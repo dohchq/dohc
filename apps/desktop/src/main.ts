@@ -3104,6 +3104,30 @@ function requireAuthorizedWorkspace(
 // edits, whose nowMs becomes appliedAt (and createId the operationId) in the
 // persisted JSONL operation log. Omitted ⇒ the real wall clock / randomUUID,
 // identical to today's behavior.
+// Quit-ask state (#567): shared by the before-quit interceptor and the IPC
+// handlers the renderer answers through. Bounds a hung renderer's ACK, never
+// the user's decision — an answering renderer resumes or holds within
+// milliseconds.
+const QUIT_ASK_TIMEOUT_MS = 3_000;
+let quitApproved = false;
+let quitAskTimer: ReturnType<typeof setTimeout> | null = null;
+function clearQuitAskTimer(): void {
+  if (quitAskTimer) {
+    clearTimeout(quitAskTimer);
+    quitAskTimer = null;
+  }
+}
+function approveQuit(): void {
+  clearQuitAskTimer();
+  quitApproved = true;
+}
+function holdQuitAsk(): void {
+  clearQuitAskTimer();
+}
+function revokeQuitApproval(): void {
+  quitApproved = false;
+}
+
 function registerIpcHandlers(
   deps: { now?: () => number; createId?: () => string } = {},
 ): void {
@@ -7878,21 +7902,30 @@ function registerIpcHandlers(
         state: currentUpdateState(),
       });
     }
-    return UpdateActionResult.parse(await autoUpdateController.installUpdate());
+    // The renderer decided BEFORE this call (its recovery check runs first,
+    // because quitAndInstall is one-shot) — pre-approve the quit the install
+    // is about to start so the ask does not veto it and burn the latch
+    // (#579 review, r10). A refused install revokes the approval: the next
+    // plain quit must still ask.
+    approveQuit();
+    const result = UpdateActionResult.parse(
+      await autoUpdateController.installUpdate(),
+    );
+    if (!result.accepted) revokeQuitApproval();
+    return result;
   });
 
-  ipcMain.handle(CHANNELS.resumeUpdateInstall, async (event) => {
+  ipcMain.handle(CHANNELS.holdQuit, (event) => {
     assertTrustedSender(event);
-    if (!autoUpdateController) {
-      return UpdateActionResult.parse({
-        accepted: false,
-        completed: false,
-        state: currentUpdateState(),
-      });
-    }
-    return UpdateActionResult.parse(
-      await autoUpdateController.resumeBlockedInstall(),
-    );
+    // The renderer's recovery dialog owns the decision now; the quit stays
+    // cancelled until the user resumes it (or never).
+    holdQuitAsk();
+  });
+
+  ipcMain.handle(CHANNELS.resumeQuit, (event) => {
+    assertTrustedSender(event);
+    approveQuit();
+    app.quit();
   });
 
   ipcMain.on(CHANNELS.firstPaint, (event) => {
@@ -8072,7 +8105,36 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
 
-  app.on("before-quit", () => {
+  // Quit interception (#567 / #579 review, r10): set-aside drafts live only
+  // in renderer memory, and a quit is their one irreversible exit — the
+  // renderer must get to warn BEFORE any destructive teardown runs. This
+  // matters doubly for updates: electron-updater's quitAndInstall is
+  // ONE-SHOT, so the decision has to come before it is ever called. The
+  // renderer answers every ask promptly: resume (no drafts, or the user
+  // confirmed) or hold (its dialog owns the decision).
+  app.on("before-quit", (event) => {
+    if (quitApproved) return;
+    const window = BrowserWindow.getAllWindows().find(
+      (candidate) => !candidate.isDestroyed(),
+    );
+    if (!window) return;
+    event.preventDefault();
+    clearQuitAskTimer();
+    quitAskTimer = setTimeout(() => {
+      // The renderer never answered — hung or crashed — and quit must stay
+      // possible. This bounds the renderer's ACK, not the user's decision:
+      // an answering renderer resumes or holds within milliseconds.
+      quitAskTimer = null;
+      quitApproved = true;
+      app.quit();
+    }, QUIT_ASK_TIMEOUT_MS);
+    window.webContents.send(CHANNELS.quitRequested);
+  });
+
+  app.on("before-quit", (event) => {
+    // The ask above may have vetoed this quit; tearing down site previews on
+    // a quit that is not happening would kill live surfaces under the user.
+    if (event.defaultPrevented) return;
     // Fire-and-forget on quit: skip locks and do not await async stops so
     // termination stays quick; child.unref() and the OS finish process cleanup.
     stopSitePreviewsForQuit();

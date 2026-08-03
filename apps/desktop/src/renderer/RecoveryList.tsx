@@ -114,14 +114,15 @@ export function RecoveryList(props: { workspaceId?: string }) {
             <span className="font-mono text-muted">{row.path}</span>
             {/* The GLOBAL list (the close dialog) can hold two workspaces'
                 identical paths — name the workspace or the rows are
-                indistinguishable (#579 review, r7). The id is the one name
-                the renderer has above the shell; scoped lists need none. */}
+                indistinguishable (#579 review, r7). The label is the name
+                the UI shows elsewhere (the shell registers it); scoped lists
+                need none. */}
             {props.workspaceId === undefined ? (
               <span
                 data-testid="recovery-list-workspace"
                 className="ml-2 font-mono text-[10px] text-subtle"
               >
-                {row.workspaceId}
+                {row.workspaceLabel}
               </span>
             ) : null}
           </span>

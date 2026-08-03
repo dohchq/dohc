@@ -624,7 +624,12 @@ export const CHANNELS = {
   getUpdateState: "desktop:get-update-state",
   checkForUpdates: "desktop:check-for-updates",
   installUpdate: "desktop:install-update",
-  resumeUpdateInstall: "desktop:resume-update-install",
+  // Quit interception (#567): main asks the renderer before a quit proceeds,
+  // so set-aside drafts warn BEFORE any destructive teardown. The renderer
+  // answers with hold (its dialog owns the decision) or resume (quit).
+  quitRequested: "desktop:quit-requested",
+  holdQuit: "desktop:hold-quit",
+  resumeQuit: "desktop:resume-quit",
   workspaceActivity: "desktop:workspace-activity",
   cloudSessionChanged: "desktop:cloud-session-changed",
   firstPaint: "desktop:first-paint",

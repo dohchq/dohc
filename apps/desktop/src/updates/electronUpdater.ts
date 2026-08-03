@@ -38,12 +38,6 @@ export type AutoUpdateController = {
   publicState: () => PublicUpdateState;
   checkForUpdates: () => Promise<UpdateCheckResult>;
   installUpdate: () => Promise<UpdateActionResult>;
-  // Re-runs quitAndInstall for an install the RENDERER blocked (its close
-  // guard vetoed the unload while set-aside drafts existed). The
-  // installInFlight gate exists to refuse double REQUESTS, not resumes —
-  // a second installUpdate() would answer accepted:false and "Restart
-  // anyway" would do nothing (#579 review, r9).
-  resumeBlockedInstall: () => Promise<UpdateActionResult>;
   stop: () => void;
 };
 
@@ -265,7 +259,18 @@ export async function startAutoUpdates(options: {
     }
   };
 
-  const attemptQuitAndInstall = (): UpdateActionResult => {
+  // quitAndInstall is ONE-SHOT in electron-updater: a second call returns
+  // without quitting. Every recovery decision therefore happens BEFORE this
+  // runs (the renderer checks its set-aside drafts first, and main
+  // pre-approves the quit) — there is deliberately no resume path here
+  // (#579 review, r10).
+  const installUpdate = async (): Promise<UpdateActionResult> => {
+    if (stopped || installInFlight || state.status !== "ready") {
+      return { accepted: false, completed: false, state: publicState() };
+    }
+    installInFlight = true;
+    installErrorMessage = null;
+    options.onState?.(state, publicState());
     try {
       autoUpdater.quitAndInstall(false, true);
       if (installErrorMessage) {
@@ -278,31 +283,6 @@ export async function startAutoUpdates(options: {
       options.onState?.(state, publicState());
       return { accepted: false, completed: false, state: publicState() };
     }
-  };
-
-  const installUpdate = async (): Promise<UpdateActionResult> => {
-    if (stopped || installInFlight || state.status !== "ready") {
-      return { accepted: false, completed: false, state: publicState() };
-    }
-    installInFlight = true;
-    installErrorMessage = null;
-    options.onState?.(state, publicState());
-    return attemptQuitAndInstall();
-  };
-
-  // The renderer's close guard can veto the unload this install started (a
-  // beforeunload block while set-aside drafts exist). "Restart anyway" must
-  // re-run quitAndInstall: the installInFlight gate above refuses double
-  // requests, and a RESUME is not one (#579 review, r9). With no blocked
-  // install to resume, this is an ordinary install request under the
-  // ordinary gate.
-  const resumeBlockedInstall = async (): Promise<UpdateActionResult> => {
-    if (stopped || state.status !== "ready") {
-      return { accepted: false, completed: false, state: publicState() };
-    }
-    if (!installInFlight) return installUpdate();
-    installErrorMessage = null;
-    return attemptQuitAndInstall();
   };
 
   const scheduleCheck = (delayMs: number): ReturnType<typeof setTimeout> => {
@@ -332,7 +312,6 @@ export async function startAutoUpdates(options: {
     publicState,
     checkForUpdates,
     installUpdate,
-    resumeBlockedInstall,
     stop,
   };
 }

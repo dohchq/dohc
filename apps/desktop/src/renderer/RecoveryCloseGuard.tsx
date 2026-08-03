@@ -1,23 +1,33 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import { orphanedDraftCount } from "./orphanedDrafts";
+import { orphanedDraftCount, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
+
+type UnloadKind = "close" | "reload" | "update" | "quit";
 
 // The guard cannot tell one unload's beforeunload from another's, but the
 // user asked for a specific action by name — confirming must resume THAT
-// action, never swap a requested reload or update-restart for a plain exit
-// (#579 review, r7 + r8). Every in-app unload trigger routes through here so
-// the guard knows what it blocked: one slot, consumed by the next
-// beforeunload, cleared when the request itself fails without unloading.
+// action, never swap it for a plain exit (#579 review, r7 + r8). In-app
+// reloads route through here so the guard knows what it blocked: one slot,
+// consumed by the next beforeunload, cleared when the request itself fails
+// without unloading. Quits are decided BEFORE they start (main asks), and
+// update installs are decided before quitAndInstall is ever called — neither
+// uses this slot.
 type PendingUnload = {
-  kind: "reload" | "update";
+  kind: "reload";
   // Re-runs the blocked action. Resolves TRUE when the action was accepted
   // and an unload should follow, FALSE when it failed without unloading —
   // the guard re-arms itself on false (#579 review, r9).
   resume: () => Promise<boolean>;
 };
 let pendingUnload: PendingUnload | null = null;
+
+// The mounted guard registers its dialog opener here so the decide-first
+// paths (update install) can warn WITHOUT triggering the destructive call.
+let openRecoveryWarning:
+  | ((warning: { kind: UnloadKind; resume: () => Promise<boolean> }) => void)
+  | null = null;
 
 export function requestGuardedReload(): void {
   const attempt: PendingUnload = {
@@ -38,34 +48,28 @@ export function requestGuardedReload(): void {
     });
 }
 
-// The update install returns a result its callers surface (error copy, retry
-// affordances); the guard only records how to RESUME the restart. A resume
-// is not a second install request — main's in-flight gate refuses those —
-// so it goes through the dedicated resume IPC (#579 review, r9). A request
-// main refuses never unloads, so the slot is cleared instead of mislabeling
-// the user's next plain close as an update restart.
-export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult> {
-  const attempt: PendingUnload = {
+// Decide BEFORE the destructive call (#579 review, r10): electron-updater's
+// quitAndInstall is ONE-SHOT — calling it and then vetoing the quit would
+// burn the latch, and no "Restart anyway" could ever restart. So the drafts
+// are checked first: on a clear path the install runs at once (main
+// pre-approves the quit it starts), and on a blocked path the dialog opens
+// INSTEAD of the install, whose confirm makes the one and only call.
+// Returns null when the dialog took over — the caller's own flow ends there.
+export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult | null> {
+  if (orphanedDraftCount() === 0 || openRecoveryWarning === null) {
+    return bridge().installUpdate();
+  }
+  openRecoveryWarning({
     kind: "update",
     resume: () =>
       bridge()
-        .resumeUpdateInstall()
+        .installUpdate()
         .then(
           (result) => result.accepted,
           () => false,
         ),
-  };
-  pendingUnload = attempt;
-  try {
-    const result = await bridge().installUpdate();
-    if (!result.accepted || result.state.status === "error") {
-      if (pendingUnload === attempt) pendingUnload = null;
-    }
-    return result;
-  } catch (error) {
-    if (pendingUnload === attempt) pendingUnload = null;
-    throw error;
-  }
+  });
+  return null;
 }
 
 // Fail-safe for a bypassed unload that never happens and gives no failure
@@ -74,10 +78,10 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult>
 // milliseconds; this only bounds how long the drafts go unguarded.
 const BYPASS_REARM_MS = 10_000;
 
-// Set-aside drafts (#567) live in renderer memory only, so closing or
-// reloading this window is the one exit that destroys them — and an
+// Set-aside drafts (#567) live in renderer memory only, so closing,
+// reloading, quitting, or restarting into an update destroys them — and an
 // irreversible change must be announced before it runs (product invariant).
-// Electron cancels the close SILENTLY on preventDefault, so the dialog below
+// Electron cancels a close SILENTLY on preventDefault, so the dialog below
 // is the announcement, and it carries the full recovery list: the warning
 // must offer the very actions it demands (#579 review, r5).
 //
@@ -91,11 +95,18 @@ const BYPASS_REARM_MS = 10_000;
 // taken here (#579 review, r4).
 export function RecoveryCloseGuard(props: { children: ReactNode }) {
   const [closeWarning, setCloseWarning] = useState<{
-    count: number;
     // What the user asked for — the confirm button resumes exactly it.
-    kind: "close" | "reload" | "update";
+    kind: UnloadKind;
     resume: (() => Promise<boolean>) | null;
   } | null>(null);
+  // LIVE, not a snapshot (#579 review, r10): the dialog embeds Copy/Dismiss,
+  // so the count must follow every dismissal, and an emptied dialog has
+  // nothing left to warn about.
+  const liveCount = useAllOrphanedDrafts().length;
+  const warningOpen = closeWarning !== null;
+  useEffect(() => {
+    if (warningOpen && liveCount === 0) setCloseWarning(null);
+  }, [warningOpen, liveCount]);
   const bypassCloseGuard = useRef(false);
   const bypassRearmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rearmGuard = () => {
@@ -106,6 +117,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     }
   };
   useEffect(() => {
+    openRecoveryWarning = (warning) => setCloseWarning(warning);
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       // Consumed either way: if this unload proceeds the slot dies with the
       // page, and if it is blocked the dialog now owns the answer.
@@ -117,27 +129,56 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
         rearmGuard();
         return;
       }
-      const count = orphanedDraftCount();
-      if (count === 0) return;
+      if (orphanedDraftCount() === 0) return;
       event.preventDefault();
       setCloseWarning({
-        count,
         kind: pending?.kind ?? "close",
         resume: pending?.resume ?? null,
       });
     };
     window.addEventListener("beforeunload", onBeforeUnload);
+    // A native quit (Cmd+Q, tray Quit) never reaches beforeunload unguarded:
+    // main intercepts it and ASKS first (#579 review, r10). Answer promptly
+    // — resume when nothing is at stake, hold when the dialog takes over —
+    // so main's hung-renderer fail-safe never fires for a live renderer.
+    let unsubscribeQuit: (() => void) | undefined;
+    try {
+      // Optional-call: a missing bridge or an older preload without the quit
+      // API degrades to "no quit interception", never to a crashed guard —
+      // this component sits above the error boundary.
+      unsubscribeQuit = bridge().onQuitRequested?.(() => {
+        if (bypassCloseGuard.current || orphanedDraftCount() === 0) {
+          void bridge().resumeQuit();
+          return;
+        }
+        void bridge().holdQuit();
+        setCloseWarning({
+          kind: "quit",
+          resume: () =>
+            bridge()
+              .resumeQuit()
+              .then(
+                () => true,
+                () => false,
+              ),
+        });
+      });
+    } catch {
+      unsubscribeQuit = undefined;
+    }
     return () => {
+      openRecoveryWarning = null;
       window.removeEventListener("beforeunload", onBeforeUnload);
+      unsubscribeQuit?.();
       if (bypassRearmTimer.current) clearTimeout(bypassRearmTimer.current);
     };
-    // rearmGuard only touches refs; the handler registers once.
+    // rearmGuard only touches refs; the handlers register once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
     <>
       {props.children}
-      {closeWarning !== null ? (
+      {closeWarning !== null && liveCount > 0 ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-ink/20">
           <div
             data-testid="recovery-close-warning"
@@ -154,22 +195,24 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                 ? "Reload"
                 : closeWarning.kind === "update"
                   ? "Restart"
-                  : "Close"}{" "}
-              without your set-aside{" "}
-              {closeWarning.count === 1 ? "edit" : "edits"}?
+                  : closeWarning.kind === "quit"
+                    ? "Quit"
+                    : "Close"}{" "}
+              without your set-aside {liveCount === 1 ? "edit" : "edits"}?
             </h3>
             <p className="mb-0 mt-2 text-xs leading-5 text-muted">
-              {`${closeWarning.count} set-aside ${
-                closeWarning.count === 1 ? "edit is" : "edits are"
+              {`${liveCount} set-aside ${
+                liveCount === 1 ? "edit is" : "edits are"
               } lost when dohc ${
                 closeWarning.kind === "reload"
                   ? "reloads"
                   : closeWarning.kind === "update"
                     ? "restarts"
-                    : "closes"
+                    : closeWarning.kind === "quit"
+                      ? "quits"
+                      : "closes"
               }.`}{" "}
-              Copy {closeWarning.count === 1 ? "it" : "them"} here to keep the
-              text.
+              Copy {liveCount === 1 ? "it" : "them"} here to keep the text.
             </p>
             <div className="mt-3 max-h-60 overflow-y-auto">
               <RecoveryList />
@@ -189,8 +232,8 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                 data-testid="recovery-close-anyway"
                 onClick={() => {
                   // Resume exactly what the user asked for: a requested
-                  // reload or update restart must not become a plain exit
-                  // (#579 review, r7 + r8).
+                  // reload, restart, or quit must not become a plain exit
+                  // (#579 review, r7 + r8 + r10).
                   const resume =
                     closeWarning.resume ??
                     (() => {
@@ -221,7 +264,9 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   ? "Reload anyway"
                   : closeWarning.kind === "update"
                     ? "Restart anyway"
-                    : "Close anyway"}
+                    : closeWarning.kind === "quit"
+                      ? "Quit anyway"
+                      : "Close anyway"}
               </button>
             </div>
           </div>

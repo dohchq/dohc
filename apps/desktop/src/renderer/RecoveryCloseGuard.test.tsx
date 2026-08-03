@@ -14,7 +14,11 @@ import {
   RecoveryCloseGuard,
   requestGuardedUpdateInstall,
 } from "./RecoveryCloseGuard";
-import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
+import {
+  captureOrphanedDraft,
+  noteWorkspaceLabel,
+  resetOrphanedDrafts,
+} from "./orphanedDrafts";
 
 afterEach(() => {
   cleanup();
@@ -30,6 +34,7 @@ afterEach(() => {
 describe("RecoveryCloseGuard", () => {
   it("warns before closing while set-aside edits exist, offers the list, and closes on 'Close anyway'", async () => {
     const user = userEvent.setup();
+    noteWorkspaceLabel("ws-1", "Personal notes");
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     // The guard is deliberately GLOBAL (#579 review, r6): the whole renderer
     // dies at once, so every workspace's drafts are at stake here.
@@ -65,13 +70,14 @@ describe("RecoveryCloseGuard", () => {
     );
     // The GLOBAL list names each row's workspace — two workspaces can hold
     // the same path, and Copy/Dismiss must be tellable apart (#579 review,
-    // r7).
-    // MUTATION (workspace labels): drop the label span. Identical paths
-    // from two workspaces are indistinguishable.
+    // r7) — with the NAME the UI shows, not the raw UUID (#579 review,
+    // r10); an unregistered workspace falls back to its id.
+    // MUTATION (workspace labels): drop the label span or show the raw id.
+    // Identical paths from two workspaces are indistinguishable.
     const labels = screen
       .getAllByTestId("recovery-list-workspace")
       .map((label) => label.textContent);
-    expect(labels).toContain("ws-1");
+    expect(labels).toContain("Personal notes");
     expect(labels).toContain("ws-2");
     await user.click(within(row).getByTestId("recovery-list-copy"));
     await waitFor(async () =>
@@ -141,7 +147,10 @@ describe("RecoveryCloseGuard", () => {
 
     await user.click(screen.getByTestId("recovery-dismiss"));
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
-    await user.click(screen.getByTestId("recovery-close-goback"));
+    // The last draft resolved: the dialog retires itself (#579 review, r10).
+    await waitFor(() =>
+      expect(screen.queryByTestId("recovery-close-warning")).toBeNull(),
+    );
 
     const second = new Event("beforeunload", { cancelable: true });
     act(() => {
@@ -197,10 +206,11 @@ describe("RecoveryCloseGuard", () => {
     closeSpy.mockRestore();
   });
 
-  // #579 review r8: an update restart (quit-and-install) is another named
-  // action; the guard's confirm must resume the UPDATE, not swap it for a
-  // plain close that leaves the app running without the update.
-  it("a blocked update restart resumes as the update, never a plain exit", async () => {
+  // #579 review r10: electron-updater's quitAndInstall is ONE-SHOT, so the
+  // decision comes BEFORE the destructive call — with drafts present, the
+  // dialog opens INSTEAD of the install, and its confirm makes the one and
+  // only quitAndInstall request.
+  it("a blocked update restart defers the install and confirms into the only call", async () => {
     const user = userEvent.setup();
     const readyState = {
       status: "ready" as const,
@@ -216,15 +226,7 @@ describe("RecoveryCloseGuard", () => {
       completed: false,
       state: readyState,
     }));
-    // The resume IPC, not a second install request: main's in-flight gate
-    // refuses double requests, and "Restart anyway" is a resume (#579
-    // review, r9).
-    const resumeUpdateInstall = vi.fn(async () => ({
-      accepted: true,
-      completed: false,
-      state: readyState,
-    }));
-    vi.stubGlobal("dohcDesktop", { installUpdate, resumeUpdateInstall });
+    vi.stubGlobal("dohcDesktop", { installUpdate });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     render(
       <RecoveryCloseGuard>
@@ -232,29 +234,50 @@ describe("RecoveryCloseGuard", () => {
       </RecoveryCloseGuard>,
     );
 
-    await requestGuardedUpdateInstall();
-    expect(installUpdate).toHaveBeenCalledTimes(1);
-    const blocked = new Event("beforeunload", { cancelable: true });
-    act(() => {
-      window.dispatchEvent(blocked);
-    });
-    expect(blocked.defaultPrevented).toBe(true);
+    // MUTATION (decide-first): call installUpdate before the drafts check.
+    // The one-shot latch is burned while the quit gets vetoed, and no
+    // confirm can ever restart.
+    const blocked = await requestGuardedUpdateInstall();
+    expect(blocked).toBeNull();
+    expect(installUpdate).not.toHaveBeenCalled();
     await screen.findByTestId("recovery-close-warning");
     expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
       "Restart anyway",
     );
 
-    // MUTATION (blocked-action slot): make the confirm call window.close()
-    // for every kind. The user asked to restart into the update and the app
-    // just closes — or on macOS keeps running without it.
     const closeSpy = vi
       .spyOn(window, "close")
       .mockImplementation(() => undefined);
     await user.click(screen.getByTestId("recovery-close-anyway"));
-    await waitFor(() => expect(resumeUpdateInstall).toHaveBeenCalledTimes(1));
-    expect(installUpdate).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(installUpdate).toHaveBeenCalledTimes(1));
     expect(closeSpy).not.toHaveBeenCalled();
     closeSpy.mockRestore();
+  });
+
+  it("installs at once when no set-aside edits exist", async () => {
+    const installUpdate = vi.fn(async () => ({
+      accepted: true,
+      completed: false,
+      state: {
+        status: "ready" as const,
+        message: "Update 1.2.4 is ready.",
+        currentVersion: "1.2.3",
+        channel: "latest",
+        canCheck: false,
+        canInstall: true,
+        version: "1.2.4",
+      },
+    }));
+    vi.stubGlobal("dohcDesktop", { installUpdate });
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    const result = await requestGuardedUpdateInstall();
+    expect(result?.accepted).toBe(true);
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
   });
 
   // #579 review r9: the bypass is scoped to the one resumed unload attempt.
@@ -263,26 +286,20 @@ describe("RecoveryCloseGuard", () => {
   // silently.
   it("re-arms the guard when the resumed action fails to unload", async () => {
     const user = userEvent.setup();
-    const readyState = {
-      status: "ready" as const,
-      message: "Update 1.2.4 is ready.",
-      currentVersion: "1.2.3",
-      channel: "latest",
-      canCheck: false,
-      canInstall: true,
-      version: "1.2.4",
-    };
     const installUpdate = vi.fn(async () => ({
-      accepted: true,
-      completed: false,
-      state: readyState,
-    }));
-    const resumeUpdateInstall = vi.fn(async () => ({
       accepted: false,
       completed: false,
-      state: readyState,
+      state: {
+        status: "ready" as const,
+        message: "Update 1.2.4 is ready.",
+        currentVersion: "1.2.3",
+        channel: "latest",
+        canCheck: false,
+        canInstall: true,
+        version: "1.2.4",
+      },
     }));
-    vi.stubGlobal("dohcDesktop", { installUpdate, resumeUpdateInstall });
+    vi.stubGlobal("dohcDesktop", { installUpdate });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     render(
       <RecoveryCloseGuard>
@@ -291,13 +308,9 @@ describe("RecoveryCloseGuard", () => {
     );
 
     await requestGuardedUpdateInstall();
-    const blocked = new Event("beforeunload", { cancelable: true });
-    act(() => {
-      window.dispatchEvent(blocked);
-    });
     await screen.findByTestId("recovery-close-warning");
     await user.click(screen.getByTestId("recovery-close-anyway"));
-    await waitFor(() => expect(resumeUpdateInstall).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(installUpdate).toHaveBeenCalledTimes(1));
     await act(async () => {
       await Promise.resolve();
     });
@@ -312,37 +325,120 @@ describe("RecoveryCloseGuard", () => {
     expect(await screen.findByTestId("recovery-close-warning")).toBeTruthy();
   });
 
-  it("a refused update install does not mislabel the next close as a restart", async () => {
-    const installUpdate = vi.fn(async () => ({
-      accepted: false,
-      completed: false,
-      state: {
-        status: "idle" as const,
-        message: "Updates have not been checked yet.",
-        currentVersion: "1.2.3",
-        channel: "latest",
-        canCheck: true,
-        canInstall: false,
-      },
-    }));
-    vi.stubGlobal("dohcDesktop", { installUpdate });
+  // #579 review r10: a native quit (Cmd+Q, tray Quit) is main-initiated —
+  // main asks first, and the renderer's answer must resume the QUIT, never
+  // swap it for a window close that leaves the process running on macOS.
+  it("holds a native quit for the dialog, and 'Quit anyway' resumes the quit", async () => {
+    const user = userEvent.setup();
+    let quitListener: (() => void) | null = null;
+    const onQuitRequested = vi.fn((listener: () => void) => {
+      quitListener = listener;
+      return () => {
+        quitListener = null;
+      };
+    });
+    const holdQuit = vi.fn(async () => undefined);
+    const resumeQuit = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", { onQuitRequested, holdQuit, resumeQuit });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     render(
       <RecoveryCloseGuard>
         <div />
       </RecoveryCloseGuard>,
     );
-    // Main refused: nothing will unload, so the slot must clear — the next
-    // plain close is a close.
-    await requestGuardedUpdateInstall();
-    const blocked = new Event("beforeunload", { cancelable: true });
+    await waitFor(() => expect(quitListener).not.toBeNull());
+
+    // MUTATION (quit hold): resume every quit ask unconditionally. The
+    // drafts die with the quit, unannounced.
     act(() => {
-      window.dispatchEvent(blocked);
+      quitListener?.();
     });
+    await waitFor(() => expect(holdQuit).toHaveBeenCalledTimes(1));
+    expect(resumeQuit).not.toHaveBeenCalled();
     await screen.findByTestId("recovery-close-warning");
     expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
-      "Close anyway",
+      "Quit anyway",
     );
+
+    // MUTATION (resume the QUIT): make the confirm call window.close(). On
+    // macOS the process keeps running after the user asked to quit.
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    await user.click(screen.getByTestId("recovery-close-anyway"));
+    await waitFor(() => expect(resumeQuit).toHaveBeenCalledTimes(1));
+    expect(closeSpy).not.toHaveBeenCalled();
+    closeSpy.mockRestore();
+  });
+
+  it("resumes a quit at once when no set-aside edits exist", async () => {
+    let quitListener: (() => void) | null = null;
+    const onQuitRequested = vi.fn((listener: () => void) => {
+      quitListener = listener;
+      return () => {
+        quitListener = null;
+      };
+    });
+    const holdQuit = vi.fn(async () => undefined);
+    const resumeQuit = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", { onQuitRequested, holdQuit, resumeQuit });
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await waitFor(() => expect(quitListener).not.toBeNull());
+    act(() => {
+      quitListener?.();
+    });
+    await waitFor(() => expect(resumeQuit).toHaveBeenCalledTimes(1));
+    expect(holdQuit).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+  });
+
+  // #579 review r10: the dialog's count is LIVE. Dismissing rows from the
+  // dialog updates the sentence, and an emptied dialog has nothing left to
+  // warn about — it retires itself and the next close proceeds.
+  it("keeps the dialog's count live and retires it when the last draft resolves", async () => {
+    const user = userEvent.setup();
+    captureOrphanedDraft("ws-1", "a.md", "First!");
+    captureOrphanedDraft("ws-1", "b.md", "Second!");
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    const first = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(first);
+    });
+    const dialog = await screen.findByTestId("recovery-close-warning");
+    expect(dialog.textContent).toContain("2 set-aside edits are lost");
+
+    // MUTATION (live count): render the snapshot count. Dismissing a row
+    // leaves the dialog claiming two edits, then one that no longer exists.
+    const firstRow = screen.getAllByTestId("recovery-list-row")[0];
+    await user.click(within(firstRow).getByTestId("recovery-dismiss"));
+    await user.click(
+      within(firstRow).getByTestId("recovery-dismiss-confirm"),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("recovery-close-warning").textContent,
+      ).toContain("1 set-aside edit is lost"),
+    );
+
+    const lastRow = screen.getByTestId("recovery-list-row");
+    await user.click(within(lastRow).getByTestId("recovery-dismiss"));
+    await user.click(within(lastRow).getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("recovery-close-warning")).toBeNull(),
+    );
+    const second = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(second);
+    });
+    expect(second.defaultPrevented).toBe(false);
   });
 
   // #579 review r5: the guard must survive a CRASH. A guard inside the

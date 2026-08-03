@@ -67,6 +67,7 @@ import {
   versionCompareTabPath,
 } from "./workbench/workbenchState";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
+import { RecoveryList } from "./RecoveryList";
 
 const WORKSPACE: Workspace = {
   workspaceId: "ws-shell-test",
@@ -6280,6 +6281,23 @@ describe("set-aside draft recovery", () => {
     expect(within(inactive).getByTestId("tab-dirty")).toBeTruthy();
     const active = screen.getByTestId("tab-a.md");
     expect(within(active).queryByTestId("tab-dirty")).toBeNull();
+  });
+
+  // #579 review r10: the global recovery list labels rows with the NAME the
+  // UI shows for the workspace, not its UUID — the shell registers it.
+  it("registers the workspace's display name for the global recovery list", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    captureOrphanedDraft(WORKSPACE.workspaceId, "a.md", "Kept!");
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    // The same global list the close dialog embeds.
+    // MUTATION (label wiring): drop the shell's noteWorkspaceLabel effect —
+    // the row falls back to the raw workspace id.
+    render(<RecoveryList />);
+    expect(screen.getByTestId("recovery-list-workspace").textContent).toBe(
+      "personal",
+    );
   });
 
   // #579 review r7: a switch can fail AFTER its IPC started — main settles

@@ -146,9 +146,24 @@ export function orphanedDraftCount(): number {
 
 export type OrphanedDraftRow = {
   workspaceId: string;
+  // The name the UI shows for this workspace (the shell registers it) — the
+  // raw id is a UUID no user recognizes (#579 review, r10). Falls back to
+  // the id when no shell for that workspace ever mounted.
+  workspaceLabel: string;
   path: string;
   draft: OrphanedDraft;
 };
+
+const workspaceLabels = new Map<string, string>();
+
+// The shell knows the display name; the recovery surfaces (which can outlive
+// or sit above the shell) only know ids. One registration per mount keeps
+// the global recovery list readable.
+export function noteWorkspaceLabel(workspaceId: string, label: string): void {
+  if (workspaceLabels.get(workspaceId) === label) return;
+  workspaceLabels.set(workspaceId, label);
+  scheduleNotify();
+}
 
 let allRowsCache: { version: number; rows: readonly OrphanedDraftRow[] } | null =
   null;
@@ -166,7 +181,10 @@ export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
     const rows: OrphanedDraftRow[] = [];
     for (const [key, kept] of drafts) {
       const [workspaceId, path] = JSON.parse(key) as [string, string];
-      for (const draft of kept) rows.push({ workspaceId, path, draft });
+      const workspaceLabel = workspaceLabels.get(workspaceId) ?? workspaceId;
+      for (const draft of kept) {
+        rows.push({ workspaceId, workspaceLabel, path, draft });
+      }
     }
     allRowsCache = {
       version: storeVersion,
@@ -180,5 +198,6 @@ export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
 // it between tests instead of leaking keys into each other.
 export function resetOrphanedDrafts(): void {
   drafts.clear();
+  workspaceLabels.clear();
   scheduleNotify();
 }

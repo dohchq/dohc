@@ -77,6 +77,7 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
+  noteWorkspaceLabel,
   remapOrphanedDraftPaths,
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
@@ -1258,6 +1259,12 @@ export function DesktopWorkspaceShell(props: {
   // (#579 review, P2). The store outlives tabs and version switches, so no
   // save-first prompt is owed.
   const recoveryPaths = useOrphanedDraftPaths(workspaceId);
+  // The global recovery list (the close dialog, above this shell) labels
+  // rows with the name the UI shows here — the raw id is a UUID (#579
+  // review, r10).
+  useEffect(() => {
+    noteWorkspaceLabel(workspaceId, workspaceName(props.workspace));
+  }, [workspaceId, props.workspace]);
   // Every workbench destination change invalidates an in-flight canonical DM
   // lookup. Kept beside the central mutateWb seam so file/graph/history/tab
   // navigation cannot be missed by a one-off opener.
@@ -2795,9 +2802,10 @@ export function DesktopWorkspaceShell(props: {
   }, [reportShellError]);
   const installDesktopUpdate = useCallback(async () => {
     try {
-      // Through the guard (#579 review, r8): a blocked restart must resume
-      // as the update, not a plain close.
+      // Through the guard (#579 review, r8 + r10): with set-aside drafts
+      // present the recovery dialog opens INSTEAD of the one-shot install.
       const result = await requestGuardedUpdateInstall();
+      if (result === null) return;
       if (!result.accepted) {
         reportShellError(
           "Could not install the update.",

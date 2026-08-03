@@ -162,9 +162,11 @@ export function NoticeCenter(props: {
     try {
       setInstallPending(true);
       setUpdateActionError(null);
-      // Through the guard (#579 review, r8): if set-aside drafts block the
-      // restart, the confirm must resume the UPDATE, not a plain close.
+      // Through the guard (#579 review, r8 + r10): with set-aside drafts
+      // present the recovery dialog opens INSTEAD of the one-shot install,
+      // and its confirm makes the only quitAndInstall call.
       const result = await requestGuardedUpdateInstall();
+      if (result === null) return;
       if (!result.accepted || result.state.status === "error") {
         setUpdateActionError(
           result.state.status === "error"

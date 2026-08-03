@@ -39,7 +39,13 @@ function fakeUpdater() {
       for (const listener of listeners.get(eventName) ?? []) listener(...args);
     },
   };
+  // electron-updater's quitAndInstall is ONE-SHOT (#579 review, r10): a
+  // second call returns without quitting. The double models the latch so a
+  // test can never pass by relying on a re-call the dependency ignores.
+  let quitAndInstallLatched = false;
   updater.quitAndInstall.mockImplementation(() => {
+    if (quitAndInstallLatched) return;
+    quitAndInstallLatched = true;
     updater.emit("before-quit-for-update");
   });
   return updater;
@@ -179,35 +185,6 @@ describe("electron updater actions", () => {
     });
     expect(updater.quitAndInstall).toHaveBeenCalledTimes(1);
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
-  });
-
-  // #579 review r9: the renderer's close guard can veto the quit an accepted
-  // install started. The in-flight gate refuses a second REQUEST — right for
-  // double-clicks, wrong for the guard's "Restart anyway" — so the resume
-  // path re-runs quitAndInstall for the install already in flight.
-  it("resumes a blocked install with a second quitAndInstall, not a refused request", async () => {
-    const updater = fakeUpdater();
-    const controller = await startWith(updater);
-    expect(controller).not.toBeNull();
-
-    updater.emit("checking-for-update");
-    updater.emit("update-downloaded", { version: "1.2.4" });
-    await expect(controller!.installUpdate()).resolves.toMatchObject({
-      accepted: true,
-    });
-    // A second request is refused (the double-click gate)...
-    await expect(controller!.installUpdate()).resolves.toMatchObject({
-      accepted: false,
-    });
-    // ...and the RESUME is not a request: it re-runs quitAndInstall.
-    // MUTATION (resume seam): make resumeBlockedInstall delegate to
-    // installUpdate. The gate answers accepted:false and "Restart anyway"
-    // does nothing.
-    await expect(controller!.resumeBlockedInstall()).resolves.toMatchObject({
-      accepted: true,
-    });
-    expect(updater.quitAndInstall).toHaveBeenCalledTimes(2);
-    expect(updater.quitAndInstall).toHaveBeenLastCalledWith(false, true);
   });
 
   it("bounds progress exposed to the renderer", async () => {

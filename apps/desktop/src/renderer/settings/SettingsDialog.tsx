@@ -429,9 +429,10 @@ export function SettingsDialog(props: {
     setUpdateBusy("install");
     setUpdateError(null);
     try {
-      // Through the guard (#579 review, r8): a blocked restart must resume
-      // as the update, not a plain close.
+      // Through the guard (#579 review, r8 + r10): with set-aside drafts
+      // present the recovery dialog opens INSTEAD of the one-shot install.
       const result = await requestGuardedUpdateInstall();
+      if (result === null) return;
       setUpdateState(result.state);
       if (!result.accepted) {
         setUpdateError(
