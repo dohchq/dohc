@@ -775,13 +775,16 @@ describe("Rust engine daemon lifecycle", () => {
       // terminal verdict failed to stop the restart it ordered.
       expect(clients).toHaveLength(2);
       expect(clients.every((client) => client.closed)).toBe(true);
-      // No driven-time ceiling: which budget ended the run is already pinned
-      // by the terminal MESSAGE above (the wedge budget's, not the crash
-      // window's — ten wedge exits at 225s each would need 37.5 minutes,
-      // more than the loop ever drives). A ceiling here rejected honest
-      // work: each relaunch smoke needs real event-loop turns the driven
-      // clock cannot buy, and under a 24-process load the run was measured
-      // ending at 650s of driven time against the old 600s bound (#568).
+      // The driven-time ceiling pins the wedge budget's SPEED, which the
+      // terminal message alone cannot: a tripled probe cadence would still
+      // produce the same message, minutes later. Measured honest end under
+      // a 24-process load: 650s of driven time (the old 600s bound sat
+      // inside that range — each relaunch smoke needs real event-loop turns
+      // the driven clock cannot buy). 900s covers the measurement with
+      // margin and stays below the ~1080s that two wedge cycles would need
+      // if DEFAULT_PING_INTERVAL_MS merely tripled (3 intervals + 3
+      // expiries per cycle: 3*135s + 3*45s = 540s each).
+      expect(now).toBeLessThan(900_000);
     } finally {
       vi.useRealTimers();
       await lifecycle.stop();
@@ -1485,12 +1488,13 @@ describe("Rust engine daemon lifecycle", () => {
     await expect(lifecycle.start()).rejects.toThrow(
       /workspace\.open timed out after 20ms/,
     );
-    // Proves the 20ms request timer drove the rejection rather than a hang.
-    // The ceiling only has to be far below a hang. Borrowed measurement:
-    // this test never failed under load, but siteRunner's cancel path saw
-    // honest 2.6-3.3s stalls under the same 24-process load (#568), so
-    // 500ms sat inside the loaded-healthy range of the same machine state.
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    // Proves the 20ms request timer drove the rejection rather than a hang
+    // or a mis-armed slower timer. This bound stays at its original 500ms:
+    // this exact path never failed under load in 12 measured runs (#568),
+    // and evidence borrowed from another path cannot widen a discrimination
+    // bound this one never broke — widening it would let a regression that
+    // delays the startup timeout to just under the ceiling pass unseen.
+    expect(Date.now() - startedAt).toBeLessThan(500);
     expect(client.closed).toBe(true);
     await lifecycle.stop();
   });
