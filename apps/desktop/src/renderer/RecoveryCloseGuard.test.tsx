@@ -10,7 +10,10 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppErrorBoundary } from "./ErrorBoundary";
-import { RecoveryCloseGuard } from "./RecoveryCloseGuard";
+import {
+  RecoveryCloseGuard,
+  requestGuardedUpdateInstall,
+} from "./RecoveryCloseGuard";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 
 afterEach(() => {
@@ -192,6 +195,89 @@ describe("RecoveryCloseGuard", () => {
     expect(reloadRenderer).toHaveBeenCalledTimes(2);
     expect(closeSpy).not.toHaveBeenCalled();
     closeSpy.mockRestore();
+  });
+
+  // #579 review r8: an update restart (quit-and-install) is another named
+  // action; the guard's confirm must resume the UPDATE, not swap it for a
+  // plain close that leaves the app running without the update.
+  it("a blocked update restart resumes as the update, never a plain exit", async () => {
+    const user = userEvent.setup();
+    const installUpdate = vi.fn(async () => ({
+      accepted: true,
+      completed: false,
+      state: {
+        status: "ready" as const,
+        message: "Update 1.2.4 is ready.",
+        currentVersion: "1.2.3",
+        channel: "latest",
+        canCheck: false,
+        canInstall: true,
+        version: "1.2.4",
+      },
+    }));
+    vi.stubGlobal("dohcDesktop", { installUpdate });
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+
+    await requestGuardedUpdateInstall();
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    const blocked = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(blocked);
+    });
+    expect(blocked.defaultPrevented).toBe(true);
+    await screen.findByTestId("recovery-close-warning");
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
+      "Restart anyway",
+    );
+
+    // MUTATION (blocked-action slot): make the confirm call window.close()
+    // for every kind. The user asked to restart into the update and the app
+    // just closes — or on macOS keeps running without it.
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    await user.click(screen.getByTestId("recovery-close-anyway"));
+    expect(installUpdate).toHaveBeenCalledTimes(2);
+    expect(closeSpy).not.toHaveBeenCalled();
+    closeSpy.mockRestore();
+  });
+
+  it("a refused update install does not mislabel the next close as a restart", async () => {
+    const installUpdate = vi.fn(async () => ({
+      accepted: false,
+      completed: false,
+      state: {
+        status: "idle" as const,
+        message: "Updates have not been checked yet.",
+        currentVersion: "1.2.3",
+        channel: "latest",
+        canCheck: true,
+        canInstall: false,
+      },
+    }));
+    vi.stubGlobal("dohcDesktop", { installUpdate });
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    // Main refused: nothing will unload, so the slot must clear — the next
+    // plain close is a close.
+    await requestGuardedUpdateInstall();
+    const blocked = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(blocked);
+    });
+    await screen.findByTestId("recovery-close-warning");
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
+      "Close anyway",
+    );
   });
 
   // #579 review r5: the guard must survive a CRASH. A guard inside the

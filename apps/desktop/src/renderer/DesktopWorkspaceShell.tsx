@@ -80,6 +80,7 @@ import {
   remapOrphanedDraftPaths,
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
+import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
 // chunk resolved, and every character typed in that gap went to whatever the
@@ -2794,7 +2795,9 @@ export function DesktopWorkspaceShell(props: {
   }, [reportShellError]);
   const installDesktopUpdate = useCallback(async () => {
     try {
-      const result = await bridge().installUpdate();
+      // Through the guard (#579 review, r8): a blocked restart must resume
+      // as the update, not a plain close.
+      const result = await requestGuardedUpdateInstall();
       if (!result.accepted) {
         reportShellError(
           "Could not install the update.",

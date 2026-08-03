@@ -28,6 +28,7 @@ import {
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
 import { bridge } from "../bridge";
+import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyAppearanceSettings } from "../theme";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { PreferredNameControl } from "./PreferredNameControl";
@@ -428,7 +429,9 @@ export function SettingsDialog(props: {
     setUpdateBusy("install");
     setUpdateError(null);
     try {
-      const result = await bridge().installUpdate();
+      // Through the guard (#579 review, r8): a blocked restart must resume
+      // as the update, not a plain close.
+      const result = await requestGuardedUpdateInstall();
       setUpdateState(result.state);
       if (!result.accepted) {
         setUpdateError(

@@ -2043,6 +2043,96 @@ describe("markdown document opening state", () => {
     );
   });
 
+  // #579 review r8: the queue and the obligation. Writer A is in flight,
+  // writer B is parked in writeDraftNow's own wait, and the shell's flush
+  // awaits the slot. When A lands, B resumes FIRST, claims the slot, and
+  // clears `unsavedDraft` — a single-await flush would return right there,
+  // and the switch it gates would proceed while B lands the previous
+  // version's text.
+  it("the flush outlasts a queued writer that claims the slot when the first write lands", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    let releaseA!: () => void;
+    const heldA = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseA = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    let releaseB!: () => void;
+    const heldB = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseB = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    let writes = 0;
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => {
+      writes += 1;
+      return writes === 1 ? heldA : heldB;
+    });
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    let flush: (() => Promise<void>) | null = null;
+    const registerDraftFlush = (next: (() => Promise<void>) | null) => {
+      flush = next;
+    };
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        registerDraftFlush={registerDraftFlush}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(
+      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      "One",
+    );
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    // B arms and fires while A holds the slot: B is parked in the queue.
+    await user.type(screen.getByTestId("markdown-editor"), "Two");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    // A lands; B claims the slot and issues its own write.
+    await act(async () => {
+      releaseA();
+      await heldA;
+    });
+    await waitFor(() =>
+      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // MUTATION (flush loop): make the seam await `pendingWrite` ONCE. The
+    // flush settles right here, with B still landing the old text.
+    expect(flushSettled).toBe(false);
+
+    await act(async () => {
+      releaseB();
+      await heldB;
+    });
+    await act(async () => {
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
+  });
+
   // #579 review r7: READ mode (a large, non-truncated document) edits title
   // and properties without `editing` ever flipping, and a reopen can hand
   // back a byte-identical body — the props.body sync effect then has no

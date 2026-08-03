@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SyncStatusResult, UpdateStateEvent } from "../../ipc/bridgeContract";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
+import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { bridge } from "../bridge";
 import type {
   AgentNotification,
@@ -161,7 +162,9 @@ export function NoticeCenter(props: {
     try {
       setInstallPending(true);
       setUpdateActionError(null);
-      const result = await bridge().installUpdate();
+      // Through the guard (#579 review, r8): if set-aside drafts block the
+      // restart, the confirm must resume the UPDATE, not a plain close.
+      const result = await requestGuardedUpdateInstall();
       if (!result.accepted || result.state.status === "error") {
         setUpdateActionError(
           result.state.status === "error"

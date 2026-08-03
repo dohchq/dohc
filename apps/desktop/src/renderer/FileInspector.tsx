@@ -1396,7 +1396,13 @@ function MarkdownView(props: {
       // versions, and must not proceed while the previous state's text is
       // still landing. If that write FAILS, `unsavedDraft` is true again by
       // the time this resumes, and the retry below lands it before the move.
-      if (pendingWrite.current) await pendingWrite.current;
+      //
+      // A LOOP, not one await (#579 review, r8): a queued writer parked in
+      // writeDraftNow's own wait resumes FIRST when the active write
+      // settles, claims the slot, and clears `unsavedDraft` — a single await
+      // would return here with that successor still landing. Each pass
+      // re-reads the slot, so the loop exits only when nothing is in flight.
+      while (pendingWrite.current) await pendingWrite.current;
       // The ref, not the captured value: the shell can call this seam between
       // the refusal and the re-registration. `opening` too (#567): a flush
       // that arrives mid-reopen must not write the previous version's draft.
