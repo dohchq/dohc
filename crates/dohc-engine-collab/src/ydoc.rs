@@ -473,7 +473,18 @@ impl Ydoc {
                         map.remove(txn, &key);
                     }
                     for (key, value) in &frontmatter {
-                        map.insert(txn, key.as_str(), value.as_str());
+                        match value {
+                            MdFrontmatter::Scalar(value) => {
+                                map.insert(txn, key.as_str(), value.as_str());
+                            }
+                            MdFrontmatter::Map(children) => {
+                                let nested: std::collections::HashMap<String, Any> = children
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), Any::from(v.as_str())))
+                                    .collect();
+                                map.insert(txn, key.as_str(), Any::from(nested));
+                            }
+                        }
                     }
                     let len = frag.len(txn);
                     if len > 0 {
@@ -537,7 +548,15 @@ enum MdBlock {
 /// Split a leading `---` frontmatter block of flat `key: value` scalars off
 /// the chosen markdown. Only the exact shape the projector emits is claimed;
 /// anything else stays in the body and parses as blocks.
-fn split_markdown_frontmatter(markdown: &str) -> (Vec<(String, String)>, &str) {
+/// A parsed frontmatter entry: the scalar and one-level-map shapes the
+/// projector itself emits (`scalar_line`). Anything else bails to the body
+/// parser rather than guessing at YAML.
+enum MdFrontmatter {
+    Scalar(String),
+    Map(Vec<(String, String)>),
+}
+
+fn split_markdown_frontmatter(markdown: &str) -> (Vec<(String, MdFrontmatter)>, &str) {
     let Some(rest) = markdown.strip_prefix("---\n") else {
         return (Vec::new(), markdown);
     };
@@ -552,22 +571,73 @@ fn split_markdown_frontmatter(markdown: &str) -> (Vec<(String, String)>, &str) {
     if !after.is_empty() && !after.starts_with('\n') {
         return (Vec::new(), markdown);
     }
-    let mut entries = Vec::new();
-    for line in rest[..end].lines() {
-        let Some((key, value)) = line.split_once(": ") else {
-            // Nested maps, typed scalars, or free text: not the flat shape
-            // this fold claims. Leave the whole document to the body parser.
-            return (Vec::new(), markdown);
-        };
-        if key.trim().is_empty() || key.starts_with(' ') {
+    let lines: Vec<&str> = rest[..end].lines().collect();
+    let mut entries: Vec<(String, MdFrontmatter)> = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.starts_with(' ') || line.trim().is_empty() {
             return (Vec::new(), markdown);
         }
-        entries.push((key.to_string(), value.to_string()));
+        if let Some((key, value)) = line.split_once(": ") {
+            if key.trim().is_empty() {
+                return (Vec::new(), markdown);
+            }
+            entries.push((key.to_string(), MdFrontmatter::Scalar(value.to_string())));
+            index += 1;
+            continue;
+        }
+        // `key:` alone opens the projector's one-level nested map: two-space
+        // indented `child: value` scalars, sorted on projection.
+        let Some(key) = line.strip_suffix(':') else {
+            return (Vec::new(), markdown);
+        };
+        if key.trim().is_empty() || key.contains(':') {
+            return (Vec::new(), markdown);
+        }
+        index += 1;
+        let mut children = Vec::new();
+        while index < lines.len() {
+            let Some(child) = lines[index].strip_prefix("  ") else {
+                break;
+            };
+            // Deeper nesting than the projector emits: bail to the body
+            // parser rather than mangling metadata.
+            if child.starts_with(' ') {
+                return (Vec::new(), markdown);
+            }
+            let Some((child_key, child_value)) = child.split_once(": ") else {
+                return (Vec::new(), markdown);
+            };
+            if child_key.trim().is_empty() {
+                return (Vec::new(), markdown);
+            }
+            children.push((child_key.to_string(), child_value.to_string()));
+            index += 1;
+        }
+        entries.push((key.to_string(), MdFrontmatter::Map(children)));
     }
     (entries, body)
 }
 
 fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
+    parse_markdown_blocks_at(body, 0)
+}
+
+/// The fold parses at most this many nested blockquote levels. Measured
+/// against the projector's own renderable ceiling, not guessed: each
+/// quote level costs two of `MAX_PROJECTION_DEPTH`'s 128 units (element
+/// plus child), so 60 levels is the deepest document the projection can
+/// still render with margin for the innermost paragraph — beyond it no
+/// faithful representation exists at all, because plain paragraph text
+/// escapes a leading `>` on projection. Past the ceiling the quoted
+/// lines stay one verbatim paragraph: content survives, and 60 recursion
+/// frames cannot exhaust the parser stack or the actor thread no matter
+/// how many megabytes of `> ` prefixes one resolve frame carries.
+const QUOTE_FOLD_MAX_DEPTH: usize = 60;
+
+/// `depth` bounds blockquote recursion at [`QUOTE_FOLD_MAX_DEPTH`].
+fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
     let lines: Vec<&str> = body.split('\n').collect();
     let mut blocks = Vec::new();
     let mut index = 0usize;
@@ -611,6 +681,7 @@ fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
         }
         if line == ">" || line.starts_with("> ") {
             let mut inner = Vec::new();
+            let start = index;
             while index < lines.len() {
                 let quoted = lines[index];
                 if quoted == ">" {
@@ -622,7 +693,14 @@ fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
                 }
                 index += 1;
             }
-            blocks.push(MdBlock::Quote(parse_markdown_blocks(&inner.join("\n"))));
+            if depth >= QUOTE_FOLD_MAX_DEPTH {
+                blocks.push(MdBlock::Paragraph(lines[start..index].join("\n")));
+            } else {
+                blocks.push(MdBlock::Quote(parse_markdown_blocks_at(
+                    &inner.join("\n"),
+                    depth + 1,
+                )));
+            }
             continue;
         }
         if parse_task_item(line).is_some() {
@@ -3404,6 +3482,65 @@ fn main() {}
         assert!(
             frontmatter.contains("Chosen"),
             "frontmatter scalars are parsed, got {frontmatter}"
+        );
+    }
+
+    #[test]
+    fn resolution_fold_parses_the_projectors_nested_frontmatter() {
+        // Codex #596 round 4: the projector itself emits one-level nested
+        // maps (`scalar_line`), and the fold must accept its own output.
+        // MUTATION: bail on `key:` lines again - the delimiters parse as
+        // horizontal rules, the projection diverges, and this fails.
+        let doc = Ydoc::wire();
+        doc.richdoc_append_paragraph("old");
+        let chosen = "---\nmeta:\n  owner: ice\n  team: dohc\ntitle: Chosen\n---\n\nbody text";
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen);
+        let projected = doc.project(ContentKind::Richdoc).expect("projection");
+        assert_eq!(
+            projected.markdown, chosen,
+            "the nested frontmatter roundtrips byte-identically"
+        );
+        let frontmatter =
+            serde_json::to_string(&doc.canonical_content()["frontmatter"]).expect("fm json");
+        assert!(
+            frontmatter.contains("owner") && frontmatter.contains("ice"),
+            "the nested map is real metadata, not body text: {frontmatter}"
+        );
+    }
+
+    #[test]
+    fn resolution_fold_bounds_blockquote_depth() {
+        // Codex #596 round 4: an adversarial run of `> ` prefixes must not
+        // recurse without bound inside the resolve frame. Below the ceiling
+        // the fold nests real blockquotes and roundtrips byte-exactly; past
+        // it the quoted remainder stays one verbatim paragraph (no faithful
+        // representation exists there - the projection itself cannot render
+        // deeper). MUTATION: drop the depth bound - the adversarial count
+        // assertion fails with one node per prefix.
+        let renderable = Ydoc::wire();
+        let chosen = format!("{}deep", "> ".repeat(40));
+        renderable.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen);
+        let projected = renderable
+            .project(ContentKind::Richdoc)
+            .expect("projection");
+        assert_eq!(
+            projected.markdown, chosen,
+            "a renderable depth roundtrips byte-identically"
+        );
+
+        let adversarial = Ydoc::wire();
+        let hostile = format!("{}deep", "> ".repeat(1_000));
+        adversarial.rewrite_content_to_markdown(ContentKind::Richdoc, &hostile);
+        let body =
+            serde_json::to_string(&adversarial.canonical_content()["body"]).expect("body json");
+        let blockquotes = body.matches("\"blockquote\"").count();
+        assert_eq!(
+            blockquotes, QUOTE_FOLD_MAX_DEPTH,
+            "nesting stops at the measured ceiling: {blockquotes}"
+        );
+        assert!(
+            body.contains("deep"),
+            "the quoted content survives past the ceiling"
         );
     }
 }

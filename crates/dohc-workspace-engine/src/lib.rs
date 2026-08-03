@@ -11070,6 +11070,7 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
             | dohc_engine_crypto::CryptoError::KeyFileMalformed
             | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
         },
+        DomainError::PayloadTooLarge { .. } => ErrorCode::PayloadTooLarge,
         DomainError::WorkspaceNotFound
         | DomainError::VersionNotFound
         | DomainError::InvalidVersion

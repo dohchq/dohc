@@ -8885,6 +8885,29 @@ fn ydoc_open_state_on_store(
         // behind the active editor with no event or resync signal.
         dohc_engine_sync::drain_deferred_ydoc_for_key(store, &key, &NoFaults)?;
     }
+    // An open sync conflict on this object freezes the OPEN as well as the
+    // settle: the claimed lineage may be a peer's unreviewed base, and
+    // serving it would put the editor on the very side the conflict
+    // preserves the head against — the user types into unreviewed content
+    // and resolution rewrites the lineage under the live client. Refuse
+    // with the same reason the settle freeze uses; resolution lifts both.
+    if expected_key_matches
+        && store
+            .read_with(|conn| {
+                dohc_engine_sync::open_sync_conflict_for_object(
+                    conn,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                )
+            })?
+            .is_some()
+    {
+        return Err(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "ydoc-conflict-open",
+        }
+        .into());
+    }
     let persisted = dohc_engine_collab::load_persisted(store, &key)?;
     // "Existing" means durable DOC STATE, not a bare marker: a local-only
     // close prunes every CRDT row and leaves head_update_seq == 0
@@ -10644,7 +10667,7 @@ fn conflict_resolve_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store)
+    let result = VersionedTextStore::new(store)
         .resolve_text_conflict_with(input, faults, |tx, result| {
             if let Some(delete) = result.delete.as_ref() {
                 delete_file_search_index(
@@ -10712,7 +10735,42 @@ fn conflict_resolve_on_store(
             }
             Ok(())
         })
-        .map_err(RuntimeError::from)
+        .map_err(RuntimeError::from)?;
+    // The fold appends full-document rewrites; give it the append path's
+    // self-bounding (`self_bound_log`), or repeated conflicts grow
+    // `ydoc_updates` without bound. Best-effort exactly like the append: the
+    // fold is already durable, a skipped or crashed compaction folds next
+    // time, and `maybe_compact` no-ops below threshold and while updates are
+    // pending.
+    let folded_object = result.write.as_ref().map_or_else(
+        || {
+            result.conflict.current.snapshot.as_ref().map(|snapshot| {
+                (
+                    result.conflict.target_version_id.clone(),
+                    snapshot.object_id.clone(),
+                )
+            })
+        },
+        |write| {
+            Some((
+                write.snapshot.version_id.clone(),
+                write.snapshot.object_id.clone(),
+            ))
+        },
+    );
+    if let Some((version_id, object_id)) = folded_object
+        && let Ok(key) = DocKey::new(input.workspace_id.clone(), version_id, object_id)
+        && dohc_engine_collab::read_marker(store, &key)?.is_some()
+    {
+        let _ = dohc_engine_collab::maybe_compact(
+            store,
+            &key,
+            dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD,
+            faults,
+            input.now_ms,
+        )?;
+    }
+    Ok(result)
 }
 
 /// Map a resolution-fold failure into the resolving transaction's error
@@ -10722,6 +10780,18 @@ fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::Dom
         dohc_engine_sync::SyncError::InvalidInput { reason } => {
             dohc_engine_domain::DomainError::InvalidInput { reason }
         }
+        // The fold's size refusal carries its measurements; wrapping it as
+        // state-corrupt would throw them away and misreport a bounded input
+        // as corruption.
+        dohc_engine_sync::SyncError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        } => dohc_engine_domain::DomainError::PayloadTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        },
         dohc_engine_sync::SyncError::Storage(storage) => {
             dohc_engine_domain::DomainError::Storage(storage)
         }

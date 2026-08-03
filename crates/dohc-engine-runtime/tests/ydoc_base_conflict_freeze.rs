@@ -389,3 +389,197 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
         "the resolution's materialization replays before the settle answers"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_base_conflict_freezes_the_open_too() {
+    // Codex #596 round 4: refusing only the settle left the OPEN serving the
+    // claimed sender lineage - the editor displayed and accepted edits
+    // against the unreviewed side while the head froze. The gate covers
+    // open and settle symmetrically. MUTATION: drop the open-conflict check
+    // in `ydoc_open_state_on_store` - the open succeeds and this fails.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        seed_divergent_base(&mut store);
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 5).expect("open actor").actor;
+    let refused = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            6,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an open base conflict must freeze the open");
+    assert!(
+        matches!(
+            refused,
+            dohc_engine_runtime::RuntimeError::Domain(
+                dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-conflict-open"
+                }
+            )
+        ),
+        "unexpected open outcome: {refused:?}"
+    );
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_oversized_resolution_fold_reports_its_measurements() {
+    // Codex #596 round 4: the catch-all wrapped the fold's BlobTooLarge as
+    // state-corrupt, discarding the numbers. The refusal now carries the
+    // constraint, the limit, and the observed usage end to end. MUTATION:
+    // route BlobTooLarge back through the corrupt catch-all in
+    // `map_fold_error` - the PayloadTooLarge match fails.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let (_key, _winner_base, _winner_doc, conflict_id) = {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        seed_divergent_base(&mut store)
+    };
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 10).expect("open actor").actor;
+    let oversized = "x".repeat(dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES + 1);
+    let refused = handle
+        .conflict_resolve(
+            ResolveTextConflict {
+                workspace_id: WS.to_owned(),
+                conflict_id,
+                resolution: ResolveConflictKind::ApplyMerged { text: oversized },
+                object_id: "resolution-fresh-object".to_owned(),
+                write_moment_id: "m-resolve-oversized".to_owned(),
+                delete_moment_id: "m-resolve-delete".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 11,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an unfoldable choice must refuse with its measurements");
+    match refused {
+        dohc_engine_runtime::RuntimeError::Domain(
+            dohc_engine_domain::DomainError::PayloadTooLarge {
+                constraint,
+                limit_bytes,
+                observed_bytes,
+            },
+        ) => {
+            assert!(constraint.contains("MAX_YDOC_UPDATE_BYTES"));
+            assert_eq!(
+                limit_bytes,
+                dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+            );
+            assert!(observed_bytes > limit_bytes);
+        }
+        other => panic!("the measurements must survive the mapping: {other:?}"),
+    }
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resolution_fold_self_bounds_the_update_log() {
+    // Codex #596 round 4: folds append full-document rewrites but never
+    // compacted, so repeated conflicts grow ydoc_updates without bound. The
+    // resolve now runs the append path's best-effort compaction. MUTATION:
+    // drop the post-resolve `maybe_compact` call - the pending-update count
+    // stays above the threshold and this fails.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let (_key, winner_doc, conflict_id) = {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        let (key, _winner_base, winner_doc, conflict_id) = seed_divergent_base(&mut store);
+        // One short of DEFAULT_COMPACTION_THRESHOLD, so the applies' own
+        // self-bounding stays quiet and the FOLD's append is the row that
+        // crosses the line.
+        for seq in 0..i64::from(dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD) - 1 {
+            let delta = winner_doc.plaintext_insert(0, "x");
+            let delta_sha = store.put_binary_blob(&delta).expect("delta blob");
+            let op = ReplicationEnvelope {
+                workspace_id: WS.to_owned(),
+                origin_id: "winner-origin".to_owned(),
+                origin_seq: seq + 1,
+                op_kind: "ydoc.update".to_owned(),
+                payload: serde_json::json!({
+                    "versionId": "main",
+                    "objectId": "object-plan",
+                    "path": PATH,
+                    "contentKind": "plaintext",
+                    "updateBlobSha256": delta_sha,
+                    "isBaseState": false
+                }),
+                recorded_at_ms: 100 + seq,
+            };
+            apply_ydoc_envelope(&mut store, &op, &NoFaults, &NoLiveLeases)
+                .expect("delta coalesces");
+        }
+        (key, winner_doc, conflict_id)
+    };
+    let _ = winner_doc;
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 10).expect("open actor").actor;
+    handle
+        .conflict_resolve(
+            ResolveTextConflict {
+                workspace_id: WS.to_owned(),
+                conflict_id,
+                resolution: ResolveConflictKind::KeepCurrent,
+                object_id: "resolution-fresh-object".to_owned(),
+                write_moment_id: "m-resolve-compact".to_owned(),
+                delete_moment_id: "m-resolve-delete".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 500,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("keep-current resolves");
+    supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 501).expect("inspect");
+    let (updates, marker_heads): (i64, (i64, i64)) = store
+        .read_with(|conn| {
+            let updates: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates \
+                     WHERE workspace_id=?1 AND object_id='object-plan'",
+                    [WS],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+            let heads: (i64, i64) = conn
+                .query_row(
+                    "SELECT head_update_seq, head_snapshot_seq FROM ydoc_docs \
+                     WHERE workspace_id=?1 AND object_id='object-plan'",
+                    [WS],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>((updates, heads))
+        })
+        .expect("log shape");
+    assert_eq!(
+        updates, 0,
+        "the fold's compaction folds the update log: {marker_heads:?}"
+    );
+    assert_eq!(
+        marker_heads.0, marker_heads.1,
+        "the snapshot head caught up with the update head"
+    );
+}
