@@ -7560,6 +7560,128 @@ fn the_deferred_drain_originates_once_the_lineage_is_complete() {
 }
 
 #[test]
+fn a_refused_projection_never_originates() {
+    // Codex #598 P1: the re-triggered origination ran BEFORE the projection's
+    // path-identity check, outside its savepoint — a stale or hostile path
+    // got its base claim and outbound journal row committed while only the
+    // projection was refused. Origination now runs inside the savepoint,
+    // after the projection accepts the path. Mutation check: move the
+    // origination call back above the savepoint — the no-claim and
+    // no-journal assertions fail.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-hostile',1_400), ('ws','object-occupant',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO sync_relay_cursors \
+                 (workspace_id, cursor, replication_epoch, stream_identity) \
+                 VALUES ('ws','0','epoch-1','stream-1')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            // Another object owns the path the hostile update will name.
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-occupant".to_owned(),
+                    path: "notes/occupied.md".to_owned(),
+                    text: "occupant".to_owned(),
+                    moment_id: "m-occupant".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_450,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    // An UNCLAIMED replicated lineage with durable local rows.
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-hostile").expect("key");
+    let local = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local text ");
+    dohc_engine_collab::record_local_update_creating_marker(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::Replicated,
+        &local,
+        None,
+        &NoFaults,
+        1_500,
+    )
+    .expect("local edit");
+
+    // A remote update naming ANOTHER OBJECT's path: the projection refuses
+    // (RefusedRetainingMutation), and origination must not have fired.
+    let remote_doc = dohc_engine_collab::Ydoc::wire();
+    let remote = remote_doc.plaintext_insert(0, "remote text");
+    let remote_sha = engine.put_binary_blob(&remote).expect("remote blob");
+    let hostile = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-hostile",
+            "path": "notes/occupied.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": remote_sha,
+            "isBaseState": false
+        }),
+    );
+    let outcome =
+        apply_ydoc_envelope(&mut engine, &hostile, &NoFaults, &NoLiveLeases).expect("applies");
+    assert!(
+        matches!(outcome, ApplyOutcome::Refused(_)),
+        "the occupied path refuses the projection: {outcome:?}"
+    );
+    let marker = dohc_engine_collab::read_marker(&engine, &key)
+        .expect("marker read")
+        .expect("marker");
+    assert!(
+        !marker.base_claimed,
+        "a refused projection must not claim a base"
+    );
+    assert!(
+        journaled_ydoc_base_ops(&engine).is_empty(),
+        "a refused projection must not journal an outbound base"
+    );
+
+    // The same lineage on a VALID path still originates exactly once.
+    let valid = envelope(
+        "peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-hostile",
+            "path": "notes/valid.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": remote_sha,
+            "isBaseState": false
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &valid, &NoFaults, &NoLiveLeases).expect("valid applies");
+    let ops = journaled_ydoc_base_ops(&engine);
+    assert_eq!(ops.len(), 1, "the accepted path originates exactly once");
+    assert!(ops[0].1, "the journaled op is the base state");
+}
+
+#[test]
 fn a_coalesced_conflict_still_recounts_on_redelivery() {
     // Codex #596 P2: a later delta coalesces the conflict and rewrites its
     // incoming anchor, so a crash-redelivery recount keyed on the conflict

@@ -360,7 +360,6 @@ pub fn drain_deferred_ydoc_for_key(
             dohc_engine_collab::load_persisted(store, key).map_err(map_collab_hard_error)?
         && !persisted.doc.has_pending_dependencies()
     {
-        originate_path = Some(payload.path.clone());
         let projected = store.write_with(faults, |tx| {
             project_and_write_in_tx(
                 tx,
@@ -379,7 +378,11 @@ pub fn drain_deferred_ydoc_for_key(
             )
         });
         match projected {
-            Ok(TxnOutcome::Committed(())) => {}
+            // Origination is owed only for a path the projection ACCEPTED
+            // (#548 review): a refused identity below consumes the marker
+            // without promoting — a stale or hostile path must never claim
+            // and journal a base.
+            Ok(TxnOutcome::Committed(())) => originate_path = Some(payload.path.clone()),
             Ok(TxnOutcome::Crashed { .. }) => return Err(SyncError::FaultCrash),
             // These rows are already ACKed and therefore cannot be retried
             // from the relay. If an identity pin now blocks projection,
@@ -1610,16 +1613,6 @@ pub fn apply_ydoc_envelope(
             if projected_doc.doc.has_pending_dependencies() {
                 return Ok(crate::apply::MutationOutcome::Applied(applied));
             }
-            // This apply may have just resolved the dependency that made an
-            // earlier origination decline (#548): ask again in the same
-            // admission transaction. Claimed lineages and non-replicating
-            // workspaces no-op inside.
-            crate::ydoc_originate::originate_ydoc_base_in_tx(
-                tx,
-                &key,
-                &update_path,
-                op.recorded_at_ms,
-            )?;
             tx.execute_batch("SAVEPOINT dohc_ydoc_projection")
                 .map_err(SyncError::persist)?;
             match project_and_write_in_tx(
@@ -1634,6 +1627,21 @@ pub fn apply_ydoc_envelope(
                 search_policy.as_ref(),
             ) {
                 Ok(()) => {
+                    // This apply may have just resolved the dependency that
+                    // made an earlier origination decline (#548): ask again
+                    // in the same admission transaction — but only INSIDE
+                    // this savepoint, after the projection accepted the
+                    // path. Originating before the identity check would
+                    // promote and journal a lineage the projection is about
+                    // to refuse (a stale or hostile path), outside the
+                    // savepoint that unwinds the refusal. Claimed lineages
+                    // and non-replicating workspaces no-op inside.
+                    crate::ydoc_originate::originate_ydoc_base_in_tx(
+                        tx,
+                        &key,
+                        &update_path,
+                        op.recorded_at_ms,
+                    )?;
                     tx.execute_batch("RELEASE dohc_ydoc_projection")
                         .map_err(SyncError::persist)?;
                 }
