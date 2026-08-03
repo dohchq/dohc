@@ -744,6 +744,10 @@ mod tests {
             PathFloor::Secret
         );
         assert_eq!(
+            classify_engine_file_path("secrets/.env/nested.md"),
+            PathFloor::Secret
+        );
+        assert_eq!(
             classify_engine_file_path(".dohc/engine/x"),
             PathFloor::Ignored
         );
