@@ -10,7 +10,11 @@ import type {
   DmRecord,
   FileChatThreadRecord,
 } from "../../ipc/bridgeContract";
-import { ChatsView, reconcileResolvedChatDecision } from "./ChatsView";
+import {
+  ChatsView,
+  reconcileResolvedChatDecision,
+  type ChatsNav,
+} from "./ChatsView";
 
 // Chats view (PR 13, WS-E): fast, natural chat — the channel composer sends
 // on Enter with NO title prompt, unread badges derive from the store's read
@@ -839,6 +843,41 @@ describe("ChatsView hybrid feed", () => {
     );
     await act(async () => Promise.resolve());
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  // #552: an in-place conversation click is a COMMAND, and the shell must
+  // hear it synchronously in the click. The passive onNavChange report is an
+  // effect: it flushes after the microtask queue, and on an exact repeat of
+  // the current destination it changes nothing at all — a pending DM lookup
+  // resolving in that window would remount the page over the message the
+  // user just jumped to.
+  it("reports a page feed click as a command, ahead of the passive nav report", async () => {
+    const onNavChange = vi.fn();
+    const onNavCommand = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [personalFeedItem("Feed update worth revisiting", "message-feed")],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message({ id: "message-feed", body: "Feed update worth revisiting" })],
+    });
+    renderView(vi.fn(), vi.fn(), { variant: "page", onNavChange, onNavCommand });
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const post = await screen.findByText("Feed update worth revisiting");
+    await userEvent.click(post.closest("button")!);
+
+    expect(onNavCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ level: "thread", focusMessageId: "message-feed" }),
+    );
+    // The command preceded the passive report of that destination.
+    const commandOrder = onNavCommand.mock.invocationCallOrder[0]!;
+    const reportIndex = onNavChange.mock.calls.findIndex(
+      ([nav]) => (nav as ChatsNav).level === "thread",
+    );
+    expect(reportIndex).toBeGreaterThanOrEqual(0);
+    expect(commandOrder).toBeLessThan(
+      onNavChange.mock.invocationCallOrder[reportIndex]!,
+    );
   });
 
   it("focuses the selected non-opening message when a feed item opens its thread", async () => {

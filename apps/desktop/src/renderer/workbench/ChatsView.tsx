@@ -888,6 +888,13 @@ export function ChatsView(props: {
   // Reports every navigation so the shell can seed the next mount (panel or
   // expanded tab) with this instance's current conversation.
   onNavChange?: (nav: ChatsNav) => void;
+  // The page variant's counterpart of the panel's onOpenInTab: an explicit
+  // conversation click, reported BEFORE the view navigates in place. It is a
+  // user command, so the shell cancels a pending cross-surface navigation
+  // (the DM lookup) unconditionally — even when the click repeats the current
+  // destination, which still re-loads and re-scrolls. The passive onNavChange
+  // report only says where the view already is and stays conditional.
+  onNavCommand?: (nav: ChatsNav) => void;
   // The compact panel is a navigator: selecting a conversation can hand its
   // destination to the shell so it opens in the editor instead of replacing
   // the panel's list. The page variant always navigates in place.
@@ -2019,6 +2026,9 @@ export function ChatsView(props: {
       });
       if (token !== liveToken.current) return;
       setNewThreadBody("");
+      // The completion is the user's command landing: report it through the
+      // seam in the same tick as the nav write (see openConversation).
+      props.onNavCommand?.({ level: "thread", channel, thread: result.thread });
       setNav({ level: "thread", channel, thread: result.thread });
       setMessages([result.message]);
       setReactions([]);
@@ -2412,13 +2422,25 @@ export function ChatsView(props: {
         props.onOpenInTab(target);
         return;
       }
+      // In-place navigation is still a command. Report it as one before the
+      // local loaders run: an exact repeat of the current destination changes
+      // no nav state, so the passive report alone would cancel nothing.
+      props.onNavCommand?.(target);
       if (target.level === "feed") openFeed();
       else if (target.level === "channel") void openChannel(target.channel);
       else if (target.level === "thread") {
         void openThread(target.channel, target.thread, target.focusMessageId);
       } else void openDm(target.dm, target.focusMessageId);
     },
-    [openChannel, openDm, openFeed, openThread, props.onOpenInTab, variant],
+    [
+      openChannel,
+      openDm,
+      openFeed,
+      openThread,
+      props.onNavCommand,
+      props.onOpenInTab,
+      variant,
+    ],
   );
 
   // Expand-to-tab seam, outbound: report where this view is (and what's
@@ -2600,6 +2622,8 @@ export function ChatsView(props: {
         result.dm,
         ...current.filter((dm) => dm.channelId !== result.dm.channelId),
       ]);
+      // The completion is the user's command landing (see openConversation).
+      props.onNavCommand?.({ level: "dm", dm: result.dm });
       void openDm(result.dm);
     } catch (error) {
       if (token !== liveToken.current) return;
@@ -2830,6 +2854,8 @@ export function ChatsView(props: {
       try {
         await bridge().leaveSharedChannel({ workspaceId, shareId });
         if (token !== liveToken.current) return;
+        // The completion is the user's command landing (see openConversation).
+        props.onNavCommand?.({ level: "channels" });
         setNav({ level: "channels" });
         await refreshOverview();
       } catch (error) {
@@ -2858,6 +2884,8 @@ export function ChatsView(props: {
             ? { ...current, channels: [...current.channels, result.channel] }
             : current,
         );
+        // The completion is the user's command landing (see openConversation).
+        props.onNavCommand?.({ level: "channel", channel: result.channel });
         void openChannel(result.channel);
       } catch (error) {
         if (token !== liveToken.current) return;
@@ -2868,6 +2896,16 @@ export function ChatsView(props: {
   );
 
   const goBack = useCallback(() => {
+    // Back is an explicit command like any conversation click: report it
+    // synchronously through the same seam, so a DM answer queued in this
+    // tick cannot pass its isCurrent() check and remount over the place the
+    // user just went back to. Every BackHeader (and the keyboard shortcut)
+    // routes through here.
+    props.onNavCommand?.(
+      nav.level === "thread"
+        ? { level: "channel", channel: nav.channel }
+        : { level: "channels" },
+    );
     liveToken.current += 1;
     if (nav.level === "thread") {
       // Re-open the channel so thread ordering/badges reflect what happened
@@ -2889,7 +2927,7 @@ export function ChatsView(props: {
       setDmDraft("");
       void refreshDms();
     }
-  }, [nav, openChannel, refreshDms, refreshOverview]);
+  }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
 
   const reactionsByMessage = useMemo(() => {
     const result = new Map<string, ChatReactionRecord[]>();
@@ -4517,6 +4555,10 @@ export function ChatsView(props: {
                     // recipient/draft left over from a previous compose.
                     setDmRecipients("");
                     setDmDraft("");
+                    // A command like any conversation click (see
+                    // openConversation): report it synchronously, or a DM
+                    // answer queued in this tick remounts over the compose.
+                    props.onNavCommand?.({ level: "dm-new" });
                     setNav({ level: "dm-new" });
                   }}
                   className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
