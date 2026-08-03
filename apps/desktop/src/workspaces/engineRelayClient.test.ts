@@ -104,7 +104,7 @@ class MockDaemon implements EngineDaemonClient {
             ],
           };
         case "sync.commitCursor":
-          return { committed: true };
+          return { committed: true, pendingPush: true };
         case "sync.recoverOrigin":
           return {
             oldOriginId: "origin-old",
@@ -287,6 +287,21 @@ describe("EngineRelayClient", () => {
       { method: "sync.claim", params: { workspaceId: "workspace-a" } },
       { method: "sync.probe", params: { workspaceId: "workspace-a" } },
     ]);
+    await sessions.closeAll();
+  });
+
+  it("folds a cursor-commit origination into the pull's pendingPush", async () => {
+    // dohc-ai/dohc#548 round 3: the FIRST cursor commit can originate owed
+    // Y.Doc lineages, and that commit runs AFTER the pull result was built
+    // (capture commits it once materialization lands). The result's
+    // pendingPush is therefore a getter the commit folds into. MUTATION:
+    // snapshot pendingPush as a plain field (or drop the fold in
+    // commitFetchCursor) - the post-commit assertion fails.
+    const { sessions, client } = await harness();
+    const pull = await client.pull();
+    expect(pull.pendingPush).toBe(false);
+    await pull.commitFetchCursor();
+    expect(pull.pendingPush).toBe(true);
     await sessions.closeAll();
   });
 

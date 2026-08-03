@@ -67,13 +67,17 @@ pub fn read_relay_cursor(
     })
 }
 
+/// Returns whether this commit ORIGINATED owed Y.Doc lineages (the first
+/// cursor sweep journaled bases). The caller must surface it as a pending
+/// push: the origination lands AFTER the pass's push already ran, and
+/// nothing else schedules one.
 pub fn commit_relay_cursor(
     store: &mut EngineStore,
     workspace_id: &str,
     cursor: &RelayCursor,
     now_ms: i64,
     faults: &dyn FaultInjector,
-) -> Result<TxnOutcome<()>, SyncError> {
+) -> Result<TxnOutcome<bool>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     if !(0..=crate::MAX_WIRE_INTEGER).contains(&cursor.cursor) {
         return Err(SyncError::InvalidInput {
@@ -139,14 +143,16 @@ pub fn commit_relay_cursor(
                 )
                 .map_err(SyncError::persist)?;
             }
-            if first_cursor {
+            let originated = if first_cursor {
                 crate::ydoc_originate::originate_owed_ydoc_lineages_in_tx(
                     tx,
                     workspace_id,
                     now_ms,
-                )?;
-            }
-            Ok::<(), SyncError>(())
+                )?
+            } else {
+                0
+            };
+            Ok::<bool, SyncError>(originated > 0)
     })
 }
 

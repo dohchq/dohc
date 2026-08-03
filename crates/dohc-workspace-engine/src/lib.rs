@@ -10733,7 +10733,9 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
 fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError> {
     Ok(match outcome {
         RelayOperationOutcome::Sync(outcome) => sync_outcome_json(outcome),
-        RelayOperationOutcome::CursorCommitted => json!({ "committed": true }),
+        RelayOperationOutcome::CursorCommitted { pending_push } => {
+            json!({ "committed": true, "pendingPush": pending_push })
+        }
         RelayOperationOutcome::Probe(has_content) => json!({ "hasContent": has_content }),
         RelayOperationOutcome::Claimed => json!({ "claimed": true }),
         RelayOperationOutcome::JoinIdentityAdopted => json!({ "adopted": true }),

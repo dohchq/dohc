@@ -6354,7 +6354,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         client
             .commit_pull_cursor(&mut reopened, "ws", &pending, 2_000, &NoFaults)
             .expect("commit"),
-        TxnOutcome::Committed(())
+        TxnOutcome::Committed(false)
     );
 }
 
@@ -7314,10 +7314,13 @@ fn first_relay_cursor_commit_originates_owed_lineages() {
         )
         .expect("cursor commit")
     };
-    assert!(matches!(
-        commit(&mut engine, 1),
-        dohc_engine_storage::TxnOutcome::Committed(())
-    ));
+    assert!(
+        matches!(
+            commit(&mut engine, 1),
+            dohc_engine_storage::TxnOutcome::Committed(true)
+        ),
+        "the originating commit reports the pending push (codex #598 round 3)"
+    );
 
     let ops = journaled_ydoc_base_ops(&engine);
     assert_eq!(ops.len(), 1, "the first cursor commit originates the base");
@@ -7348,7 +7351,7 @@ fn first_relay_cursor_commit_originates_owed_lineages() {
     // Base-once: a later cursor commit originates nothing further.
     assert!(matches!(
         commit(&mut engine, 2),
-        dohc_engine_storage::TxnOutcome::Committed(())
+        dohc_engine_storage::TxnOutcome::Committed(false)
     ));
     assert_eq!(journaled_ydoc_base_ops(&engine).len(), 1);
 }
@@ -7522,6 +7525,7 @@ fn the_deferred_drain_originates_once_the_lineage_is_complete() {
             deferred: true,
             reason: Some("ydoc-session-live"),
             conflicts_opened: 0,
+            pending_push: false,
         })
     );
     assert!(
@@ -15867,11 +15871,11 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(10), 2_000, &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        Ok(TxnOutcome::Committed(_))
     ));
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(4), 2_000, &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        Ok(TxnOutcome::Committed(_))
     ));
     assert_eq!(
         read_relay_cursor(&engine, "ws")
@@ -16614,7 +16618,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &cursor, 2_000, &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        Ok(TxnOutcome::Committed(_))
     ));
     let stored = engine
         .read_with(|conn| {

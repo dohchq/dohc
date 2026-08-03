@@ -880,7 +880,7 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
         client
             .commit_pull_cursor(&mut reopened, "ws", &pending, 2_000, &NoFaults)
             .expect("commit after materialization"),
-        TxnOutcome::Committed(())
+        TxnOutcome::Committed(false)
     );
     assert_eq!(
         read_relay_cursor(&reopened, "ws")

@@ -770,13 +770,23 @@ mod deferred_relay_tests {
 #[derive(Debug)]
 pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
-    CursorCommitted,
+    CursorCommitted {
+        /// The commit's first-cursor sweep ORIGINATED owed Y.Doc lineages:
+        /// their journaled bases landed after this pass's push, so the
+        /// caller must schedule another push.
+        pending_push: bool,
+    },
     Probe(bool),
     Claimed,
     JoinIdentityAdopted,
     Recovered(RecoverResponse),
-    KeyEnvelopeUploaded { etag: String },
-    KeyEnvelopeDownloaded { envelope_json: String, etag: String },
+    KeyEnvelopeUploaded {
+        etag: String,
+    },
+    KeyEnvelopeDownloaded {
+        envelope_json: String,
+        etag: String,
+    },
     SharedChannelPulled(SharedChannelPullOutcome),
     SharedChannelPushed(SharedChannelPushOutcome),
     ShareViewPulled(ShareViewPullOutcome),
@@ -6349,7 +6359,9 @@ fn execute_relay_operation(
             cursor,
             now_ms,
         } => match client.commit_pull_cursor(store, &workspace_id, &cursor, now_ms, &NoFaults)? {
-            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
+            TxnOutcome::Committed(pending_push) => {
+                Ok(RelayOperationOutcome::CursorCommitted { pending_push })
+            }
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
         RelayOperation::Probe { workspace_id } => {
@@ -6487,7 +6499,9 @@ fn execute_relay_operation(
             workspace_id,
             cursor,
         } => match client.commit_share_view_cursor(store, &workspace_id, &cursor, &NoFaults)? {
-            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
+            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted {
+                pending_push: false,
+            }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
     }
@@ -9311,6 +9325,19 @@ fn ydoc_settle_on_store(
         == Some(projected_sha.as_str())
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
+        // Settlement binds the path (#548 review): a lineage with durable rows
+        // but no settled artifact has no path_aliases row, so the first-cursor
+        // sweep cannot name it, and a later local-only close would prune it
+        // unpublished. The settle is the moment the path becomes durable — ask
+        // origination again here, after the settle succeeded (a refused settle
+        // must leave no promotion side-effects). Claimed lineages and
+        // non-replicating workspaces no-op inside.
+        match store.write_with(faults, |tx| {
+            dohc_engine_sync::originate_ydoc_base_in_tx(tx, key, path, now_ms)
+        })? {
+            TxnOutcome::Committed(_) => {}
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
         return Ok(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
@@ -9547,6 +9574,19 @@ fn ydoc_settle_on_store(
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
         }
         JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
+    }
+    // Settlement binds the path (#548 review): a lineage with durable rows
+    // but no settled artifact has no path_aliases row, so the first-cursor
+    // sweep cannot name it, and a later local-only close would prune it
+    // unpublished. The settle is the moment the path becomes durable — ask
+    // origination again here, after the settle succeeded (a refused settle
+    // must leave no promotion side-effects). Claimed lineages and
+    // non-replicating workspaces no-op inside.
+    match store.write_with(faults, |tx| {
+        dohc_engine_sync::originate_ydoc_base_in_tx(tx, key, path, now_ms)
+    })? {
+        TxnOutcome::Committed(_) => {}
+        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     }
     Ok(YdocSettlement {
         moment_id: write.moment.moment_id,

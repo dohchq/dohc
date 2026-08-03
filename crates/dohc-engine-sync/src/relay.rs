@@ -754,7 +754,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         cursor: &RelayCursor,
         now_ms: i64,
         faults: &dyn FaultInjector,
-    ) -> Result<TxnOutcome<()>, RelayError> {
+    ) -> Result<TxnOutcome<bool>, RelayError> {
         commit_relay_cursor(store, workspace_id, cursor, now_ms, faults).map_err(local)
     }
 

@@ -502,7 +502,12 @@ function translateRelayError(method: string, error: unknown): never {
 export interface EngineRelayWorkspaceClient {
   push(): Promise<PushWorkspaceToRelayResult>;
   pull(): Promise<PullWorkspaceFromRelayResult>;
-  commitCursor(cursor: Record<string, JsonValue | undefined>): Promise<void>;
+  // Resolves with whether the commit's first-cursor sweep ORIGINATED owed
+  // Y.Doc lineages (dohc-ai/dohc#548): their journaled bases land after
+  // this pass's push, so the caller must schedule another one.
+  commitCursor(
+    cursor: Record<string, JsonValue | undefined>,
+  ): Promise<{ pendingPush: boolean }>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
   bootstrapJoinIdentity(identity: RelayWorkspaceIdentity | null): Promise<void>;
@@ -627,7 +632,7 @@ export class EngineRelayClient {
 
     const commitCursor = async (
       cursor: Record<string, JsonValue | undefined>,
-    ): Promise<void> => {
+    ): Promise<{ pendingPush: boolean }> => {
       const result = resultRecord(
         await request("sync.commitCursor", {
           workspaceId: workspace.workspaceId,
@@ -638,6 +643,7 @@ export class EngineRelayClient {
       if (!booleanField(result, "committed", "sync.commitCursor")) {
         throw new Error("Rust engine sync.commitCursor did not commit.");
       }
+      return { pendingPush: result.pendingPush === true };
     };
 
     const claimWith = async (
@@ -736,7 +742,8 @@ export class EngineRelayClient {
             finalCursor = cursor;
             break;
           }
-          await commitCursor(cursor);
+          const committed = await commitCursor(cursor);
+          pendingPush = pendingPush || committed.pendingPush;
         }
         if (!finalCursor) {
           throw new Error("Rust engine sync.pull returned no final cursor.");
@@ -746,12 +753,22 @@ export class EngineRelayClient {
           applied,
           skipped,
           conflictsOpened,
-          pendingPush,
+          // A getter, not a snapshot: the FINAL cursor commit runs after
+          // the caller received this result (capture commits it once
+          // materialization lands), and the first-cursor sweep can
+          // originate owed lineages there - the sync engine reads this
+          // after that commit, so it must see the fold.
+          get pendingPush() {
+            return pendingPush;
+          },
           pendingConflictResolves: resolves.length,
           pendingResolves: resolves,
           fastForwardedPaths: [...changed.values()],
           nextCursor,
-          commitFetchCursor: async () => await commitCursor(finalCursor),
+          commitFetchCursor: async () => {
+            const committed = await commitCursor(finalCursor);
+            pendingPush = pendingPush || committed.pendingPush;
+          },
         };
       },
       commitCursor,
@@ -988,7 +1005,9 @@ export class EngineRelayClient {
           refusalCount,
           changedPaths: [...changed.values()],
           nextCursor,
-          commitCursor: async () => await commitCursor(finalCursor),
+          commitCursor: async () => {
+            await commitCursor(finalCursor);
+          },
         };
       },
     };
