@@ -23,6 +23,15 @@ import "./editor/MarkdownEditor";
 import "./PropertiesPanel";
 import "./DatabaseStudioView";
 import "./SourceCodeEditor";
+
+// jsdom implements no elementFromPoint, and a click that lands on a mounted
+// ProseMirror view reaches posAtCoords, which calls it unguarded — an
+// uncaught TypeError inside jsdom's event dispatch that fails the run while
+// every test passes. On main the editor mount raced the click, so this fired
+// as a roughly one-in-a-dozen lottery (#568's rotating cast); the pre-warm
+// above makes mount-before-click the common order. "Nothing at that point"
+// sends posAtCoords into its guarded bounding-box fallback.
+document.elementFromPoint ??= () => null;
 import * as Y from "yjs";
 import {
   markdownToYDoc,
