@@ -1617,10 +1617,9 @@ export const WORKSPACE_VERSION_NAME_MAX = 80;
 // carries, passed through verbatim (`engineHistoryIpc.ts` versionConflictForIpc,
 // `versionCompare.ts`), so they carry the engine's own text contract.
 //
-// Compare rows use this bound to its full height: `compareVersionFiles` reads
-// them through `listTextFiles`, which hydrates each over-cap body by
-// `readTextFile` -> `readTextBlob`, so a compare side at the engine's contract
-// does arrive.
+// Compare rows use this bound to its full height: `compareVersionFilesPage`
+// hydrates each differing path by `readTextFile` -> `readTextBlob`, so a
+// compare side at the engine's contract does arrive.
 //
 // Conflict listing is the exception. The daemon serializes a conflict's three
 // sides in band and refuses the page with `conflict-row-exceeds-wire-limit`
@@ -1700,13 +1699,22 @@ export type WorkspaceVersionFileChange = z.infer<typeof WorkspaceVersionFileChan
 export const CompareWorkspaceVersionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   versionId: VERSION_ID,
+  // Continuation from the previous page's nextAfterPath; absent for the
+  // first page.
+  afterPath: PATH_STRING.optional(),
 });
 export type CompareWorkspaceVersionsPayload = z.infer<
   typeof CompareWorkspaceVersionsPayload
 >;
 
+// Page-shaped (#562): the rows carry full text sides, so the message is
+// bounded by main's page budget (`COMPARE_PAGE_TEXT_BYTE_BUDGET`,
+// workspace-core versionCompare.ts) and the rest rides the continuation.
 export const CompareWorkspaceVersionsResult = z.object({
   files: z.array(WorkspaceVersionFileChange),
+  // Non-null: more differing files exist past this page. Pass it back as
+  // afterPath to fetch them.
+  nextAfterPath: PATH_STRING.nullable(),
 });
 export type CompareWorkspaceVersionsResult = z.infer<
   typeof CompareWorkspaceVersionsResult
@@ -1745,15 +1753,37 @@ export type WorkspaceVersionConflict = z.infer<typeof WorkspaceVersionConflict>;
 export const MergeWorkspaceVersionPayload = SwitchWorkspaceVersionPayload;
 export type MergeWorkspaceVersionPayload = z.infer<typeof MergeWorkspaceVersionPayload>;
 
+const CONFLICT_ID = z.string().min(1).max(200);
+
+// Every conflict-carrying result is page-shaped (#562): the daemon pages
+// `conflicts.list` under a byte budget, and these results pass one such page
+// through. Non-null nextAfterConflictId: more open conflicts exist past this
+// page — pass it back as afterConflictId to fetch them.
 export const MergeWorkspaceVersionResult = z.object({
   mergedFileCount: z.number().int().min(0),
   unchangedFileCount: z.number().int().min(0),
+  // How many files THIS merge left in conflict. The rows below are the first
+  // page of ALL open conflicts (a sync conflict can be among them), so the
+  // STAGE decision reads this count — unrelated open conflicts must not turn
+  // a clean merge into a conflicted one. The count sentence over the cards
+  // reads the loaded rows instead: it describes what the user is looking at.
+  conflictCount: z.number().int().min(0),
   conflicts: z.array(WorkspaceVersionConflict),
+  nextAfterConflictId: CONFLICT_ID.nullable(),
 });
 export type MergeWorkspaceVersionResult = z.infer<typeof MergeWorkspaceVersionResult>;
 
+export const ListWorkspaceVersionConflictsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  afterConflictId: CONFLICT_ID.optional(),
+});
+export type ListWorkspaceVersionConflictsPayload = z.infer<
+  typeof ListWorkspaceVersionConflictsPayload
+>;
+
 export const ListWorkspaceVersionConflictsResult = z.object({
   conflicts: z.array(WorkspaceVersionConflict),
+  nextAfterConflictId: CONFLICT_ID.nullable(),
 });
 export type ListWorkspaceVersionConflictsResult = z.infer<
   typeof ListWorkspaceVersionConflictsResult
@@ -1772,8 +1802,10 @@ export type ResolveWorkspaceVersionConflictPayload = z.infer<
   typeof ResolveWorkspaceVersionConflictPayload
 >;
 
+// The first page of the conflicts still open after the resolution.
 export const ResolveWorkspaceVersionConflictResult = z.object({
   conflicts: z.array(WorkspaceVersionConflict),
+  nextAfterConflictId: CONFLICT_ID.nullable(),
 });
 export type ResolveWorkspaceVersionConflictResult = z.infer<
   typeof ResolveWorkspaceVersionConflictResult
@@ -3146,7 +3178,7 @@ export interface DohcDesktopBridge {
     payload: MergeWorkspaceVersionPayload,
   ): Promise<MergeWorkspaceVersionResult>;
   listWorkspaceVersionConflicts(
-    payload: ListWorkspaceFilesPayload,
+    payload: ListWorkspaceVersionConflictsPayload,
   ): Promise<ListWorkspaceVersionConflictsResult>;
   resolveWorkspaceVersionConflict(
     payload: ResolveWorkspaceVersionConflictPayload,

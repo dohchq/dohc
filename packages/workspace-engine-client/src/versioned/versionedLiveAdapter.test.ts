@@ -285,7 +285,9 @@ describe("VersionedLiveAdapter", () => {
     expect(requests).toEqual([]);
   });
 
-  it("drains every conflicts.list page behind the array store contract", async () => {
+  it("passes ONE conflicts.list page through with the daemon's continuation", async () => {
+    // #562: the drain that undid the daemon's paging lived here. One call is
+    // one page — a second request from a single call is the drain coming back.
     const requests: Request[] = [];
     const second = { ...conflict, id: "conflict-2", createdAtMs: 2 };
     const client: MinimalDaemonClient = {
@@ -319,11 +321,72 @@ describe("VersionedLiveAdapter", () => {
         workspaceId: WORKSPACE,
         status: "open",
       }),
-    ).resolves.toEqual([conflict, second]);
+    ).resolves.toEqual({
+      conflicts: [conflict],
+      nextAfterConflictId: conflict.id,
+    });
+    expect(requests.map((request) => request.params)).toEqual([
+      { status: "open" },
+    ]);
+
+    // The caller continues by handing the token back, one page per call.
+    await expect(
+      adapter.listTextConflicts({
+        workspaceId: WORKSPACE,
+        status: "open",
+        afterConflictId: conflict.id,
+      }),
+    ).resolves.toEqual({ conflicts: [second], nextAfterConflictId: null });
     expect(requests.map((request) => request.params)).toEqual([
       { status: "open" },
       { status: "open", afterConflictId: conflict.id },
     ]);
+  });
+
+  it("maps one versions.compareFiles page onto the store's entry page", async () => {
+    const requests: Request[] = [];
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        return {
+          id: request.id,
+          result: {
+            entries: [
+              { path: "a.md", status: "modified" },
+              { path: "b.png", status: "added", binary: true },
+            ],
+            nextCursor: "b.png",
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.compareVersionFilesPage({
+        workspaceId: WORKSPACE,
+        sourceVersionId: "version-1",
+        targetVersionId: "main",
+        afterPath: "0.md",
+      }),
+    ).resolves.toEqual({
+      entries: [
+        { path: "a.md", status: "modified" },
+        { path: "b.png", status: "added", binary: true },
+      ],
+      nextAfterPath: "b.png",
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe(VERSIONED_METHOD.versionsCompareFiles);
+    expect(requests[0]!.params).toEqual({
+      workspaceId: WORKSPACE,
+      sourceVersionId: "version-1",
+      targetVersionId: "main",
+      afterPath: "0.md",
+    });
   });
 
   it("consumes the matching out-of-band blob for an over-cap binary read", async () => {

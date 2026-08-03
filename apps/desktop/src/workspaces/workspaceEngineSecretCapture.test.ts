@@ -199,7 +199,9 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     engine.captureBatch([{ path: ".env", operation: "update" }]);
     await engine.flush();
 
-    const changes = await engine.compareVersions(created.activeVersionId);
+    const page = await engine.compareVersions(created.activeVersionId);
+    expect(page.nextAfterPath).toBeNull();
+    const changes = page.files;
     const secretChange = changes.find((change) => change.path === ".env");
     expect(secretChange).toMatchObject({ status: "modified", protected: true });
     expect(secretChange?.currentText).toBeUndefined();

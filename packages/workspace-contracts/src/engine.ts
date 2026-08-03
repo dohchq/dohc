@@ -248,6 +248,13 @@ export type VersionedTextConflictResolveResult =
       delete?: VersionedTextDeleteResult;
     };
 
+export interface VersionedTextConflictPage {
+  conflicts: VersionedTextConflictRecord[];
+  // Pass back as afterConflictId to fetch the next page; null when this page
+  // reached the end of the listing.
+  nextAfterConflictId: VersionedTextConflictId | null;
+}
+
 export type SyncReplicationOpKind =
   | "workspace.init"
   | "moment.append"
@@ -911,10 +918,23 @@ export interface VersionedTextStore {
     path: string;
     metadata: ActorNeutralWriteMetadata;
   }): Promise<VersionedTextMergeResult>;
+  // One page of the engine's whole-version comparison (`versions.compareFiles`):
+  // every path that differs between the two versions, metadata only, in path
+  // order. Texts are hydrated per path by the caller that needs them (#562).
+  compareVersionFilesPage(input: {
+    workspaceId: WorkspaceId;
+    sourceVersionId: VersionId;
+    targetVersionId: VersionId;
+    afterPath?: string;
+  }): Promise<VersionFileChangeEntryPage>;
+  // Page-shaped on purpose (#562): the engine pages `conflicts.list` under a
+  // byte budget, and a drain here is what let one caller undo that. A caller
+  // that needs every row loops pages; most callers need one.
   listTextConflicts(input: {
     workspaceId: WorkspaceId;
     status?: VersionedTextConflictStatus;
-  }): Promise<VersionedTextConflictRecord[]>;
+    afterConflictId?: VersionedTextConflictId;
+  }): Promise<VersionedTextConflictPage>;
   resolveTextConflict(input: {
     workspaceId: WorkspaceId;
     conflictId: VersionedTextConflictId;
@@ -1844,6 +1864,21 @@ export type EngineFilePathClassification =
 
 export type VersionFileChangeStatus = "added" | "modified" | "deleted";
 
+// One differing path, metadata only — what `versions.compareFiles` reports
+// per row. The hydrated shape below is built from this by reading the sides.
+export interface VersionFileChangeEntry {
+  path: string;
+  status: VersionFileChangeStatus;
+  binary?: boolean;
+}
+
+export interface VersionFileChangeEntryPage {
+  entries: VersionFileChangeEntry[];
+  // Pass back as afterPath to fetch the next page; null when this page
+  // reached the end of the comparison.
+  nextAfterPath: string | null;
+}
+
 export interface VersionFileChange {
   path: string;
   status: VersionFileChangeStatus;
@@ -1921,6 +1956,13 @@ export interface SecretFileCompareEntry {
   status: VersionFileChangeStatus;
 }
 
+export interface SecretFileComparePage {
+  entries: SecretFileCompareEntry[];
+  // Pass back as afterPath to fetch the next page; null when this page
+  // reached the end of the comparison.
+  nextAfterPath: string | null;
+}
+
 export interface SecretFileWriteOutcome {
   // False when the write matched the current tip exactly (no new moment).
   changed: boolean;
@@ -1987,12 +2029,15 @@ export interface SecretFileStore {
     toVersionId: VersionId;
   }): Promise<void>;
   // Metadata-only comparison of two versions' secret files (statuses are
-  // relative to the target).
+  // relative to the target). Page-shaped like every other listing (#562): the
+  // engine pages this on the wire, and a drain here is what put every
+  // remaining protected row on one compare page.
   compareSecretFileVersions(input: {
     workspaceId: WorkspaceId;
     targetVersionId: VersionId;
     sourceVersionId: VersionId;
-  }): Promise<SecretFileCompareEntry[]>;
+    afterPath?: string;
+  }): Promise<SecretFileComparePage>;
   // Whole-file merge of one secret path from source into target. Secrets
   // never produce conflict records (conflict records carry side texts, which
   // protected contents must never ride): when the source changed relative to

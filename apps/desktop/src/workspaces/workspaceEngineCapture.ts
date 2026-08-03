@@ -4,7 +4,8 @@ import {
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import {
-  compareVersionFiles,
+  compareEnginePaths,
+  compareVersionFilesPage,
   type VersionFileChange,
 } from "@dohc/workspace-core/versionCompare";
 import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy";
@@ -16,6 +17,7 @@ import {
   MAX_VERSIONED_BINARY_FILE_BYTES,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
+  type SecretFileComparePage,
   type SecretFileMoment,
   type SecretFileStore,
   type VersionRecord,
@@ -160,10 +162,28 @@ export interface WorkspaceVersionSwitchResult {
   changedFileCount: number;
 }
 
+// One page of the compare surface's rows: hydrated text changes and
+// protected (secret) rows merged in path order, with a path continuation.
+export interface WorkspaceVersionComparePage {
+  files: VersionFileChange[];
+  nextAfterPath: string | null;
+}
+
 export interface WorkspaceVersionMergeResult {
   mergedFileCount: number;
   unchangedFileCount: number;
+  // How many files this merge left in conflict (new and re-surfaced). The
+  // rows themselves are open conflicts in the engine; readers page them
+  // through listOpenConflictsPage instead of carrying them here (#562).
+  conflictCount: number;
+}
+
+// One page of open conflicts, the engine's own `conflicts.list` page passed
+// through (#562): the daemon bounds a page by byte budget, and nothing on the
+// desktop side re-drains it into one array.
+export interface WorkspaceVersionConflictPage {
   conflicts: VersionedTextConflictRecord[];
+  nextAfterConflictId: string | null;
 }
 
 // One timeline row for the history UI: text moments and PROTECTED (secret)
@@ -237,7 +257,8 @@ export type WorkspaceVersionConflictResolution =
 
 export interface WorkspaceVersionConflictResolveOutcome {
   conflict: VersionedTextConflictRecord;
-  remaining: VersionedTextConflictRecord[];
+  // The first page of the conflicts still open after this resolution.
+  remaining: WorkspaceVersionConflictPage;
 }
 
 // The save state of a live engine Y.Doc, derived from REAL settle outcomes.
@@ -386,16 +407,28 @@ export interface WorkspaceEngineCapture {
   // Captures current disk state into the active version, then rewrites the
   // workspace folder to the target version's engine-owned text files.
   switchVersion(versionId: string): Promise<WorkspaceVersionSwitchResult>;
-  // Changed paths between a version and a target (default Main), computed
-  // after capturing the latest disk edits so the answer is never stale.
+  // One page of changed files between a version and a target (default Main),
+  // with text sides hydrated for diffing. The first page (no afterPath)
+  // captures the latest disk edits first so the answer is never stale; later
+  // pages continue that same comparison.
   compareVersions(
     sourceVersionId: string,
-    targetVersionId?: string,
-  ): Promise<VersionFileChange[]>;
+    options?: { targetVersionId?: string; afterPath?: string },
+  ): Promise<WorkspaceVersionComparePage>;
+  // How many files differ between a version and Main (text and protected),
+  // computed from the metadata listing without hydrating any text.
+  compareVersionsChangedCount(sourceVersionId: string): Promise<number>;
   // Merges a named version into Main through the engine merge API. When Main
   // is the active version, merged results are materialized to disk.
   mergeVersionIntoMain(sourceVersionId: string): Promise<WorkspaceVersionMergeResult>;
-  listOpenConflicts(): Promise<VersionedTextConflictRecord[]>;
+  // One page of open conflicts; pass the previous page's nextAfterConflictId
+  // to continue.
+  listOpenConflictsPage(
+    afterConflictId?: string,
+  ): Promise<WorkspaceVersionConflictPage>;
+  // Every open conflict id (the sync notice lifecycle needs the full set).
+  // Walks pages; only ids are retained.
+  listOpenConflictIds(): Promise<string[]>;
   resolveConflict(
     conflictId: string,
     resolution: WorkspaceVersionConflictResolution,
@@ -1680,6 +1713,29 @@ export function createWorkspaceEngineCapture(
   function secretStoreFor(): SecretFileStore {
     secretStore ??= daemonStores().secretStore;
     return secretStore;
+  }
+
+  // One page of protected-file changes, with the same guarantee as the text
+  // pager (#562): a returned page is empty only when the comparison is
+  // exhausted — an all-identical window is walked through, never returned as
+  // an empty page a surface would misread.
+  async function secretComparePage(
+    targetVersionId: string,
+    sourceVersionId: string,
+    afterPath: string | undefined,
+  ): Promise<SecretFileComparePage> {
+    const secrets = secretStoreFor();
+    let cursor = afterPath;
+    for (;;) {
+      const page = await secrets.compareSecretFileVersions({
+        workspaceId,
+        targetVersionId,
+        sourceVersionId,
+        ...(cursor !== undefined ? { afterPath: cursor } : {}),
+      });
+      if (page.entries.length > 0 || page.nextAfterPath === null) return page;
+      cursor = page.nextAfterPath;
+    }
   }
 
   // Reconciliation-tolerant listing (WS-H1 gate fix): an unreadable or racy
@@ -3161,49 +3217,112 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    compareVersions(sourceVersionId, targetVersionId = ENGINE_MAIN_VERSION_ID) {
+    compareVersions(sourceVersionId, compareOptions) {
+      const targetVersionId =
+        compareOptions?.targetVersionId ?? ENGINE_MAIN_VERSION_ID;
+      const afterPath = compareOptions?.afterPath;
       return enqueueResult("compare versions", async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
         // Capture the latest disk edits first so the comparison reflects what
-        // the user actually sees in the folder.
-        const activeVersionId = await activeVersionIdOf(engine);
-        if (options.daemonOwnsCapture) {
-          await engine.flushCapture?.();
-        } else {
-          await reconcileDiskIntoVersion(
-            engine,
-            activeVersionId,
-            policy,
-            {
-              origin: "local-file",
-              summary: "Saved latest edits",
-              correlationId: `version-compare-${createId()}`,
-            },
-          );
+        // the user actually sees in the folder. Only the FIRST page captures:
+        // a later page continues the same comparison, and re-capturing under
+        // it could move the cursor's ground truth mid-walk.
+        if (afterPath === undefined) {
+          const activeVersionId = await activeVersionIdOf(engine);
+          if (options.daemonOwnsCapture) {
+            await engine.flushCapture?.();
+          } else {
+            await reconcileDiskIntoVersion(
+              engine,
+              activeVersionId,
+              policy,
+              {
+                origin: "local-file",
+                summary: "Saved latest edits",
+                correlationId: `version-compare-${createId()}`,
+              },
+            );
+          }
         }
-        const textChanges = await compareVersionFiles(engine, {
+        const textPage = await compareVersionFilesPage(engine, {
           workspaceId,
           sourceVersionId,
           targetVersionId,
+          ...(afterPath !== undefined ? { afterPath } : {}),
         });
         // Protected rows (PR 08): secret files report path + status ONLY —
-        // "Protected file changed", never contents, never diffs.
-        const secretChanges = await secretStoreFor().compareSecretFileVersions({
-          workspaceId,
+        // "Protected file changed", never contents, never diffs. ONE engine
+        // page of them (#562): both sources page by path, and the merged page
+        // ends at the SMALLER of the two continuations, so one cursor resumes
+        // both. Rows past that boundary are re-fetched by the next page —
+        // dropped here, never lost.
+        const secretPage = await secretComparePage(
           targetVersionId,
           sourceVersionId,
-        });
-        return [
-          ...textChanges,
-          ...secretChanges.map(
-            (change): VersionFileChange => ({
-              path: change.path,
-              status: change.status,
-              protected: true,
-            }),
-          ),
-        ].sort((a, b) => a.path.localeCompare(b.path));
+          afterPath,
+        );
+        const textNext = textPage.nextAfterPath;
+        const secretNext = secretPage.nextAfterPath;
+        const boundary =
+          textNext !== null && secretNext !== null
+            ? compareEnginePaths(textNext, secretNext) <= 0
+              ? textNext
+              : secretNext
+            : (textNext ?? secretNext);
+        // Every boundary comparison is in the ENGINE's path order (UTF-8
+        // bytes = code points). A UTF-16 `<` here can drop a non-BMP path at
+        // the boundary — or emit it twice, once per page.
+        const inWindow = (path: string): boolean =>
+          boundary === null || compareEnginePaths(path, boundary) <= 0;
+        const files = [
+          ...textPage.files.filter((change) => inWindow(change.path)),
+          ...secretPage.entries
+            .filter((change) => inWindow(change.path))
+            .map(
+              (change): VersionFileChange => ({
+                path: change.path,
+                status: change.status,
+                protected: true,
+              }),
+            ),
+        ].sort((a, b) => compareEnginePaths(a.path, b.path));
+        return { files, nextAfterPath: boundary };
+      });
+    },
+
+    compareVersionsChangedCount(sourceVersionId) {
+      return enqueueResult("count changed files", async () => {
+        const engine = await engineStore();
+        if (options.daemonOwnsCapture) {
+          await engine.flushCapture?.();
+        }
+        let count = 0;
+        let afterPath: string | undefined;
+        do {
+          const page = await engine.compareVersionFilesPage({
+            workspaceId,
+            sourceVersionId,
+            targetVersionId: ENGINE_MAIN_VERSION_ID,
+            ...(afterPath !== undefined ? { afterPath } : {}),
+          });
+          count += page.entries.length;
+          afterPath = page.nextAfterPath ?? undefined;
+        } while (afterPath !== undefined);
+        let secretAfterPath: string | undefined;
+        do {
+          const page = await secretStoreFor().compareSecretFileVersions({
+            workspaceId,
+            targetVersionId: ENGINE_MAIN_VERSION_ID,
+            sourceVersionId,
+            ...(secretAfterPath !== undefined
+              ? { afterPath: secretAfterPath }
+              : {}),
+          });
+          count += page.entries.length;
+          secretAfterPath = page.nextAfterPath ?? undefined;
+        } while (secretAfterPath !== undefined);
+        return count;
       });
     },
 
@@ -3248,43 +3367,60 @@ export function createWorkspaceEngineCapture(
         };
         // Paths identical on both sides need no merge; everything else goes
         // through the engine's three-way per-file merge (which preserves
-        // base/current/incoming when it conflicts).
-        const changes = await compareVersionFiles(engine, {
-          workspaceId,
-          sourceVersionId,
-          targetVersionId: ENGINE_MAIN_VERSION_ID,
-        });
+        // base/current/incoming when it conflicts). The differing paths come
+        // from the engine's metadata listing, one page at a time — the walk
+        // needs paths, never text bodies (#562).
+        const changedPaths: string[] = [];
+        {
+          let afterPath: string | undefined;
+          do {
+            const page = await engine.compareVersionFilesPage({
+              workspaceId,
+              sourceVersionId,
+              targetVersionId: ENGINE_MAIN_VERSION_ID,
+              ...(afterPath !== undefined ? { afterPath } : {}),
+            });
+            changedPaths.push(...page.entries.map((entry) => entry.path));
+            afterPath = page.nextAfterPath ?? undefined;
+          } while (afterPath !== undefined);
+        }
         // Re-running the merge RESUMES: a path that already has an open
         // conflict for this version pair re-surfaces that conflict instead of
-        // recording a duplicate.
-        const openConflicts = await engine.listTextConflicts({
-          workspaceId,
-          status: "open",
-        });
-        const openConflictByPath = new Map(
-          openConflicts
-            .filter(
-              (conflict) =>
+        // recording a duplicate. Only the paths are retained from the walk.
+        const openConflictPaths = new Set<string>();
+        {
+          let afterConflictId: string | undefined;
+          do {
+            const page = await engine.listTextConflicts({
+              workspaceId,
+              status: "open",
+              ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+            });
+            for (const conflict of page.conflicts) {
+              if (
                 conflict.sourceVersionId === sourceVersionId &&
-                conflict.targetVersionId === ENGINE_MAIN_VERSION_ID,
-            )
-            .map((conflict) => [conflict.path, conflict]),
-        );
+                conflict.targetVersionId === ENGINE_MAIN_VERSION_ID
+              ) {
+                openConflictPaths.add(conflict.path);
+              }
+            }
+            afterConflictId = page.nextAfterConflictId ?? undefined;
+          } while (afterConflictId !== undefined);
+        }
         const materializations: MaterializeOperation[] = [];
-        const conflicts: VersionedTextConflictRecord[] = [];
+        let conflictCount = 0;
         let mergedFileCount = 0;
         let unchangedFileCount = 0;
-        for (const change of changes) {
-          const existingConflict = openConflictByPath.get(change.path);
-          if (existingConflict) {
-            conflicts.push(existingConflict);
+        for (const path of changedPaths) {
+          if (openConflictPaths.has(path)) {
+            conflictCount += 1;
             continue;
           }
           const result = await engine.mergeTextFileFromVersion({
             workspaceId,
             targetVersionId: ENGINE_MAIN_VERSION_ID,
             sourceVersionId,
-            path: change.path,
+            path,
             metadata,
           });
           if (result.kind === "unchanged") {
@@ -3292,7 +3428,7 @@ export function createWorkspaceEngineCapture(
             continue;
           }
           if (result.kind === "conflict") {
-            conflicts.push(result.conflict);
+            conflictCount += 1;
             continue;
           }
           mergedFileCount += 1;
@@ -3302,7 +3438,7 @@ export function createWorkspaceEngineCapture(
                 await materializeWriteForSnapshot(engine, result.write.snapshot),
               );
             } else {
-              materializations.push({ kind: "delete", path: change.path });
+              materializations.push({ kind: "delete", path });
             }
           }
         }
@@ -3313,11 +3449,22 @@ export function createWorkspaceEngineCapture(
         // and Main's previous state stays one protected moment back in
         // history — restorable, so nothing is lost.
         const secrets = secretStoreFor();
-        const secretChanges = await secrets.compareSecretFileVersions({
-          workspaceId,
-          targetVersionId: ENGINE_MAIN_VERSION_ID,
-          sourceVersionId,
-        });
+        const secretChanges: SecretFileComparePage["entries"] = [];
+        {
+          let secretAfterPath: string | undefined;
+          do {
+            const page = await secrets.compareSecretFileVersions({
+              workspaceId,
+              targetVersionId: ENGINE_MAIN_VERSION_ID,
+              sourceVersionId,
+              ...(secretAfterPath !== undefined
+                ? { afterPath: secretAfterPath }
+                : {}),
+            });
+            secretChanges.push(...page.entries);
+            secretAfterPath = page.nextAfterPath ?? undefined;
+          } while (secretAfterPath !== undefined);
+        }
         for (const change of secretChanges) {
           const applied = await secrets.applySecretFileFromVersion({
             workspaceId,
@@ -3358,13 +3505,33 @@ export function createWorkspaceEngineCapture(
         if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
           await materialize(materializations, policy);
         }
-        return { mergedFileCount, unchangedFileCount, conflicts };
+        return { mergedFileCount, unchangedFileCount, conflictCount };
       });
     },
 
-    async listOpenConflicts() {
+    async listOpenConflictsPage(afterConflictId) {
       const engine = await engineStore();
-      return engine.listTextConflicts({ workspaceId, status: "open" });
+      return engine.listTextConflicts({
+        workspaceId,
+        status: "open",
+        ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+      });
+    },
+
+    async listOpenConflictIds() {
+      const engine = await engineStore();
+      const ids: string[] = [];
+      let afterConflictId: string | undefined;
+      do {
+        const page = await engine.listTextConflicts({
+          workspaceId,
+          status: "open",
+          ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+        });
+        ids.push(...page.conflicts.map((conflict) => conflict.id));
+        afterConflictId = page.nextAfterConflictId ?? undefined;
+      } while (afterConflictId !== undefined);
+      return ids;
     },
 
     resolveConflict(conflictId, resolution) {
@@ -3435,7 +3602,13 @@ export function createWorkspaceEngineCapture(
           workspaceId,
           status: "open",
         });
-        return { conflict: result.conflict, remaining };
+        return {
+          conflict: result.conflict,
+          remaining: {
+            conflicts: remaining.conflicts,
+            nextAfterConflictId: remaining.nextAfterConflictId,
+          },
+        };
       });
     },
 

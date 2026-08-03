@@ -524,6 +524,28 @@ export class VersionedLiveAdapter {
     });
   }
 
+  // One page of the daemon's whole-version comparison: differing paths with
+  // status only, in path order, under the daemon's own page budget. Callers
+  // hydrate the sides they need per path (#562).
+  async compareVersionFilesPage(input: {
+    workspaceId: string;
+    sourceVersionId: string;
+    targetVersionId: string;
+    afterPath?: string;
+  }): Promise<{
+    entries: VersionedMethodResultMap["versions.compareFiles"]["entries"];
+    nextAfterPath: string | null;
+  }> {
+    this.assertWorkspace(input.workspaceId);
+    const page = await this.request(VERSIONED_METHOD.versionsCompareFiles, {
+      workspaceId: input.workspaceId,
+      sourceVersionId: input.sourceVersionId,
+      targetVersionId: input.targetVersionId,
+      ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
+    });
+    return { entries: page.entries, nextAfterPath: page.nextCursor };
+  }
+
   async mergeTextFileFromVersion(input: {
     workspaceId: string;
     targetVersionId: string;
@@ -553,26 +575,32 @@ export class VersionedLiveAdapter {
     );
   }
 
+  // ONE `conflicts.list` page, passed through with the daemon's own
+  // continuation. This adapter used to drain every page into one array, which
+  // undid the daemon's paging for every caller at once (#562).
   async listTextConflicts(input: {
     workspaceId: string;
     status?: "open" | "resolved";
-  }): Promise<ConflictRecord[]> {
+    afterConflictId?: string;
+  }): Promise<{
+    conflicts: ConflictRecord[];
+    nextAfterConflictId: string | null;
+  }> {
     this.assertWorkspace(input.workspaceId);
-    const conflicts: ConflictRecord[] = [];
-    let afterConflictId: string | undefined;
-    do {
-      const params: ConflictListParams = {
-        ...(input.status !== undefined ? { status: input.status } : {}),
-        ...(afterConflictId !== undefined ? { afterConflictId } : {}),
-      };
-      const page = await this.workspaceRequest(
-        WORKSPACE_METHOD.conflictsList,
-        params,
-      );
-      conflicts.push(...page.conflicts);
-      afterConflictId = page.nextAfterConflictId ?? undefined;
-    } while (afterConflictId !== undefined);
-    return conflicts;
+    const params: ConflictListParams = {
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.afterConflictId !== undefined
+        ? { afterConflictId: input.afterConflictId }
+        : {}),
+    };
+    const page = await this.workspaceRequest(
+      WORKSPACE_METHOD.conflictsList,
+      params,
+    );
+    return {
+      conflicts: page.conflicts,
+      nextAfterConflictId: page.nextAfterConflictId,
+    };
   }
 
   async openTextConflict(
@@ -889,26 +917,27 @@ export class VersionedLiveAdapter {
     await this.request(VERSIONED_METHOD.secretsFork, input);
   }
 
+  // ONE `secrets.compare` page, passed through with the daemon's own
+  // continuation (#562) — the drain that put every remaining protected row on
+  // one compare page lived here.
   async compareSecretFileVersions(input: {
     workspaceId: string;
     targetVersionId: string;
     sourceVersionId: string;
-  }): Promise<SecretCompareEntry[]> {
+    afterPath?: string;
+  }): Promise<{
+    entries: SecretCompareEntry[];
+    nextAfterPath: string | null;
+  }> {
     this.assertWorkspace(input.workspaceId);
-    const rows: SecretCompareEntry[] = [];
-    let afterPath: string | undefined;
-    do {
-      const page = await this.request(VERSIONED_METHOD.secretsCompare, {
-        workspaceId: input.workspaceId,
-        targetVersionId: input.targetVersionId,
-        sourceVersionId: input.sourceVersionId,
-        limit: 500,
-        ...(afterPath !== undefined ? { afterPath } : {}),
-      });
-      rows.push(...page.entries);
-      afterPath = page.nextAfterPath ?? undefined;
-    } while (afterPath !== undefined);
-    return rows;
+    const page = await this.request(VERSIONED_METHOD.secretsCompare, {
+      workspaceId: input.workspaceId,
+      targetVersionId: input.targetVersionId,
+      sourceVersionId: input.sourceVersionId,
+      limit: 500,
+      ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
+    });
+    return { entries: page.entries, nextAfterPath: page.nextAfterPath };
   }
 
   async applySecretFileFromVersion(input: {

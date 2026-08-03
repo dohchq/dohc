@@ -28,7 +28,7 @@ function snapshotWith(
 
 function fakeOperations(input?: {
   existingNames?: string[];
-  compare?: () => Promise<Array<{ path: string }>>;
+  compare?: () => Promise<number>;
   fromVersionId?: string;
 }): TryVersionOperations & { created: string[] } {
   const created: string[] = [];
@@ -55,8 +55,7 @@ function fakeOperations(input?: {
         "try-1",
       );
     },
-    compareVersions:
-      input?.compare ?? (async () => [{ path: "a.md" }, { path: "b.md" }]),
+    compareVersionsChangedCount: input?.compare ?? (async () => 2),
   };
 }
 
@@ -183,7 +182,7 @@ describe("createTryInVersionSessions", () => {
   });
 
   it("reports a zero-change run honestly", async () => {
-    const ops = fakeOperations({ compare: async () => [] });
+    const ops = fakeOperations({ compare: async () => 0 });
     const sessions = manager({ ops });
     await sessions.start("ws", "tidy notes");
     sessions.handleRunEnded("ws", "run-1", "complete");
@@ -212,7 +211,7 @@ describe("createTryInVersionSessions", () => {
   });
 
   it("ignores runs it does not own and duplicate end signals", async () => {
-    const compare = vi.fn(async () => [{ path: "a.md" }]);
+    const compare = vi.fn(async () => 1);
     const ops = fakeOperations({ compare });
     const sessions = manager({ ops });
     await sessions.start("ws", "tidy notes");

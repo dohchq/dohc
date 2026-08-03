@@ -11,7 +11,7 @@ import {
   ListWorkspaceVersionConflictsResult,
   WorkspaceVersionConflict,
 } from "./bridgeContract";
-import { compareVersionFiles } from "@dohc/workspace-core/versionCompare";
+import { compareVersionFilesPage } from "@dohc/workspace-core/versionCompare";
 import type {
   TextFileSnapshot,
   VersionedTextMoment,
@@ -245,25 +245,28 @@ describe("versionConflictForIpc binary sides", () => {
 // `versionConflictForIpc` produced (main.ts listWorkspaceVersionConflicts
 // handler), and conflict sides are the engine's stored bodies passed verbatim.
 describe("version texts the engine accepted cross the bridge", () => {
-  // compareVersionFiles reads snapshot listings and nothing else, so one path
-  // per version is the whole input the compare rows come from.
+  // compareVersionFilesPage reads the differing-path listing and then the
+  // sides of each listed path, so one modified path is the whole input the
+  // compare rows come from.
   function storeWithTextFile(textByVersionId: Record<string, string>) {
     return {
-      listTextFiles: async ({
+      compareVersionFilesPage: async () => ({
+        entries: [{ path: "notes.md", status: "modified" as const }],
+        nextAfterPath: null,
+      }),
+      readTextFile: async ({
         versionId,
       }: {
         versionId: string;
-      }): Promise<TextFileSnapshot[]> => [
-        {
-          objectId: "object_1",
-          versionId,
-          path: "notes.md",
-          text: textByVersionId[versionId] ?? "",
-          updatedAtMs: 100,
-          latestMomentId: `moment_${versionId}`,
-          metadata: { origin: "local-file" },
-        },
-      ],
+      }): Promise<TextFileSnapshot | null> => ({
+        objectId: "object_1",
+        versionId,
+        path: "notes.md",
+        text: textByVersionId[versionId] ?? "",
+        updatedAtMs: 100,
+        latestMomentId: `moment_${versionId}`,
+        metadata: { origin: "local-file" },
+      }),
     };
   }
 
@@ -290,17 +293,22 @@ describe("version texts the engine accepted cross the bridge", () => {
       incoming: { exists: true, text: "feature side" },
       base: { exists: false },
     });
-    const listed = ListWorkspaceVersionConflictsResult.parse({ conflicts: [conflict] });
+    const listed = ListWorkspaceVersionConflictsResult.parse({
+      conflicts: [conflict],
+      nextAfterConflictId: null,
+    });
     expect(listed.conflicts[0]!.currentText).toBe(side);
     expect(listed.conflicts[0]!.conflictId).toBe("conflict_big");
   });
 
   it("compares a file whose sides are larger than the old 2 MB bound", async () => {
-    // main.ts compareWorkspaceVersions parses exactly what compareVersionFiles
-    // returned, so this is the compare channel's real pairing.
+    // main.ts compareWorkspaceVersions parses exactly what
+    // compareVersionFilesPage returned, so this is the compare channel's real
+    // pairing. One over-budget row still ships whole: the page budget cuts
+    // AFTER the row that crossed it, never inside a row.
     const currentText = "x".repeat(3 * 1024 * 1024);
     const incomingText = `${currentText}tail`;
-    const files = await compareVersionFiles(
+    const page = await compareVersionFilesPage(
       storeWithTextFile({ main: currentText, version_feature: incomingText }),
       {
         workspaceId: "ws-engine",
@@ -308,9 +316,10 @@ describe("version texts the engine accepted cross the bridge", () => {
         targetVersionId: "main",
       },
     );
-    const compared = CompareWorkspaceVersionsResult.parse({ files });
+    const compared = CompareWorkspaceVersionsResult.parse(page);
     expect(compared.files[0]!.currentText).toBe(currentText);
     expect(compared.files[0]!.incomingText).toBe(incomingText);
+    expect(compared.nextAfterPath).toBeNull();
   });
 
   it("admits a conflict side at the engine's own text contract", () => {

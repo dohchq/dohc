@@ -138,6 +138,7 @@ describe("versions compare page", () => {
           incomingText: "new text\n",
         },
       ],
+      nextAfterPath: null,
     });
     const view = render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
     await screen.findByTestId("version-compare-file");
@@ -160,6 +161,7 @@ describe("versions compare page", () => {
           incomingText: hugeBody("b"),
         },
       ],
+      nextAfterPath: null,
     });
     render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
     const body = await screen.findByTestId("version-compare-diff-lines");

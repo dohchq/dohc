@@ -98,7 +98,7 @@ afterEach(() => {
 });
 
 async function openReview(conflicts: WorkspaceVersionConflict[]) {
-  bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts });
+  bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
   render(
     <ConflictReviewDialog
       workspaceId="ws-1"
@@ -483,6 +483,7 @@ describe("a list of open conflicts", () => {
     await openReview(many);
     bridgeMock.resolveWorkspaceVersionConflict.mockResolvedValue({
       conflicts: many.slice(1),
+      nextAfterConflictId: null,
     });
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     await screen.findByText("file-1.md");

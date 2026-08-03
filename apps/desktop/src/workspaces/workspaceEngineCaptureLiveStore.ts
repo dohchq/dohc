@@ -697,6 +697,29 @@ export function createCaptureLiveStores(
     return { ...metadata, text };
   }
 
+  // One open conflict by id, walking the daemon's `conflicts.list` pages until
+  // the id appears. Null when no open conflict has the id.
+  async function findOpenConflict(
+    workspaceId: string,
+    conflictId: string,
+  ): Promise<ReturnType<typeof conflictFromWire> | null> {
+    let afterConflictId: string | undefined;
+    do {
+      const page = await runRead(
+        async (adapter) =>
+          await adapter.listTextConflicts({
+            workspaceId,
+            status: "open",
+            ...(afterConflictId !== undefined ? { afterConflictId } : {}),
+          }),
+      );
+      const match = page.conflicts.find((entry) => entry.id === conflictId);
+      if (match) return conflictFromWire(match);
+      afterConflictId = page.nextAfterConflictId ?? undefined;
+    } while (afterConflictId !== undefined);
+    return null;
+  }
+
   const store = {
     ensureMainVersion: (input: { workspaceId: string }) =>
       runMutation(async (adapter) => await adapter.ensureMainVersion(input)),
@@ -970,11 +993,26 @@ export function createCaptureLiveStores(
     async listTextConflicts(input: {
       workspaceId: string;
       status?: "open" | "resolved";
+      afterConflictId?: string;
     }) {
-      const conflicts = await runRead(
+      const page = await runRead(
         async (adapter) => await adapter.listTextConflicts(input),
       );
-      return conflicts.map(conflictFromWire);
+      return {
+        conflicts: page.conflicts.map(conflictFromWire),
+        nextAfterConflictId: page.nextAfterConflictId,
+      };
+    },
+
+    async compareVersionFilesPage(input: {
+      workspaceId: string;
+      sourceVersionId: string;
+      targetVersionId: string;
+      afterPath?: string;
+    }) {
+      return await runRead(
+        async (adapter) => await adapter.compareVersionFilesPage(input),
+      );
     },
 
     async mergeTextFileFromVersion(input: {
@@ -1005,11 +1043,7 @@ export function createCaptureLiveStores(
         };
       }
       if (raw.status === "conflict") {
-        const conflicts = await store.listTextConflicts({
-          workspaceId: input.workspaceId,
-          status: "open",
-        });
-        const conflict = conflicts.find((entry) => entry.id === raw.conflictId);
+        const conflict = await findOpenConflict(input.workspaceId, raw.conflictId);
         if (!conflict) throw new Error(`Engine conflict for ${input.path} was not returned.`);
         return { kind: "conflict", comparison, conflict };
       }
@@ -1063,11 +1097,7 @@ export function createCaptureLiveStores(
         | { kind: "apply-merged"; text: string };
       metadata: ActorNeutralWriteMetadata;
     }) {
-      const open = await store.listTextConflicts({
-        workspaceId: input.workspaceId,
-        status: "open",
-      });
-      const existing = open.find((conflict) => conflict.id === input.conflictId);
+      const existing = await findOpenConflict(input.workspaceId, input.conflictId);
       if (!existing) throw new Error(`Engine conflict ${input.conflictId} was not found.`);
       const raw = await runMutation(
         async (adapter) =>
