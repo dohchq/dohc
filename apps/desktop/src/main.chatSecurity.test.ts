@@ -87,9 +87,8 @@ describe("main-process chat authorization", () => {
     for (const [channel, call] of gated) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain("requireEngineCapture(");
-      expect(handler, channel).toContain(
-        '"Chats are not enabled for this workspace."',
-      );
+      // #541 round 6: callers pass the FEATURE noun; the gate owns the copy.
+      expect(handler, channel).toContain('"Chats"');
       expect(handler.indexOf("requireEngineCapture("), channel).toBeLessThan(
         handler.indexOf(call),
       );
@@ -188,5 +187,55 @@ describe("main-process chat authorization", () => {
     expect(mainSource).toContain(
       "readOnly: Boolean(sharedViewOf(workspaceId))",
     );
+  });
+
+  // #541: the cause-aware refusal helpers are behavior-tested in
+  // engineCaptureGate.test.ts, but the WIRING is the user-visible fix —
+  // reverting a call site to a bare "not enabled" throw passes the whole
+  // desktop suite. These pins make that revert fail.
+  it("routes every null-capture refusal through the cause-aware helper", () => {
+    function slice(startMarker: string, endMarker: string): string {
+      const start = mainSource.indexOf(startMarker);
+      const end = mainSource.indexOf(endMarker, start);
+      if (start < 0 || end < 0) {
+        throw new Error(`Missing main.ts region ${startMarker} .. ${endMarker}`);
+      }
+      return mainSource.slice(start, end);
+    }
+
+    // The single gate behind the 30+ versions/chats/engine-history handlers.
+    expect(
+      slice(
+        "async function requireEngineCapture(",
+        "async function requireVersionOperations(",
+      ),
+    ).toContain("engineOffRefusal(");
+    // The dispatch prepare seam: cause before release, recovery from the
+    // actual close — both live inside the helper, so the wiring must use it.
+    const prepare = slice(
+      "prepareRunWorkspace: async (workspace)",
+      "authorizeServiceNote:",
+    );
+    expect(prepare).toContain("releaseAndRefuseWithoutCapture({");
+    // Round 5: the kept-entry path answers from the LIVE capture re-read.
+    expect(prepare).toContain("currentCapture:");
+    // Round 6: judged only after the kept open has settled.
+    expect(prepare).toContain("settleKeptOpen:");
+    expect(prepare).toContain("ensureWorkspaceActivityOpen(registered)");
+    // And the release itself derives its answer from the post-close
+    // retention state (round 4) — through the behavior-tested factory.
+    expect(
+      slice(
+        "async function acquireDispatchRunActivity(",
+        "function openDispatchWorkspaces(",
+      ),
+    ).toContain("createDispatchRunRelease({");
+    // The two manual sites outside requireEngineCapture.
+    expect(
+      slice("operationsFor: async (workspaceId)", "startRun: async"),
+    ).toContain("engineOffRefusal(");
+    expect(
+      slice("async function openCliWorkspace(", "const store = linkedChatStoreFor("),
+    ).toContain("engineOffRefusal(");
   });
 });
