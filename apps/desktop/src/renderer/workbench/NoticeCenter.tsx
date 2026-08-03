@@ -77,6 +77,10 @@ function toneClass(tone: Notice["tone"]): string {
 }
 
 export function NoticeCenter(props: {
+  // Scopes the set-aside section: only the ACTIVE workspace's drafts show
+  // here (#579 review, r6) — another workspace's paths must not leak across
+  // a switch. The app-level close guard deliberately stays global.
+  workspaceId: string;
   syncStatus: SyncStatusResult | null;
   agentActive: boolean;
   conflictSummaries: string[];
@@ -381,8 +385,14 @@ export function NoticeCenter(props: {
   // Set-aside drafts (#567) count as one notice: they may belong to paths
   // that no longer exist (a deleted file's tab is gone), so this panel is
   // their always-reachable surface (#579 review, r5) — the list below offers
-  // the same Copy/Dismiss the in-document notice does.
-  const recoveryRows = useAllOrphanedDrafts();
+  // the same Copy/Dismiss the in-document notice does. Scoped to the active
+  // workspace (#579 review, r6).
+  const allRecoveryRows = useAllOrphanedDrafts();
+  const recoveryRows = useMemo(
+    () =>
+      allRecoveryRows.filter((row) => row.workspaceId === props.workspaceId),
+    [allRecoveryRows, props.workspaceId],
+  );
   const count = notices.length + (recoveryRows.length > 0 ? 1 : 0);
 
   return (
@@ -458,10 +468,10 @@ export function NoticeCenter(props: {
                       : `${recoveryRows.length} set-aside edits are waiting`}
                   </p>
                   <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
-                    They live only in this window. Copy or dismiss them to
-                    resolve.
+                    They live only in this window. Copy an edit to keep its
+                    text. Dismiss deletes it for good.
                   </p>
-                  <RecoveryList />
+                  <RecoveryList workspaceId={props.workspaceId} />
                 </section>
               ) : null}
             <ul className="m-0 list-none p-0">

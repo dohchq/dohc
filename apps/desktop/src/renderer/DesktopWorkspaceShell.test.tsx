@@ -6290,21 +6290,30 @@ describe("set-aside draft recovery", () => {
     const bridge = makeBridge(Promise.resolve(null));
     // The path is in no listing and no tab: only the store knows it.
     captureOrphanedDraft(WORKSPACE.workspaceId, "deleted/gone.md", "Kept!");
+    // Another workspace's draft must NOT leak into this workspace's notice
+    // center (#579 review, r6) — the close guard is the global surface.
+    captureOrphanedDraft("ws-somewhere-else", "private/notes.md", "Theirs");
     renderShell(bridge);
     await screen.findByTestId("file-tree");
 
     // MUTATION (notice-center surface): drop the set-aside section from
     // NoticeCenter. The draft exists, the close warning demands action, and
     // no reachable surface offers it.
+    // MUTATION (workspace filter): drop the workspaceId filter — the other
+    // workspace's private path appears here and both assertions below fail.
     await user.click(await screen.findByTestId("notice-center-toggle"));
     await screen.findByTestId("notice-set-aside-edits");
-    const row = screen.getByTestId("recovery-list-row");
+    const rows = screen.getAllByTestId("recovery-list-row");
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
     expect(row.textContent).toContain("deleted/gone.md");
+    expect(row.textContent).not.toContain("private/notes.md");
     await user.click(screen.getByTestId("recovery-list-copy"));
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe("Kept!"),
     );
-    await user.click(screen.getByTestId("recovery-list-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     await waitFor(() =>
       expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull(),
     );

@@ -42,6 +42,7 @@ import {
   dismissOrphanedDraft,
   useOrphanedDrafts,
 } from "./orphanedDrafts";
+import { DismissDraftControls } from "./RecoveryList";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { IconButton, SectionLabel } from "./ui/controls";
@@ -529,16 +530,13 @@ function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
               testId="orphaned-draft-copy"
               getSource={() => draft.text}
             />
-            <button
-              type="button"
-              data-testid="orphaned-draft-dismiss"
-              onClick={() =>
+            {/* Deleting the only copy needs the explicit confirm step (#579
+                review, r6) — the same control the recovery list uses. */}
+            <DismissDraftControls
+              onDismiss={() =>
                 dismissOrphanedDraft(props.workspaceId, props.path, draft.id)
               }
-              className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
-            >
-              Dismiss
-            </button>
+            />
           </div>
         </div>
       ))}

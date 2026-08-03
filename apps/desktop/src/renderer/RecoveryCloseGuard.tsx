@@ -54,8 +54,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
               {closeWarning === 1
                 ? "1 set-aside edit is lost when dohc closes."
                 : `${closeWarning} set-aside edits are lost when dohc closes.`}{" "}
-              Copy or dismiss {closeWarning === 1 ? "it" : "them"} here to keep
-              the text.
+              Copy {closeWarning === 1 ? "it" : "them"} here to keep the text.
             </p>
             <div className="mt-3 max-h-60 overflow-y-auto">
               <RecoveryList />

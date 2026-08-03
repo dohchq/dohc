@@ -3882,6 +3882,7 @@ export function DesktopWorkspaceShell(props: {
       </div>
 
       <StatusBar
+        workspaceId={workspaceId}
         workspaceName={workspaceName(props.workspace)}
         syncStatus={syncStatus}
         agentActive={agentActive}

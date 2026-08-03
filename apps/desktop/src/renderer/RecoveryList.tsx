@@ -7,9 +7,14 @@ import {
 // The path-independent recovery surface (#579 review, r5). The in-document
 // notice needs a mounted inspector, and three states have none: a path whose
 // read fails, a deleted file whose tab closed, and the crash screen. This
-// list renders EVERY unresolved set-aside draft, across workspaces, with the
-// same Copy/Dismiss the notice offers — so any surface that names the drafts
-// (the close-warning dialog, the notice center) can also resolve them.
+// list renders unresolved set-aside drafts with the same Copy/Dismiss the
+// notice offers — so any surface that names the drafts (the close-warning
+// dialog, the notice center) can also resolve them.
+//
+// `workspaceId` filters to one workspace (the notice center — another
+// workspace's paths must not leak across a switch, #579 review r6). The
+// close guard passes none: the whole renderer dies at once, so every
+// workspace's drafts are at stake there.
 //
 // The copy button repeats the quiet swap-and-restore rhythm of
 // FileInspector's CopySourceButton on purpose, WITHOUT importing it: this
@@ -49,12 +54,57 @@ function CopyDraftButton(props: { text: string }) {
   );
 }
 
-export function RecoveryList() {
+// Dismissing deletes the ONLY copy of the text — the store is the last place
+// it exists — so the destructive step requires an explicit confirmation
+// (#579 review, r6). Shared by this list and the in-document notice: one
+// contract for one destructive action.
+export function DismissDraftControls(props: { onDismiss: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        data-testid="recovery-dismiss"
+        onClick={() => setConfirming(true)}
+        className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+      >
+        Dismiss
+      </button>
+    );
+  }
+  return (
+    <span className="flex items-center gap-2">
+      <span className="text-[11px] text-danger">Deletes the only copy.</span>
+      <button
+        type="button"
+        data-testid="recovery-dismiss-confirm"
+        onClick={props.onDismiss}
+        className="rounded-md border border-danger px-2 py-0.5 text-[11px] text-danger transition-colors hover:bg-danger/10"
+      >
+        Dismiss edit
+      </button>
+      <button
+        type="button"
+        data-testid="recovery-dismiss-cancel"
+        onClick={() => setConfirming(false)}
+        className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+      >
+        Keep
+      </button>
+    </span>
+  );
+}
+
+export function RecoveryList(props: { workspaceId?: string }) {
   const rows = useAllOrphanedDrafts();
-  if (rows.length === 0) return null;
+  const visible =
+    props.workspaceId === undefined
+      ? rows
+      : rows.filter((row) => row.workspaceId === props.workspaceId);
+  if (visible.length === 0) return null;
   return (
     <ul data-testid="recovery-list" className="m-0 list-none p-0">
-      {rows.map((row) => (
+      {visible.map((row) => (
         <li
           key={`${row.workspaceId}:${row.path}:${row.draft.id}`}
           data-testid="recovery-list-row"
@@ -65,16 +115,11 @@ export function RecoveryList() {
           </span>
           <div className="flex shrink-0 items-center gap-2">
             <CopyDraftButton text={row.draft.text} />
-            <button
-              type="button"
-              data-testid="recovery-list-dismiss"
-              onClick={() =>
+            <DismissDraftControls
+              onDismiss={() =>
                 dismissOrphanedDraft(row.workspaceId, row.path, row.draft.id)
               }
-              className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
-            >
-              Dismiss
-            </button>
+            />
           </div>
         </li>
       ))}

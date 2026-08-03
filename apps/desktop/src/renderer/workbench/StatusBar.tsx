@@ -26,6 +26,8 @@ const SYNC_DOT: Record<SyncStatusResult["state"], string> = {
 };
 
 export function StatusBar(props: {
+  // Scopes the notice center's set-aside section to the active workspace.
+  workspaceId: string;
   workspaceName: string;
   syncStatus: SyncStatusResult | null;
   agentActive: boolean;
@@ -82,6 +84,7 @@ export function StatusBar(props: {
       </div>
       <div className="flex items-center gap-3">
         <NoticeCenter
+          workspaceId={props.workspaceId}
           syncStatus={props.syncStatus}
           agentActive={props.agentActive}
           conflictSummaries={props.conflictSummaries}

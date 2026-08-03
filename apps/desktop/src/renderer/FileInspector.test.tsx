@@ -1703,7 +1703,8 @@ describe("markdown document opening state", () => {
     ).toBe(DOC_MARKDOWN);
 
     // Dismiss retires the notice, and the save pipeline is healthy again.
-    await user.click(screen.getByTestId("orphaned-draft-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     await user.type(screen.getByTestId("markdown-editor"), "New!");
     await waitFor(
@@ -1841,7 +1842,8 @@ describe("markdown document opening state", () => {
 
     // MUTATION (chip): collapse chipState to the plain saveState. The chip
     // then reads nothing while the notice says an edit is not saved.
-    await user.click(screen.getByTestId("orphaned-draft-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     await waitFor(() =>
       expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
     );
@@ -2033,7 +2035,8 @@ describe("markdown document opening state", () => {
         "# Plan\n\nBase paragraph.\nDraft!",
       ),
     );
-    await user.click(screen.getByTestId("orphaned-draft-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     await waitFor(() =>
       expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
     );
@@ -2088,7 +2091,8 @@ describe("markdown document opening state", () => {
       "Edit set aside",
     );
 
-    await user.click(screen.getByTestId("orphaned-draft-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     await waitFor(() =>
       expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
     );
