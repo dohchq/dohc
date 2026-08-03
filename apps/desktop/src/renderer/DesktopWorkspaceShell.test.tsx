@@ -2269,10 +2269,13 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
     const placeholder = await screen.findByTestId("history-off-placeholder");
-    // Same single-line shape, with the ended share's own true Next.
+    // Same single-line shape, with the ended share's own true Next — and an
+    // active sentence naming who ended it (copy.md), not a passive
+    // "was ended" with no actor.
     expect(placeholder.textContent).toContain(
-      "A shared view records no history. This share was ended. You can still open the files it shared.",
+      "A shared view records no history. granter@dohc.test ended this share. You can still open the files it shared.",
     );
+    expect(placeholder.textContent).not.toContain("was ended");
     expect(placeholder.textContent).not.toContain("Refresh");
     expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
   });

@@ -2997,7 +2997,9 @@ export function DesktopWorkspaceShell(props: {
     >
       <span className="text-sm text-muted">
         {shareViewEnded
-          ? "A shared view records no history. This share was ended. You can still open the files it shared."
+          ? // Active voice, named actor (copy.md): the banner already names
+            // who ended the share, so this line does too.
+            `A shared view records no history. ${shareView?.granterEmail ?? "The person who shared it"} ended this share. You can still open the files it shared.`
           : "A shared view records no history. Refresh the shared view to get the latest shared changes."}
       </span>
     </div>
