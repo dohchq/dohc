@@ -247,6 +247,109 @@ describe("sync relay handler", () => {
     }
   });
 
+  it("scopes Y.Doc base arbitration to the current epoch", async () => {
+    // codex #547 round 4: after a rotation, pulls floor at epoch_log_floor,
+    // so a pre-rotation base is history nobody can fetch. It must not keep
+    // the claim: the fresh generation's base claims, and only a divergent
+    // base WITHIN the new epoch loses. MUTATION: drop the relay_seq floor
+    // from the arbitration probe - the post-rotation claim returns 409 and
+    // this fails.
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const oldBase = Buffer.from("old-generation-base");
+    const newBase = Buffer.from("new-generation-base");
+    const rivalBase = Buffer.from("new-generation-rival");
+    for (const bytes of [oldBase, newBase, rivalBase]) {
+      expect(
+        (
+          await h(
+            request("a", `/sync/workspace-a/blobs/${sha256(bytes)}`, {
+              method: "PUT",
+              body: bytes,
+            }),
+          )
+        ).status,
+      ).toBe(200);
+    }
+    const ydocBase = (originSeq: number, bytes: Buffer) => ({
+      originSeq,
+      opKind: "ydoc.update",
+      payload: {
+        versionId: "main",
+        objectId: "object-rotated",
+        path: "notes/rotated.md",
+        contentKind: "plaintext",
+        updateBlobSha256: sha256(bytes),
+        isBaseState: true,
+      },
+      recordedAtMs: 1000 + originSeq,
+    });
+
+    // The old generation claims the lineage, then the workspace rotates.
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody(
+              withIdentity({ originId: "origin-old", ops: [ydocBase(0, oldBase)] }),
+            ),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/epoch",
+            jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    // The fresh generation's base CLAIMS - the pre-rotation base is below
+    // the floor and cannot win a race against a lineage it cannot serve.
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody(
+              withIdentity(
+                { originId: "origin-new", ops: [ydocBase(0, newBase)] },
+                EPOCH_2,
+                STREAM_2,
+              ),
+            ),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    // Arbitration still holds WITHIN the new epoch.
+    const refused = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(
+          withIdentity(
+            { originId: "origin-rival", ops: [ydocBase(0, rivalBase)] },
+            EPOCH_2,
+            STREAM_2,
+          ),
+        ),
+      ),
+    );
+    expect(refused.status).toBe(409);
+    expect(await json(refused)).toMatchObject({ code: "ydoc_base_claimed" });
+  });
+
   it("admits one Y.Doc base per lineage and refuses a divergent second base", async () => {
     // dohc-ai/dohc#547: the relay arbitrates Y.Doc lineage origination
     // first-claim-wins. MUTATION: dropping the base check in appendOps turns

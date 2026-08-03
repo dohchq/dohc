@@ -598,6 +598,25 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     };
   }
 
+  // Transaction-composable floor read for appendOps (which already holds
+  // BEGIN IMMEDIATE); absent rows read as floor 0 - workspace existence is
+  // the caller's check.
+  private getEpochLogFloorInTransaction(workspaceId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT epoch_log_floor
+         FROM sync_relay_workspaces
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    if (row === undefined || row.epoch_log_floor == null) return 0;
+    const floor = Number(row.epoch_log_floor);
+    if (!Number.isSafeInteger(floor) || floor < 0) {
+      throw new Error("sync relay workspace epoch log floor is invalid");
+    }
+    return floor;
+  }
+
   getEpochLogFloor(workspaceId: string): number {
     const row = this.db
       .prepare(
@@ -1230,10 +1249,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       // accepted: a redelivery on a new coordinate (origin recovery) is valid
       // and receivers resume it idempotently. The whole batch is refused
       // atomically, like the gap and blob checks around it.
+      // Arbitration reads only the CURRENT epoch (codex #547 round 4): a
+      // rotation resets the workspace generation and floors pulls at
+      // epoch_log_floor, so a pre-rotation base is history nobody can fetch.
+      // Letting it keep the claim would refuse the fresh generation's base
+      // while making the alleged winner unadoptable - a reset workspace
+      // could never establish a lineage again.
+      const epochLogFloor = this.getEpochLogFloorInTransaction(input.workspaceId);
       const storedBaseStmt = this.db.prepare(
         `SELECT origin_id, json_extract(payload_json, '$.updateBlobSha256') AS sha
          FROM sync_relay_log
          WHERE workspace_id = ? AND op_kind = 'ydoc.update'
+           AND relay_seq > ?
            AND json_extract(payload_json, '$.isBaseState') = 1
            AND json_extract(payload_json, '$.versionId') = ?
            AND json_extract(payload_json, '$.objectId') = ?
@@ -1256,7 +1283,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         const sha = typeof record.updateBlobSha256 === "string" ? record.updateBlobSha256 : "";
         if (!versionId || !objectId || !sha) continue;
         const lineage = `${versionId}\u0000${objectId}`;
-        const stored = storedBaseStmt.get(input.workspaceId, versionId, objectId);
+        const stored = storedBaseStmt.get(
+          input.workspaceId,
+          epochLogFloor,
+          versionId,
+          objectId,
+        );
         const winner = stored
           ? { originId: String(stored.origin_id), sha: String(stored.sha) }
           : batchBaseShas.has(lineage)
