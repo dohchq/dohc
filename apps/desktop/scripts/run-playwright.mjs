@@ -68,7 +68,7 @@ export function requirePlaywrightCli(cliPath, resolveCli = playwrightCliPath) {
  *   spawnImpl?: typeof spawn,
  *   mkdtempImpl?: typeof mkdtempSync,
  *   rmImpl?: typeof rmSync,
- *   onTermination?: (forward: (signal: string) => void) => void,
+ *   onTermination?: (forward: (signal: string) => void) => (() => void) | void,
  * }} [options]
  * @returns {Promise<number>}
  */
@@ -80,9 +80,16 @@ export async function runPlaywright(args, {
   mkdtempImpl = mkdtempSync,
   rmImpl = rmSync,
   onTermination = (forward) => {
-    for (const signal of ["SIGINT", "SIGTERM"]) {
-      process.on(signal, () => forward(signal));
+    /** @type {Array<[NodeJS.Signals, () => void]>} */
+    const registered = [];
+    for (const signal of /** @type {NodeJS.Signals[]} */ (["SIGINT", "SIGTERM"])) {
+      const handler = () => forward(signal);
+      registered.push([signal, handler]);
+      process.on(signal, handler);
     }
+    return () => {
+      for (const [signal, handler] of registered) process.off(signal, handler);
+    };
   },
 } = {}) {
   const cli = requirePlaywrightCli(cliPath);
@@ -100,7 +107,7 @@ export async function runPlaywright(args, {
   // object already ends the child if the wrapper dies. So Windows only
   // waits. A hard kill of the wrapper itself can still leak the directory,
   // which costs disk; a shared directory costs the run.
-  onTermination((signal) => {
+  const disposeTermination = onTermination((signal) => {
     if (platform !== "win32") child.kill(signal);
   });
   try {
@@ -130,6 +137,7 @@ export async function runPlaywright(args, {
       { cause: error },
     );
   } finally {
+    disposeTermination?.();
     rmImpl(cacheDir, { recursive: true, force: true });
   }
 }
