@@ -437,6 +437,7 @@ import {
   captureForFlaggedWorkspace,
   dispatchScanEligible,
   engineOffRefusal,
+  releaseAndRefuseWithoutCapture,
 } from "./workspaces/engineCaptureGate";
 import {
   readWorkspaceEnginePolicy,
@@ -2196,15 +2197,14 @@ const chatDispatchService = createChatDispatchService({
       throw new Error(`Unknown workspace: ${workspace.workspaceId}`);
     }
     const release = await acquireDispatchRunActivity(registered);
-    if (!activity.engineCaptureFor(workspace.workspaceId)) {
-      await release();
-      throw new Error(
-        engineOffRefusal(
-          activity.getStatus(workspace.workspaceId),
-          "Chats are not enabled for this workspace.",
-        ),
-      );
-    }
+    // The helper owns the read-then-release order: releasing the transient
+    // open deletes the status entry, and its defaults read as the opt-out.
+    await releaseAndRefuseWithoutCapture({
+      capture: activity.engineCaptureFor(workspace.workspaceId),
+      status: () => activity.getStatus(workspace.workspaceId),
+      release,
+      notEnabled: "Chats are not enabled for this workspace.",
+    });
     return release;
   },
   authorizeServiceNote: async (workspace, threadId, verifiedUserId) => {

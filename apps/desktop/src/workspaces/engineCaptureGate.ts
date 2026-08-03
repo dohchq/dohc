@@ -81,6 +81,27 @@ export function engineOffRefusal(
   return notEnabled;
 }
 
+// The dispatch-run seam of the same refusal (#541, codex P2 on #583): the
+// caller holds a TRANSIENT open, and releasing it deletes the workspace's
+// activity entry — a status read after the release sees cause-less defaults
+// that read as the opt-out. This helper owns the order: the refusal is built
+// from the live status, THEN the hold is released, then it throws. A caller
+// with a capture attached gets a no-op.
+export async function releaseAndRefuseWithoutCapture(input: {
+  capture: object | null;
+  status: () => {
+    settingsWarning?: string;
+    historyRecordingUnavailable: boolean;
+  };
+  release: () => Promise<void>;
+  notEnabled: string;
+}): Promise<void> {
+  if (input.capture) return;
+  const refusal = engineOffRefusal(input.status(), input.notEnabled);
+  await input.release();
+  throw new Error(refusal);
+}
+
 // The gate's predicate on its own, for callers that must honor the opt-out
 // WITHOUT touching the engine (e.g. the chat dispatch scan — for an opted-out
 // workspace, merely resolving its stores would create .dohc/engine/).

@@ -6,6 +6,7 @@ import {
   captureForFlaggedWorkspace,
   dispatchScanEligible,
   engineOffRefusal,
+  releaseAndRefuseWithoutCapture,
 } from "./engineCaptureGate";
 import type { WorkspaceCaptureHooks } from "./workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -160,6 +161,50 @@ describe("engineOffRefusal", () => {
     );
     expect(refusal).toBe(warning);
     expect(refusal).toContain("/ws/.dohc/settings.local.json");
+  });
+});
+
+// Codex P2 on #583: releasing a dispatch's transient open deletes the
+// workspace's activity entry, so a status read AFTER the release sees
+// cause-less defaults — and the refusal falls back to "not enabled", the
+// false cause the refusal exists to remove. The helper owns the order.
+describe("releaseAndRefuseWithoutCapture", () => {
+  const NOT_ENABLED = "Chats are not enabled for this workspace.";
+
+  it("reads the cause before releasing the transient open", async () => {
+    let released = false;
+    await expect(
+      releaseAndRefuseWithoutCapture({
+        capture: null,
+        // The live entry knows the build failed; the closed entry's
+        // defaults would claim nobody-chose-this never happened.
+        status: () =>
+          released
+            ? { historyRecordingUnavailable: false }
+            : { historyRecordingUnavailable: true },
+        release: async () => {
+          released = true;
+        },
+        notEnabled: NOT_ENABLED,
+      }),
+    ).rejects.toThrow(
+      "dohc could not start the workspace engine for this workspace.",
+    );
+    // The hold is still released — the refusal never leaks the open.
+    expect(released).toBe(true);
+  });
+
+  it("keeps the hold and refuses nothing when the capture is attached", async () => {
+    let released = false;
+    await releaseAndRefuseWithoutCapture({
+      capture: {},
+      status: () => ({ historyRecordingUnavailable: false }),
+      release: async () => {
+        released = true;
+      },
+      notEnabled: NOT_ENABLED,
+    });
+    expect(released).toBe(false);
   });
 });
 
