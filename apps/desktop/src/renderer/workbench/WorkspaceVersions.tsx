@@ -837,14 +837,23 @@ export function VersionMergeDialog(props: {
       props.onWorkspaceStateChanged();
       // The merge's own count decides the stage: the rows are the first page
       // of ALL open conflicts, and a lingering sync conflict must not turn a
-      // clean merge into a conflicted one.
-      if (result.conflictCount > 0) {
+      // clean merge into a conflicted one. The rows gate it too: a count
+      // with an empty terminal page means every conflict was already
+      // resolved elsewhere between the merge and the listing — painting a
+      // zero-card decide stage over that would ask for decisions that no
+      // longer exist.
+      if (
+        result.conflictCount > 0 &&
+        (result.conflicts.length > 0 || result.nextAfterConflictId !== null)
+      ) {
         windowGeneration.current += 1;
         setStage({
           stage: "conflicts",
           conflicts: result.conflicts,
           nextAfterConflictId: result.nextAfterConflictId,
         });
+      } else if (result.conflictCount > 0) {
+        setStage({ stage: "resolved-all" });
       } else {
         setStage({ stage: "clean", mergedFileCount: result.mergedFileCount });
       }
@@ -1549,17 +1558,32 @@ function ConflictList(props: {
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const openId = openConflictId(props.conflicts, chosenId);
-  const { onLoadMore } = props;
+  const { conflicts, onLoadMore } = props;
+  // The pending flag belongs to the loaded window (#602 review): when the
+  // window changes identity (a resolution replaced it, or a page appended),
+  // any in-flight Show more belongs to the OLD window — clear the flag now
+  // rather than when the abandoned request settles (indefinitely, if it
+  // never does), and let its settle repaint nothing.
+  const loadToken = useRef(0);
+  useEffect(() => {
+    loadToken.current += 1;
+    setLoadingMore(false);
+    setLoadMoreError(null);
+  }, [conflicts]);
   const loadMore = useCallback(() => {
+    const token = ++loadToken.current;
     setLoadingMore(true);
     setLoadMoreError(null);
     void onLoadMore()
       .catch((error) => {
+        if (token !== loadToken.current) return;
         setLoadMoreError(
           ipcErrorMessage(error, "Couldn't load more conflicting files."),
         );
       })
-      .finally(() => setLoadingMore(false));
+      .finally(() => {
+        if (token === loadToken.current) setLoadingMore(false);
+      });
   }, [onLoadMore]);
 
   return (
@@ -1683,6 +1707,10 @@ export function VersionComparePage(props: {
     let cancelled = false;
     windowGeneration.current += 1;
     setState({ status: "loading" });
+    // The pending flag belongs to the window too (#602 review): without this
+    // reset, a replaced window inherits an abandoned page's "Loading…" until
+    // the stale request settles — indefinitely, if it never does.
+    setLoadingMore(false);
     setLoadMoreError(null);
     void (async () => {
       const [versions, comparison] = await Promise.all([
@@ -1740,7 +1768,11 @@ export function VersionComparePage(props: {
           ipcErrorMessage(error, "Couldn't load more changed files."),
         );
       })
-      .finally(() => setLoadingMore(false));
+      .finally(() => {
+        // Only this generation's pending flag: the effect already cleared it
+        // for a replaced window, and a stale settle must not repaint it.
+        if (windowGeneration.current === generation) setLoadingMore(false);
+      });
   }, [state, workspaceId, versionId]);
 
   return (
@@ -1760,17 +1792,16 @@ export function VersionComparePage(props: {
             <p className="mb-0 mt-1 text-[11px] text-muted">
               {state.files.length === 0
                 ? "The two versions have the same text files."
-                : state.nextAfterPath !== null
-                  ? `More than ${state.files.length} file${
-                      state.files.length === 1 ? "" : "s"
-                    } differ${state.files.length === 1 ? "s" : ""} between ${
-                      state.versionName
-                    } and Main.`
-                  : `${state.files.length} file${
-                      state.files.length === 1 ? "" : "s"
-                    } differ${state.files.length === 1 ? "s" : ""} between ${
-                      state.versionName
-                    } and Main.`}
+                : // One numeral style with the conflict copy next door
+                  // (docs/brand/copy.md): a lone file is a sentence and
+                  // spells "one"; scanned counts above one use numerals.
+                  state.nextAfterPath !== null
+                  ? state.files.length === 1
+                    ? `More than one file differs between ${state.versionName} and Main.`
+                    : `More than ${state.files.length} files differ between ${state.versionName} and Main.`
+                  : state.files.length === 1
+                    ? `One file differs between ${state.versionName} and Main.`
+                    : `${state.files.length} files differ between ${state.versionName} and Main.`}
             </p>
           ) : null}
         </div>

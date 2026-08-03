@@ -156,7 +156,16 @@ describe("capture.compareVersions pages both sources under one cursor", () => {
             nextAfterPath: boundary,
           },
         ],
-        [boundary, { entries: [], nextAfterPath: null }],
+        // A REAL successor row: the pager peeks past a cursor and drops one
+        // with nothing differing behind it, so the boundary under test must
+        // be earned.
+        [
+          boundary,
+          {
+            entries: [{ path: "zz.md", status: "modified" }],
+            nextAfterPath: null,
+          },
+        ],
       ]),
       new Map<string | undefined, SecretFileComparePage>([
         [
@@ -187,7 +196,9 @@ describe("capture.compareVersions pages both sources under one cursor", () => {
     const second = await engine.compareVersions("v-1", {
       afterPath: first.nextAfterPath!,
     });
+    // Code-point order again: "zz.md" (0x7A) sorts BEFORE the U+10000 path.
     expect(second.files).toEqual([
+      { path: "zz.md", status: "modified", currentText: "main body of zz.md", incomingText: "v-1 body of zz.md" },
       { path: astralSecret, status: "modified", protected: true },
     ]);
     expect(second.nextAfterPath).toBeNull();

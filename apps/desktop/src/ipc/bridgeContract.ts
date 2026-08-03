@@ -1764,7 +1764,9 @@ export const MergeWorkspaceVersionResult = z.object({
   unchangedFileCount: z.number().int().min(0),
   // How many files THIS merge left in conflict. The rows below are the first
   // page of ALL open conflicts (a sync conflict can be among them), so the
-  // stage decision and the copy read this count, never the rows' length.
+  // STAGE decision reads this count — unrelated open conflicts must not turn
+  // a clean merge into a conflicted one. The count sentence over the cards
+  // reads the loaded rows instead: it describes what the user is looking at.
   conflictCount: z.number().int().min(0),
   conflicts: z.array(WorkspaceVersionConflict),
   nextAfterConflictId: CONFLICT_ID.nullable(),

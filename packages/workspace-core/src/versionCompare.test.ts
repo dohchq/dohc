@@ -17,10 +17,7 @@ interface FakeFile {
   incoming?: string;
 }
 
-function storeOf(
-  files: FakeFile[],
-  options?: { deltaNextAfterPath?: string | null },
-) {
+function storeOf(files: FakeFile[]) {
   const reads: Array<{ versionId: string; path: string }> = [];
   const byPath = new Map(files.map((file) => [file.path, file]));
   const snapshot = (path: string, text: string): TextFileSnapshot => ({
@@ -45,7 +42,7 @@ function storeOf(
           status: file.status,
           ...(file.binary ? { binary: true as const } : {}),
         }));
-      return { entries, nextAfterPath: options?.deltaNextAfterPath ?? null };
+      return { entries, nextAfterPath: null };
     },
     readTextFile: async (input: { versionId: string; path: string }) => {
       reads.push({ versionId: input.versionId, path: input.path });
@@ -133,13 +130,89 @@ describe("compareVersionFilesPage", () => {
     expect(page.nextAfterPath).toBe("big.md");
   });
 
-  it("carries the delta listing's own continuation when the budget is not hit", async () => {
-    const store = storeOf(
-      [{ path: "a.md", status: "modified", current: "1", incoming: "2" }],
-      { deltaNextAfterPath: "a.md" },
-    );
+  it("keeps a continuation only when something differs past it", async () => {
+    // The listing's cursor is not a promise of more rows: a window that ends
+    // exactly on its row limit hands one back regardless. The pager peeks —
+    // metadata only — and keeps the cursor only over a real successor. The
+    // peeked window is re-fetched by the next page.
+    const calls: Array<string | undefined> = [];
+    const pages = new Map<string | undefined, {
+      entries: Array<{ path: string; status: "modified" }>;
+      nextAfterPath: string | null;
+    }>([
+      [
+        undefined,
+        { entries: [{ path: "a.md", status: "modified" }], nextAfterPath: "a.md" },
+      ],
+      [
+        "a.md",
+        { entries: [{ path: "b.md", status: "modified" }], nextAfterPath: null },
+      ],
+    ]);
+    const store = {
+      compareVersionFilesPage: async (input: { afterPath?: string }) => {
+        calls.push(input.afterPath);
+        return pages.get(input.afterPath)!;
+      },
+      readTextFile: async (input: { versionId: string; path: string }) =>
+        ({
+          objectId: `object-${input.path}`,
+          versionId: input.versionId,
+          path: input.path,
+          text: "body",
+          updatedAtMs: 1,
+          latestMomentId: `moment-${input.path}`,
+          metadata: { origin: "local-file" as const },
+        }) satisfies TextFileSnapshot,
+    };
     const page = await compareVersionFilesPage(store, INPUT);
+    expect(page.files.map((file) => file.path)).toEqual(["a.md"]);
     expect(page.nextAfterPath).toBe("a.md");
+    // The peek cost one extra metadata call at a true page boundary.
+    expect(calls).toEqual([undefined, "a.md"]);
+
+    const rest = await compareVersionFilesPage(store, {
+      ...INPUT,
+      afterPath: "a.md",
+    });
+    expect(rest.files.map((file) => file.path)).toEqual(["b.md"]);
+    expect(rest.nextAfterPath).toBeNull();
+  });
+
+  it("drops a continuation with nothing differing behind it", async () => {
+    // An exactly-full window's cursor with only identical paths behind it
+    // used to reach the surface, which then said "more than N" over a Show
+    // more that appended nothing.
+    const pages = new Map<string | undefined, {
+      entries: Array<{ path: string; status: "modified" }>;
+      nextAfterPath: string | null;
+    }>([
+      [
+        undefined,
+        { entries: [{ path: "a.md", status: "modified" }], nextAfterPath: "a.md" },
+      ],
+      ["a.md", { entries: [], nextAfterPath: "m.md" }],
+      ["m.md", { entries: [], nextAfterPath: null }],
+    ]);
+    const store = {
+      compareVersionFilesPage: async (input: { afterPath?: string }) =>
+        pages.get(input.afterPath)!,
+      readTextFile: async (input: { versionId: string; path: string }) =>
+        ({
+          objectId: `object-${input.path}`,
+          versionId: input.versionId,
+          path: input.path,
+          text: "body",
+          updatedAtMs: 1,
+          latestMomentId: `moment-${input.path}`,
+          metadata: { origin: "local-file" as const },
+        }) satisfies TextFileSnapshot,
+    };
+    const page = await compareVersionFilesPage(store, INPUT);
+    expect(page.files.map((file) => file.path)).toEqual(["a.md"]);
+    // MUTATION: drop the lookahead -> "a.md" comes back and the surface
+    // claims more files than exist.
+    expect(page.nextAfterPath).toBeNull();
   });
 
   it("counts the budget in UTF-8 bytes, not UTF-16 code units", async () => {
@@ -193,13 +266,13 @@ describe("compareVersionFilesPage", () => {
     expect(calls).toEqual([undefined, "m.md"]);
   });
 
-  it("fits a representative healthy comparison in one page (measured)", async () => {
-    // Measured evidence for COMPARE_PAGE_TEXT_BYTE_BUDGET (AGENTS.md:
-    // "Measure limits that reject work"): the budget never rejects — it
-    // pages — but the healthy case should not page at all. A working
-    // feature-branch comparison of 40 markdown files, both sides ~2.5 KiB
-    // (the shape of this repo's own docs), hydrates ~200 KiB: inside the
-    // 256 KiB budget, one page, no "Show more".
+  it("fits a representative healthy comparison in one page", async () => {
+    // The budget never rejects — it pages — so AGENTS.md's measure-first
+    // rule does not bind it. What this pins is the healthy SHAPE: a working
+    // comparison of 40 markdown files, both sides ~2.5 KiB (the shape of
+    // this repo's own docs), hydrates ~200 KiB — inside the 256 KiB budget,
+    // one page, no "Show more". Shrinking the budget under the ordinary case
+    // fails here first.
     const side = "m".repeat(2_560);
     const files: FakeFile[] = Array.from({ length: 40 }, (_, index) => ({
       path: `docs/note-${String(index).padStart(2, "0")}.md`,

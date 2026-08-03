@@ -29,14 +29,17 @@ export type {
  * `COMPARE_PAGE_TEXT_BYTE_BUDGET`: how many UTF-8 bytes of hydrated text one
  * compare page may carry, measured over both sides of every row.
  *
- * The number is the engine's own page discipline: every daemon list family
- * pages under a 256 KiB serialized budget (`CONFLICTS_PAGE_BYTE_BUDGET`,
- * `CHAT_PAGE_BYTE_BUDGET`, `MOMENTS_PAGE_BYTE_BUDGET` in
- * crates/dohc-workspace-engine/src/lib.rs), and this page rides the same IPC
- * transport as those. It never rejects work: a row that alone exceeds the
- * budget still ships, on a page of its own, and the continuation reaches
- * everything else. `versionCompare.test.ts` holds the progress guarantee and
- * the measured evidence that representative healthy compares fit in one page.
+ * The number follows the engine's page discipline in spirit, not mechanism:
+ * the daemon budgets (`CONFLICTS_PAGE_BYTE_BUDGET` et al.,
+ * crates/dohc-workspace-engine/src/lib.rs) cut SERIALIZED rows, while this
+ * counts the raw UTF-8 of the hydrated text sides — cheaper to measure here,
+ * and within escaping overhead of what the row costs on the wire. It never
+ * rejects work: a row that alone exceeds the budget still ships, on a page
+ * of its own, so one page can legitimately carry a single row up to the
+ * engine's per-side text contract (~10 MiB a side — the same row-level bound
+ * `bridgeContract.ts` already admits per conflict row).
+ * `versionCompare.test.ts` holds the progress guarantee and pins that a
+ * representative healthy comparison fits in one page.
  */
 export const COMPARE_PAGE_TEXT_BYTE_BUDGET = 256 * 1024;
 
@@ -72,25 +75,21 @@ export function compareEnginePaths(a: string, b: string): number {
   }
 }
 
-// UTF-8 length without building the encoded copy: the budget is spent on
-// multi-megabyte bodies, and encoding one just to count it would allocate a
-// second copy.
-function utf8Length(text: string): number {
-  let length = 0;
-  for (const character of text) {
-    const code = character.codePointAt(0) ?? 0;
-    if (code < 0x80) length += 1;
-    else if (code < 0x800) length += 2;
-    else if (code < 0x10000) length += 3;
-    else length += 4;
-  }
-  return length;
-}
+// TextEncoder, not Buffer.byteLength: workspace-core is imported by renderer
+// bundles, and a Node builtin here is the #272 failure mode (neither
+// typecheck nor vitest would catch it). The encode allocates a transient
+// copy, which native encoding makes cheap; a hand-rolled code-point loop was
+// measured ~29x slower on the multi-megabyte bodies this counts.
+const utf8 = new TextEncoder();
 
 function changeBytes(change: VersionFileChange): number {
   return (
-    (change.currentText === undefined ? 0 : utf8Length(change.currentText)) +
-    (change.incomingText === undefined ? 0 : utf8Length(change.incomingText))
+    (change.currentText === undefined
+      ? 0
+      : utf8.encode(change.currentText).byteLength) +
+    (change.incomingText === undefined
+      ? 0
+      : utf8.encode(change.incomingText).byteLength)
   );
 }
 
@@ -159,5 +158,31 @@ export async function compareVersionFilesPage(
       return { files, nextAfterPath: entry.path };
     }
   }
-  return { files, nextAfterPath: delta.nextAfterPath };
+  if (delta.nextAfterPath === null) {
+    return { files, nextAfterPath: null };
+  }
+  // The listing's continuation is a cursor, not a promise of more rows: a
+  // window that ended exactly on its row limit hands one back with nothing
+  // differing behind it, and the surface would then claim "more than N" over
+  // a Show more that appends nothing. Peek ahead through identical windows —
+  // metadata only, no text — and drop the cursor when nothing differs past
+  // it. A nonempty peek keeps the ORIGINAL cursor; the peeked window is
+  // re-fetched by the next page, which costs one duplicate metadata call at
+  // a true page boundary.
+  let peekAfterPath: string = delta.nextAfterPath;
+  for (;;) {
+    const peek = await store.compareVersionFilesPage({
+      workspaceId: input.workspaceId,
+      sourceVersionId: input.sourceVersionId,
+      targetVersionId: input.targetVersionId,
+      afterPath: peekAfterPath,
+    });
+    if (peek.entries.length > 0) {
+      return { files, nextAfterPath: delta.nextAfterPath };
+    }
+    if (peek.nextAfterPath === null) {
+      return { files, nextAfterPath: null };
+    }
+    peekAfterPath = peek.nextAfterPath;
+  }
 }
