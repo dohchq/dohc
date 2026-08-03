@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { configure } from "@testing-library/dom";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -1226,11 +1233,25 @@ describe("engine markdown source view", () => {
       // A version switch later in the same tab: `opening` goes true again.
       // MUTATION: key the guard on "ever clicked retry" -> this draft is
       // silently dropped and writeWorkspaceText is never called.
-      await user.click(screen.getByTestId("markdown-edit-toggle"));
-      await user.type(
-        await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
-        "typed",
-      );
+      //
+      // fireEvent, not userEvent: a pointer click into the mounted WYSIWYG
+      // surface reaches prosemirror's mousedown, which needs layout jsdom
+      // does not have — and that throws AFTER the test, failing the run
+      // with every assertion green.
+      // Step to SOURCE mode, whose editor is a textarea a draft can be typed
+      // into without touching the WYSIWYG surface at all.
+      let editor: HTMLElement | null = null;
+      for (let click = 0; click < 3 && editor === null; click += 1) {
+        fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
+        const candidate = await screen.findByTestId(
+          "markdown-editor",
+          {},
+          { timeout: 5_000 },
+        );
+        if (candidate.tagName === "TEXTAREA") editor = candidate;
+      }
+      expect(editor).not.toBeNull();
+      fireEvent.change(editor!, { target: { value: `${DOC_MARKDOWN}typed` } });
       view.rerender(
         <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
       );
