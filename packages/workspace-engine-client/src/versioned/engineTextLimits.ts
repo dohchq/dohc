@@ -34,8 +34,12 @@ export const RESOLVE_REQUEST_FRAME_BYTES = 8 * 1024 * 1024;
  * headroom. A row past it is degraded, not refused: the daemon withholds each
  * over-cap side body (`text: null` beside `inbandLimitBytes` and
  * `blobSha256`), and the adapter hydrates through `versionedText.readBlob`.
+ *
+ * DERIVED from `RESOLVE_REQUEST_FRAME_BYTES` — both are the same negotiated
+ * frame — so this file keeps exactly one hand-copy of the daemon's frame size
+ * under its drift guard, not two that can move apart.
  */
-export const CONFLICT_ROW_HARD_CAP_BYTES = 8 * 1024 * 1024 - 64 * 1024;
+export const CONFLICT_ROW_HARD_CAP_BYTES = RESOLVE_REQUEST_FRAME_BYTES - 64 * 1024;
 
 /**
  * How many bytes a string occupies once JSON-encoded, quotes included — the

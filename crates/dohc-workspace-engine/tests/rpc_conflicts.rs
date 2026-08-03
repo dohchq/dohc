@@ -676,6 +676,15 @@ async fn a_near_cap_conflict_row_answers_a_resolution_inside_one_control_frame()
         .await
         .expect("the row cap admits this conflict, so a caller can reach it");
     assert_eq!(listed.result["conflicts"].as_array().unwrap().len(), 1);
+    // The premise, asserted: the row rides UNDER the cap, bodies in band. A
+    // degraded (withheld) row would no longer carry the in-band residuals
+    // whose frame cost this test exists to measure.
+    for side_name in ["base", "current", "incoming"] {
+        assert!(
+            listed.result["conflicts"][0][side_name]["snapshot"]["text"].is_string(),
+            "{side_name} must ride in band for the residual measurement to mean anything"
+        );
+    }
 
     let resolved = transport
         .call(
@@ -1371,4 +1380,215 @@ async fn over_frame_conflict_row_degrades_to_hydratable_metadata_instead_of_refu
     assert_eq!(hydrated.response.result["bytesBase64"], Value::Null);
     let egress = hydrated.blob_egress.expect("over-cap side body egress");
     assert_eq!(egress.bytes, oversized.as_bytes());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_bound_conflict_metadata_is_refused_at_open_not_at_the_listing() {
+    // The probe vector from #603's review: metadata rides every listing row
+    // and is never withheld, so an 8.33 MB summary — inside the frame at
+    // OPEN — would land a row in the refusal window between
+    // CONFLICT_ROW_HARD_CAP_BYTES and the frame, reviving #537's failure via
+    // peer-supplied conflicts. `conflicts.open` now bounds it like its
+    // sibling write paths. MUTATION: drop `validate_metadata_fields` from
+    // `ConflictDto::into_domain` and the first open below succeeds.
+    let (_scratch, transport, handle, workspace_id) = fixture("metadata-window").await;
+
+    let mut oversized_summary = conflict_payload(&workspace_id, 0, "small body");
+    oversized_summary["conflict"]["metadata"]["summary"] = json!("m".repeat(8_330_000));
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "conflicts.open",
+                Some(handle.clone()),
+                oversized_summary,
+            ),
+        )
+        .await
+        .expect_err("an over-bound conflict summary is refused at open");
+    assert_eq!(refused.message, "invalid-metadata");
+
+    // Per-side metadata takes the same bound.
+    let mut oversized_side = conflict_payload(&workspace_id, 1, "small body");
+    oversized_side["conflict"]["incoming"]["metadataSummary"] = json!("m".repeat(8_330_000));
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(11, "conflicts.open", Some(handle.clone()), oversized_side),
+        )
+        .await
+        .expect_err("an over-bound side summary is refused at open");
+    assert_eq!(refused.message, "invalid-metadata");
+
+    // So do the identifier strings a row carries un-withheld.
+    let mut oversized_id = conflict_payload(&workspace_id, 2, "small body");
+    oversized_id["conflict"]["current"]["snapshot"]["objectId"] = json!("i".repeat(8_330_000));
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(12, "conflicts.open", Some(handle.clone()), oversized_id),
+        )
+        .await
+        .expect_err("an over-bound snapshot object id is refused at open");
+    assert_eq!(refused.message, "invalid-metadata");
+
+    // Nothing landed, so the listing still answers — the window is closed.
+    let listed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "conflicts.list",
+                Some(handle),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("the listing survives every refused open");
+    assert!(
+        listed.result["conflicts"]
+            .as_array()
+            .expect("conflict rows")
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_conflict_row_at_the_hard_cap_ships_in_band_and_one_byte_more_degrades() {
+    // The degrade trigger's exact boundary, in the sibling pattern of
+    // `a_request_that_exactly_fills_the_frame_is_applied_and_one_byte_more_is_refused`.
+    // The serialized row size is measured from a probe row — the response
+    // carries the same JSON value the daemon measured, and one ASCII 'x'
+    // adds exactly one serialized byte — then the payload side is sized to
+    // land the row exactly AT the cap, and one byte past it.
+    const CAP: usize = 8 * 1024 * 1024 - 64 * 1024;
+    let (_scratch, transport, handle, workspace_id) = fixture("row-cap-boundary").await;
+
+    // Probe: one variable side (current), two small sides.
+    let probe_len = 8_000_000_usize;
+    let payload_with_current = |index: usize, len: usize| {
+        let text = "x".repeat(len);
+        let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+        let mut payload = conflict_payload(&workspace_id, index, "small");
+        payload["conflict"]["current"]["snapshot"]["text"] = json!(text);
+        payload["conflict"]["current"]["snapshot"]["blobSha256"] = json!(sha);
+        payload
+    };
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "conflicts.open",
+                Some(handle.clone()),
+                payload_with_current(0, probe_len),
+            ),
+        )
+        .await
+        .expect("open the probe conflict");
+    assert_eq!(opened.result["inserted"], true);
+    let probe = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                11,
+                "conflicts.list",
+                Some(handle.clone()),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("list the probe row");
+    let probe_row = &probe.result["conflicts"][0];
+    assert!(
+        probe_row["current"]["snapshot"]["text"].is_string(),
+        "the probe row must ride under the cap"
+    );
+    let probe_size = serde_json::to_string(probe_row)
+        .expect("serialize probe row")
+        .len();
+    // 'x' escapes to itself, and the byte-length digit count is stable across
+    // this range (both seven digits), so the delta maps one-to-one.
+    let at_cap_len = probe_len + (CAP - probe_size);
+    assert_eq!(at_cap_len.to_string().len(), probe_len.to_string().len());
+
+    // AT the cap: the row ships whole, bodies in band.
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.open",
+                Some(handle.clone()),
+                payload_with_current(1, at_cap_len),
+            ),
+        )
+        .await
+        .expect("open the at-cap conflict");
+    assert_eq!(opened.result["inserted"], true);
+    // ONE byte past it: degraded to hydratable metadata.
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "conflicts.open",
+                Some(handle.clone()),
+                payload_with_current(2, at_cap_len + 1),
+            ),
+        )
+        .await
+        .expect("open the one-past-cap conflict");
+    assert_eq!(opened.result["inserted"], true);
+
+    let mut after: Option<String> = Some("conflict-000".to_owned());
+    let mut rows = Vec::new();
+    while let Some(cursor) = after {
+        let page = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    14,
+                    "conflicts.list",
+                    Some(handle.clone()),
+                    json!({ "status": "open", "afterConflictId": cursor }),
+                ),
+            )
+            .await
+            .expect("list a boundary page");
+        for row in page.result["conflicts"].as_array().expect("rows") {
+            rows.push(row.clone());
+        }
+        after = page.result["nextAfterConflictId"]
+            .as_str()
+            .map(str::to_owned);
+    }
+    assert_eq!(rows.len(), 2, "both boundary rows list");
+
+    let at_cap = &rows[0];
+    assert_eq!(at_cap["id"], "conflict-001");
+    let at_cap_size = serde_json::to_string(at_cap)
+        .expect("serialize at-cap row")
+        .len();
+    assert_eq!(
+        at_cap_size, CAP,
+        "the probe arithmetic must land exactly on the cap"
+    );
+    assert!(
+        at_cap["current"]["snapshot"]["text"].is_string(),
+        "MUTATION: degrade at >= instead of > and the at-cap row loses its in-band body"
+    );
+
+    let past_cap = &rows[1];
+    assert_eq!(past_cap["id"], "conflict-002");
+    assert_eq!(
+        past_cap["current"]["snapshot"]["text"],
+        Value::Null,
+        "MUTATION: degrade at > cap + 1 and the first over-cap row refuses the page"
+    );
+    assert_eq!(
+        past_cap["current"]["snapshot"]["inbandLimitBytes"],
+        json!(128 * 1024)
+    );
 }

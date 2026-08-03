@@ -7590,10 +7590,12 @@ impl EngineService {
             CONFLICT_ROW_HARD_CAP_BYTES,
         );
         if included == 0 && !conflicts.is_empty() {
-            // Unreachable while withholding covers every side body — a
-            // degraded row carries only bounded metadata. Kept so a row that
-            // somehow still overruns becomes a named refusal, never an
-            // over-frame response the daemon's writer treats as fatal.
+            // The last line of defense, not dead code: withholding nulls only
+            // the side BODIES, so this fires for a row still over the cap on
+            // what remains — which is why every string that survives
+            // withholding is bounded at open (`ConflictDto::into_domain`).
+            // A named refusal beats an over-frame response the daemon's
+            // writer treats as fatal.
             let observed = rows
                 .first()
                 .and_then(|row| serde_json::to_string(row).ok())
@@ -9655,6 +9657,16 @@ struct SnapshotDto {
 
 impl ConflictDto {
     fn into_domain(self) -> Result<TextConflict, WireError> {
+        // The bound its eleven sibling write paths already apply. Every one
+        // of these fields rides into a conflicts.list row and is never
+        // withheld, so without this an 8.33 MB summary lands a row in the
+        // refusal window between CONFLICT_ROW_HARD_CAP_BYTES and the frame —
+        // the exact failure #537 removed, surviving via peer-supplied
+        // conflicts.
+        validate_metadata_fields(
+            self.metadata.summary.as_deref(),
+            self.metadata.correlation_id.as_deref(),
+        )?;
         Ok(TextConflict {
             conflict_id: self.id,
             workspace_id: self.workspace_id,
@@ -9694,6 +9706,11 @@ impl ConflictStateDto {
                 ));
             }
         };
+        // Per-side metadata takes the same bound as the top-level pair above.
+        validate_metadata_fields(
+            self.metadata_summary.as_deref(),
+            self.metadata_correlation_id.as_deref(),
+        )?;
         Ok(ConflictFileState {
             path: self.path,
             snapshot: self.snapshot.map(SnapshotDto::into_domain).transpose()?,
@@ -9715,6 +9732,11 @@ impl ConflictStateDto {
 
 impl SnapshotDto {
     fn into_domain(self) -> Result<TextSnapshot, WireError> {
+        // Identifier and origin strings ride the listing row beside the
+        // metadata pair, un-withheld, so they get the same 16 KiB bound. The
+        // body itself is exempt: `withhold_conflict_side_texts` handles it.
+        validate_metadata_fields(Some(&self.object_id), Some(&self.latest_moment_id))?;
+        validate_metadata_fields(Some(&self.metadata_origin), None)?;
         let actual = dohc_engine_storage::hex_sha256(self.text.as_bytes());
         if self.blob_sha256 != actual {
             return Err(wire(
