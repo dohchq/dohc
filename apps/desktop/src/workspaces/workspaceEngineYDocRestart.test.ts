@@ -2373,3 +2373,178 @@ it("announces a recovered edit exactly once when both arm points run", async () 
   await session.close({ settle: false }).catch(() => undefined);
   await capture.stop();
 });
+
+// A locked-settle rebind harness: every applied update lands in a durable
+// journal, and each new generation opens already holding all of it — so the
+// adoption's replay is EMPTY, which is exactly the gap #595 names: nothing
+// arms a settle on the replacement, and the pending locked write would sit
+// stale until an unrelated edit.
+async function lockedRebindCapture(prefix: string) {
+  const rootPath = await mkdtemp(join(nativeTmpdir(), prefix));
+  roots.push(rootPath);
+  const workspaceId = prefix.replace(/-+$/, "");
+  const loopback = new VersionedLoopbackEngine();
+  const client: EngineDaemonClient & EngineTransport = {
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: workspaceId } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    { sleep: async () => undefined },
+  );
+  const state = {
+    locked: false,
+    journal: [] as Uint8Array[],
+    settleCalls: [] as number[],
+    settledMarkdowns: [] as string[],
+    generation: 0,
+    generationOptions: [] as EngineYdocProviderSessionOptions[],
+  };
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const gen = ++state.generation;
+    state.generationOptions.push(options);
+    const doc = new Y.Doc();
+    for (const update of state.journal) Y.applyUpdate(doc, update);
+    let tokens = 0;
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      contentKind: "plaintext",
+      path: options.path,
+      head: "present" as const,
+      lineage: "existing" as const,
+      async applyLocalUpdate(update) {
+        Y.applyUpdate(doc, update);
+        state.journal.push(update);
+      },
+      async settleNow() {
+        state.settleCalls.push(gen);
+        const token = ++tokens;
+        if (state.locked) {
+          const refusal = new DaemonRefusalError(
+            { code: "OVERLOADED", message: "file-locked", retry: "afterBackoff" },
+            new Error("daemon response"),
+          );
+          options.onSettleError?.(refusal, token);
+          throw refusal;
+        }
+        const markdown = doc.getText("plainText").toString();
+        const result = {
+          momentId: `moment-${gen}-${token}`,
+          path: options.path,
+          markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext" as const,
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+        await options.onSettled?.(result, token);
+        state.settledMarkdowns.push(markdown);
+        return result;
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId,
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  return { capture, state };
+}
+
+it("re-arms a pending locked settle on the generation that replaces a dead one", async () => {
+  // #595 codex P2: the locked retry ladder lives in the generation and dies
+  // with it. The adoption must ask the replacement to settle when a locked
+  // write is pending, or a lock released after a daemon restart leaves the
+  // artifact stale until an unrelated edit. (A still-held lock at that point
+  // re-enters the provider's own ladder — pinned by the client-package test
+  // "an explicit flush that hits the lock arms the retry too".)
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-locked-rebind-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "locked edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  await expect(session.settleNow()).rejects.toThrow("file-locked");
+  expect(state.settleCalls).toEqual([1]);
+
+  // The daemon dies and the lock releases while the shell reconnects. No
+  // further edit happens.
+  state.locked = false;
+  state.generationOptions[0]!.onSessionError?.(
+    Object.assign(new Error("daemon exited"), { code: "transport-error" }),
+  );
+
+  // The replacement generation settles BY ITSELF, and the settle carries the
+  // journaled edit the lock blocked.
+  await expect.poll(() => state.settleCalls, { timeout: 5_000 }).toEqual([1, 2]);
+  await expect.poll(() => state.settledMarkdowns, { timeout: 5_000 }).toEqual([
+    "locked edit",
+  ]);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
+it("a rebind with no pending locked settle settles nothing on its own", async () => {
+  // The inverse guard: adoption must not settle every replacement — only one
+  // that owes a locked write. A successful settle clears the debt first.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-clean-rebind-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "settled edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  // Locked once, then settled clean: the debt is paid before the restart.
+  state.locked = true;
+  await expect(session.settleNow()).rejects.toThrow("file-locked");
+  state.locked = false;
+  await session.settleNow();
+  expect(state.settleCalls).toEqual([1, 1]);
+
+  state.generationOptions[0]!.onSessionError?.(
+    Object.assign(new Error("daemon exited"), { code: "transport-error" }),
+  );
+  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+  // Give the adoption a beat: nothing may settle.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(state.settleCalls).toEqual([1, 1]);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});

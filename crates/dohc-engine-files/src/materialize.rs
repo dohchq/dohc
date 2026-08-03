@@ -1068,8 +1068,7 @@ fn read_current_no_follow(target: &Path) -> Result<CurrentTarget, MaterializeErr
             // BEFORE the replace loop can classify it. Name the lock here
             // too (#554): the job stays pending either way, and callers key
             // their retry contract off `FileLocked`, not the io grab-bag.
-            Err(err) if is_transient_lock(&err) => return Err(MaterializeError::FileLocked),
-            Err(err) => return Err(MaterializeError::io(target, &err)),
+            Err(err) => return Err(classify_read_open_failure(err, target)),
         }
     };
 
@@ -1972,6 +1971,23 @@ fn sync_parent_dir(
     Ok(())
 }
 
+/// Classify a failed read-open of the preimage target. Deliberately NARROWER
+/// than [`is_transient_lock`]: only a real sharing/lock violation
+/// (`ERROR_SHARING_VIOLATION` = 32, `ERROR_LOCK_VIOLATION` = 33) is
+/// [`MaterializeError::FileLocked`] — the retryable contract callers poll on.
+/// std folds `ERROR_ACCESS_DENIED` (5) into `PermissionDenied` as well, and an
+/// ACL denial is TERMINAL: calling it a lock would put the caller into an
+/// endless retry under a false cause ("another program has this file open").
+/// The replace loop keeps the broader predicate because its retry is bounded.
+#[cfg(windows)]
+fn classify_read_open_failure(err: std::io::Error, target: &Path) -> MaterializeError {
+    if matches!(err.raw_os_error(), Some(32) | Some(33)) {
+        MaterializeError::FileLocked
+    } else {
+        MaterializeError::io(target, &err)
+    }
+}
+
 /// Whether an io error is a transient sharing/lock condition worth retrying
 /// (Windows AV/indexer `ERROR_SHARING_VIOLATION` = os error 32, or a permission
 /// denial std maps such handles to). A non-transient error is returned at once.
@@ -2074,6 +2090,26 @@ mod tests {
     };
     use dohc_test_scratch::ScratchDir;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// #595 codex P2: only a real sharing/lock violation may become the
+    /// retryable `FileLocked` contract at the preimage read. std folds
+    /// `ERROR_ACCESS_DENIED` into `PermissionDenied` too, and an ACL denial
+    /// is terminal — the desktop polls `FileLocked` until it clears, so a
+    /// misclassified denial means an endless retry under a false cause.
+    #[cfg(windows)]
+    #[test]
+    fn read_open_failures_split_locks_from_acl_denials() {
+        let classify = |code: i32| {
+            classify_read_open_failure(std::io::Error::from_raw_os_error(code), Path::new("n.md"))
+        };
+        assert!(matches!(classify(32), MaterializeError::FileLocked));
+        assert!(matches!(classify(33), MaterializeError::FileLocked));
+        // ERROR_ACCESS_DENIED: terminal io error, never FileLocked — even
+        // though the bounded replace loop treats it as absorbable.
+        assert!(matches!(classify(5), MaterializeError::Io { .. }));
+        assert!(is_transient_lock(&std::io::Error::from_raw_os_error(5)));
+    }
+
 
     struct Scratch {
         root: ScratchDir,

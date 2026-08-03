@@ -1297,6 +1297,12 @@ export function createWorkspaceEngineCapture(
     // generation is stamped here, where it is known, and travels with every
     // settle callback.
     let generations = 0;
+    // A file-locked settle failure means the engine holds a durably pending
+    // write and the GENERATION's own backoff timer is retrying it. That timer
+    // dies with the generation, so the fact it existed must outlive it (#595):
+    // set on a file-locked refusal, cleared by the next settle that reaches
+    // disk, and read at adoption to re-arm the retry on the replacement.
+    let lockedSettlePending = false;
     const openGeneration = async (
       seedAbsentLineage: boolean,
       openOptions?: { retryTransportErrors?: boolean },
@@ -1350,10 +1356,14 @@ export function createWorkspaceEngineCapture(
             // failure also goes to onSettleError, which reports it.
             onSessionError: requestReconnect,
             onSettleStart: (token) => input.onSettleStart(token, generation),
-            onSettleError: (error, token) =>
-              input.onSettleError(error, token, generation),
-            onSettled: (result, token) =>
-              input.onSettled(result, token, generation),
+            onSettleError: (error, token) => {
+              if (isFileLockedRefusal(error)) lockedSettlePending = true;
+              input.onSettleError(error, token, generation);
+            },
+            onSettled: (result, token) => {
+              lockedSettlePending = false;
+              return input.onSettled(result, token, generation);
+            },
           });
           openingRemoteUpdates.set(opened, opening);
           return opened;
@@ -1426,6 +1436,19 @@ export function createWorkspaceEngineCapture(
         throw error;
       }
       markAlive();
+      // A pending locked settle survives the rebind (#595): the failed
+      // generation's retry timer died with it, and when the replacement
+      // needed no replay (the daemon's CRDT already holds the edit) nothing
+      // above armed a settle — releasing the lock later would leave the
+      // artifact stale until an unrelated edit. Ask the replacement to
+      // settle: unchanged content routes through the engine's idempotent
+      // branch, which replays the pending write, and a still-held lock
+      // re-enters the provider's own retry ladder. Failures are reported
+      // through the settle channel like any other, so nothing extra to do
+      // with the rejection here.
+      if (lockedSettlePending) {
+        void replacement.settleNow().catch(() => undefined);
+      }
     };
 
     const rebind = async (
