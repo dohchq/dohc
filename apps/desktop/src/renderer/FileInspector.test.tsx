@@ -34,7 +34,7 @@ import {
   resolveWikilinkNavigation,
 } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
-import { resetOrphanedDrafts } from "./orphanedDrafts";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
@@ -1943,6 +1943,100 @@ describe("markdown document opening state", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
+  // #579 review r4: overlapping writes. Autosave A awaiting its IPC and a
+  // later B must not overlap — if B settles first, a waiter releases while
+  // A's older temp-file rename is still pending over newer content. One
+  // write in flight, ever; the next one waits and then reads the NEWER text.
+  it("serializes overlapping autosaves — a second write waits for the first to land", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    let releaseFirst!: () => void;
+    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseFirst = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    let writes = 0;
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => {
+      writes += 1;
+      return writes === 1
+        ? heldFirst
+        : Promise.resolve({ path: "a.md", recorded: true });
+    });
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />);
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(
+      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      "One",
+    );
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    // The user keeps typing while write one is still in flight; a second
+    // autosave arms and fires.
+    await user.type(screen.getByTestId("markdown-editor"), "Two");
+    // MUTATION (serialization): remove the `while (pendingWrite.current)`
+    // wait in writeDraftNow. The second write issues inside this window,
+    // overlapping the first.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseFirst();
+      await heldFirst;
+    });
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    // The serialized second write carries the newest text.
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[1]).toEqual([
+      {
+        workspaceId: "ws-1",
+        relativePath: "a.md",
+        text: "# Plan\n\nBase paragraph.\nOneTwo",
+      },
+    ]);
+  });
+
+  // #579 review r4: recovery follows the PATH, not the file kind. An
+  // extension-changing rename remaps a markdown draft onto the text view,
+  // and Copy/Dismiss must exist there too — a marker with no controls
+  // strands the text behind a permanent dirty dot.
+  it("offers recovery on a non-markdown view after an extension-changing rename", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    captureOrphanedDraft("ws-1", "a.txt", "# Plan\n\nBase paragraph.\nDraft!");
+    render(<FileInspector workspaceId="ws-1" path="a.txt" />);
+
+    // MUTATION (kind coverage): drop {recoveryNotices} from the text branch.
+    // The path still carries the marker, but Copy/Dismiss is gone.
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "# Plan\n\nBase paragraph.\nDraft!",
+      ),
+    );
+    await user.click(screen.getByTestId("orphaned-draft-dismiss"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
   });
 
   // #579 review P2 (engine half): a bound engine session's settled "Saved"

@@ -6259,4 +6259,148 @@ describe("set-aside draft recovery", () => {
     // The notice survives the switch — recovery needed no save.
     expect(screen.getByTestId("orphaned-draft-notice")).toBeTruthy();
   });
+
+  // #579 review r4: only the mounted inspector can report savable-dirty, but
+  // recovery is knowable for EVERY tab — an inactive tab must keep its
+  // marker or the user forgets the draft exists.
+  it("marks an inactive tab that holds a set-aside draft", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["a.md", "b.md"],
+        activeTab: "a.md",
+      }),
+    );
+    captureOrphanedDraft(WORKSPACE.workspaceId, "b.md", "Kept!");
+    renderShell(bridge);
+
+    // MUTATION (per-tab set): key the marker off the active tab only. The
+    // inactive b.md loses its marker while its draft still exists.
+    const inactive = await screen.findByTestId("tab-b.md");
+    expect(within(inactive).getByTestId("tab-dirty")).toBeTruthy();
+    const active = screen.getByTestId("tab-a.md");
+    expect(within(active).queryByTestId("tab-dirty")).toBeNull();
+  });
+
+  // #579 review r4: the set-aside drafts live in renderer memory only, so
+  // closing the window is the one irreversible exit — and an irreversible
+  // change must be announced before it runs. Electron cancels the close
+  // silently on preventDefault, so the dialog IS the announcement.
+  it("warns before closing while set-aside edits exist, and closes on 'Close anyway'", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    captureOrphanedDraft(WORKSPACE.workspaceId, "a.md", "Kept!");
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    // MUTATION (close guard): remove the beforeunload interception. The
+    // close proceeds unannounced and every set-aside edit dies with it.
+    const first = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(first);
+    });
+    expect(first.defaultPrevented).toBe(true);
+    expect(await screen.findByTestId("recovery-close-warning")).toBeTruthy();
+
+    // Go back keeps everything.
+    await user.click(screen.getByTestId("recovery-close-goback"));
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+
+    // Close anyway releases the guard and re-runs the close.
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    const second = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(second);
+    });
+    await user.click(await screen.findByTestId("recovery-close-anyway"));
+    expect(closeSpy).toHaveBeenCalled();
+    const third = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(third);
+    });
+    expect(third.defaultPrevented).toBe(false);
+    closeSpy.mockRestore();
+  });
+
+  it("does not intercept closing when no set-aside edits exist", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+  });
+
+  // #579 review r4: a failed save-first flush aborts the switch, the
+  // workspace never leaves its version, and the recovery announcement must
+  // not fire — announcing a version change reopens the live document and
+  // sets the still-editable draft aside on the SAME version.
+  it("does not set the draft aside when a failed switch never left the version", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "v2",
+          name: "Draft two",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: "main",
+    }));
+    // The save-first flush fails: the autosave write rejects.
+    bridge.writeWorkspaceText = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    renderShell(bridge);
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(
+      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      "Draft!",
+    );
+    await screen.findByTestId("tab-dirty");
+
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+    await user.click(await screen.findByTestId("version-switch-save-continue"));
+
+    // The flush failed, the switch never started, the version never changed.
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalled(),
+    );
+    expect(bridge.switchWorkspaceVersion).not.toHaveBeenCalled();
+
+    // MUTATION (failed-switch announce): announce the unchanged version from
+    // performSwitch's catch. The bookkeeping reopen then sets the draft
+    // aside on the same version — the notice appears and the editor loses
+    // the text the user could just keep editing.
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    expect(
+      (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
+    ).toContain("Draft!");
+  });
 });

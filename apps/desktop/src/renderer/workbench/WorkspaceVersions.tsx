@@ -164,6 +164,12 @@ export function VersionMenu(props: {
     [snapshot],
   );
   const onMain = (active?.kind ?? "main") === "main";
+  // The version this workspace is on, readable inside async continuations
+  // without a stale closure (assigned during render, readOnlyRef precedent).
+  // performSwitch's failure path compares against it: a switch that never
+  // took must not be announced as a version change.
+  const activeVersionIdRef = useRef<string | null>(null);
+  activeVersionIdRef.current = snapshot?.activeVersionId ?? null;
 
   const closeMenu = useCallback((refocus = true) => {
     setMenuOpen(false);
@@ -175,6 +181,7 @@ export function VersionMenu(props: {
   const performSwitch = useCallback(
     async (versionId: string) => {
       const token = beginOperation();
+      const before = activeVersionIdRef.current;
       setBusy("switch");
       setInlineError(null);
       try {
@@ -200,6 +207,13 @@ export function VersionMenu(props: {
         // re-read reports, and if that read fails too, nobody knows.
         const recovered = await refresh().catch(() => null);
         if (token !== operationToken.current) return;
+        // A switch that never took — a failed save-first flush is the common
+        // case — leaves the workspace on the version it was on. Announcing a
+        // version change here would reopen live documents and set their
+        // pending drafts aside on the SAME version (#579 review, r4). An
+        // unknown outcome (the re-read failed too) still announces: showing
+        // an uncertain reality beats staying blind.
+        if (recovered !== null && recovered.activeVersionId === before) return;
         props.onWorkspaceStateChanged(recovered?.activeVersionId);
       } finally {
         if (token === operationToken.current) setBusy(null);

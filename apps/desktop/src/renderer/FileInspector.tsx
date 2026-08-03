@@ -1209,6 +1209,16 @@ function MarkdownView(props: {
     // zero-byte file: this reports the honest state, that the file on disk is
     // behind the editor.
     //
+    // ONE write in flight, ever (#579 review, r4). Without this, autosave A
+    // awaiting its IPC and a later B can overlap — B settles first, a waiter
+    // releases, and A's older temp-file rename lands over newer content. The
+    // loop, not a single await: every waiter that resumes re-checks, and the
+    // first to proceed claims the slot synchronously before the next runs.
+    // Serializing also means the later write reads the NEWER draft text.
+    while (pendingWrite.current) await pendingWrite.current;
+    // Guards AFTER the wait: `readOnly`/`opening` may have flipped while an
+    // earlier write was landing, and the refs carry the current answer.
+    //
     // The draft itself is still lost when the view is torn down in this state:
     // preserving the TEXT needs eager serialization, because
     // `serializeDraftRef` reads the live editor and a read-only window
@@ -2505,6 +2515,13 @@ export function FileInspector(props: {
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
     : undefined;
+  // Recovery follows the PATH, not the file kind (#579 review, r4): an
+  // extension-changing rename remaps a markdown draft onto a text/CSV/binary
+  // view, and Copy/Dismiss must exist wherever the marker shows. The markdown
+  // branch renders its own copy inside its header layout.
+  const recoveryNotices = (
+    <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+  );
 
   if (notInVersion) {
     return (
@@ -2518,7 +2535,7 @@ export function FileInspector(props: {
         {/* A reopen's set-aside drafts (#567) survive this refusal in the
             module store — recovery stays visible right here, not behind a
             version switch. */}
-        <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+        {recoveryNotices}
         <div
           data-testid="file-not-in-version"
           className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-subtle"
@@ -2593,6 +2610,7 @@ export function FileInspector(props: {
             onShare={onShareCurrentPath}
           />
           {truncatedNotice}
+          {recoveryNotices}
           <CsvView
             body={text ?? ""}
             workspaceId={props.workspaceId}
@@ -2615,6 +2633,7 @@ export function FileInspector(props: {
             onShare={onShareCurrentPath}
           />
           {truncatedNotice}
+          {recoveryNotices}
           <TextEditorView
             body={text ?? ""}
             testId={kind === "json" ? "view-json" : "view-text"}
@@ -2643,6 +2662,7 @@ export function FileInspector(props: {
             label="image"
             onShare={onShareCurrentPath}
           />
+          {recoveryNotices}
           <ImageView url={url} path={props.path} />
         </div>
       );
@@ -2655,6 +2675,7 @@ export function FileInspector(props: {
             label="audio"
             onShare={onShareCurrentPath}
           />
+          {recoveryNotices}
           <div className="flex flex-1 items-center justify-center p-4">
             <audio data-testid="view-audio" controls src={url} />
           </div>
@@ -2669,6 +2690,7 @@ export function FileInspector(props: {
             label="pdf"
             onShare={onShareCurrentPath}
           />
+          {recoveryNotices}
           <AffordanceCard
             testId="view-pdf"
             title="PDF document"
@@ -2679,27 +2701,30 @@ export function FileInspector(props: {
       );
     case "database":
       return (
-        <Suspense
-          fallback={
-            <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-              <ViewHeader
-                icon={<FileText size={13} aria-hidden />}
-                path={props.path}
-                label="database"
-                onShare={onShareCurrentPath}
-              />
-              <Empty>Loading database…</Empty>
-            </div>
-          }
-        >
-          <LazyDatabaseStudioView
-            workspaceId={props.workspaceId}
-            path={props.path}
-            refreshKey={props.refreshKey}
-            onSharePath={props.onSharePath}
-            readOnly={props.readOnly}
-          />
-        </Suspense>
+        <>
+          {recoveryNotices}
+          <Suspense
+            fallback={
+              <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
+                <ViewHeader
+                  icon={<FileText size={13} aria-hidden />}
+                  path={props.path}
+                  label="database"
+                  onShare={onShareCurrentPath}
+                />
+                <Empty>Loading database…</Empty>
+              </div>
+            }
+          >
+            <LazyDatabaseStudioView
+              workspaceId={props.workspaceId}
+              path={props.path}
+              refreshKey={props.refreshKey}
+              onSharePath={props.onSharePath}
+              readOnly={props.readOnly}
+            />
+          </Suspense>
+        </>
       );
     default:
       return (
@@ -2710,6 +2735,7 @@ export function FileInspector(props: {
             label="file"
             onShare={onShareCurrentPath}
           />
+          {recoveryNotices}
           <AffordanceCard
             testId="view-binary"
             title="File"

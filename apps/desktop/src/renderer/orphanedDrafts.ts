@@ -15,10 +15,18 @@ export type OrphanedDraft = {
 };
 
 const EMPTY: readonly OrphanedDraft[] = [];
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
 const drafts = new Map<string, readonly OrphanedDraft[]>();
 const listeners = new Set<() => void>();
 let nextId = 1;
 let notifyQueued = false;
+// Bumped on every mutation; snapshot caches key off it so useSyncExternalStore
+// sees stable references between mutations.
+let storeVersion = 0;
+const pathSetCache = new Map<
+  string,
+  { version: number; paths: ReadonlySet<string> }
+>();
 
 function keyFor(workspaceId: string, path: string): string {
   // JSON quotes each part, so two different keys cannot collide.
@@ -31,6 +39,8 @@ function keyFor(workspaceId: string, path: string): string {
 // the notification: it reads the map through the same hook one microtask
 // later.
 function scheduleNotify(): void {
+  // Every caller just mutated the map; the bump invalidates snapshot caches.
+  storeVersion += 1;
   if (notifyQueued) return;
   notifyQueued = true;
   queueMicrotask(() => {
@@ -102,6 +112,36 @@ export function useOrphanedDrafts(
   return useSyncExternalStore(subscribe, () => {
     return drafts.get(keyFor(workspaceId, path)) ?? EMPTY;
   });
+}
+
+// Every path in one workspace that holds a set-aside draft. The tab strip
+// marks INACTIVE tabs with it (#579 review, r4) — only the mounted inspector
+// can report savable-dirty, but recovery is knowable for every tab.
+export function useOrphanedDraftPaths(workspaceId: string): ReadonlySet<string> {
+  return useSyncExternalStore(subscribe, () => {
+    const cached = pathSetCache.get(workspaceId);
+    if (cached && cached.version === storeVersion) return cached.paths;
+    const paths = new Set<string>();
+    for (const key of drafts.keys()) {
+      const [keyWorkspaceId, path] = JSON.parse(key) as [string, string];
+      if (keyWorkspaceId === workspaceId) paths.add(path);
+    }
+    const entry = {
+      version: storeVersion,
+      paths: paths.size === 0 ? EMPTY_PATHS : paths,
+    };
+    pathSetCache.set(workspaceId, entry);
+    return entry.paths;
+  });
+}
+
+// Whether ANY workspace still holds set-aside drafts. The close warning keys
+// off this (#579 review, r4): the store is in-memory, so closing the window
+// is the one irreversible exit and the user must be told before it runs.
+export function orphanedDraftCount(): number {
+  let count = 0;
+  for (const kept of drafts.values()) count += kept.length;
+  return count;
 }
 
 // Test seam: the store is module state, so suites that capture drafts reset

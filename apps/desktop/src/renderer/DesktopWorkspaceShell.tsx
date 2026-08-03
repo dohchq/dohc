@@ -76,7 +76,11 @@ import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
-import { remapOrphanedDraftPaths, useOrphanedDrafts } from "./orphanedDrafts";
+import {
+  orphanedDraftCount,
+  remapOrphanedDraftPaths,
+  useOrphanedDraftPaths,
+} from "./orphanedDrafts";
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
 // chunk resolved, and every character typed in that gap went to whatever the
@@ -1247,13 +1251,13 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
-  // Set-aside recovery for the ACTIVE tab (#567): it marks the tab's dirty
-  // dot — the edit is not saved — but is deliberately NOT part of
-  // activeTabDirty, which drives save-first machinery that cannot save it
+  // Set-aside recovery markers (#567): every path holding a draft marks its
+  // tab and Open Editors row — inactive tabs included, because the store is
+  // knowable for all of them (#579 review, r4). Deliberately NOT part of
+  // activeTabDirty, which drives save-first machinery that cannot save these
   // (#579 review, P2). The store outlives tabs and version switches, so no
   // save-first prompt is owed.
-  const activeTabRecovery =
-    useOrphanedDrafts(workspaceId, wb.activeTab ?? "").length > 0;
+  const recoveryPaths = useOrphanedDraftPaths(workspaceId);
   // Every workbench destination change invalidates an in-flight canonical DM
   // lookup. Kept beside the central mutateWb seam so file/graph/history/tab
   // navigation cannot be missed by a one-off opener.
@@ -1523,6 +1527,29 @@ export function DesktopWorkspaceShell(props: {
       flush();
     };
   }, [workspaceId]);
+
+  // Set-aside drafts (#567) live in renderer memory only, so closing or
+  // reloading this window is the one exit that destroys them — and an
+  // irreversible change must be announced before it runs (product invariant).
+  // Electron cancels the close SILENTLY on preventDefault, so the dialog
+  // below is the announcement; [Close anyway] releases the guard and re-runs
+  // the close. Any workspace's drafts count: the whole renderer dies at once.
+  //
+  // Persisting the drafts instead is a separate decision — durability and
+  // secret-path handling — deliberately not taken here (#579 review, r4).
+  const [closeWarning, setCloseWarning] = useState<number | null>(null);
+  const bypassCloseGuard = useRef(false);
+  useEffect(() => {
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (bypassCloseGuard.current) return;
+      const count = orphanedDraftCount();
+      if (count === 0) return;
+      event.preventDefault();
+      setCloseWarning(count);
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
 
   // Latest-wins: fourteen call sites issue listings — mount, the watcher,
   // imports, restores, the share pull — and they can resolve out of order. An
@@ -3255,7 +3282,8 @@ export function DesktopWorkspaceShell(props: {
         folders={folders}
         activeTab={wb.activeTab}
         openTabs={wb.tabs}
-        dirtyTab={activeTabDirty || activeTabRecovery ? wb.activeTab : null}
+        dirtyTab={activeTabDirty ? wb.activeTab : null}
+        recoveryPaths={recoveryPaths}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
@@ -3577,7 +3605,8 @@ export function DesktopWorkspaceShell(props: {
                 <EditorTabs
                   tabs={wb.tabs}
                   activeTab={wb.activeTab}
-                  activeTabDirty={activeTabDirty || activeTabRecovery}
+                  activeTabDirty={activeTabDirty}
+                  recoveryPaths={recoveryPaths}
                   onActivate={activateEditorTab}
                   onClose={closeFileTab}
                   onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
@@ -3612,7 +3641,8 @@ export function DesktopWorkspaceShell(props: {
             <EditorTabs
               tabs={wb.tabs}
               activeTab={wb.activeTab}
-              activeTabDirty={activeTabDirty || activeTabRecovery}
+              activeTabDirty={activeTabDirty}
+              recoveryPaths={recoveryPaths}
               onActivate={activateEditorTab}
               onClose={closeFileTab}
               onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
@@ -4004,6 +4034,54 @@ export function DesktopWorkspaceShell(props: {
               onClose={() => setShareTarget(null)}
             />
           </Suspense>
+        </Overlay>
+      ) : null}
+      {closeWarning !== null ? (
+        <Overlay onClose={() => setCloseWarning(null)}>
+          <div
+            data-testid="recovery-close-warning"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="recovery-close-warning-title"
+            className="dohc-elevated w-[min(420px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"
+          >
+            <h3
+              id="recovery-close-warning-title"
+              className="m-0 text-sm font-semibold text-ink"
+            >
+              Close without your set-aside {closeWarning === 1 ? "edit" : "edits"}?
+            </h3>
+            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
+              {closeWarning === 1
+                ? "1 set-aside edit is lost when dohc closes."
+                : `${closeWarning} set-aside edits are lost when dohc closes.`}{" "}
+              Copy or dismiss {closeWarning === 1 ? "it" : "them"} first to keep
+              the text.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                data-testid="recovery-close-goback"
+                autoFocus
+                onClick={() => setCloseWarning(null)}
+                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+              >
+                Go back
+              </button>
+              <button
+                type="button"
+                data-testid="recovery-close-anyway"
+                onClick={() => {
+                  bypassCloseGuard.current = true;
+                  setCloseWarning(null);
+                  window.close();
+                }}
+                className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
+              >
+                Close anyway
+              </button>
+            </div>
+          </div>
         </Overlay>
       ) : null}
       {openShareOpen ? (
