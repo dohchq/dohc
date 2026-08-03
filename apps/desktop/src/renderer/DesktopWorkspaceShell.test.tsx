@@ -2570,9 +2570,54 @@ describe("history page", () => {
     expect(placeholder.textContent).toContain(
       "dohc could not confirm whether this workspace records history.",
     );
+    // The Next this state owes (#601 codex P2): the one action that re-runs
+    // both reads — no lighter re-read is wired on this surface.
+    expect(placeholder.textContent).toContain("Restart dohc to try again.");
     // The false cause and the false privacy assurance this pins against.
     expect(placeholder.textContent).not.toContain("Settings");
     expect(placeholder.textContent).not.toContain("not being recorded");
+  });
+
+  // The masked vector (#601 codex P2): the recorder failed to build on an
+  // engine-ENABLED workspace. The renderer's own read still says engine-on,
+  // and without the status override the shell mounts the engine timeline —
+  // whose every listEngineMoments call can only error. Main's status must
+  // override the renderer capability, and the engine fetch must never fire.
+  it("lets the status failure override the renderer's engine-on read", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const failedStatus = {
+      ...SYNC_STATUS,
+      historyRecordingOff: true,
+      historyRecordingUnavailable: true,
+    };
+    bridge.openWorkspace = vi.fn(async () => failedStatus);
+    bridge.getSyncStatus = vi.fn(async () => failedStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    // Prove the renderer's read really said engine-ON before anything is
+    // asserted: this engine-only control exists only once the settings read
+    // resolved the flag true. Without this the pins below pass vacuously in
+    // the pre-read window where engineEnabled is still false.
+    await screen.findByTestId("titlebar-chats-sidebar");
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    expect(placeholder.textContent).toContain(
+      "dohc could not start recording history for this workspace.",
+    );
+    expect(placeholder.textContent).not.toContain("turned off in Settings");
+
+    // Activity pushes take the no-engine refresh path too — the pin that
+    // kills the recurring listEngineMoments error loop.
+    const statusCalls = bridge.getSyncStatus.mock.calls.length;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() =>
+      expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(statusCalls),
+    );
+    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
   });
 
   // #505 on this surface: the recorder failed to build. Nothing records, but

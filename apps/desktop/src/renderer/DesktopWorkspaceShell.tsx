@@ -250,8 +250,10 @@ function historyOffPlaceholderCopy(
     return "History is off for this workspace. The workspace engine is turned off in Settings → Advanced, so changes are not being recorded. Turn it on and reopen the workspace to record history again.";
   }
   // Main has not said recording is off. It may be recording right now, so
-  // no cause and no "not recorded" — only what dohc could not do.
-  return "History is unavailable. dohc could not confirm whether this workspace records history.";
+  // no cause and no "not recorded" — only what dohc could not do, plus the
+  // one next step that reliably re-runs both reads (no lighter re-read is
+  // wired on this surface).
+  return "History is unavailable. dohc could not confirm whether this workspace records history. Restart dohc to try again.";
 }
 
 export function chatsNavigationRequiresRemount(
@@ -1120,7 +1122,22 @@ export function DesktopWorkspaceShell(props: {
   // that has not happened yet.
   const [filesLoaded, setFilesLoaded] = useState(false);
   const [folders, setFolders] = useState<string[]>([]);
-  const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
+  const [syncStatus, setSyncStatusState] = useState<SyncStatusResult | null>(null);
+  // Mirror of the newest status, readable by callbacks without re-creating
+  // them per status change (#542): refreshHistory consults it to decide
+  // whether the engine-history fetch may run at all, and its identity churn
+  // would re-run the workspace-open effect that lists it as a dependency.
+  const syncStatusRef = useRef<SyncStatusResult | null>(null);
+  const setSyncStatus = useCallback((status: SyncStatusResult | null) => {
+    syncStatusRef.current = status;
+    setSyncStatusState(status);
+  }, []);
+  // Main's single answer to "does anything record here" (#542): when the
+  // open-time decision produced no recorder — opt-out, unreadable settings,
+  // or a failed capture build — every engine-history call can only error,
+  // whatever the renderer's own capability read said.
+  const statusSaysNoRecorder = (status: SyncStatusResult | null) =>
+    Boolean(status?.historyRecordingOff || status?.historyRecordingUnavailable);
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
   const [cloudStatus, setCloudStatus] = useState<CloudStatusResult | null>(null);
@@ -1773,7 +1790,10 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const refreshHistory = useCallback(async () => {
-    if (engineEnabled && !isShareView) {
+    // The engine fetch runs only when main's status agrees a recorder exists
+    // (#542): after a failed capture build the renderer's own read still
+    // says engine-on, and every listEngineMoments call would error.
+    if (engineEnabled && !isShareView && !statusSaysNoRecorder(syncStatusRef.current)) {
       // Latest-COMMITTED-wins: each request advances the token, and an answer
       // displays only if it is newer than the answer already displayed, so an
       // older response can never overwrite newer moments or move
@@ -3039,7 +3059,8 @@ export function DesktopWorkspaceShell(props: {
       ? { ended: shareViewEnded, granterEmail: shareView.granterEmail }
       : null,
   );
-  const historyTimeline = engineEnabled && !isShareView ? (
+  const historyTimeline =
+    engineEnabled && !isShareView && !statusSaysNoRecorder(syncStatus) ? (
     <EngineHistoryView
       moments={engineHistory?.moments ?? []}
       hasMore={engineHistory?.nextBeforeMomentOrder != null}
