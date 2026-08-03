@@ -58,6 +58,13 @@ export async function captureForFlaggedWorkspace(
   };
 }
 
+// How the caller's path recovers from a failed capture build (#541, codex P2
+// on #583). A RETAINED workspace session keeps the failed decision for the
+// whole app session — only a restart re-runs it. A TRANSIENT open (background
+// dispatch, runner self-test) is closed and removed by its release, so the
+// next attempt rebuilds the capture: retry is the instruction that works.
+export type EngineOffRecovery = "restart" | "retry";
+
 // What a refusal may SAY when the gate produced no capture (#541). "Not
 // enabled" asserts a decision, and after a failed capture build — or an
 // unreadable settings file — the truth is a failure, not a setting the user
@@ -70,13 +77,14 @@ export function engineOffRefusal(
     historyRecordingUnavailable: boolean;
   },
   notEnabled: string,
+  recovery: EngineOffRecovery,
 ): string {
   // #483: the warning already names the unreadable file and the fix.
   if (status.settingsWarning) return status.settingsWarning;
   if (status.historyRecordingUnavailable) {
-    // Restart, not reopen: main builds the recorder once per workspace per
-    // app session, so reopening the workspace re-reads nothing.
-    return "dohc could not start the workspace engine for this workspace. Restart dohc to try again.";
+    return recovery === "retry"
+      ? "dohc could not start the workspace engine for this workspace. Try again."
+      : "dohc could not start the workspace engine for this workspace. Restart dohc to try again.";
   }
   return notEnabled;
 }
@@ -95,9 +103,12 @@ export async function releaseAndRefuseWithoutCapture(input: {
   };
   release: () => Promise<void>;
   notEnabled: string;
+  // Whether this open's release really closes the entry: a transient open
+  // recovers by retry, a retained one only by restart.
+  recovery: EngineOffRecovery;
 }): Promise<void> {
   if (input.capture) return;
-  const refusal = engineOffRefusal(input.status(), input.notEnabled);
+  const refusal = engineOffRefusal(input.status(), input.notEnabled, input.recovery);
   await input.release();
   throw new Error(refusal);
 }

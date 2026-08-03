@@ -1693,6 +1693,9 @@ const tryInVersionSessions = createTryInVersionSessions({
         engineOffRefusal(
           activity.getStatus(workspace.workspaceId),
           "Versions are not enabled for this workspace.",
+          // openWorkspaceActivity retained this session: only a restart
+          // re-runs the capture decision.
+          "restart",
         ),
       );
     }
@@ -2088,22 +2091,30 @@ async function closeDispatchRunActivity(workspaceId: string): Promise<void> {
 
 async function acquireDispatchRunActivity(
   workspace: CreatedWorkspace,
-): Promise<() => Promise<void>> {
+): Promise<{ release: () => Promise<void>; transient: boolean }> {
   const alreadyOpen = activity
     .listOpenWorkspaceIds()
     .includes(workspace.workspaceId);
+  // Transient means the release below really closes the entry — so a failed
+  // capture build recovers by simply trying again (the next open rebuilds
+  // it), where a retained session recovers only by restart (#541).
+  const transient =
+    !alreadyOpen && !retainedWorkspaceActivities.has(workspace.workspaceId);
   await workspaceChatLifecycle.open(
     workspace,
     () => ensureWorkspaceActivityOpen(workspace),
   );
   let released = false;
-  return async () => {
-    if (released) return;
-    released = true;
-    if (alreadyOpen || retainedWorkspaceActivities.has(workspace.workspaceId)) {
-      return;
-    }
-    await closeDispatchRunActivity(workspace.workspaceId);
+  return {
+    transient,
+    release: async () => {
+      if (released) return;
+      released = true;
+      if (alreadyOpen || retainedWorkspaceActivities.has(workspace.workspaceId)) {
+        return;
+      }
+      await closeDispatchRunActivity(workspace.workspaceId);
+    },
   };
 }
 
@@ -2196,7 +2207,7 @@ const chatDispatchService = createChatDispatchService({
     if (!registered) {
       throw new Error(`Unknown workspace: ${workspace.workspaceId}`);
     }
-    const release = await acquireDispatchRunActivity(registered);
+    const { release, transient } = await acquireDispatchRunActivity(registered);
     // The helper owns the read-then-release order: releasing the transient
     // open deletes the status entry, and its defaults read as the opt-out.
     await releaseAndRefuseWithoutCapture({
@@ -2204,6 +2215,7 @@ const chatDispatchService = createChatDispatchService({
       status: () => activity.getStatus(workspace.workspaceId),
       release,
       notEnabled: "Chats are not enabled for this workspace.",
+      recovery: transient ? "retry" : "restart",
     });
     return release;
   },
@@ -2325,6 +2337,9 @@ async function openCliWorkspace(
       engineOffRefusal(
         activity.getStatus(workspace.workspaceId),
         "Chats are not enabled for this workspace.",
+        // openWorkspaceActivity retained this session: only a restart
+        // re-runs the capture decision.
+        "restart",
       ),
     );
   }
@@ -5070,7 +5085,7 @@ function registerIpcHandlers(
       // #541: the caller's "not enabled" copy holds only for the real
       // opt-out — after a failed capture build the refusal names the failure.
       throw new Error(
-        engineOffRefusal(activity.getStatus(workspace.workspaceId), notEnabled),
+        engineOffRefusal(activity.getStatus(workspace.workspaceId), notEnabled, "restart"),
       );
     }
     return { workspace, capture };

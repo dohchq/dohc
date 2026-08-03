@@ -136,7 +136,11 @@ describe("engineOffRefusal", () => {
 
   it("keeps the caller's opt-out copy only for the real opt-out", () => {
     expect(
-      engineOffRefusal({ historyRecordingUnavailable: false }, NOT_ENABLED),
+      engineOffRefusal(
+        { historyRecordingUnavailable: false },
+        NOT_ENABLED,
+        "restart",
+      ),
     ).toBe(NOT_ENABLED);
   });
 
@@ -144,6 +148,7 @@ describe("engineOffRefusal", () => {
     const refusal = engineOffRefusal(
       { historyRecordingUnavailable: true },
       NOT_ENABLED,
+      "restart",
     );
     expect(refusal).toBe(
       "dohc could not start the workspace engine for this workspace. Restart dohc to try again.",
@@ -152,12 +157,26 @@ describe("engineOffRefusal", () => {
     expect(refusal).not.toContain("not enabled");
   });
 
+  // Codex P2 on #583 (round 2): the instruction must be the one that works
+  // on the caller's path. A retained session keeps the failed decision until
+  // restart; a transient dispatch open is rebuilt on the next attempt, so
+  // telling that caller to restart the whole app is false. Both messages are
+  // pinned exactly — swapping the recoveries fails both tests.
+  it("tells a transient open to try again, not to restart", () => {
+    expect(
+      engineOffRefusal({ historyRecordingUnavailable: true }, NOT_ENABLED, "retry"),
+    ).toBe(
+      "dohc could not start the workspace engine for this workspace. Try again.",
+    );
+  });
+
   it("names the unreadable settings file when that read is the cause (#483)", () => {
     const warning =
       "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
     const refusal = engineOffRefusal(
       { settingsWarning: warning, historyRecordingUnavailable: false },
       NOT_ENABLED,
+      "restart",
     );
     expect(refusal).toBe(warning);
     expect(refusal).toContain("/ws/.dohc/settings.local.json");
@@ -186,9 +205,12 @@ describe("releaseAndRefuseWithoutCapture", () => {
           released = true;
         },
         notEnabled: NOT_ENABLED,
+        recovery: "retry",
       }),
     ).rejects.toThrow(
-      "dohc could not start the workspace engine for this workspace.",
+      // The transient open's true next step: the release closed the entry,
+      // so the next attempt rebuilds the capture — no restart needed.
+      "dohc could not start the workspace engine for this workspace. Try again.",
     );
     // The hold is still released — the refusal never leaks the open.
     expect(released).toBe(true);
@@ -203,6 +225,7 @@ describe("releaseAndRefuseWithoutCapture", () => {
         released = true;
       },
       notEnabled: NOT_ENABLED,
+      recovery: "retry",
     });
     expect(released).toBe(false);
   });
