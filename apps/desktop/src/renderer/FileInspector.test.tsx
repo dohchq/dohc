@@ -26,11 +26,15 @@ import "./SourceCodeEditor";
 
 // jsdom implements no elementFromPoint, and a click that lands on a mounted
 // ProseMirror view reaches posAtCoords, which calls it unguarded — an
-// uncaught TypeError inside jsdom's event dispatch that fails the run while
-// every test passes. On main the editor mount raced the click, so this fired
-// as a roughly one-in-a-dozen lottery (#568's rotating cast); the pre-warm
-// above makes mount-before-click the common order. "Nothing at that point"
-// sends posAtCoords into its guarded bounding-box fallback.
+// uncaught TypeError inside jsdom's event dispatch that failed full-suite
+// runs while every test passed. Measured at this head: the pre-warm imports
+// above alone remove that failure, and with them in place this stub logs
+// zero calls — it is insurance, not the fix. It stays because the jsdom gap
+// is real and any future click that reaches an editor before its views
+// settle would reintroduce an all-tests-pass exit 1; "nothing at that
+// point" sends posAtCoords into its guarded bounding-box fallback. Kept
+// here rather than a vitest setupFile: this is the only suite that clicks
+// mounted ProseMirror.
 document.elementFromPoint ??= () => null;
 import * as Y from "yjs";
 import {
@@ -473,18 +477,7 @@ describe("markdown editor unmount flush", () => {
     const bigBody = `---\ntitle: Plan\n---\n\n${"# Section\n\nbody paragraph.\n\n".repeat(3000)}`;
     expect(bigBody.length).toBeGreaterThan(64 * 1024);
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({ text: bigBody, truncated: false });
-    // Arm a promise on the failing write so the test awaits the real call
-    // (#539): the 800ms autosave debounce plus load must never race a
-    // wall-clock window — the old 3s bound was measured at 3.1s under a
-    // 24-process load (#568).
-    let writeAttempted!: () => void;
-    const writeAttempt = new Promise<void>((resolveAttempt) => {
-      writeAttempted = resolveAttempt;
-    });
-    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => {
-      writeAttempted();
-      return Promise.reject(new Error("disk full"));
-    });
+    bridgeMock.writeWorkspaceText.mockRejectedValueOnce(new Error("disk full"));
 
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="plan.md" />);
@@ -500,10 +493,15 @@ describe("markdown editor unmount flush", () => {
     await user.type(title, "!");
 
     // The autosave (800ms debounce) fails; the failure must become visible
-    // even though we never left read mode. The debounce and the write are
-    // awaited through the armed promise, so the remaining wait covers only
-    // the chip render.
-    await writeAttempt;
+    // even though we never left read mode. Await the real write first — the
+    // debounce plus load must never race a wall-clock window (its old 3s
+    // bound was measured at 3.1s under a 24-process load, #568) — and bound
+    // it, so a product that never writes fails as this named assertion
+    // rather than as the test deadline. 10s is ~3x the loaded measurement.
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalled(),
+      { timeout: 10_000 },
+    );
     await waitFor(() => {
       const chip = screen.getByTestId("markdown-save-state");
       expect(chip.textContent).toBe("Couldn't save");
