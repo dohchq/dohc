@@ -14,6 +14,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // here — an error shape that reads like a product regression rather than a flake.
 configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });
+// Pre-warm the lazily-loaded views at collection so no findBy* window pays
+// for a module load under machine load (#539's mechanism, measured in #568).
+import "./editor/MarkdownEditor";
+import "./PropertiesPanel";
+import "./DatabaseStudioView";
+import "./SourceCodeEditor";
 import * as Y from "yjs";
 import {
   markdownToYDoc,
@@ -470,16 +476,21 @@ describe("markdown editor unmount flush", () => {
     await user.click(title);
     await user.type(title, "!");
 
-    // The autosave (800ms debounce) fails; the failure must become visible even
-    // though we never left read mode.
+    // The autosave (800ms debounce) fails; the failure must become visible
+    // even though we never left read mode. Await the real write first — the
+    // debounce plus load must never race a wall-clock window (its old 3s
+    // bound was measured at 3.1s under a 24-process load, #568) — and bound
+    // it, so a product that never writes fails as this named assertion
+    // rather than as the test deadline. 10s is ~3x the loaded measurement.
     await waitFor(
-      () => {
-        const chip = screen.getByTestId("markdown-save-state");
-        expect(chip.textContent).toBe("Couldn't save");
-        expect(chip.getAttribute("data-state")).toBe("error");
-      },
-      { timeout: 3_000 },
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalled(),
+      { timeout: 10_000 },
     );
+    await waitFor(() => {
+      const chip = screen.getByTestId("markdown-save-state");
+      expect(chip.textContent).toBe("Couldn't save");
+      expect(chip.getAttribute("data-state")).toBe("error");
+    });
     // The optimistic title edit is still displayed alongside the failure.
     expect(title.value).toContain("!");
     view.unmount();

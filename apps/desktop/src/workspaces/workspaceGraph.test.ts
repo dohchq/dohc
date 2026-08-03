@@ -2,6 +2,13 @@ import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
+
+// No widened deadline here, on purpose (#568). The long path — the
+// budget-bound scan — is dominated by synchronous work the runner cannot
+// interrupt: under a 24-process load it passed at up to 6.4s against the 5s
+// default deadline in 36 runs, and the timer never fired, which means the
+// deadline does not engage on this path and widening it would protect
+// nothing while slowing every genuine async hang report.
 import {
   buildMarkdownGraph,
   computeBacklinks,

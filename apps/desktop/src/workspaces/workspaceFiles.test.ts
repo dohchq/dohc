@@ -522,10 +522,12 @@ describe("collectZipEntries", () => {
       ),
     );
     await expect(collectZipEntries(root, "many")).rejects.toThrow(/Export too large/);
-    // 15s because this one writes 2001 real files — an I/O budget, not a logic
-    // budget (#372). Scoped to this test: the other 58 in this file are fast, and
-    // a file-wide bump would triple how long a genuine hang takes to surface.
-  }, 15_000);
+    // 30s because this one writes 2001 real files — an I/O budget, not a logic
+    // budget (#372). Scoped to this test: the other 58 in this file measured
+    // under 1s on a loaded box, and a file-wide bump would multiply how long a
+    // genuine hang takes to surface. The old 15s bound was measured from
+    // inside: 13.0s on a 24-process load, 2026-08-03 (#568).
+  }, 30_000);
 
   it("exports mounted-share paths (read surface, not a write)", async () => {
     await mkdir(join(root, SHARED_WITH_ME_FOLDER, "alex", "docs"), { recursive: true });

@@ -14,6 +14,20 @@ import {
   type EngineDaemonClient,
 } from "./engineDaemonLifecycle";
 
+// Every cross-machine wait in this file carries this bound (#568). Each
+// relaunch runs the startup smoke against a real temporary directory, so a
+// wait's duration is honest fs work plus whatever else the machine is doing.
+// Measured 2026-08-03 on a 24-process load (4 copies of this suite plus 4
+// each of five desktop suites, 3 waves, 12 runs): every wait whose subject
+// arrived completed within 2.5s; 15s is 6x that, and the 20s test deadline
+// still fails a genuine hang as itself. The rolling-window failures that
+// same load produced (6/12 and 3/12 runs) were NOT slow waits — the crash
+// landed while the replacement's startup smoke was still in flight, so it
+// was spent on the burst budget and the window signal never existed to wait
+// for. Those tests now await the real became-healthy signal below.
+const WAIT = { timeout: 15_000 } as const;
+vi.setConfig({ testTimeout: 20_000 });
+
 // The healthy window the restart-budget test configures; its wait is derived
 // from this so the two can never drift apart.
 const HEALTHY_RESET_MS = 20;
@@ -150,7 +164,7 @@ describe("Rust engine daemon lifecycle", () => {
 
     await lifecycle.start();
     exits[0]?.(9, null);
-    await vi.waitFor(() => expect(tokens).toHaveLength(2));
+    await vi.waitFor(() => expect(tokens).toHaveLength(2), WAIT);
 
     expect(tokens[0]).toMatch(/^[0-9a-f]{64}$/);
     expect(tokens[1]).toMatch(/^[0-9a-f]{64}$/);
@@ -198,7 +212,7 @@ describe("Rust engine daemon lifecycle", () => {
       // The daemon restarts: the SAME lifecycle handler keeps receiving from
       // the replacement client without re-registering.
       exits[0]?.(1, null);
-      await vi.waitFor(() => expect(emitters.length).toBeGreaterThan(1));
+      await vi.waitFor(() => expect(emitters.length).toBeGreaterThan(1), WAIT);
       emitters[1]?.({
         seq: 1,
         sessionGeneration: 2,
@@ -234,7 +248,7 @@ describe("Rust engine daemon lifecycle", () => {
       await lifecycle.start();
       expect(launches).toBe(1);
       exits[0]?.(1, null);
-      await vi.waitFor(() => expect(launches).toBe(2));
+      await vi.waitFor(() => expect(launches).toBe(2), WAIT);
     } finally {
       await lifecycle.stop();
     }
@@ -308,8 +322,9 @@ describe("Rust engine daemon lifecycle", () => {
       for (let generation = 0; generation < 4; generation += 1) {
         exits[generation]?.(1, null);
         if (generation < 3) {
-          await vi.waitFor(() =>
-            expect(exits).toHaveLength(generation + 2),
+          await vi.waitFor(
+            () => expect(exits).toHaveLength(generation + 2),
+            WAIT,
           );
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
@@ -318,9 +333,7 @@ describe("Rust engine daemon lifecycle", () => {
       await vi.waitFor(
         () => {
           expect(terminalFailures).toHaveLength(1);
-        },
-        { timeout: 2_000 },
-      );
+        }, WAIT);
       expect(exits).toHaveLength(4);
       expect(terminalFailures[0]?.message).toMatch(
         /restart limit exceeded after 3 attempts/,
@@ -332,6 +345,7 @@ describe("Rust engine daemon lifecycle", () => {
 
   it("resets the restart budget after a sustained healthy generation", async () => {
     const exits: EngineClientSpawnOptions["onExit"][] = [];
+    let live = 0;
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
       maxRestarts: 1,
@@ -341,20 +355,27 @@ describe("Rust engine daemon lifecycle", () => {
         exits.push(options.onExit);
         return new FakeClient();
       },
+      onLaunch: () => {
+        live += 1;
+      },
     });
 
     try {
       await lifecycle.start();
       exits[0]?.(1, null);
-      await vi.waitFor(() => expect(exits).toHaveLength(2));
-      // The budget reset is an internal unref'd timer with no observable seam,
-      // and it is SCHEDULED asynchronously after the generation launches — so a
-      // sleep only slightly longer than the window can end before the callback
-      // has run, leaving the budget unreset and the exit below terminal. Wait a
-      // wide multiple of the window rather than racing it.
+      // A crash exercises the budget it is aimed at only if it lands on a
+      // HEALTHY generation: one that dies during its own startup smoke is a
+      // failed launch attempt instead, and the rolling window and reset
+      // timer never see it. The smoke runs against a real temporary
+      // directory, so under load it outlasts any fixed sleep — exactly how
+      // this family failed on a busy box (#568). onLaunch fires after
+      // running=true: the real became-healthy signal.
+      await vi.waitFor(() => expect(live).toBe(2), WAIT);
+      // The budget-reset timer is armed just before onLaunch, so after the
+      // wait above a wide multiple of the window lets it fire.
       await new Promise((resolve) => setTimeout(resolve, HEALTHY_RESET_MS * 10));
       exits[1]?.(1, null);
-      await vi.waitFor(() => expect(exits).toHaveLength(3));
+      await vi.waitFor(() => expect(exits).toHaveLength(3), WAIT);
     } finally {
       await lifecycle.stop();
     }
@@ -368,6 +389,7 @@ describe("Rust engine daemon lifecycle", () => {
     // out waiting for a terminal failure that never arrives.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
+    let live = 0;
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
       maxRestarts: WINDOW_TEST_MAX_RESTARTS,
@@ -379,6 +401,9 @@ describe("Rust engine daemon lifecycle", () => {
         exits.push(options.onExit);
         return new FakeClient();
       },
+      onLaunch: () => {
+        live += 1;
+      },
       onFailure: (error, terminal) => {
         if (terminal) terminalFailures.push(error);
       },
@@ -387,24 +412,19 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       for (let generation = 0; generation < 3; generation += 1) {
-        exits[generation]?.(1, null);
-        // Every relaunch runs the smoke against a real temporary directory, so
-        // waitFor's 1s default is not enough under a loaded full-suite run.
-        // The per-test timeout below has to exceed this, or the test dies
-        // before waitFor ever gives up.
-        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
-          timeout: 5_000,
-        });
-        // Outlive the healthy window by a wide multiple: these are the healthy
-        // gaps the issue describes, the ones a budget reset by health cannot
-        // see past.
+        // Only a HEALTHY generation's crash spends a window slot — see the
+        // restart-budget test above for why a sleep cannot stand in for
+        // this signal. Then outlive the healthy window: these are the
+        // healthy gaps the issue describes, the ones a budget reset by
+        // health cannot see past.
+        await vi.waitFor(() => expect(live).toBe(generation + 1), WAIT);
         await new Promise((resolve) => setTimeout(resolve, HEALTHY_RESET_MS * 10));
+        exits[generation]?.(1, null);
       }
+      await vi.waitFor(() => expect(live).toBe(4), WAIT);
       exits[3]?.(1, null);
 
-      await vi.waitFor(() => expect(terminalFailures).toHaveLength(1), {
-        timeout: 5_000,
-      });
+      await vi.waitFor(() => expect(terminalFailures).toHaveLength(1), WAIT);
       expect(terminalFailures[0]?.message).toBe(
         "The Rust engine crashed again after 3 restarts in the last 2 minutes. " +
           "The limit is 3 restarts per 2 minutes. dohc stopped restarting it.",
@@ -416,7 +436,7 @@ describe("Rust engine daemon lifecycle", () => {
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("forgets restarts older than the rolling window", async () => {
     // MUTATION: drop the timestamp pruning in restartAfterExit and restarts
@@ -424,6 +444,7 @@ describe("Rust engine daemon lifecycle", () => {
     // and both assertions below fail.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
+    let live = 0;
     const restartWindowMs = HEALTHY_RESET_MS * 2;
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
@@ -436,6 +457,9 @@ describe("Rust engine daemon lifecycle", () => {
         exits.push(options.onExit);
         return new FakeClient();
       },
+      onLaunch: () => {
+        live += 1;
+      },
       onFailure: (error, terminal) => {
         if (terminal) terminalFailures.push(error);
       },
@@ -444,19 +468,19 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       for (let generation = 0; generation < 3; generation += 1) {
-        exits[generation]?.(1, null);
-        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
-          timeout: 5_000,
-        });
+        // Crash only a healthy generation, spaced four windows apart.
+        await vi.waitFor(() => expect(live).toBe(generation + 1), WAIT);
         await new Promise((resolve) => setTimeout(resolve, restartWindowMs * 4));
+        exits[generation]?.(1, null);
       }
 
+      await vi.waitFor(() => expect(live).toBe(4), WAIT);
       expect(exits).toHaveLength(4);
       expect(terminalFailures).toHaveLength(0);
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("spends one window slot per crash, not per launch attempt", async () => {
     // MUTATION: move the recordCrash call inside the attempt loop and the
@@ -467,6 +491,7 @@ describe("Rust engine daemon lifecycle", () => {
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
     let launchCount = 0;
+    let live = 0;
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
       // 6 attempts here, the most of any window test — see the constant.
@@ -485,6 +510,9 @@ describe("Rust engine daemon lifecycle", () => {
         exits.push(options.onExit);
         return new FakeClient();
       },
+      onLaunch: () => {
+        live += 1;
+      },
       onFailure: (error, terminal) => {
         if (terminal) terminalFailures.push(error);
       },
@@ -493,18 +521,16 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       for (let generation = 0; generation < 3; generation += 1) {
-        exits[generation]?.(1, null);
-        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
-          timeout: 5_000,
-        });
+        // Crash only a healthy generation — see the restart-budget test.
+        await vi.waitFor(() => expect(live).toBe(generation + 1), WAIT);
         await new Promise((resolve) => setTimeout(resolve, HEALTHY_RESET_MS * 10));
+        exits[generation]?.(1, null);
       }
+      await vi.waitFor(() => expect(live).toBe(4), WAIT);
       expect(terminalFailures).toHaveLength(0);
       exits[3]?.(1, null);
 
-      await vi.waitFor(() => expect(terminalFailures).toHaveLength(1), {
-        timeout: 5_000,
-      });
+      await vi.waitFor(() => expect(terminalFailures).toHaveLength(1), WAIT);
       expect(terminalFailures[0]?.message).toMatch(/after 3 restarts/);
       // 4 generations from 7 launch calls: 3 crashes recovered, each after one
       // failed attempt. Counting attempts would have stopped at 2 generations.
@@ -513,7 +539,7 @@ describe("Rust engine daemon lifecycle", () => {
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("expires window entries on the wall clock when the host suspends", async () => {
     // performance.now() does not advance while a Linux host sleeps, so a
@@ -523,6 +549,7 @@ describe("Rust engine daemon lifecycle", () => {
     // entries end this run terminal at the third crash.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
+    let live = 0;
     const restartWindowMs = 120_000;
     let wallNow = 0;
     const lifecycle = new EngineDaemonLifecycle({
@@ -540,6 +567,9 @@ describe("Rust engine daemon lifecycle", () => {
         exits.push(options.onExit);
         return new FakeClient();
       },
+      onLaunch: () => {
+        live += 1;
+      },
       onFailure: (error, terminal) => {
         if (terminal) terminalFailures.push(error);
       },
@@ -548,20 +578,20 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       for (let generation = 0; generation < 3; generation += 1) {
+        // Crash only a healthy generation — see the restart-budget test.
+        await vi.waitFor(() => expect(live).toBe(generation + 1), WAIT);
+        await new Promise((resolve) => setTimeout(resolve, HEALTHY_RESET_MS * 10));
         wallNow += restartWindowMs * 4;
         exits[generation]?.(1, null);
-        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
-          timeout: 5_000,
-        });
-        await new Promise((resolve) => setTimeout(resolve, HEALTHY_RESET_MS * 10));
       }
 
+      await vi.waitFor(() => expect(live).toBe(4), WAIT);
       expect(exits).toHaveLength(4);
       expect(terminalFailures).toHaveLength(0);
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("expires window entries on the monotonic clock when the wall clock steps back", async () => {
     // The inverse host fault: an NTP or VM correction moves the wall clock
@@ -571,6 +601,7 @@ describe("Rust engine daemon lifecycle", () => {
     // entries end this run terminal at the third crash.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
+    let live = 0;
     const restartWindowMs = HEALTHY_RESET_MS * 2;
     let wallNow = 10 * 60_000;
     const lifecycle = new EngineDaemonLifecycle({
@@ -585,6 +616,9 @@ describe("Rust engine daemon lifecycle", () => {
         exits.push(options.onExit);
         return new FakeClient();
       },
+      onLaunch: () => {
+        live += 1;
+      },
       onFailure: (error, terminal) => {
         if (terminal) terminalFailures.push(error);
       },
@@ -593,23 +627,23 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       for (let generation = 0; generation < 3; generation += 1) {
-        // Each crash sees a wall clock a further ten minutes in the past.
-        wallNow -= 10 * 60_000;
-        exits[generation]?.(1, null);
-        await vi.waitFor(() => expect(exits).toHaveLength(generation + 2), {
-          timeout: 5_000,
-        });
+        // Crash only a healthy generation — see the restart-budget test.
+        await vi.waitFor(() => expect(live).toBe(generation + 1), WAIT);
         // Real elapsed time, which the untouched monotonic clock measures,
         // crosses the window between crashes.
         await new Promise((resolve) => setTimeout(resolve, restartWindowMs * 4));
+        // Each crash sees a wall clock a further ten minutes in the past.
+        wallNow -= 10 * 60_000;
+        exits[generation]?.(1, null);
       }
 
+      await vi.waitFor(() => expect(live).toBe(4), WAIT);
       expect(exits).toHaveLength(4);
       expect(terminalFailures).toHaveLength(0);
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("restarts a daemon that is alive but stopped answering engine.ping", async () => {
     // The wedge from the issue: the process never exits, so the restart path —
@@ -642,9 +676,7 @@ describe("Rust engine daemon lifecycle", () => {
 
     try {
       await lifecycle.start();
-      await vi.waitFor(() => expect(clients).toHaveLength(2), {
-        timeout: 5_000,
-      });
+      await vi.waitFor(() => expect(clients).toHaveLength(2), WAIT);
       expect(clients[0]?.closed).toBe(true);
       expect(
         failures.map(({ error, terminal }) => [error.message, terminal]),
@@ -676,7 +708,7 @@ describe("Rust engine daemon lifecycle", () => {
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("ends a wedge loop at PRODUCTION cadence, on a driven clock", async () => {
     // THE RATIO, not the numbers. Every other wedge test compresses the probe
@@ -696,6 +728,9 @@ describe("Rust engine daemon lifecycle", () => {
     let now = 0;
     const clients: SelfExitingClient[] = [];
     const terminalFailures: Error[] = [];
+    // Driven arrival time of every probe, per generation, for the cadence
+    // assertion below.
+    const probeArrivals: number[][] = [];
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
       initialBackoffMs: 0,
@@ -704,7 +739,12 @@ describe("Rust engine daemon lifecycle", () => {
       monotonicNowMs: () => now,
       wallNowMs: () => now,
       launch: async (options) => {
-        const client = new SelfExitingClient(silentPing);
+        const arrivals: number[] = [];
+        probeArrivals.push(arrivals);
+        const client = new SelfExitingClient((request) => {
+          if (request.method === "engine.ping") arrivals.push(now);
+          return silentPing(request);
+        });
         client.exit = options.onExit;
         clients.push(client);
         return client;
@@ -743,9 +783,33 @@ describe("Rust engine daemon lifecycle", () => {
       // terminal verdict failed to stop the restart it ordered.
       expect(clients).toHaveLength(2);
       expect(clients.every((client) => client.closed)).toBe(true);
-      // And it ended well inside the crash window it could never have filled:
-      // ten wedge exits at 225s each would take 37.5 minutes.
-      expect(now).toBeLessThan(600_000);
+      // The cadence check pins the wedge budget's SPEED, which the terminal
+      // message alone cannot: a slower probe cadence would produce the same
+      // message, minutes later. It must NOT be an elapsed-driven-time
+      // ceiling: the driven clock advances one step per real event-loop
+      // turn, and the relaunch smoke's real I/O consumes turns, so driven
+      // milliseconds measure machine load — honest runs measured 650s to
+      // 965s of driven time under a 24-process load, overlapping any bound
+      // a tripled interval (830s measured) could fail (#568/#580). Probe
+      // ARRIVAL SPACING inside one wedged generation is load-invariant:
+      // it is pure fake-timer arithmetic, one expiry plus one interval
+      // after the previous probe, 45s + 30s = 75s at the production
+      // constants (the expiry half is already pinned by the message
+      // above). A tripled interval spaces probes 135s apart and fails
+      // here on any box; the tolerance covers only the driven loop's 5s
+      // step quantization.
+      const spacings: number[] = [];
+      for (const arrivals of probeArrivals) {
+        for (let i = 1; i < arrivals.length; i += 1) {
+          spacings.push((arrivals[i] ?? 0) - (arrivals[i - 1] ?? 0));
+        }
+      }
+      // Two generations, three probes each: at least four spacings.
+      expect(spacings.length).toBeGreaterThanOrEqual(4);
+      for (const spacing of spacings) {
+        expect(spacing).toBeGreaterThanOrEqual(75_000);
+        expect(spacing).toBeLessThanOrEqual(80_000);
+      }
     } finally {
       vi.useRealTimers();
       await lifecycle.stop();
@@ -793,14 +857,12 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       // Four generations means three wedge kills survived without terminating.
-      await vi.waitFor(() => expect(clients.length).toBeGreaterThanOrEqual(4), {
-        timeout: 10_000,
-      });
+      await vi.waitFor(() => expect(clients.length).toBeGreaterThanOrEqual(4), WAIT);
       expect(failures.filter(({ terminal }) => terminal)).toEqual([]);
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("kills a wedged daemon as a transport failure, not a deliberate close", async () => {
     // A wedge kill is a REPLACEMENT. EngineWorkspaceSessions retries only
@@ -828,15 +890,13 @@ describe("Rust engine daemon lifecycle", () => {
 
     try {
       await lifecycle.start();
-      await vi.waitFor(() => expect(clients.length).toBeGreaterThanOrEqual(2), {
-        timeout: 10_000,
-      });
+      await vi.waitFor(() => expect(clients.length).toBeGreaterThanOrEqual(2), WAIT);
       expect(clients[0]?.closed).toBe(true);
       expect(clients[0]?.closeCause).toBe("transport-error");
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("kills the wedged daemon before the terminal report can block", async () => {
     // The desktop answers a terminal verdict with dialog.showErrorBox, which
@@ -871,14 +931,12 @@ describe("Rust engine daemon lifecycle", () => {
 
     try {
       await lifecycle.start();
-      await vi.waitFor(() => expect(closedWhenReported).toHaveLength(1), {
-        timeout: 10_000,
-      });
+      await vi.waitFor(() => expect(closedWhenReported).toHaveLength(1), WAIT);
       expect(closedWhenReported).toEqual([true]);
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("never kills a daemon whose output is still arriving", async () => {
     // A probe cannot overtake the daemon's output queue. That queue holds 64
@@ -926,7 +984,7 @@ describe("Rust engine daemon lifecycle", () => {
       clearInterval(traffic);
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("counts a reply that lands between probe windows", async () => {
     // Probes do not tile the timeline: the next one starts an interval after
@@ -975,7 +1033,7 @@ describe("Rust engine daemon lifecycle", () => {
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("never kills a daemon that answers engine.ping slowly or refuses it", async () => {
     // A saturated daemon answers: the request supervisor resolves a queued
@@ -1012,16 +1070,14 @@ describe("Rust engine daemon lifecycle", () => {
 
     try {
       await lifecycle.start();
-      await vi.waitFor(() => expect(probes).toBeGreaterThanOrEqual(4), {
-        timeout: 5_000,
-      });
+      await vi.waitFor(() => expect(probes).toBeGreaterThanOrEqual(4), WAIT);
       expect(failures).toEqual([]);
       expect(clients).toHaveLength(1);
       expect(clients[0]?.closed).toBe(false);
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("does not call a restarting daemon wedged", async () => {
     // A probe can still be in flight when its generation dies. The replacement
@@ -1054,7 +1110,7 @@ describe("Rust engine daemon lifecycle", () => {
       // Let the first probe get in flight, then crash under it.
       await new Promise((resolve) => setTimeout(resolve, 20));
       exits[0]?.(1, null);
-      await vi.waitFor(() => expect(exits).toHaveLength(2), { timeout: 5_000 });
+      await vi.waitFor(() => expect(exits).toHaveLength(2), WAIT);
       // Outlive the stale probe's expiry bound by a wide margin.
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(failures.map((error) => error.message)).toEqual([
@@ -1063,7 +1119,7 @@ describe("Rust engine daemon lifecycle", () => {
     } finally {
       await lifecycle.stop();
     }
-  }, 20_000);
+  });
 
   it("counts a replacement that handshakes then hangs as a failed restart", async () => {
     let initialExit: EngineClientSpawnOptions["onExit"];
@@ -1103,7 +1159,7 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       initialExit?.(1, null);
-      await vi.waitFor(() => expect(launchCount).toBe(2));
+      await vi.waitFor(() => expect(launchCount).toBe(2), WAIT);
       await vi.waitFor(
         () => {
           expect(
@@ -1114,9 +1170,7 @@ describe("Rust engine daemon lifecycle", () => {
             ),
           ).toBe(true);
           expect(failures.some(({ terminal }) => terminal)).toBe(true);
-        },
-        { timeout: 2_000 },
-      );
+        }, WAIT);
     } finally {
       await lifecycle.stop();
     }
@@ -1178,7 +1232,7 @@ describe("Rust engine daemon lifecycle", () => {
     expect(launchSignal?.aborted).toBe(true);
 
     resolveLaunch(client);
-    await vi.waitFor(() => expect(client.closed).toBe(true));
+    await vi.waitFor(() => expect(client.closed).toBe(true), WAIT);
     expect(stopped).toBe(false);
 
     resolveExit();
@@ -1410,7 +1464,7 @@ describe("Rust engine daemon lifecycle", () => {
       "search.queryChatMessagesGranular",
       { query: "first", limit: 50_000 },
     );
-    await vi.waitFor(() => expect(client.requests).toHaveLength(2));
+    await vi.waitFor(() => expect(client.requests).toHaveLength(2), WAIT);
     const second = lifecycle.requestWorkspace(
       "C:\\workspace",
       "workspace",
@@ -1459,6 +1513,12 @@ describe("Rust engine daemon lifecycle", () => {
     await expect(lifecycle.start()).rejects.toThrow(
       /workspace\.open timed out after 20ms/,
     );
+    // Proves the 20ms request timer drove the rejection rather than a hang
+    // or a mis-armed slower timer. This bound stays at its original 500ms:
+    // this exact path never failed under load in 12 measured runs (#568),
+    // and evidence borrowed from another path cannot widen a discrimination
+    // bound this one never broke — widening it would let a regression that
+    // delays the startup timeout to just under the ceiling pass unseen.
     expect(Date.now() - startedAt).toBeLessThan(500);
     expect(client.closed).toBe(true);
     await lifecycle.stop();
