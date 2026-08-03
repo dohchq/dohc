@@ -1933,16 +1933,42 @@ export function DesktopWorkspaceShell(props: {
       } else {
         // Nobody could name it: the operation changed no version, or it failed
         // and left an unknown one active. Ask. This read is the only remaining
-        // asynchronous boundary, it cannot retract an answer admitted while it
-        // was in flight, and a failure leaves the previous statement standing
-        // — which is not permanent blindness, because history answers carry
-        // the active version too and the next refresh to succeed was issued
-        // later. Narrowing what is left is #555.
+        // asynchronous boundary, and a failure leaves the previous statement
+        // standing — which is not permanent blindness, because history answers
+        // carry the active version too and the next refresh to succeed was
+        // issued later.
         void bridge()
           .listWorkspaceVersions({ workspaceId })
-          .then(({ activeVersionId: active }) =>
-            noteActiveEngineVersion(versionToken, active),
-          )
+          .then(({ activeVersionId: active }) => {
+            noteActiveEngineVersion(versionToken, active);
+            // A boundary that arrives after the answers it must judge is not
+            // a boundary (#555): while this lookup was in flight, an answer
+            // issued BEFORE it could commit against a guard that still named
+            // the version the user left. So the committed page faces the
+            // same staleness question every arriving answer faces, now that
+            // the statement it was missing exists. Stale — committed by a
+            // request older than the newest statement and naming a version
+            // that statement contradicts — means it describes a timeline
+            // nobody is on: drop it and ask again. A merge or a resolution
+            // never trips this (they change no version, so the lookup only
+            // restates what the page already says), and after an unmount the
+            // committed watermark sits at the bumped issue counter, so a
+            // late-settling lookup can never drop or re-fetch for a shell
+            // the user left.
+            if (
+              committedEngineVersionId.current !== null &&
+              engineHistoryAnswerIsStale(
+                committedEngineHistoryToken.current,
+                committedEngineVersionId.current,
+              )
+            ) {
+              committedEngineVersionId.current = null;
+              setEngineHistory(null);
+              void refreshHistory().catch((error) =>
+                reportShellError("Could not refresh history.", error),
+              );
+            }
+          })
           .catch(() => undefined);
       }
       void refreshFiles().catch((error) =>
@@ -1953,6 +1979,7 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [
+      engineHistoryAnswerIsStale,
       noteActiveEngineVersion,
       refreshFiles,
       refreshHistory,
@@ -2928,12 +2955,18 @@ export function DesktopWorkspaceShell(props: {
       </span>
     </div>
   );
-  // Open-file refresh: history growth re-reads the active file (the counter
-  // only ever increases within a session). Opted-out workspaces have no
-  // history growth to react to.
-  const historyRefreshCounter = engineEnabled
-    ? (engineHistory ? engineHistory.latestMomentOrder + 1 : 0)
-    : 0;
+  // Open-file refresh: history growth re-reads the active file. The floor
+  // keeps the counter monotonic within the session even when the timeline is
+  // dropped and re-fetched (#555) — a cache-buster that revisits a value can
+  // suppress a needed re-read. Opted-out workspaces have no history growth
+  // to react to. (Max-tracking a ref during render is idempotent, so a
+  // repeated render commits the same value.)
+  const historyRefreshFloor = useRef(0);
+  historyRefreshFloor.current = Math.max(
+    historyRefreshFloor.current,
+    engineHistory ? engineHistory.latestMomentOrder + 1 : 0,
+  );
+  const historyRefreshCounter = engineEnabled ? historyRefreshFloor.current : 0;
   const graphKey = engineEnabled
     ? `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`
     : graphRefreshKey;

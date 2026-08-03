@@ -3072,6 +3072,306 @@ describe("history page", () => {
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
   });
 
+  // The residual window (#555): a switch that FAILED, whose recovery re-read
+  // also failed, leaves the shell asking which version is active. That lookup
+  // is a boundary arriving after the answers it must judge — an old-version
+  // answer landing first meets a guard that knows nothing and paints. The
+  // lookup cannot stop the paint, so it judges the committed page when it
+  // settles: naming a version the lookup contradicts, the page is dropped and
+  // the timeline asked again.
+  it("drops an old-version answer the failed-switch lookup contradicts", async () => {
+    const stranded = deferred<ListEngineMomentsResult>();
+    const repaint = deferred<ListEngineMomentsResult>();
+    let failSwitchRefresh!: (error: Error) => void;
+    const switchRefresh = new Promise<never>((_resolve, reject) => {
+      failSwitchRefresh = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      stranded.promise,
+      switchRefresh,
+      repaint.promise,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    const versionList = [
+      {
+        id: "main",
+        name: "Main",
+        kind: "main" as const,
+        createdAtMs: 0,
+        canMergeIntoMain: false,
+      },
+      {
+        id: "try-1",
+        name: "Try: launch note",
+        kind: "named" as const,
+        createdAtMs: 1,
+        canMergeIntoMain: true,
+      },
+    ];
+    // Read 1 is the selector's mount read. Read 2 is its recovery re-read
+    // after the failed switch — it fails too, so nobody can name the active
+    // version and the shell has to ask. Read 3 is that lookup, held open.
+    // Later reads (the re-key refresh) hang: nothing else may answer.
+    const lookup = deferred<{
+      versions: typeof versionList;
+      activeVersionId: string;
+    }>();
+    let versionReads = 0;
+    bridge.listWorkspaceVersions = vi.fn(() => {
+      versionReads += 1;
+      if (versionReads === 1) {
+        return Promise.resolve({ versions: versionList, activeVersionId: "try-1" });
+      }
+      if (versionReads === 2) return Promise.reject(new Error("recovery read failed"));
+      if (versionReads === 3) return lookup.promise;
+      return new Promise<never>(() => {});
+    });
+    // The switch failed — but it partially applied, so the workspace really
+    // is on Main; only the lookup can say so.
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      throw new Error("switch failed");
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const mainItem = (await screen.findAllByTestId("version-item")).find(
+      (item) => item.dataset.versionId === "main",
+    );
+    await user.click(mainItem!);
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(bridge.listWorkspaceVersions.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+
+    // The switch-triggered refresh fails: nothing newer will answer on its own.
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      failSwitchRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+
+    // The old version's answer lands while the lookup is still in flight. The
+    // guard knows nothing yet, so it paints — this is the window itself.
+    await act(async () => {
+      stranded.resolve(
+        historyPage(
+          [historyMoment("m-stranded", "Wrote the note in the try version")],
+          "try-1",
+        ),
+      );
+      await stranded.promise;
+    });
+    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
+
+    // The lookup settles and contradicts the committed page: dropped, and the
+    // timeline is asked again.
+    await act(async () => {
+      lookup.resolve({ versions: versionList, activeVersionId: "main" });
+      await lookup.promise;
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("Wrote the note in the try version")).toBeNull(),
+    );
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      repaint.resolve(historyPage([historyMoment("m-main", "Back on main")], "main"));
+      await repaint.promise;
+    });
+    expect(await screen.findByText("Back on main")).toBeTruthy();
+  });
+
+  // The other verdict the lookup can reach: it agrees with the committed page
+  // (the failed switch never applied). Dropping here would blank a timeline
+  // that is right — and this is every merge and conflict resolution, whose
+  // lookup only restates what is already true.
+  it("keeps the committed page when the failed-switch lookup agrees with it", async () => {
+    const stranded = deferred<ListEngineMomentsResult>();
+    let failSwitchRefresh!: (error: Error) => void;
+    const switchRefresh = new Promise<never>((_resolve, reject) => {
+      failSwitchRefresh = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      stranded.promise,
+      switchRefresh,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    const versionList = [
+      {
+        id: "main",
+        name: "Main",
+        kind: "main" as const,
+        createdAtMs: 0,
+        canMergeIntoMain: false,
+      },
+      {
+        id: "try-1",
+        name: "Try: launch note",
+        kind: "named" as const,
+        createdAtMs: 1,
+        canMergeIntoMain: true,
+      },
+    ];
+    const lookup = deferred<{
+      versions: typeof versionList;
+      activeVersionId: string;
+    }>();
+    let versionReads = 0;
+    bridge.listWorkspaceVersions = vi.fn(() => {
+      versionReads += 1;
+      if (versionReads === 1) {
+        return Promise.resolve({ versions: versionList, activeVersionId: "try-1" });
+      }
+      if (versionReads === 2) return Promise.reject(new Error("recovery read failed"));
+      if (versionReads === 3) return lookup.promise;
+      return new Promise<never>(() => {});
+    });
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      throw new Error("switch failed");
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const mainItem = (await screen.findAllByTestId("version-item")).find(
+      (item) => item.dataset.versionId === "main",
+    );
+    await user.click(mainItem!);
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(bridge.listWorkspaceVersions.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      failSwitchRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stranded.resolve(
+        historyPage(
+          [historyMoment("m-stranded", "Wrote the note in the try version")],
+          "try-1",
+        ),
+      );
+      await stranded.promise;
+    });
+    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
+
+    // The switch never applied: the lookup names the version the page already
+    // describes. Nothing is dropped and nothing is re-fetched.
+    await act(async () => {
+      lookup.resolve({ versions: versionList, activeVersionId: "try-1" });
+      await lookup.promise;
+    });
+    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
+    expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2);
+  });
+
+  // The judge must know when court is over: a lookup that settles after the
+  // shell unmounted judges nothing. Without the committed-watermark half of
+  // the staleness question, a contradicting late lookup would drop state and
+  // fire four IPC reads for a workspace the user already left — the renderer
+  // async-state invariant.
+  it("a lookup that settles after unmount drops nothing and asks nothing", async () => {
+    const stranded = deferred<ListEngineMomentsResult>();
+    let failSwitchRefresh!: (error: Error) => void;
+    const switchRefresh = new Promise<never>((_resolve, reject) => {
+      failSwitchRefresh = reject;
+    });
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      stranded.promise,
+      switchRefresh,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    const versionList = [
+      {
+        id: "main",
+        name: "Main",
+        kind: "main" as const,
+        createdAtMs: 0,
+        canMergeIntoMain: false,
+      },
+      {
+        id: "try-1",
+        name: "Try: launch note",
+        kind: "named" as const,
+        createdAtMs: 1,
+        canMergeIntoMain: true,
+      },
+    ];
+    const lookup = deferred<{
+      versions: typeof versionList;
+      activeVersionId: string;
+    }>();
+    let versionReads = 0;
+    bridge.listWorkspaceVersions = vi.fn(() => {
+      versionReads += 1;
+      if (versionReads === 1) {
+        return Promise.resolve({ versions: versionList, activeVersionId: "try-1" });
+      }
+      if (versionReads === 2) return Promise.reject(new Error("recovery read failed"));
+      if (versionReads === 3) return lookup.promise;
+      return new Promise<never>(() => {});
+    });
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      throw new Error("switch failed");
+    });
+    const user = userEvent.setup();
+    const view = renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const mainItem = (await screen.findAllByTestId("version-item")).find(
+      (item) => item.dataset.versionId === "main",
+    );
+    await user.click(mainItem!);
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(bridge.listWorkspaceVersions.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      failSwitchRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stranded.resolve(
+        historyPage(
+          [historyMoment("m-stranded", "Wrote the note in the try version")],
+          "try-1",
+        ),
+      );
+      await stranded.promise;
+    });
+
+    // The user leaves while the lookup is still in flight.
+    view.unmount();
+
+    // The lookup settles, contradicting the page the shell once displayed.
+    // Nothing may happen: no drop, and above all no re-fetch for a shell
+    // that is gone.
+    await act(async () => {
+      lookup.resolve({ versions: versionList, activeVersionId: "main" });
+      await lookup.promise;
+      await Promise.resolve();
+    });
+    expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2);
+  });
+
   // Announcing the switch FIRST re-keys this component, and the re-key used to
   // bump the same counter the operation checks itself against — so the switch
   // invalidated its own token while its follow-up re-read was still pending,
