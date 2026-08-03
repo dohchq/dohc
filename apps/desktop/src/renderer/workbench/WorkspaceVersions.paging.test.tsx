@@ -166,13 +166,14 @@ describe("VersionMergeDialog conflict paging", () => {
   }
 
   it("the merge's own count decides the stage, not the open-conflict rows", async () => {
-    // The rows are the first page of ALL open conflicts — a lingering sync
-    // conflict rides along. A clean merge must stay clean.
+    // The rows are the first page of ALL open conflicts — the contract
+    // (MergeWorkspaceVersionResult) says a sync conflict can ride along. A
+    // merge that itself conflicted nothing must stay clean.
     bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
       mergedFileCount: 2,
       unchangedFileCount: 0,
       conflictCount: 0,
-      conflicts: [],
+      conflicts: [{ ...conflict("c-sync"), origin: "sync" }],
       nextAfterConflictId: null,
     });
     renderMerge();
