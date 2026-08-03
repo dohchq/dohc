@@ -18,6 +18,22 @@ describe("engine Y.Doc close bounding at quit", () => {
     expect(body).toContain("shuttingDown: true");
   });
 
+  it("frees a held capture chain before the quit race starts (#564)", () => {
+    // A document open mid transport-retry holds the capture chain, and the
+    // quit teardown's captureStop queues behind it. beginShutdown resolves
+    // the armed backoff and makes the next failure final — but only if it
+    // runs FIRST, synchronously, before any teardown is armed.
+    const start = mainSource.indexOf('app.on("will-quit"');
+    expect(start).toBeGreaterThan(-1);
+    const body = mainSource.slice(start, mainSource.indexOf("app.exit(0)", start));
+    const shutdownAt = body.indexOf(
+      "rustEngineWorkspaceSessions?.beginShutdown()",
+    );
+    expect(shutdownAt).toBeGreaterThan(-1);
+    expect(shutdownAt).toBeLessThan(body.indexOf("closeAllEngineYDocSessions()"));
+    expect(shutdownAt).toBeLessThan(body.indexOf("stopAll()"));
+  });
+
   it("bounds NOTHING else", () => {
     // Every other close in main — the document-close IPC, the renderer-reload
     // teardown, a stale session's replacement — must keep the full transport

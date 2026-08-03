@@ -32,6 +32,9 @@ export interface EngineYDocTransport {
     available: boolean;
     initialUpdate?: Uint8Array;
     notInVersion?: boolean;
+    // The open hit its retry deadline (#564) — the other available:false that
+    // must not fall back to the writable plain editor.
+    openTimedOut?: boolean;
   }>;
   // Ship a local editor update to main, where it is journaled via recordUpdate.
   applyLocalUpdate(update: Uint8Array): void;
@@ -50,6 +53,10 @@ export interface EngineYDocBinding {
   // The path is not in the version this workspace is on. The caller must stop
   // editing the document, not downgrade it to the writable plain editor.
   readonly notInVersion: boolean;
+  // The open hit its retry deadline (#564). The caller keeps the document
+  // read-only with the reason stated and a retry offered — the same
+  // no-downgrade rule as notInVersion.
+  readonly openTimedOut: boolean;
   // Tear down: stop shipping edits, unsubscribe, close the engine session, and
   // destroy the mirror doc. Idempotent.
   destroy(): Promise<void>;
@@ -66,6 +73,7 @@ export async function bindEngineYDoc(
       doc: null,
       available: false,
       notInVersion: opened.notInVersion === true,
+      openTimedOut: opened.openTimedOut === true,
       async destroy() {
         // Best-effort close even on the unavailable path: main may have taken a
         // reservation before deciding not to serve (it should not, but never
@@ -103,6 +111,7 @@ export async function bindEngineYDoc(
     doc,
     available: true,
     notInVersion: false,
+    openTimedOut: false,
     async destroy() {
       if (destroyed) return;
       destroyed = true;

@@ -57,6 +57,8 @@ import {
 } from "./workspaceEnginePolicyFile";
 import {
   isEngineSessionReconnectError,
+  TRANSPORT_REBIND_MAX_BACKOFF_MS,
+  WORKSPACE_OPEN_DEADLINE_MS,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -141,6 +143,17 @@ export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 //     failure.
 
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
+
+// #564: how long ONE document open may keep retrying transport errors while
+// it holds the capture chain. Derived from the session constants it bounds —
+// two full open attempts plus two worst-case backoffs — so it always admits
+// the single-recovery path (daemon died, relaunched, second attempt bound:
+// ~2.1 s) and refuses the six-attempt ladder (~14.5 s derived, which starved
+// listMoments, readMoment, and capture.stop() for that whole window). A
+// healthy open never consults it: the deadline gates retries only. Measured
+// healthy opens on a busy chain are recorded in ydocOpenDeadline.test.ts.
+export const YDOC_OPEN_RETRY_DEADLINE_MS =
+  2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
 export const MAX_ENGINE_CAPTURE_TEXT_BYTES = MAX_HISTORY_TEXT_SNAPSHOT_BYTES;
 export const MAX_ENGINE_CAPTURE_BINARY_BYTES = MAX_VERSIONED_BINARY_FILE_BYTES;
 
@@ -1293,7 +1306,7 @@ export function createWorkspaceEngineCapture(
     let generations = 0;
     const openGeneration = async (
       seedAbsentLineage: boolean,
-      openOptions?: { retryTransportErrors?: boolean },
+      openOptions?: { retryTransportErrors?: boolean; retryDeadlineMs?: number },
     ): Promise<EngineYdocProviderSession> =>
       await sessions.run(
         workspace,
@@ -1354,6 +1367,9 @@ export function createWorkspaceEngineCapture(
         },
         {
           retryTransportErrors: openOptions?.retryTransportErrors ?? true,
+          ...(openOptions?.retryDeadlineMs !== undefined
+            ? { retryDeadlineMs: openOptions.retryDeadlineMs }
+            : {}),
         },
       );
 
@@ -1525,7 +1541,12 @@ export function createWorkspaceEngineCapture(
       }
     };
 
-    current = await openGeneration(true);
+    // The FIRST generation opens on the capture chain (#493), so its retry
+    // window is bounded (#564). Rebinds after a daemon death run on the
+    // session's own operation chain and keep the full ladder.
+    current = await openGeneration(true, {
+      retryDeadlineMs: YDOC_OPEN_RETRY_DEADLINE_MS,
+    });
     canonicalDoc = current.doc;
     const initialOpening = openingRemoteUpdates.get(current);
     if (initialOpening) {

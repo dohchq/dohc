@@ -19,6 +19,7 @@ import {
 } from "./engineDaemonLifecycle";
 import {
   EngineWorkspaceRebindError,
+  EngineWorkspaceRetryDeadlineError,
   EngineWorkspaceSessions,
   WORKSPACE_OPEN_DEADLINE_MS,
 } from "./engineWorkspaceSessions";
@@ -709,6 +710,167 @@ describe("EngineWorkspaceSessions", () => {
     ).resolves.toBe("handle-relaunched");
     expect(delays).toEqual([100]);
     expect(clientLookups).toBeGreaterThanOrEqual(3);
+  });
+
+  // #564: the retry deadline bounds how long one run may keep WAITING on
+  // transport recovery. It gates retries only — a healthy first attempt is
+  // never rejected, however small the deadline.
+  describe("retryDeadlineMs", () => {
+    it("never rejects a healthy open, however small the deadline", async () => {
+      const workspace = await tempWorkspace("workspace-healthy-deadline");
+      const client = new MockClient("handle-healthy");
+      const sessions = new EngineWorkspaceSessions({
+        currentClient: () => client,
+      });
+
+      await expect(
+        sessions.run(workspace, async (binding) => binding.workspace, {
+          retryTransportErrors: true,
+          retryDeadlineMs: 1,
+        }),
+      ).resolves.toBe("handle-healthy");
+    });
+
+    it("stops retrying transport errors once the deadline is spent", async () => {
+      const workspace = await tempWorkspace("workspace-deadline");
+      const client = new MockClient("handle-deadline");
+      // Injected clock: each failed attempt costs 2,500 ms (the shape of a
+      // real workspace-open deadline plus overhead). Attempts 1 and 2 are
+      // inside the 6,000 ms budget; the check after attempt 3 is not.
+      let nowMs = 0;
+      let attempts = 0;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .run(
+          workspace,
+          async () => {
+            attempts += 1;
+            nowMs += 2_500;
+            throw { code: "transport-error" };
+          },
+          { retryTransportErrors: true, retryDeadlineMs: 6_000 },
+        )
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      // MUTATION: drop the deadline check -> all six attempts run and the
+      // rejection is EngineWorkspaceRebindError instead.
+      expect(attempts).toBe(3);
+      const message = (outcome as Error).message;
+      // The rejection names the constraint, the configured limit with its
+      // unit, and the observed wait (AGENTS.md: show agents the limits they
+      // hit).
+      expect(message).toContain("retryDeadlineMs limit of 6000ms");
+      expect(message).toContain("waited 7500ms across 3 attempts");
+      expect((outcome as Error).cause).toMatchObject({
+        code: "transport-error",
+      });
+    });
+
+    it("bounds a daemon-down OPEN the same way", async () => {
+      const workspace = await tempWorkspace("workspace-open-deadline");
+      let nowMs = 0;
+      let clientReads = 0;
+      const sessions = new EngineWorkspaceSessions(
+        {
+          currentClient: () => {
+            clientReads += 1;
+            nowMs += 2_500;
+            throw new EngineDaemonUnavailableError("daemon down");
+          },
+        },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .run(workspace, async () => "unreachable", {
+          retryTransportErrors: true,
+          retryDeadlineMs: 6_000,
+        })
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(clientReads).toBe(3);
+    });
+
+    it("rejects an invalid deadline instead of quietly voiding it", async () => {
+      const workspace = await tempWorkspace("workspace-bad-deadline");
+      const client = new MockClient("handle-bad-deadline");
+      const sessions = new EngineWorkspaceSessions({
+        currentClient: () => client,
+      });
+
+      await expect(
+        sessions.run(workspace, async () => "unreachable", {
+          retryDeadlineMs: 0,
+        }),
+      ).rejects.toThrow(TypeError);
+    });
+  });
+
+  // #564: app quit. Retry waiting ends NOW — an armed backoff resolves, the
+  // failure that caused it surfaces, and the capture chain behind the run is
+  // free within one attempt instead of the full ladder.
+  describe("beginShutdown", () => {
+    it("cancels an armed backoff and surfaces the transport failure", async () => {
+      const workspace = await tempWorkspace("workspace-shutdown-sleep");
+      const client = new MockClient("handle-shutdown-sleep");
+      let sleeping: (() => void) | null = null;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          // Never resolves on its own: without the cancel race, this run
+          // waits forever and so would the quit behind it.
+          sleep: () =>
+            new Promise<void>((resolveSleep) => {
+              sleeping = () => resolveSleep();
+            }),
+        },
+      );
+
+      const run = sessions.run(
+        workspace,
+        async () => {
+          throw { code: "transport-error" };
+        },
+        { retryTransportErrors: true },
+      );
+      await vi.waitFor(() => {
+        expect(sleeping).not.toBeNull();
+      });
+      sessions.beginShutdown();
+      await expect(run).rejects.toMatchObject({ code: "transport-error" });
+    });
+
+    it("makes a later transport failure final instead of retried", async () => {
+      const workspace = await tempWorkspace("workspace-shutdown-final");
+      const client = new MockClient("handle-shutdown-final");
+      let attempts = 0;
+      const sleep = vi.fn(async () => {});
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { sleep },
+      );
+      sessions.beginShutdown();
+
+      await expect(
+        sessions.run(
+          workspace,
+          async () => {
+            attempts += 1;
+            throw { code: "transport-error" };
+          },
+          { retryTransportErrors: true },
+        ),
+      ).rejects.toMatchObject({ code: "transport-error" });
+      // MUTATION: drop the shutdown gate -> six attempts with backoff.
+      expect(attempts).toBe(1);
+      expect(sleep).not.toHaveBeenCalled();
+    });
   });
 
   it("bounds client-generation churn while opening a workspace", async () => {

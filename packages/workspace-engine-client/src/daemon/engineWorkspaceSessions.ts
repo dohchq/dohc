@@ -60,11 +60,23 @@ export interface EngineWorkspaceRunOptions {
    * first attempt before applying another write.
    */
   retryTransportErrors?: boolean;
+  /**
+   * Stop retrying transport errors once this many milliseconds have passed
+   * since the run started (#564). The deadline gates RETRIES only: a healthy
+   * first attempt is never rejected, and an attempt already in flight always
+   * finishes. Expiry throws EngineWorkspaceRetryDeadlineError with the last
+   * transport error as its cause. Callers that hold a shared resource while
+   * they wait — the capture chain's document open — pass this so one open
+   * cannot spend the full six-attempt ladder holding everyone else off.
+   */
+  retryDeadlineMs?: number;
 }
 
 export interface EngineWorkspaceSessionsOptions {
   transportRebindAttempts?: number;
   sleep?: (delayMs: number) => Promise<void>;
+  // Test injection for the retryDeadlineMs clock; production uses Date.now.
+  now?: () => number;
   /**
    * Deadline for a single daemon `workspace.open`. Defaults to
    * WORKSPACE_OPEN_DEADLINE_MS, which is the product guarantee about
@@ -84,7 +96,9 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 const TRANSPORT_REBIND_ATTEMPTS = 6;
 const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
-const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
+// Exported so a caller deriving a retryDeadlineMs can budget whole recovery
+// windows (open deadline + worst-case backoff) instead of restating numbers.
+export const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
 const SHADOW_CLONE_TOKEN = /^[0-9a-f]{64}$/;
 export const WORKSPACE_OPEN_DEADLINE_MS = 2_000;
 
@@ -112,6 +126,36 @@ export class EngineWorkspaceSessionsClosedError extends Error {
     super("Rust engine workspace sessions are closed.");
     this.name = "EngineWorkspaceSessionsClosedError";
   }
+}
+
+// The retryDeadlineMs limit was reached: the run stopped STARTING transport
+// retries. The last transport error rides as the cause.
+export class EngineWorkspaceRetryDeadlineError extends Error {
+  readonly workspaceId: string;
+
+  constructor(
+    workspaceId: string,
+    retryDeadlineMs: number,
+    waitedMs: number,
+    attempts: number,
+    cause: unknown,
+  ) {
+    super(
+      `Rust engine stopped retrying the open for workspace ${workspaceId}: ` +
+        `the retryDeadlineMs limit of ${retryDeadlineMs}ms was reached ` +
+        `(waited ${waitedMs}ms across ${attempts} attempts). ` +
+        `Retry the operation, or wait for the daemon to come back.`,
+      { cause },
+    );
+    this.name = "EngineWorkspaceRetryDeadlineError";
+    this.workspaceId = workspaceId;
+  }
+}
+
+export function isEngineWorkspaceRetryDeadlineError(
+  error: unknown,
+): error is EngineWorkspaceRetryDeadlineError {
+  return error instanceof EngineWorkspaceRetryDeadlineError;
 }
 
 function requiresReconnect(error: unknown): boolean {
@@ -160,8 +204,14 @@ export class EngineWorkspaceSessions {
   private readonly shareMounts = new Set<string>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly now: () => number;
   private readonly workspaceOpenDeadlineMs: number;
   private acceptingRuns = true;
+  // App quit (#564): retry waiting is over. Armed backoff sleeps resolve,
+  // and a transport failure after this point is final. Operations themselves
+  // still run — the quit teardown's closes go through run() too.
+  private shuttingDown = false;
+  private readonly sleepCancels = new Set<() => void>();
 
   constructor(
     private readonly source: EngineDaemonClientSource,
@@ -170,6 +220,7 @@ export class EngineWorkspaceSessions {
     this.transportRebindAttempts =
       options.transportRebindAttempts ?? TRANSPORT_REBIND_ATTEMPTS;
     this.sleep = options.sleep ?? defaultSleep;
+    this.now = options.now ?? Date.now;
     // `??` alone would accept 0, a negative, NaN or Infinity — an exported
     // option, so an invalid value would either fail every workspace.open or
     // quietly void the deadline guarantee this option exists to preserve.
@@ -198,6 +249,20 @@ export class EngineWorkspaceSessions {
     operation: (binding: EngineWorkspaceBinding) => Promise<T>,
     options: EngineWorkspaceRunOptions = {},
   ): Promise<T> {
+    // Same discipline as workspaceOpenDeadlineMs above: reject an invalid
+    // value rather than quietly voiding the bound it exists to preserve.
+    const retryDeadlineMs = options.retryDeadlineMs;
+    if (
+      retryDeadlineMs !== undefined &&
+      (!Number.isInteger(retryDeadlineMs) ||
+        retryDeadlineMs <= 0 ||
+        retryDeadlineMs > MAX_TIMER_DELAY_MS)
+    ) {
+      throw new TypeError(
+        `retryDeadlineMs must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}, received ${String(retryDeadlineMs)}.`,
+      );
+    }
+    const startedAtMs = this.now();
     const entry = await this.acquire(workspace.workspaceId);
     try {
       const maxAttempts = options.retryTransportErrors
@@ -211,6 +276,7 @@ export class EngineWorkspaceSessions {
           entry,
           options,
           rebindStarted,
+          startedAtMs,
         );
         try {
           return await operation(binding);
@@ -233,13 +299,52 @@ export class EngineWorkspaceSessions {
           rebindStarted = true;
           lastError = error;
           if (retryAfterTransport) {
-            await this.sleep(transportBackoffMs(attempt));
+            // Both gates bound WAITING, never a healthy first attempt: at
+            // quit the failure is final, and past the caller's deadline the
+            // run stops starting new backoff/attempt rounds (#564).
+            if (this.shuttingDown) throw error;
+            const waitedMs = this.now() - startedAtMs;
+            if (retryDeadlineMs !== undefined && waitedMs >= retryDeadlineMs) {
+              throw new EngineWorkspaceRetryDeadlineError(
+                workspace.workspaceId,
+                retryDeadlineMs,
+                waitedMs,
+                attempt,
+                error,
+              );
+            }
+            await this.interruptibleSleep(transportBackoffMs(attempt));
+            if (this.shuttingDown) throw error;
           }
         }
       }
       throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
     } finally {
       this.release(entry);
+    }
+  }
+
+  /**
+   * App quit: stop holding callers for daemon recovery. Armed backoff sleeps
+   * resolve now, and further transport failures are final instead of
+   * retried. Operations still run — the quit teardown's own closes come
+   * through run() after this.
+   */
+  beginShutdown(): void {
+    this.shuttingDown = true;
+    for (const cancel of [...this.sleepCancels]) cancel();
+  }
+
+  private async interruptibleSleep(delayMs: number): Promise<void> {
+    let cancel!: () => void;
+    const cancelled = new Promise<void>((resolveCancel) => {
+      cancel = resolveCancel;
+    });
+    this.sleepCancels.add(cancel);
+    try {
+      await Promise.race([this.sleep(delayMs), cancelled]);
+    } finally {
+      this.sleepCancels.delete(cancel);
     }
   }
 
@@ -344,6 +449,7 @@ export class EngineWorkspaceSessions {
     entry: SessionEntry,
     options: EngineWorkspaceRunOptions,
     rebindStarted: boolean,
+    startedAtMs: number,
   ): Promise<EngineWorkspaceBinding> {
     const maxAttempts = options.retryTransportErrors
       ? this.transportRebindAttempts
@@ -357,7 +463,25 @@ export class EngineWorkspaceSessions {
         lastError = error;
         if (attempt >= maxAttempts) break;
         if (daemonMayBeRelaunching(error)) {
-          await this.sleep(transportBackoffMs(attempt));
+          // The same waiting gates as run()'s operation retries (#564): a
+          // daemon-down open is the other place a caller can spend the whole
+          // backoff ladder, and it holds the same resources.
+          if (this.shuttingDown) break;
+          const waitedMs = this.now() - startedAtMs;
+          if (
+            options.retryDeadlineMs !== undefined &&
+            waitedMs >= options.retryDeadlineMs
+          ) {
+            throw new EngineWorkspaceRetryDeadlineError(
+              workspace.workspaceId,
+              options.retryDeadlineMs,
+              waitedMs,
+              attempt,
+              error,
+            );
+          }
+          await this.interruptibleSleep(transportBackoffMs(attempt));
+          if (this.shuttingDown) break;
         }
       }
     }
@@ -393,7 +517,7 @@ export class EngineWorkspaceSessions {
             new Error("Rust engine client changed on every open attempt."),
           );
         }
-        await this.sleep(transportBackoffMs(attempt));
+        await this.interruptibleSleep(transportBackoffMs(attempt));
         continue;
       }
       entry.binding = binding;

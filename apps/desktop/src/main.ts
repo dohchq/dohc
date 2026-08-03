@@ -429,6 +429,7 @@ import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLive
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
+  isEngineWorkspaceRetryDeadlineError,
   type EngineDaemonLifecycle,
 } from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
@@ -2875,6 +2876,13 @@ app.on("will-quit", (event) => {
   if (quitting) return;
   quitting = true;
   event.preventDefault();
+  // FIRST, synchronously (#564): a document open mid transport-retry holds
+  // the capture chain, and captureStop below queues behind it. This resolves
+  // its armed backoff and makes the next failure final, so the chain frees in
+  // at most one attempt instead of spending the whole 3 s budget. Nothing is
+  // abandoned that a user could see: an opening document is read-only (#533),
+  // so no edit exists yet on the path being given up.
+  rustEngineWorkspaceSessions?.beginShutdown();
   searchRegistry.killAll();
   const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
   const chatDispatchStop = chatDispatchService.stop().catch(() => undefined);
@@ -7754,9 +7762,12 @@ function registerIpcHandlers(
         // gracefully — but never silently. A refusal here downgrades the doc to
         // the plain editor, and an unlogged permanent refusal is
         // indistinguishable from intended fallback (it hid a dead engine editor
-        // for weeks). Only path-not-in-version sets the flag below; an
-        // uncaptured artifact is really on disk, so claiming the version does
-        // not have it would be false.
+        // for weeks). Two flags below refuse that downgrade instead:
+        // path-not-in-version (#534, the plain editor would write the phantom
+        // back) and the open retry deadline (#564, the engine may still bind
+        // this document — a writable plain editor now would take the disk path
+        // #533 closed). An uncaptured artifact is really on disk, so claiming
+        // the version does not have it would be false.
         console.error(
           `[desktop] engine Y.Doc open refused for ${input.path}:`,
           error,
@@ -7764,6 +7775,9 @@ function registerIpcHandlers(
         return OpenEngineYDocSessionResult.parse({
           available: false,
           ...(isYDocPathNotInVersionError(error) ? { notInVersion: true } : {}),
+          ...(isEngineWorkspaceRetryDeadlineError(error)
+            ? { openTimedOut: true }
+            : {}),
         });
       }
       // The renderer can die or reload DURING the await above. Close the stale

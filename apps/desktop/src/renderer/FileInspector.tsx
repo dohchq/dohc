@@ -687,6 +687,9 @@ function MarkdownView(props: {
   // reread fail before the queued open answers — so an open owned here would be
   // cancelled by the very race its refusal exists to name (#534, codex P2).
   engine: UseEngineDoc;
+  // Reopen the engine session after `engine.openTimedOut` (#564). Owned by
+  // the inspector, like the open itself.
+  onRetryEngineOpen?: () => void;
   // Set by the inspector the instant the engine refuses this path. Read by
   // every write guard BESIDE `readOnlyRef`, because the refusal arrives in the
   // same commit that unmounts this component — there is no render of it here to
@@ -859,6 +862,10 @@ function MarkdownView(props: {
   const readOnly =
     !!props.forceReadOnly ||
     engine.notInVersion ||
+    // #564: the engine open hit its retry deadline. The plain editor stays
+    // read-only — its autosave would race the session the engine may still
+    // bind — and the notice below states the reason and offers the retry.
+    engine.openTimedOut ||
     (props.truncated && !engine.available);
   // Every write guard reads THIS, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
@@ -1502,6 +1509,9 @@ function MarkdownView(props: {
         }
       />
       {props.truncatedNotice}
+      {engine.openTimedOut && props.onRetryEngineOpen ? (
+        <EngineOpenTimedOutNotice onRetry={props.onRetryEngineOpen} />
+      ) : null}
       {surfaceMode === "source" ? (
         <textarea
           data-testid="markdown-editor"
@@ -2160,6 +2170,30 @@ function Empty({ children }: { children: React.ReactNode }) {
   );
 }
 
+// #564: the engine open hit its retry deadline. The document stays read-only
+// — never the writable plain editor — with the reason stated and the retry
+// offered where the user is looking.
+function EngineOpenTimedOutNotice(props: { onRetry: () => void }) {
+  return (
+    <div
+      data-testid="engine-open-timeout-notice"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span>
+        dohc could not open this file for editing in time. It is read-only for
+        now.
+      </span>
+      <button
+        type="button"
+        onClick={props.onRetry}
+        className="text-subtle hover:text-ink"
+      >
+        Try again
+      </button>
+    </div>
+  );
+}
+
 function TruncatedNotice(props: { workspaceId: string; path: string }) {
   return (
     <div
@@ -2275,12 +2309,17 @@ export function FileInspector(props: {
   // when that answer is a failure: a failed reread is exactly when the refusal
   // is on its way, and dropping `enabled` would cancel the open that carries it.
   const readAnswered = text !== null || error;
+  // "Try again" after an open that hit its retry deadline (#564): part of the
+  // hook's request key, so a retry is a fresh open under the same
+  // stale-response guard as any other request change.
+  const [engineRetryNonce, setEngineRetryNonce] = useState(0);
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
     enabled:
       kind === "markdown" && readAnswered && !truncated && !props.readOnly,
     reopenKey: props.engineVersionKey,
+    retryKey: engineRetryNonce,
   });
   // DERIVED, never stored. #565 keys the hook's outcome to the request that
   // asked for it, so a refusal for the version the user just LEFT cannot repaint
@@ -2294,8 +2333,11 @@ export function FileInspector(props: {
   // still holds the pre-refusal value when its unmount flush runs. A REF the
   // PARENT assigns during render is what crosses that gap — the object identity
   // is stable, so even the child's first-render closures read the live value.
+  // A timed-out open (#564) blocks writes the same way: the engine may still
+  // bind the document, and a draft written meanwhile would take the disk path
+  // #533 closed.
   const writesRefusedRef = useRef(false);
-  writesRefusedRef.current = notInVersion;
+  writesRefusedRef.current = notInVersion || engine.openTimedOut;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText
@@ -2393,6 +2435,7 @@ export function FileInspector(props: {
             registerSourceToggle={props.registerSourceToggle}
             onPendingDraftChange={setPendingDraft}
             engine={engine}
+            onRetryEngineOpen={() => setEngineRetryNonce((nonce) => nonce + 1)}
             writesRefusedRef={writesRefusedRef}
           />
         </div>

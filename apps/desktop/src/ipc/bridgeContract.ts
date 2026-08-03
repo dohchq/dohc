@@ -3049,6 +3049,12 @@ export const OpenEngineYDocSessionResult = z.object({
   // editor; this one must not, because that editor would autosave the path back
   // into the version as a phantom file.
   notInVersion: z.boolean().optional(),
+  // The open hit its retry deadline while the engine was unreachable (#564).
+  // Like notInVersion, this must NOT downgrade to the writable plain editor:
+  // the engine may still bind this document, and a plain autosave meanwhile
+  // would take the disk path #533 closed. The caller stays read-only, states
+  // the reason, and offers a retry.
+  openTimedOut: z.boolean().optional(),
 });
 export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionResult>;
 
