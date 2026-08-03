@@ -2844,3 +2844,78 @@ it("a rename drains the detached locked debt before touching disk", async () => 
   await finish(true).catch(() => undefined);
   await capture.stop();
 }, 20_000);
+
+it("a destructive delete cancels the detached locked debt instead of recreating the file", async () => {
+  // #595 round 7: the user deleted the file. A delayed payment reopening the
+  // path would RECREATE it — the clobber inverted — so the destructive
+  // vacate cancels the debt with a trace. Nothing durable is lost: the
+  // edits stay in the object's lineage.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-delete-cancel-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "deleted edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The user deletes the file, then the lock releases.
+  await capture.settleAndCloseLiveSessionsForPath("note.md");
+  state.locked = false;
+
+  // The cancel left a trace, and the retry window passes with no reopen and
+  // no settle: the deleted file is not recreated.
+  await expect
+    .poll(
+      () => state.errors.filter((context) => context.includes("close retry")),
+      { timeout: 5_000 },
+    )
+    .toHaveLength(1);
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(1);
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 15_000);
+
+it("a moved-away directory cancels detached locked debts under its prefix", async () => {
+  // Same rule, prefix shape: moving or deleting `dir` must not let a debt
+  // for `dir/note.md` rebuild the moved-from tree.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-dir-cancel-");
+  const session = await capture.openYDocSession({
+    path: "dir/note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "moved-away edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  await capture.settleAndCloseLiveSessionsForPath("dir");
+  state.locked = false;
+
+  await expect
+    .poll(
+      () => state.errors.filter((context) => context.includes("close retry")),
+      { timeout: 5_000 },
+    )
+    .toHaveLength(1);
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(1);
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 15_000);

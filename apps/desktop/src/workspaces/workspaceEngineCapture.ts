@@ -1761,6 +1761,33 @@ export function createWorkspaceEngineCapture(
       }
       await entry.close({ settle: false });
     }
+    // #595 round 7: detached locked-write debts are the SESSIONLESS residents
+    // of these same paths, and every caller of this vacate is about to remove
+    // or replace what sits under the matched paths. The pay-vs-cancel rule,
+    // per operation:
+    //
+    // - A single-file RENAME pays its exact endpoints BEFORE this vacate
+    //   (beginFileRename): the user wants the content to travel, so the
+    //   write lands first. A debt still here at vacate time could not land
+    //   (the lock held) and its path is about to stop existing.
+    // - Every DESTRUCTIVE match — delete, moved-away tree, version restore —
+    //   CANCELS with a trace, never pays: a delayed payment would reopen the
+    //   old path afterward and RECREATE a deleted file or a moved-from tree,
+    //   the clobber inverted. The user removed the path; dohc must not put
+    //   it back.
+    //
+    // Cancelling loses nothing durable: the edits stay in the object's
+    // lineage, which is where a deleted document's text lives anyway.
+    for (const path of [...detachedLockedDebts.keys()]) {
+      if (!match(path)) continue;
+      detachedLockedDebts.delete(path);
+      onError(
+        `ydoc close retry of ${path}`,
+        new Error(
+          `locked-write retry cancelled: a destructive operation (${summary}) removed or replaced the path while a pending write waited; the edits remain in the document lineage`,
+        ),
+      );
+    }
   }
 
   // The encrypted secret store (PR 08) shares engine.db; opened lazily so
@@ -3029,6 +3056,14 @@ export function createWorkspaceEngineCapture(
         // still-held lock keeps it and re-arms.
         let detachedRetryMs = LOCKED_CLOSE_RETRY_INITIAL_MS;
         const payDetachedLockedDebt = async (): Promise<void> => {
+          // Another edge may have paid, transferred, or CANCELLED this debt
+          // after the timer's own check — a destructive vacate cancels
+          // registry entries while a fired payment can already sit queued
+          // behind it on the chain. The registry is the single owner record:
+          // no longer named there means nothing left to do.
+          if (detachedLockedDebts.get(input.path) !== payDetachedLockedDebt) {
+            return;
+          }
           if (stopped) {
             detachedLockedDebts.delete(input.path);
             return;
