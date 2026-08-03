@@ -1979,18 +1979,57 @@ fn sync_parent_dir(
 /// ACL denial is TERMINAL: calling it a lock would put the caller into an
 /// endless retry under a false cause ("another program has this file open").
 ///
-/// This is THE terminal boundary rule, and every place a lock-shaped failure
-/// escapes to a caller applies it: the preimage read-open, and both bounded
-/// replace loops at exhaustion. The replace loops still RETRY on the broad
-/// predicate within their cap (an AV/indexer handle mid-scan often surfaces
-/// as ERROR_ACCESS_DENIED), but the error that outlives the cap must say
-/// what the code says (#595).
+/// This is THE terminal boundary rule for the preimage read-open. The replace
+/// loops at exhaustion add one probe on top ([`terminal_replace_classification`])
+/// because Windows reports a held handle differently at the two boundaries:
+/// a no-share read-open fails 32, but a replace over a handle held without
+/// FILE_SHARE_DELETE fails with the same ERROR_ACCESS_DENIED an ACL denial
+/// produces. The loops still RETRY on the broad predicate within their cap;
+/// the error that outlives the cap must say what the cause really is (#595).
 fn terminal_lock_classification(err: std::io::Error, target: &Path) -> MaterializeError {
     if matches!(err.raw_os_error(), Some(32) | Some(33)) {
         MaterializeError::FileLocked
     } else {
         MaterializeError::io(target, &err)
     }
+}
+
+/// Whether an ACCESS_DENIED replace failure is really a HELD HANDLE, not an
+/// ACL: opening the target for DELETE access with full sharing answers 32/33
+/// exactly when another handle without FILE_SHARE_DELETE is the contender —
+/// the very thing the replace needs and could not get — while a DACL denial
+/// answers ACCESS_DENIED again. A successful probe open means the contender
+/// released between attempts: also a lock, and the retry lands.
+#[cfg(windows)]
+fn replace_denial_is_handle_lock(target: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    const DELETE: u32 = 0x0001_0000;
+    const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4; // read | write | delete
+    match std::fs::OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(SHARE_ALL)
+        .open(target)
+    {
+        Ok(_) => true,
+        Err(err) => matches!(err.raw_os_error(), Some(32) | Some(33)),
+    }
+}
+
+/// The terminal classification after a bounded replace loop exhausts. 32/33
+/// keep the retryable `FileLocked` contract outright; ERROR_ACCESS_DENIED is
+/// ambiguous at THIS boundary (#554's own dogfood shape: a handle held
+/// without FILE_SHARE_DELETE fails the replace with 5, exactly like an ACL),
+/// so it is resolved by probing the target — a handle-lock stays retryable,
+/// a DACL denial is terminal io. Everything else is terminal io.
+fn terminal_replace_classification(err: std::io::Error, target: &Path) -> MaterializeError {
+    if matches!(err.raw_os_error(), Some(32) | Some(33)) {
+        return MaterializeError::FileLocked;
+    }
+    #[cfg(windows)]
+    if err.raw_os_error() == Some(5) && replace_denial_is_handle_lock(target) {
+        return MaterializeError::FileLocked;
+    }
+    MaterializeError::io(target, &err)
 }
 
 /// Whether an io error is a transient sharing/lock condition worth retrying
@@ -2030,7 +2069,7 @@ fn replace_with_bounded_retry(
             Err(err) if is_transient_lock(&err) => {
                 if attempt >= MAX_REPLACE_ATTEMPTS {
                     let _ = std::fs::remove_file(tmp); // best-effort cleanup
-                    return Err(terminal_lock_classification(err, target));
+                    return Err(terminal_replace_classification(err, target));
                 }
                 // Back off before the next attempt so a real (tens-of-ms)
                 // AV/indexer sharing violation is actually absorbed. Injectable,
@@ -2063,7 +2102,7 @@ fn replace_secret_with_bounded_retry(
             Err(err) if is_transient_lock(&err) => {
                 if attempt >= MAX_REPLACE_ATTEMPTS {
                     let _ = parent.remove_file(tmp_name, tmp);
-                    return Err(terminal_lock_classification(err, target));
+                    return Err(terminal_replace_classification(err, target));
                 }
                 backoff.wait_before_retry(attempt);
             }
@@ -2097,12 +2136,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// #595 codex P2 (rounds 2+3): only a real sharing/lock violation may
-    /// become the retryable `FileLocked` contract at ANY terminal boundary —
-    /// the preimage read-open and both exhausted replace loops classify
-    /// through this one rule. std folds `ERROR_ACCESS_DENIED` into
-    /// `PermissionDenied` too, and an ACL denial is terminal — the desktop
-    /// polls `FileLocked` until it clears, so a misclassified denial means
-    /// an endless retry under a false cause.
+    /// become the retryable `FileLocked` contract at the preimage read-open.
+    /// std folds `ERROR_ACCESS_DENIED` into `PermissionDenied` too, and an
+    /// ACL denial is terminal — the desktop polls `FileLocked` until it
+    /// clears, so a misclassified denial means an endless retry under a
+    /// false cause. (The replace boundary resolves its ambiguous
+    /// ACCESS_DENIED with a probe — the test below.)
     #[test]
     fn terminal_lock_classification_splits_locks_from_acl_denials() {
         let classify = |err: std::io::Error| terminal_lock_classification(err, Path::new("n.md"));
@@ -2167,6 +2206,39 @@ mod tests {
             MAX_REPLACE_ATTEMPTS as usize
         );
         assert!(matches!(result, Err(MaterializeError::Io { .. })));
+    }
+
+    /// The replace boundary's two meanings of ERROR_ACCESS_DENIED (#554,
+    /// #595 round 4): a handle held without FILE_SHARE_DELETE fails the
+    /// replace with 5 — the dogfood shape itself — and the probe's
+    /// DELETE-access open convicts it as a lock. The same raw code with no
+    /// contending handle to find is the ACL story: terminal io. (A real
+    /// deny-ACE answers the probe with ACCESS_DENIED, the same non-lock
+    /// branch the absent target pins here.)
+    #[cfg(windows)]
+    #[test]
+    fn replace_denial_probe_splits_held_handles_from_acls() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let scratch = Scratch::new("replace-denial-probe");
+        let target = scratch.root.join("held.md");
+        std::fs::write(&target, b"held").expect("write target");
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2) // read | write, NO delete sharing
+            .open(&target)
+            .expect("hold handle");
+        assert!(matches!(
+            terminal_replace_classification(std::io::Error::from_raw_os_error(5), &target),
+            MaterializeError::FileLocked
+        ));
+        drop(holder);
+        assert!(matches!(
+            terminal_replace_classification(
+                std::io::Error::from_raw_os_error(5),
+                &scratch.root.join("no-such-target.md"),
+            ),
+            MaterializeError::Io { .. }
+        ));
     }
 
     /// The inverse: a real sharing violation that survives every attempt

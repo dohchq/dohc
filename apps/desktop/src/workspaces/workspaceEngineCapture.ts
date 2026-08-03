@@ -3012,6 +3012,8 @@ export function createWorkspaceEngineCapture(
                   ...(input.contentKind
                     ? { contentKind: input.contentKind }
                     : {}),
+                  onDead: () => undefined,
+                  onAlive: () => undefined,
                   onRemoteUpdate: () => undefined,
                   onSettleStart: () => undefined,
                   onSettleError: () => undefined,
