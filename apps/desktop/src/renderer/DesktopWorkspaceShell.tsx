@@ -1281,6 +1281,19 @@ export function DesktopWorkspaceShell(props: {
       cloudStatusToken.current += 1;
     };
   }, [refreshCloudStatus]);
+  // The session signal reaches the SHELL too: cloudStatus derives the
+  // presence collaboration, so a sign-out must tear the old account's
+  // presence down NOW — dropping the status rebuilds the collaboration
+  // dormant and aborts its long poll — not when some later refresh notices.
+  // The token bump also stops a stale connected response from repainting;
+  // the refresh then reports the new session's truth.
+  useEffect(() => {
+    return bridge().onCloudSessionChanged(() => {
+      cloudStatusToken.current += 1;
+      setCloudStatus(null);
+      refreshCloudStatus();
+    });
+  }, [refreshCloudStatus]);
 
   // The presence collaboration for the ACTIVE workspace, rebuilt per workspace
   // (keyed by workspaceId) so a switch tears the old transport down and aborts

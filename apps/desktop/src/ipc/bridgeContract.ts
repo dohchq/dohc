@@ -2403,10 +2403,32 @@ export const ListChatChannelSharesPayload = z.object({
 });
 export type ListChatChannelSharesPayload = z.infer<typeof ListChatChannelSharesPayload>;
 
+// The granted/received rows live on the relay; the joined rows are local.
+// The relay side carries which of three different facts it learned, because
+// each one means something different for cached rows:
+//  - "answered": the relay's rows, authoritative (empty means no shares).
+//  - "unreachable": the relay did not answer. NOT an empty listing — the
+//    caller keeps what it already knows.
+//  - "signed-out": there is no valid session (signed out, expired, switched
+//    account). Account-scoped rows do not exist for this caller, so cached
+//    rows must clear — another account's invitations and recipient emails
+//    must not survive a logout.
 export const ListChatChannelSharesResult = z.object({
-  granted: z.array(ChatChannelShareGrantRow).max(1000),
-  received: z.array(ChatChannelShareReceivedRow).max(1000),
   joined: z.array(JoinedSharedChannelRow).max(1000),
+  // The account the relay lanes are scoped to (server + stable user id), or
+  // null when no session exists. Cached relay rows are preservable only
+  // within the SAME session: an unreachable answer under a different account
+  // must never preserve another account's rows.
+  sessionKey: z.string().nullable(),
+  relay: z.discriminatedUnion("state", [
+    z.object({
+      state: z.literal("answered"),
+      granted: z.array(ChatChannelShareGrantRow).max(1000),
+      received: z.array(ChatChannelShareReceivedRow).max(1000),
+    }),
+    z.object({ state: z.literal("unreachable") }),
+    z.object({ state: z.literal("signed-out") }),
+  ]),
 });
 export type ListChatChannelSharesResult = z.infer<typeof ListChatChannelSharesResult>;
 
@@ -3246,6 +3268,23 @@ export interface DohcDesktopBridge {
   // or history changed (settled filesystem batch recorded). Returns an
   // unsubscribe function.
   onWorkspaceActivity(listener: () => void): () => void;
+  // Live push: main signals a cloud session transition (login, logout,
+  // account switch, or a relay proving the session dead). Account-scoped
+  // renderer caches — the relay-backed share rows — refresh on this signal;
+  // the generic activity ping deliberately reaches only cheap local
+  // refreshes. The event carries the NEW session's key (null when signed
+  // out) so a same-account token rotation invalidates nothing. Returns an
+  // unsubscribe function.
+  // The phase completes the two-moment transition contract: "changing" is
+  // transition start (preserve same-session state, ask for nothing — the
+  // credential cache is mid-transition), "ready" is adoption end (run the
+  // one revalidation against the settled session).
+  onCloudSessionChanged(
+    listener: (event: {
+      sessionKey: string | null;
+      phase: "changing" | "ready";
+    }) => void,
+  ): () => void;
   // Application-menu clicks, validated against MenuCommand in the preload
   // before they reach renderer code. Returns an unsubscribe function.
   onMenuCommand(listener: (command: MenuCommand) => void): () => void;

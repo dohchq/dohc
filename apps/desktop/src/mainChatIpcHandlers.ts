@@ -2,6 +2,10 @@
 // the real parsers, workspace lookup, policy checks, and operations; tests can
 // register and invoke these same callbacks without booting Electron's entire
 // app lifecycle.
+import {
+  ChatChannelShareGrantRow,
+  ChatChannelShareReceivedRow,
+} from "./ipc/bridgeContract";
 
 interface WorkspacePayload {
   workspaceId: string;
@@ -289,4 +293,208 @@ export async function writeChatMessageFromMain<Attachment, Result>(input: {
     ...(authorUserId ? { authorUserId } : {}),
     attachments,
   });
+}
+
+// A relay-share call that failed because its session was invalid. Whether
+// that says anything about the CURRENT session depends on whose token the
+// relay rejected: a rejection of the credentials still in use is an
+// authoritative sign-out, while a rejection of a token the session already
+// rotated away from says nothing — callers must not clear account-scoped
+// caches over it.
+export class RelaySessionError extends Error {
+  readonly sessionWasCurrent: boolean;
+  constructor(message: string, options?: { sessionWasCurrent?: boolean }) {
+    super(message);
+    this.sessionWasCurrent = options?.sessionWasCurrent ?? true;
+  }
+}
+
+// The relay side of a chat share listing. The joined rows are local and always
+// answer; the granted/received lanes exist only on the relay. A transport
+// failure is "unreachable", never an empty listing — an outage must not read
+// as "there are no shares", or it clobbers whatever rows the renderer has
+// cached. A session failure is "signed-out": the caller has no account-scoped
+// rows, and cached ones must clear.
+export type RelayChatShareLanes =
+  | {
+      state: "answered";
+      granted: ChatChannelShareGrantRow[];
+      received: ChatChannelShareReceivedRow[];
+    }
+  | { state: "unreachable" }
+  | { state: "signed-out" };
+
+export async function readRelayChatShareLanes(input: {
+  fetchListing: () => Promise<{
+    granted?: Array<Record<string, unknown>>;
+    received?: Array<Record<string, unknown>>;
+  }>;
+  remoteWorkspaceId: string | null;
+}): Promise<RelayChatShareLanes> {
+  let listing: Awaited<ReturnType<typeof input.fetchListing>>;
+  try {
+    listing = await input.fetchListing();
+  } catch (error) {
+    // Signed-out is authoritative only when the relay rejected the CURRENT
+    // credentials. A stale token's rejection — a listing still in flight
+    // across a same-account rotation — says nothing about the current
+    // session, and clearing cached rows over it is the clobber this
+    // contract exists to prevent.
+    if (error instanceof RelaySessionError && error.sessionWasCurrent) {
+      return { state: "signed-out" };
+    }
+    return { state: "unreachable" };
+  }
+  // A 200 whose body is not the listing shape is NOT an authoritative
+  // answer. Mapping AND row-level validation run inside this guard: a
+  // malformed body or an invalid entry field escaping to the contract parse
+  // would reject the whole IPC call, which the renderer reads as an unknown
+  // listing and clears.
+  try {
+    const mapped = mapRelayShareListing(listing, input.remoteWorkspaceId);
+    return {
+      state: "answered",
+      granted: mapped.granted.map((row) => ChatChannelShareGrantRow.parse(row)),
+      received: mapped.received.map((row) =>
+        ChatChannelShareReceivedRow.parse(row),
+      ),
+    };
+  } catch {
+    return { state: "unreachable" };
+  }
+}
+
+function mapRelayShareListing(
+  listing: {
+    granted?: Array<Record<string, unknown>>;
+    received?: Array<Record<string, unknown>>;
+  },
+  remoteWorkspaceId: string | null,
+): {
+  granted: Array<Record<string, unknown>>;
+  received: Array<Record<string, unknown>>;
+} {
+  const chatSelector = (row: Record<string, unknown>) => {
+    const selector = row.selector as
+      | { kind?: unknown; channelWireId?: unknown; access?: unknown }
+      | undefined;
+    return selector?.kind === "chat-channel" &&
+      typeof selector.channelWireId === "string"
+      ? {
+          channelWireId: selector.channelWireId,
+          access: selector.access === "read-only" ? "read-only" : "read-write",
+        }
+      : null;
+  };
+  const grantedRows = listing.granted ?? [];
+  const receivedRows = listing.received ?? [];
+  // Only real arrays may map. An ITERABLE non-array lane — a string — would
+  // iterate per character, filter every one, and manufacture an
+  // authoritative EMPTY answer out of garbage.
+  if (!Array.isArray(grantedRows) || !Array.isArray(receivedRows)) {
+    throw new Error("relay share listing lanes must be arrays");
+  }
+  const granted: Array<Record<string, unknown>> = [];
+  const received: Array<Record<string, unknown>> = [];
+  for (const row of grantedRows) {
+    const selector = chatSelector(row);
+    // Grants are scoped to THIS workspace's remote identity: a channel shared
+    // from another workspace is managed there.
+    if (!selector || remoteWorkspaceId === null) continue;
+    if (row.workspaceId !== remoteWorkspaceId) continue;
+    granted.push({
+      shareId: row.shareId,
+      ...selector,
+      recipientEmail: row.recipientEmail ?? null,
+      revokedAtMs: row.revokedAtMs ?? null,
+    });
+  }
+  for (const row of receivedRows) {
+    const selector = chatSelector(row);
+    if (!selector) continue;
+    received.push({
+      shareId: row.shareId,
+      ...selector,
+      granterEmail: row.granterEmail ?? null,
+    });
+  }
+  return { granted, received };
+}
+
+// A relay 401 acts if and only if it belongs to the CURRENT credentials, and
+// then it acts COMPLETELY — memory, broadcast, persistent store — and
+// immediately, never behind cleanup. A stale request still in flight from a
+// previous session must not wipe the session the user just adopted; a
+// current-session 401 must not leave the saved token behind to report a false
+// connected state after a restart.
+interface RelaySessionIdentity {
+  serverUrl: string;
+  userId: string;
+  token: string;
+}
+
+function sameRelaySession(
+  left: RelaySessionIdentity,
+  right: RelaySessionIdentity | null,
+): boolean {
+  return (
+    right !== null &&
+    right.token === left.token &&
+    right.serverUrl === left.serverUrl &&
+    right.userId === left.userId
+  );
+}
+
+// Returns whether the 401 belonged to the current session and was acted on —
+// the caller threads that into RelaySessionError, because only a rejection of
+// the CURRENT credentials is an authoritative sign-out.
+export async function handleRelayUnauthorized(input: {
+  requestCredentials: RelaySessionIdentity;
+  currentCredentials: RelaySessionIdentity | null;
+  clearCachedCredentials: () => void;
+  // The transitional broadcast, fired at the clear; the final broadcast
+  // fires only once the store settled (notifyCloudSessionChanged).
+  notifySessionChanging: () => void;
+  notifyCloudSessionChanged: () => void;
+  // ONE serialized store mutation: the saved record can be NEWER than the
+  // cache (a completed login poll saves the next session before main adopts
+  // it), so the store compares and clears inside its own mutation queue — a
+  // login save can never land between the check and the clear.
+  invalidatePersistedSessionIf: (
+    expected: RelaySessionIdentity,
+  ) => Promise<void>;
+}): Promise<boolean> {
+  if (!sameRelaySession(input.requestCredentials, input.currentCredentials)) {
+    return false;
+  }
+  input.clearCachedCredentials();
+  input.notifySessionChanging();
+  try {
+    await input.invalidatePersistedSessionIf(input.requestCredentials);
+  } catch {
+    // The in-memory session is already cleared and broadcast; a store
+    // failure must not turn the session error into something else.
+  }
+  // Broadcast the FINAL state after the store settled: a status read raced
+  // by the first broadcast can have seen the expired on-disk session and
+  // reported connected — no later event would correct it.
+  input.notifyCloudSessionChanged();
+  return true;
+}
+
+// The session a share listing's relay lanes are scoped to: server URL, relay
+// URL, and the stable Better Auth user id. The relay URL is part of the
+// scope — the same account reconnected to a different relay has different
+// rows, so its cache must not carry over. Never the token: it rotates within
+// one session, and a rotated token must still preserve that session's cache.
+export function chatShareSessionKey(
+  credentials: { serverUrl: string; relayUrl?: string; userId: string } | null,
+): string | null {
+  if (!credentials) return null;
+  const normalize = (url: string) => url.replace(/\/+$/u, "");
+  return [
+    normalize(credentials.serverUrl),
+    credentials.relayUrl ? normalize(credentials.relayUrl) : "",
+    credentials.userId,
+  ].join("#");
 }

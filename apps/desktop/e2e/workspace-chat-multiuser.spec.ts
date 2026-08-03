@@ -98,13 +98,26 @@ async function grantedShare(
       window as unknown as {
         dohcDesktop: {
           listChatChannelShares(payload: { workspaceId: string }): Promise<{
-            granted: Array<{ shareId: string; channelWireId: string; revokedAtMs: number | null }>;
+            relay:
+              | {
+                  state: "answered";
+                  granted: Array<{
+                    shareId: string;
+                    channelWireId: string;
+                    revokedAtMs: number | null;
+                  }>;
+                }
+              | { state: "unreachable" }
+              | { state: "signed-out" };
           }>;
         };
       }
     ).dohcDesktop;
     const shares = await api.listChatChannelShares({ workspaceId: id }).catch(() => null);
-    const live = shares?.granted.find((row) => row.revokedAtMs === null) ?? null;
+    const live =
+      shares?.relay.state === "answered"
+        ? shares.relay.granted.find((row) => row.revokedAtMs === null) ?? null
+        : null;
     return live ? { shareId: live.shareId, channelWireId: live.channelWireId } : null;
   }, workspaceId).then(
     // waitForFunction only resolves on a truthy result, so the polled `null`

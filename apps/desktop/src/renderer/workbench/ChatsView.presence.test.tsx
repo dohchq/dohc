@@ -71,6 +71,7 @@ const bridgeMock = {
   // MU-C4 shared-channel surface: ChatsView loads share state on mount, so
   // the presence tests must stub it even though they exercise a solo view.
   listChatChannelShares: vi.fn(),
+  onCloudSessionChanged: vi.fn(),
   shareChatChannel: vi.fn(),
   joinSharedChannel: vi.fn(),
   leaveSharedChannel: vi.fn(),
@@ -169,11 +170,16 @@ beforeEach(() => {
   bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: {} });
   bridgeMock.writeClipboardText.mockResolvedValue(undefined);
   bridgeMock.onWorkspaceActivity.mockReturnValue(() => undefined);
+  bridgeMock.onCloudSessionChanged.mockReturnValue(() => undefined);
   bridgeMock.markChatThreadRead.mockResolvedValue({ lastReadSequence: 1, revision: 1 });
   bridgeMock.listChatReactions.mockResolvedValue({ reactions: [], viewerAuthorId: "you" });
   // Solo/dormant default: no grants, nothing received, nothing joined — the
   // share load resolves so the overview reaches its ready state.
-  bridgeMock.listChatChannelShares.mockResolvedValue({ granted: [], received: [], joined: [] });
+  bridgeMock.listChatChannelShares.mockResolvedValue({
+    joined: [],
+    sessionKey: "session-a",
+    relay: { state: "answered" as const, granted: [], received: [] },
+  });
   // Solo default: no DMs, DM surface unavailable.
   bridgeMock.syncDms.mockResolvedValue({ available: false, dms: [] });
   vi.stubGlobal("dohcDesktop", bridgeMock);
@@ -474,8 +480,6 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
     });
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
     bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
       joined: [
         {
           shareId: "share-1",
@@ -485,6 +489,8 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
           ended: false,
         },
       ],
+      sessionKey: "session-a",
+    relay: { state: "answered" as const, granted: [], received: [] },
     });
     const rec = recordingCollab();
     const user = userEvent.setup();
@@ -544,8 +550,6 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
     });
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [joinedThread] });
     bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
       joined: [
         {
           shareId: "share-1",
@@ -555,6 +559,8 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
           ended: false,
         },
       ],
+      sessionKey: "session-a",
+    relay: { state: "answered" as const, granted: [], received: [] },
     });
     const rec = recordingCollab();
     const user = userEvent.setup();
@@ -749,8 +755,6 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
     );
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
     bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
       joined: [
         {
           shareId: "share-1",
@@ -760,6 +764,8 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
           ended: false,
         },
       ],
+      sessionKey: "session-a",
+    relay: { state: "answered" as const, granted: [], received: [] },
     });
     const rec = recordingCollab();
     const user = userEvent.setup();

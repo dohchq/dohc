@@ -276,6 +276,30 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.on(CHANNELS.workspaceActivity, handler);
     return () => ipcRenderer.removeListener(CHANNELS.workspaceActivity, handler);
   },
+  onCloudSessionChanged: (
+    listener: (event: {
+      sessionKey: string | null;
+      phase: "changing" | "ready";
+    }) => void,
+  ) => {
+    // Validate the payload at the boundary like every main-sent event: the
+    // listener only ever sees a string key or null, and one of the two
+    // phases — an unknown phase degrades to "changing", the phase that
+    // takes no action on its own.
+    const handler = (_event: unknown, payload: unknown) => {
+      const record =
+        payload !== null && typeof payload === "object"
+          ? (payload as { sessionKey?: unknown; phase?: unknown })
+          : {};
+      const sessionKey =
+        typeof record.sessionKey === "string" ? record.sessionKey : null;
+      const phase = record.phase === "ready" ? ("ready" as const) : ("changing" as const);
+      listener({ sessionKey, phase });
+    };
+    ipcRenderer.on(CHANNELS.cloudSessionChanged, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.cloudSessionChanged, handler);
+  },
   // Event payloads from main are still validated at this boundary: only a
   // command from the closed MENU_COMMANDS set ever reaches renderer code
   // (isMenuCommand — unit-tested against String objects/toString tricks; the

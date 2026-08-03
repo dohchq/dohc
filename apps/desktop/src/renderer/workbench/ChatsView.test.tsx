@@ -148,9 +148,33 @@ const bridgeMock = {
   listPersonalChatFeed: vi.fn(),
   markPersonalChatFeedSeen: vi.fn(),
   onWorkspaceActivity: vi.fn(),
+  onCloudSessionChanged: vi.fn(),
 };
 
 Element.prototype.scrollIntoView = vi.fn();
+
+// The contract listing for a relay that ANSWERED. An unreachable relay
+// resolves `{ joined, relay: { state: "unreachable" } }` instead — never an
+// empty listing — and a missing session resolves `{ state: "signed-out" }`
+// (#551).
+function shareListing(
+  rows: {
+    granted?: unknown[];
+    received?: unknown[];
+    joined?: unknown[];
+    sessionKey?: string | null;
+  } = {},
+) {
+  return {
+    joined: rows.joined ?? [],
+    sessionKey: rows.sessionKey !== undefined ? rows.sessionKey : "session-a",
+    relay: {
+      state: "answered" as const,
+      granted: rows.granted ?? [],
+      received: rows.received ?? [],
+    },
+  };
+}
 
 const workspaceActivityCallbacks = new Set<() => void>();
 
@@ -158,8 +182,23 @@ function emitWorkspaceActivity() {
   for (const callback of [...workspaceActivityCallbacks]) callback();
 }
 
+const cloudSessionCallbacks = new Set<
+  (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void
+>();
+
+// Most tests model a whole transition with one event; "changing" is the
+// default because for a CHANGED key both phases behave the same, and a
+// same-key test must say "ready" explicitly to ask for the revalidation.
+function emitCloudSessionChanged(
+  sessionKey: string | null,
+  phase: "changing" | "ready" = "changing",
+) {
+  for (const callback of [...cloudSessionCallbacks]) callback({ sessionKey, phase });
+}
+
 beforeEach(() => {
   workspaceActivityCallbacks.clear();
+  cloudSessionCallbacks.clear();
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
   bridgeMock.onWorkspaceActivity.mockImplementation((callback: () => void) => {
     workspaceActivityCallbacks.add(callback);
@@ -167,15 +206,24 @@ beforeEach(() => {
       workspaceActivityCallbacks.delete(callback);
     };
   });
+  bridgeMock.onCloudSessionChanged.mockImplementation(
+    (
+      callback: (event: {
+        sessionKey: string | null;
+        phase: "changing" | "ready";
+      }) => void,
+    ) => {
+      cloudSessionCallbacks.add(callback);
+      return () => {
+        cloudSessionCallbacks.delete(callback);
+      };
+    },
+  );
   bridgeMock.listChatChannels.mockResolvedValue({
     channels: [channel()],
     fileThreads: [],
   });
-  bridgeMock.listChatChannelShares.mockResolvedValue({
-    granted: [],
-    received: [],
-    joined: [],
-  });
+  bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
   bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: [] });
   bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
@@ -286,6 +334,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   workspaceActivityCallbacks.clear();
+  cloudSessionCallbacks.clear();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -493,19 +542,19 @@ describe("ChatsView panel navigator unread badges", () => {
       channels: [channel({ unreadCount: 2 })],
       fileThreads: [],
     });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [
-        {
-          shareId: "share-received",
-          channelWireId: "wire-received",
-          granterEmail: "owner@example.com",
-          access: "read-write",
-          ended: false,
-        },
-      ],
-      joined: [],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
     const view = render(navigator(0));
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
     expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
@@ -523,6 +572,531 @@ describe("ChatsView panel navigator unread badges", () => {
       expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
     });
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+  });
+
+  // #551: a relay outage RESOLVES the listing with `relay.state ===
+  // "unreachable"` — it does not reject. That resolution must not read as
+  // "there are no shares": the cached relay-backed rows stand until the relay
+  // answers.
+  it("keeps cached relay share rows when a catch-up refresh resolves with the relay unreachable", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    const view = render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+
+    // The read lands; the relay is down, so the listing resolves unreachable.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: "session-a",
+      relay: { state: "unreachable" as const },
+    });
+    view.rerender(navigator(1));
+
+    // The badge catches up, and the invitation is still on offer.
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+    expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+  });
+
+  // The counterpart that keeps the distinction honest: when the relay ANSWERS
+  // with no rows, that is the truth, and the cached rows go.
+  it("clears cached relay share rows when the relay answers an authoritative empty listing", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    const view = render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+
+    // The read lands; the relay answers: nobody shares anything with you now.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
+    view.rerender(navigator(1));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+    });
+  });
+
+  // Signed-out is the third fact, and it is NOT an outage: the cached relay
+  // rows are account-scoped, so another account's invitations and recipient
+  // emails must not survive a logout or account switch.
+  it("clears cached relay share rows when the listing resolves signed-out", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    const view = render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+
+    // The user signed out (or switched accounts). The next catch-up refresh
+    // resolves signed-out — the rows belong to nobody on this machine now.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: null,
+      relay: { state: "signed-out" as const },
+    });
+    view.rerender(navigator(1));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+    });
+  });
+
+  // The TRIGGER half of the signed-out pin: logout emits only a session
+  // signal — no rerender, no catch-up refresh, and the activity ping's badge
+  // path never asks the relay. The mounted view itself must re-read the
+  // listing and drop the previous account's rows.
+  it("clears cached relay share rows when a session change arrives, without any refresh", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+
+    // The user logs out: every later listing resolves signed-out, and main
+    // pushes the session signal.
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: null,
+      relay: { state: "signed-out" as const },
+    });
+    act(() => emitCloudSessionChanged(null));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+    });
+  });
+
+  // The relay rows are keyed by the SESSION they were read under, so the
+  // keep-cached-through-an-outage rule can only ever keep the same account's
+  // rows. The sharpest case: switch accounts, and the NEW account's first
+  // listing cannot reach the relay — the previous account's invitations and
+  // emails must be gone, not preserved.
+  it("clears another account's cached relay rows when the new session cannot reach the relay", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        sessionKey: "session-a",
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+
+    // Another account signs in, and its first listing finds the relay down.
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: "session-b",
+      relay: { state: "unreachable" as const },
+    });
+    act(() => emitCloudSessionChanged("session-b"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+    });
+  });
+
+  // The in-flight race the session KEY alone cannot stop: account A's read is
+  // still in flight when the user switches to B, B's listing resolves
+  // unreachable FIRST (leaving the relay lane unclaimed), and A's answered
+  // response lands last. Session keys clear only at commit — the read issued
+  // under the old session must be refused outright, or it restores A's rows
+  // under B.
+  it("refuses an old account's in-flight answer that lands after the session change", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    const invitation = {
+      shareId: "share-received",
+      channelWireId: "wire-received",
+      granterEmail: "owner@example.com",
+      access: "read-write",
+      ended: false,
+    };
+    const answerShares: Array<(value: unknown) => void> = [];
+    bridgeMock.listChatChannelShares.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answerShares.push(resolve);
+        }),
+    );
+    const view = render(navigator(0));
+    await waitFor(() => expect(answerShares).toHaveLength(1));
+    await act(async () => {
+      answerShares[0](shareListing({ sessionKey: "session-a", received: [invitation] }));
+      await Promise.resolve();
+    });
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+
+    // A read lands: account A's catch-up lookup is issued and stalls.
+    view.rerender(navigator(1));
+    await waitFor(() => expect(answerShares).toHaveLength(2));
+
+    // Switch to account B. Its listing cannot reach the relay and resolves
+    // FIRST — the relay lane stays unclaimed.
+    act(() => emitCloudSessionChanged("session-b"));
+    await waitFor(() => expect(answerShares).toHaveLength(3));
+    await act(async () => {
+      answerShares[2]({
+        joined: [],
+        sessionKey: "session-b",
+        relay: { state: "unreachable" },
+      });
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+
+    // Account A's stalled read answers last, with A's rows. It was issued
+    // under the old session: it must commit nothing.
+    await act(async () => {
+      answerShares[1](shareListing({ sessionKey: "session-a", received: [invitation] }));
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+  });
+
+  // The rows must leave the SCREEN at the signal itself: the new session's
+  // listing may never resolve (a stalled relay), and waiting on it would
+  // keep showing the previous account's invitations and emails indefinitely.
+  it("clears the previous account's rows at the session change, before any listing answers", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return Promise.resolve(
+          shareListing({
+            sessionKey: "session-a",
+            received: [
+              {
+                shareId: "share-received",
+                channelWireId: "wire-received",
+                granterEmail: "owner@example.com",
+                access: "read-write",
+                ended: false,
+              },
+            ],
+          }),
+        );
+      }
+      // The new session's relay stalls forever.
+      return new Promise(() => {});
+    });
+    render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+
+    act(() => emitCloudSessionChanged("session-b"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+    });
+    // The refresh WAS issued — the clear did not wait on it.
+    expect(shareReads).toBe(2);
+  });
+
+  // The signal carries the NEW session's key so a token rotation within the
+  // SAME session invalidates nothing — and asks for nothing. Mid-transition
+  // the credential cache is deliberately empty, so a listing issued off the
+  // same-key event would answer an authoritative signed-out and clear the
+  // very rows the same-key rule preserved; a stalled cleanup would hide
+  // them indefinitely.
+  it("keeps the rows through a same-session rotation while cleanup stalls", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return Promise.resolve(
+          shareListing({
+            sessionKey: "session-a",
+            received: [
+              {
+                shareId: "share-received",
+                channelWireId: "wire-received",
+                granterEmail: "owner@example.com",
+                access: "read-write",
+                ended: false,
+              },
+            ],
+          }),
+        );
+      }
+      // Mid-transition truth: the credential cache is cleared, so any
+      // listing issued now answers an authoritative signed-out.
+      return Promise.resolve({
+        joined: [],
+        sessionKey: null,
+        relay: { state: "signed-out" as const },
+      });
+    });
+    render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+
+    // The token rotates: same server, relay, and user — same key.
+    act(() => emitCloudSessionChanged("session-a"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+    // The same-key event asked for nothing: asking mid-transition is the
+    // defect — the transitional answer would have been signed-out.
+    expect(shareReads).toBe(1);
+  });
+
+  // The other moment of the same-key contract: the READY phase is adoption
+  // end, and it runs exactly one revalidation against the settled session —
+  // invitations and revocations from during the reauth must land without
+  // waiting for an unrelated refresh.
+  it("revalidates once on the ready phase of a same-session rotation", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return Promise.resolve(
+          shareListing({
+            sessionKey: "session-a",
+            received: [
+              {
+                shareId: "share-received",
+                channelWireId: "wire-received",
+                granterEmail: "owner@example.com",
+                access: "read-write",
+                ended: false,
+              },
+            ],
+          }),
+        );
+      }
+      // The relay revoked the invitation during the reauth.
+      return Promise.resolve(shareListing({ sessionKey: "session-a" }));
+    });
+    render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+
+    // Transition start: preserve, ask for nothing.
+    act(() => emitCloudSessionChanged("session-a", "changing"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(shareReads).toBe(1);
+    expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+
+    // Adoption end: exactly one revalidation, and the revocation lands.
+    act(() => emitCloudSessionChanged("session-a", "ready"));
+    await waitFor(() => expect(shareReads).toBe(2));
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+    });
+    expect(shareReads).toBe(2);
+  });
+
+  // The session refresh commits under the session generation, not the
+  // conversation-navigation token: opening a channel while the new session's
+  // listing is in flight must not discard its answer — nothing would re-list
+  // until some unrelated refresh.
+  it("lands the session refresh's answer when the user navigates during it", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    const answers: Array<(value: unknown) => void> = [];
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return Promise.resolve(shareListing({ sessionKey: "session-a" }));
+      }
+      return new Promise((resolve) => {
+        answers.push(resolve);
+      });
+    });
+    render(
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        readRevision={0}
+      />,
+    );
+    await waitFor(() => expect(shareReads).toBe(1));
+
+    // Switch sessions; the new session's listing stays in flight.
+    act(() => emitCloudSessionChanged("session-b"));
+    await waitFor(() => expect(shareReads).toBe(2));
+
+    // The user opens a channel meanwhile — a navigation, not a session or
+    // workspace change.
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+
+    // The listing answers with the new session's invitation. It must commit.
+    await act(async () => {
+      answers[0]!(
+        shareListing({
+          sessionKey: "session-b",
+          received: [
+            {
+              shareId: "share-b",
+              channelWireId: "wire-b",
+              granterEmail: "peer@example.com",
+              access: "read-write",
+              ended: false,
+            },
+          ],
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    // Back on the overview, the invitation is there — no unrelated refresh
+    // needed. goBack's own overview refresh stays in flight (reads 3+ stall),
+    // so what shows can only be the session refresh's commit.
+    await userEvent.click(screen.getByTestId("chats-channel-back"));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+  });
+
+  // Two lookups can settle in ONE React batch, both reading a null listing
+  // ref. The newer unreachable answer claims only the joined lane; the older
+  // answered one must still land its authoritative relay rows — an
+  // all-or-nothing claim on the stale joined ticket would silently discard
+  // them, leaving invitations empty until some later refresh.
+  it("keeps an answered listing's relay rows when an unreachable one commits first in the same batch", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    const answerShares: Array<(value: unknown) => void> = [];
+    bridgeMock.listChatChannelShares.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answerShares.push(resolve);
+        }),
+    );
+    const view = render(navigator(0));
+    await waitFor(() => expect(answerShares).toHaveLength(1));
+
+    // A read lands: the catch-up issues a second, NEWER lookup.
+    view.rerender(navigator(1));
+    await waitFor(() => expect(answerShares).toHaveLength(2));
+
+    // Both settle in one batch: the newer one unreachable first, then the
+    // older one with the relay's real rows.
+    await act(async () => {
+      answerShares[1]({
+        joined: [],
+        sessionKey: "session-a",
+        relay: { state: "unreachable" },
+      });
+      answerShares[0](
+        shareListing({
+          received: [
+            {
+              shareId: "share-received",
+              channelWireId: "wire-received",
+              granterEmail: "owner@example.com",
+              access: "read-write",
+              ended: false,
+            },
+          ],
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
   });
 
   // refreshOverview and refreshShares both write channelShares. Without one
@@ -568,7 +1142,7 @@ describe("ChatsView panel navigator unread badges", () => {
     // Mount: one person has the channel.
     await waitFor(() => expect(answerShares).toHaveLength(1));
     await act(async () => {
-      answerShares[0]({ granted: [grant("ana@example.com", "share-1")], received: [], joined: [] });
+      answerShares[0](shareListing({ granted: [grant("ana@example.com", "share-1")] }));
       await Promise.resolve();
     });
     await user.click(await screen.findByTestId("chats-channel"));
@@ -594,11 +1168,11 @@ describe("ChatsView panel navigator unread badges", () => {
     await user.click(screen.getByTestId("chats-share-submit"));
     await waitFor(() => expect(answerShares).toHaveLength(3));
     await act(async () => {
-      answerShares[2]({
-        granted: [grant("ana@example.com", "share-1"), grant("bo@example.com", "share-2")],
-        received: [],
-        joined: [],
-      });
+      answerShares[2](
+        shareListing({
+          granted: [grant("ana@example.com", "share-1"), grant("bo@example.com", "share-2")],
+        }),
+      );
       await Promise.resolve();
     });
     await waitFor(() =>
@@ -607,7 +1181,7 @@ describe("ChatsView panel navigator unread badges", () => {
 
     // Now the stalled background lookup answers with its older snapshot.
     await act(async () => {
-      answerShares[1]({ granted: [grant("ana@example.com", "share-1")], received: [], joined: [] });
+      answerShares[1](shareListing({ granted: [grant("ana@example.com", "share-1")] }));
       await Promise.resolve();
     });
 
@@ -640,19 +1214,19 @@ describe("ChatsView shared-workspace read-only boundary", () => {
       channels: [sharedChannel],
       fileThreads: [],
     });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [
-        {
-          shareId: "share-received",
-          channelWireId: "wire-received",
-          granterEmail: "owner@example.com",
-          access: "read-write",
-          ended: false,
-        },
-      ],
-      joined: [],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
     bridgeMock.listChannelThreads.mockResolvedValue({
       threads: [thread({ openingMessage: openingPreview() })],
     });
@@ -1988,27 +2562,27 @@ describe("ChatsView live activity refresh", () => {
     bridgeMock.listChatChannels.mockImplementation(() =>
       Promise.resolve({ channels: [channel({ unreadCount })], fileThreads: [] }),
     );
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [
-        {
-          shareId: "share-received",
-          channelWireId: "wire-received",
-          granterEmail: "owner@example.com",
-          access: "read-write",
-          ended: false,
-        },
-      ],
-      joined: [],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
     renderView();
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
 
-    // The relay goes away: the handler answers with empty rows, not an error.
+    // The relay goes away: the handler resolves, reporting it unreachable.
     bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
       joined: [],
+      sessionKey: "session-a",
+      relay: { state: "unreachable" as const },
     });
     unreadCount = 3;
     act(() => emitWorkspaceActivity());
@@ -2091,16 +2665,12 @@ describe("ChatsView live activity refresh", () => {
       channels: [channel({ wireId: "wire-joined" })],
       fileThreads: [],
     });
-    let answerFullRead!: (value: {
-      granted: unknown[];
-      received: unknown[];
-      joined: unknown[];
-    }) => void;
+    let answerFullRead!: (value: ReturnType<typeof shareListing>) => void;
     let shareReads = 0;
     bridgeMock.listChatChannelShares.mockImplementation(() => {
       shareReads += 1;
       if (shareReads === 1) {
-        return Promise.resolve({ granted: [], received: [], joined: [joinedRow] });
+        return Promise.resolve(shareListing({ joined: [joinedRow] }));
       }
       // The readRevision refresh's full lookup: it stalls.
       return new Promise((resolve) => {
@@ -2136,7 +2706,7 @@ describe("ChatsView live activity refresh", () => {
 
     // The full lookup answers, carrying an invitation only it can report.
     await act(async () => {
-      answerFullRead({ granted: [], received: [invitation], joined: [joinedRow] });
+      answerFullRead(shareListing({ received: [invitation], joined: [joinedRow] }));
       await Promise.resolve();
     });
 
@@ -2153,11 +2723,7 @@ describe("ChatsView live activity refresh", () => {
   // snapshot that load is carrying, and dropping it leaves the stale counts on
   // screen until the next event.
   it("keeps a badge result that lands while the first load is still waiting", async () => {
-    let answerFirstShares!: (value: {
-      granted: unknown[];
-      received: unknown[];
-      joined: unknown[];
-    }) => void;
+    let answerFirstShares!: (value: ReturnType<typeof shareListing>) => void;
     let shareReads = 0;
     bridgeMock.listChatChannelShares.mockImplementation(() => {
       shareReads += 1;
@@ -2166,7 +2732,7 @@ describe("ChatsView live activity refresh", () => {
           answerFirstShares = resolve;
         });
       }
-      return Promise.resolve({ granted: [], received: [], joined: [] });
+      return Promise.resolve(shareListing());
     });
     let reads = 0;
     bridgeMock.listChatChannels.mockImplementation(() => {
@@ -2188,7 +2754,7 @@ describe("ChatsView live activity refresh", () => {
     // The first load finally answers. Its channels are older; its shares are
     // still the only answer to a question the badge read never asked.
     await act(async () => {
-      answerFirstShares({ granted: [], received: [], joined: [] });
+      answerFirstShares(shareListing());
       await Promise.resolve();
     });
     expect(screen.getByTestId("chats-channel-unread").textContent).toBe("5");
@@ -2209,7 +2775,7 @@ describe("ChatsView live activity refresh", () => {
     bridgeMock.listChatChannelShares.mockImplementation(() => {
       shareReads += 1;
       if (shareReads === 1) {
-        return Promise.resolve({ granted: [], received: [], joined: [joinedRow] });
+        return Promise.resolve(shareListing({ joined: [joinedRow] }));
       }
       // The relay stopped answering, and nothing bounds that wait.
       return new Promise(() => {});
@@ -2299,11 +2865,7 @@ describe("ChatsView live activity refresh", () => {
   // anyway would starve the listing that owns BOTH lanes — leaving "unknown"
   // on screen, which locks every channel including this workspace's own.
   it("lets the first share listing settle even when a badge pass ran first", async () => {
-    let answerShares!: (value: {
-      granted: unknown[];
-      received: unknown[];
-      joined: unknown[];
-    }) => void;
+    let answerShares!: (value: ReturnType<typeof shareListing>) => void;
     let shareReads = 0;
     bridgeMock.listChatChannelShares.mockImplementation(() => {
       shareReads += 1;
@@ -2312,7 +2874,7 @@ describe("ChatsView live activity refresh", () => {
           answerShares = resolve;
         });
       }
-      return Promise.resolve({ granted: [], received: [], joined: [] });
+      return Promise.resolve(shareListing());
     });
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel()],
@@ -2328,7 +2890,7 @@ describe("ChatsView live activity refresh", () => {
     await screen.findByTestId("chats-channel-name");
 
     await act(async () => {
-      answerShares({ granted: [], received: [], joined: [] });
+      answerShares(shareListing());
       await Promise.resolve();
     });
 
@@ -2379,11 +2941,7 @@ describe("ChatsView live activity refresh", () => {
     });
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
     let shareReads = 0;
-    let answerMount!: (value: {
-      granted: unknown[];
-      received: unknown[];
-      joined: unknown[];
-    }) => void;
+    let answerMount!: (value: ReturnType<typeof shareListing>) => void;
     bridgeMock.listChatChannelShares.mockImplementation(() => {
       shareReads += 1;
       if (shareReads === 1) {
@@ -2414,7 +2972,7 @@ describe("ChatsView live activity refresh", () => {
 
     // The request the surface was waiting on answers, and it is believed.
     await act(async () => {
-      answerMount({ granted: [], received: [], joined: [] });
+      answerMount(shareListing());
       await Promise.resolve();
     });
 
@@ -2482,11 +3040,9 @@ describe("ChatsView live activity refresh", () => {
       access: "read-write" as const,
       ended: false,
     };
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
-      joined: [joinedRow],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({ joined: [joinedRow] }),
+    );
     bridgeMock.listChatChannels.mockImplementation(() =>
       Promise.resolve({
         channels: [channel({ wireId: "wire-joined" })],
@@ -2639,7 +3195,7 @@ describe("ChatsView live activity refresh", () => {
     bridgeMock.listChatChannelShares.mockImplementation(() => {
       shareReads += 1;
       if (shareReads === 1) {
-        return Promise.resolve({ granted: [], received: [], joined: [joinedRow] });
+        return Promise.resolve(shareListing({ joined: [joinedRow] }));
       }
       // The refresh the user's back-navigation owns. It stalls, then fails.
       return new Promise((_resolve, reject) => {
@@ -2735,11 +3291,9 @@ describe("ChatsView live activity refresh", () => {
       channels: [channel({ wireId: "wire-joined" })],
       fileThreads: [],
     });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [invitation],
-      joined: [joinedRow],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({ received: [invitation], joined: [joinedRow] }),
+    );
     renderView();
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
     expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
@@ -3559,11 +4113,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
   });
 
   it("keeps an owned local channel writable after authoritative empty share metadata", async () => {
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
-      joined: [],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
     renderView();
 
     await userEvent.click(await screen.findByTestId("chats-channel"));
@@ -3577,26 +4127,26 @@ describe("ChatsView shared channels (MU-C4)", () => {
       channels: [teamChannel()],
       fileThreads: [],
     });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
-      joined: [
-        {
-          shareId: "share-old",
-          channelWireId: "wire-team",
-          access: "read-only",
-          granterEmail: "owner@example.com",
-          ended: false,
-        },
-        {
-          shareId: "share-current",
-          channelWireId: "wire-team",
-          access: "read-write",
-          granterEmail: "owner@example.com",
-          ended: false,
-        },
-      ],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        joined: [
+          {
+            shareId: "share-old",
+            channelWireId: "wire-team",
+            access: "read-only",
+            granterEmail: "owner@example.com",
+            ended: false,
+          },
+          {
+            shareId: "share-current",
+            channelWireId: "wire-team",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+            ended: false,
+          },
+        ],
+      }),
+    );
     renderView();
 
     await userEvent.click(await screen.findByTestId("chats-channel"));
@@ -3609,19 +4159,19 @@ describe("ChatsView shared channels (MU-C4)", () => {
       channels: [teamChannel()],
       fileThreads: [],
     });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [
-        {
-          shareId: "share-1",
-          channelWireId: "wire-team",
-          access: "read-write",
-          recipientEmail: "ana@example.com",
-          revokedAtMs: null,
-        },
-      ],
-      received: [],
-      joined: [],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        granted: [
+          {
+            shareId: "share-1",
+            channelWireId: "wire-team",
+            access: "read-write",
+            recipientEmail: "ana@example.com",
+            revokedAtMs: null,
+          },
+        ],
+      }),
+    );
     bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-2" });
     bridgeMock.revokeRelayShare.mockResolvedValue(undefined);
     renderView();
@@ -3656,26 +4206,174 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
   });
 
+  // A revocation that LANDED is a local fact. When the confirming refresh
+  // cannot reach the relay, the keep-cached rule must not resurrect the
+  // removed person as a member with a live Remove button.
+  it("shows a revoked member gone even when the confirming refresh cannot reach the relay", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return Promise.resolve(
+          shareListing({
+            granted: [
+              {
+                shareId: "share-1",
+                channelWireId: "wire-team",
+                access: "read-write",
+                recipientEmail: "ana@example.com",
+                revokedAtMs: null,
+              },
+            ],
+          }),
+        );
+      }
+      // Every later listing — including the post-revoke confirmation — finds
+      // the relay down.
+      return Promise.resolve({
+        joined: [],
+        sessionKey: "session-a",
+        relay: { state: "unreachable" as const },
+      });
+    });
+    bridgeMock.revokeRelayShare.mockResolvedValue(undefined);
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-share-channel"));
+    expect((await screen.findByTestId("chats-share-member")).textContent).toContain(
+      "ana@example.com",
+    );
+
+    await userEvent.click(screen.getByTestId("chats-share-revoke"));
+    await waitFor(() =>
+      expect(bridgeMock.revokeRelayShare).toHaveBeenCalledWith({ shareId: "share-1" }),
+    );
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-share-member")).toBeNull();
+    });
+  });
+
+  // A revoke that STARTED under the old session must not spend a commit
+  // ticket in the new session's order: its optimistic claim would outrank
+  // the new session's own in-flight listing and leave the panel empty after
+  // an unreachable follow-up.
+  it("lets the new session's answer land when a revoke from the old session finishes late", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    const answers: Array<(value: unknown) => void> = [];
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return Promise.resolve(
+          shareListing({
+            sessionKey: "session-a",
+            granted: [
+              {
+                shareId: "share-1",
+                channelWireId: "wire-team",
+                access: "read-write",
+                recipientEmail: "ana@example.com",
+                revokedAtMs: null,
+              },
+            ],
+          }),
+        );
+      }
+      return new Promise((resolve) => {
+        answers.push(resolve);
+      });
+    });
+    let finishRevoke!: (value: undefined) => void;
+    bridgeMock.revokeRelayShare.mockReturnValue(
+      new Promise((resolve) => {
+        finishRevoke = resolve;
+      }),
+    );
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-share-channel"));
+    expect((await screen.findByTestId("chats-share-member")).textContent).toContain(
+      "ana@example.com",
+    );
+
+    // The revoke starts under session A and stalls.
+    await userEvent.click(screen.getByTestId("chats-share-revoke"));
+    await waitFor(() => expect(bridgeMock.revokeRelayShare).toHaveBeenCalled());
+
+    // Switch sessions: the signal clears the panel and issues the new
+    // session's listing, which stays in flight.
+    act(() => emitCloudSessionChanged("session-b"));
+    await waitFor(() => expect(shareReads).toBe(2));
+
+    // The revoke finishes late; its confirming refresh cannot reach the
+    // relay.
+    await act(async () => {
+      finishRevoke(undefined);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(shareReads).toBe(3));
+    await act(async () => {
+      answers.at(-1)!({
+        joined: [],
+        sessionKey: "session-b",
+        relay: { state: "unreachable" },
+      });
+      await Promise.resolve();
+    });
+
+    // The new session's OWN listing — issued at the switch — answers with
+    // its grant. It must land, not be outranked by the stale revoke's claim.
+    await act(async () => {
+      answers[0]!(
+        shareListing({
+          sessionKey: "session-b",
+          granted: [
+            {
+              shareId: "share-b",
+              channelWireId: "wire-team",
+              access: "read-write",
+              recipientEmail: "bob@example.com",
+              revokedAtMs: null,
+            },
+          ],
+        }),
+      );
+      await Promise.resolve();
+    });
+    const members = await screen.findAllByTestId("chats-share-member");
+    expect(members.map((member) => member.textContent).join(" ")).toContain(
+      "bob@example.com",
+    );
+  });
+
   it("lists invitations under Shared with you, joins one, and re-enables the other Join buttons", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [
-        {
-          shareId: "share-in",
-          channelWireId: "wire-in",
-          access: "read-write",
-          granterEmail: "owner@example.com",
-        },
-        {
-          shareId: "share-in-2",
-          channelWireId: "wire-in-2",
-          access: "read-write",
-          granterEmail: "other@example.com",
-        },
-      ],
-      joined: [],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-in",
+            channelWireId: "wire-in",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+          },
+          {
+            shareId: "share-in-2",
+            channelWireId: "wire-in-2",
+            access: "read-write",
+            granterEmail: "other@example.com",
+          },
+        ],
+      }),
+    );
     bridgeMock.joinSharedChannel.mockResolvedValue({
       joined: {
         shareId: "share-in",
@@ -3713,26 +4411,27 @@ describe("ChatsView shared channels (MU-C4)", () => {
 
   it("offers an explicit rejoin action for an ended leave tombstone", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [
-        {
-          shareId: "share-return",
-          channelWireId: "wire-return",
-          access: "read-write",
-          granterEmail: "owner@example.com",
-        },
-      ],
-      joined: [
-        {
-          shareId: "share-return",
-          channelWireId: "wire-return",
-          access: "read-write",
-          granterEmail: "owner@example.com",
-          ended: true,
-        },
-      ],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-return",
+            channelWireId: "wire-return",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+          },
+        ],
+        joined: [
+          {
+            shareId: "share-return",
+            channelWireId: "wire-return",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+            ended: true,
+          },
+        ],
+      }),
+    );
     bridgeMock.joinSharedChannel.mockResolvedValue({
       joined: {
         shareId: "share-return",
@@ -3761,19 +4460,19 @@ describe("ChatsView shared channels (MU-C4)", () => {
       channels: [teamChannel()],
       fileThreads: [],
     });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
-      joined: [
-        {
-          shareId: "share-in",
-          channelWireId: "wire-team",
-          access: "read-only",
-          granterEmail: "owner@example.com",
-          ended: false,
-        },
-      ],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        joined: [
+          {
+            shareId: "share-in",
+            channelWireId: "wire-team",
+            access: "read-only",
+            granterEmail: "owner@example.com",
+            ended: false,
+          },
+        ],
+      }),
+    );
     bridgeMock.leaveSharedChannel.mockResolvedValue(undefined);
     renderView();
     expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
@@ -3804,19 +4503,19 @@ describe("ChatsView shared channels (MU-C4)", () => {
       channels: [teamChannel()],
       fileThreads: [],
     });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
-      joined: [
-        {
-          shareId: "share-in",
-          channelWireId: "wire-team",
-          access: "read-only",
-          granterEmail: "owner@example.com",
-          ended: false,
-        },
-      ],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        joined: [
+          {
+            shareId: "share-in",
+            channelWireId: "wire-team",
+            access: "read-only",
+            granterEmail: "owner@example.com",
+            ended: false,
+          },
+        ],
+      }),
+    );
     bridgeMock.listPersonalChatFeed.mockResolvedValue({
       items: [
         {
@@ -3861,19 +4560,19 @@ describe("ChatsView shared channels (MU-C4)", () => {
       channels: [teamChannel()],
       fileThreads: [],
     });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
-      joined: [
-        {
-          shareId: "share-in",
-          channelWireId: "wire-team",
-          access: "read-write",
-          granterEmail: "owner@example.com",
-          ended: true,
-        },
-      ],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        joined: [
+          {
+            shareId: "share-in",
+            channelWireId: "wire-team",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+            ended: true,
+          },
+        ],
+      }),
+    );
     bridgeMock.listChannelThreads.mockResolvedValue({
       threads: [
         thread({
@@ -3900,19 +4599,19 @@ describe("ChatsView shared channels (MU-C4)", () => {
       channels: [teamChannel()],
       fileThreads: [],
     });
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
-      joined: [
-        {
-          shareId: "share-in",
-          channelWireId: "wire-team",
-          access: "read-write",
-          granterEmail: "owner@example.com",
-          ended: false,
-        },
-      ],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        joined: [
+          {
+            shareId: "share-in",
+            channelWireId: "wire-team",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+            ended: false,
+          },
+        ],
+      }),
+    );
     renderView();
     await userEvent.click(await screen.findByTestId("chats-channel"));
     await screen.findByTestId("chats-joined-banner");
@@ -3921,19 +4620,19 @@ describe("ChatsView shared channels (MU-C4)", () => {
     cleanup();
 
     // The same channel after revocation (ended): still readable, no posting.
-    bridgeMock.listChatChannelShares.mockResolvedValue({
-      granted: [],
-      received: [],
-      joined: [
-        {
-          shareId: "share-in",
-          channelWireId: "wire-team",
-          access: "read-write",
-          granterEmail: "owner@example.com",
-          ended: true,
-        },
-      ],
-    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        joined: [
+          {
+            shareId: "share-in",
+            channelWireId: "wire-team",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+            ended: true,
+          },
+        ],
+      }),
+    );
     renderView();
     await userEvent.click(await screen.findByTestId("chats-channel"));
     const note = await screen.findByTestId("chats-readonly-note");

@@ -2,13 +2,19 @@ import { describe, expect, it } from "vitest";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import {
   adoptCompletedCloudLoginSession,
+  runCloudLogoutTransition,
   createCloudLogin,
   type CloudLoginStore,
+  type InvalidSessionMarker,
 } from "./cloudLogin";
 
-function memoryStore(): CloudLoginStore & { saved: CloudCredentials | null } {
+function memoryStore(): CloudLoginStore & {
+  saved: CloudCredentials | null;
+  invalidMarker: InvalidSessionMarker | null;
+} {
   const box = {
     saved: null as CloudCredentials | null,
+    invalidMarker: null as InvalidSessionMarker | null,
     async load() {
       return box.saved;
     },
@@ -17,6 +23,15 @@ function memoryStore(): CloudLoginStore & { saved: CloudCredentials | null } {
     },
     async clear() {
       box.saved = null;
+    },
+    async loadInvalidMarker() {
+      return box.invalidMarker;
+    },
+    async saveInvalidMarker(marker: InvalidSessionMarker) {
+      box.invalidMarker = marker;
+    },
+    async clearInvalidMarker() {
+      box.invalidMarker = null;
     },
   };
   return box;
@@ -466,17 +481,59 @@ describe("completed cloud login session", () => {
       reconcileCloud() {
         steps.push(`reconcile ${cachedCredentials?.token ?? "signed-out"}`);
       },
+      notifySessionChanging() {
+        steps.push("notify session changing");
+      },
+      notifyCloudSessionChanged() {
+        steps.push("notify session changed");
+      },
     });
 
     await expect(transition).rejects.toBe(relayCloseFailure);
     expect(cachedCredentials).toEqual(savedCredentials);
     expect(steps).toEqual([
       "clear credentials",
+      // Immediately after the clear — engine cleanup can stall behind an
+      // in-flight sync pass, and views must not wait on it. This broadcast
+      // carries the INCOMING identity the caller computed before the clear.
+      "notify session changing",
       "stop engines",
       "close relay workspaces",
       "refresh credentials",
       "reconcile new-session-token",
+      // And the final state once the new session is in place.
+      "notify session changed",
     ]);
+  });
+
+  // The renderer signal is not gated on the transition succeeding: the
+  // credentials changed either way, and mounted views must re-scope their
+  // account-tied caches even when cleanup or the refresh rejected.
+  it("notifies the session change even when the transition fails", async () => {
+    const refreshFailure = new Error("refresh failed");
+    let notified = 0;
+
+    await expect(
+      adoptCompletedCloudLoginSession({
+        clearCachedCredentials() {},
+        async stopEngines() {
+          throw new Error("cleanup failed");
+        },
+        async closeRelayTransportWorkspaces() {},
+        async refreshCredentialCache() {
+          throw refreshFailure;
+        },
+        reconcileCloud() {},
+        notifySessionChanging() {
+          notified += 1;
+        },
+        notifyCloudSessionChanged() {
+          notified += 1;
+        },
+      }),
+    ).rejects.toMatchObject({});
+    // Once at the clear, once at the transition's end.
+    expect(notified).toBe(2);
   });
 
   it("reports cleanup and refresh failures without reconciling stale state", async () => {
@@ -496,6 +553,8 @@ describe("completed cloud login session", () => {
       reconcileCloud() {
         reconciled = true;
       },
+      notifySessionChanging() {},
+      notifyCloudSessionChanged() {},
     });
 
     await expect(transition).rejects.toMatchObject({
@@ -516,7 +575,314 @@ describe("completed cloud login session", () => {
         reconcileCloud() {
           throw reconcileFailure;
         },
+        notifySessionChanging() {},
+        notifyCloudSessionChanged() {},
       }),
     ).rejects.toBe(reconcileFailure);
+  });
+});
+
+// The logout transition follows the same rule as login adoption: the session
+// is invalid the moment the credentials are cleared, so the renderer signals
+// fire from a finally and are never gated on the credential store or engine
+// cleanup succeeding.
+describe("cloud logout transition", () => {
+  it("notifies the session change even when engine cleanup rejects", async () => {
+    const stopFailure = new Error("engines refused to stop");
+    const steps: string[] = [];
+
+    await expect(
+      runCloudLogoutTransition({
+        clearCachedCredentials() {
+          steps.push("clear credentials");
+        },
+        async logout() {
+          steps.push("logout");
+        },
+        async stopEngines() {
+          steps.push("stop engines");
+          throw stopFailure;
+        },
+        async closeRelayTransportWorkspaces() {
+          steps.push("close relay workspaces");
+        },
+        notifyWorkspaceActivity() {
+          steps.push("notify activity");
+        },
+        notifyCloudSessionChanged() {
+          steps.push("notify session changed");
+        },
+      }),
+    ).rejects.toBe(stopFailure);
+    expect(steps).toEqual([
+      "clear credentials",
+      "notify session changed",
+      "logout",
+      "stop engines",
+      "notify activity",
+    ]);
+  });
+
+  // The signal must not wait on cleanup at all: an in-flight sync pass can
+  // stall stopEngines indefinitely, and the old account's rows must leave
+  // mounted views the moment the credentials are cleared.
+  it("broadcasts the session change before cleanup that never finishes", async () => {
+    let notified = false;
+    const transition = runCloudLogoutTransition({
+      clearCachedCredentials() {},
+      async logout() {},
+      stopEngines: () => new Promise<void>(() => {}),
+      async closeRelayTransportWorkspaces() {},
+      notifyWorkspaceActivity() {},
+      notifyCloudSessionChanged() {
+        notified = true;
+      },
+    });
+    await Promise.resolve();
+    expect(notified).toBe(true);
+    void transition;
+  });
+
+  it("still cleans up and notifies when the credential store rejects the logout", async () => {
+    const logoutFailure = new Error("credential store unavailable");
+    const steps: string[] = [];
+
+    await expect(
+      runCloudLogoutTransition({
+        clearCachedCredentials() {
+          steps.push("clear credentials");
+        },
+        async logout() {
+          steps.push("logout");
+          throw logoutFailure;
+        },
+        async stopEngines() {
+          steps.push("stop engines");
+        },
+        async closeRelayTransportWorkspaces() {
+          steps.push("close relay workspaces");
+        },
+        notifyWorkspaceActivity() {
+          steps.push("notify activity");
+        },
+        notifyCloudSessionChanged() {
+          steps.push("notify session changed");
+        },
+      }),
+    ).rejects.toBe(logoutFailure);
+    expect(steps).toEqual([
+      "clear credentials",
+      "notify session changed",
+      "logout",
+      "stop engines",
+      "close relay workspaces",
+      "notify activity",
+    ]);
+  });
+});
+
+// The 401 path's persistent invalidation: ONE serialized compare-and-clear
+// inside the store's mutation queue. A login save can never land between the
+// check and the clear — the queue orders them whole.
+describe("invalidateSessionIf", () => {
+  const SESSION_A: CloudCredentials = {
+    serverUrl: "http://cloud.test",
+    email: "a@dohc.test",
+    userId: "usr_a",
+    token: "token-a",
+  };
+
+  it("clears the store while it still holds the matching session", async () => {
+    const store = memoryStore();
+    store.saved = SESSION_A;
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: fakeFetch({}).impl,
+    });
+    await login.invalidateSessionIf({
+      serverUrl: SESSION_A.serverUrl,
+      userId: SESSION_A.userId,
+      token: SESSION_A.token,
+    });
+    expect(store.saved).toBeNull();
+  });
+
+  it("leaves a different saved session intact", async () => {
+    const store = memoryStore();
+    store.saved = { ...SESSION_A, userId: "usr_b", token: "token-b" };
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: fakeFetch({}).impl,
+    });
+    await login.invalidateSessionIf({
+      serverUrl: SESSION_A.serverUrl,
+      userId: SESSION_A.userId,
+      token: SESSION_A.token,
+    });
+    expect(store.saved).toEqual({ ...SESSION_A, userId: "usr_b", token: "token-b" });
+  });
+
+  // The TOCTOU the queue closes: A's 401 lands while a completed login is
+  // MID-SAVE. The invalidation queues behind the save, its compare then sees
+  // the new session, and the just-completed login survives.
+  it("cannot delete a login whose save is in flight when the 401 lands", async () => {
+    const saveStarted = deferred<void>();
+    const releaseSave = deferred<void>();
+    const store = memoryStore();
+    store.saved = SESSION_A;
+    store.save = async (credentials) => {
+      saveStarted.resolve(undefined);
+      await releaseSave.promise;
+      store.saved = credentials;
+    };
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({
+        body: { access_token: "token-b" },
+      }),
+      "/api/auth/get-session": () => ({
+        body: { user: { email: "b@dohc.test", id: "usr_b" } },
+      }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: impl,
+    });
+
+    await login.start();
+    const polling = login.poll();
+    await saveStarted.promise;
+    // The outgoing session's 401 arrives while B's save holds the queue.
+    const invalidating = login.invalidateSessionIf({
+      serverUrl: SESSION_A.serverUrl,
+      userId: SESSION_A.userId,
+      token: SESSION_A.token,
+    });
+    releaseSave.resolve(undefined);
+
+    await expect(polling).resolves.toEqual({
+      status: "complete",
+      email: "b@dohc.test",
+    });
+    await invalidating;
+    // B's just-completed login survives the serialized compare-and-clear.
+    expect(store.saved).toMatchObject({ userId: "usr_b", token: "token-b" });
+    await expect(login.credentials()).resolves.toMatchObject({
+      userId: "usr_b",
+    });
+  });
+
+  // A failed deletion must not manufacture a live session: the record is
+  // still on disk, but the session layer KNOWS it is dead. The tombstone
+  // holds until a deletion succeeds — status() reports disconnected and
+  // credentials() stops handing the dead token to sync engines.
+  it("tombstones a dead session whose deletion failed until a retry succeeds", async () => {
+    const store = memoryStore();
+    store.saved = SESSION_A;
+    let clearFails = true;
+    const realClear = store.clear.bind(store);
+    store.clear = async () => {
+      if (clearFails) throw new Error("store unavailable");
+      await realClear();
+    };
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: fakeFetch({}).impl,
+    });
+    const identity = {
+      serverUrl: SESSION_A.serverUrl,
+      userId: SESSION_A.userId,
+      token: SESSION_A.token,
+    };
+
+    // The deletion fails loudly — and the dead record stops answering. The
+    // marker also PERSISTS, so a restart cannot resurrect the session.
+    await expect(login.invalidateSessionIf(identity)).rejects.toThrow(
+      "store unavailable",
+    );
+    expect(store.saved).toEqual(SESSION_A);
+    expect(store.invalidMarker).not.toBeNull();
+    await expect(login.status()).resolves.toEqual({ connected: false });
+    await expect(login.credentials()).resolves.toBeNull();
+
+    // The retry succeeds: the tombstone lifts with the record gone.
+    clearFails = false;
+    await login.invalidateSessionIf(identity);
+    expect(store.saved).toBeNull();
+    expect(store.invalidMarker).toBeNull();
+    await expect(login.status()).resolves.toEqual({ connected: false });
+  });
+
+  // The restart shape: a fresh instance has no in-memory tombstone — only
+  // the persisted marker. The stored record matching it must read as
+  // disconnected and be deleted on load, not resurrected as connected.
+  it("keeps a dead session dead across restart and deletes it on load", async () => {
+    const store = memoryStore();
+    store.saved = SESSION_A;
+    let clearFails = true;
+    const realClear = store.clear.bind(store);
+    store.clear = async () => {
+      if (clearFails) throw new Error("store unavailable");
+      await realClear();
+    };
+    const identity = {
+      serverUrl: SESSION_A.serverUrl,
+      userId: SESSION_A.userId,
+      token: SESSION_A.token,
+    };
+    const beforeRestart = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: fakeFetch({}).impl,
+    });
+    await expect(beforeRestart.invalidateSessionIf(identity)).rejects.toThrow(
+      "store unavailable",
+    );
+    expect(store.invalidMarker).not.toBeNull();
+
+    // Restart: a new instance over the same store, deletion now possible.
+    clearFails = false;
+    const afterRestart = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: fakeFetch({}).impl,
+    });
+    await expect(afterRestart.status()).resolves.toEqual({ connected: false });
+    // Deleted-on-load: the record is gone and the marker lifted.
+    expect(store.saved).toBeNull();
+    expect(store.invalidMarker).toBeNull();
+    await expect(afterRestart.credentials()).resolves.toBeNull();
+  });
+
+  it("does not let the tombstone shadow a different, live session", async () => {
+    const store = memoryStore();
+    store.saved = SESSION_A;
+    store.clear = async () => {
+      throw new Error("store unavailable");
+    };
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: fakeFetch({}).impl,
+    });
+    await expect(
+      login.invalidateSessionIf({
+        serverUrl: SESSION_A.serverUrl,
+        userId: SESSION_A.userId,
+        token: SESSION_A.token,
+      }),
+    ).rejects.toThrow("store unavailable");
+
+    // A NEW session lands (a completed login overwrote the record): the
+    // tombstone names the dead token only, and the new session answers.
+    store.saved = { ...SESSION_A, userId: "usr_b", token: "token-b" };
+    await expect(login.status()).resolves.toMatchObject({ connected: true });
+    await expect(login.credentials()).resolves.toMatchObject({
+      userId: "usr_b",
+    });
   });
 });

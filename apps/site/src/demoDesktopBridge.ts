@@ -252,6 +252,7 @@ type DemoDesktopBridge = Pick<
   | "writeWorkspaceAsset"
   | "getWorkspaceSettings"
   | "onWorkspaceActivity"
+  | "onCloudSessionChanged"
   | "listChatChannels"
   | "listChatChannelShares"
   | "listJoinedSharedChannels"
@@ -595,6 +596,10 @@ const demoBridge = {
     activityListeners.add(listener);
     return () => activityListeners.delete(listener);
   },
+  // The demo has no cloud session, so the signal never fires.
+  onCloudSessionChanged() {
+    return () => {};
+  },
   async listChatChannels() {
     return {
       channels: [
@@ -614,7 +619,11 @@ const demoBridge = {
     };
   },
   async listChatChannelShares() {
-    return { granted: [], received: [], joined: [] };
+    return {
+      joined: [],
+      sessionKey: null,
+      relay: { state: "answered" as const, granted: [], received: [] },
+    };
   },
   async listJoinedSharedChannels() {
     return { joined: [] };

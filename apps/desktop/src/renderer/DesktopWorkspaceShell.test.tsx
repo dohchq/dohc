@@ -343,6 +343,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         activityCallback = null;
       };
     }),
+    onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
     onMenuCommand: vi.fn((callback: (command: MenuCommandId) => void) => {
       menuCallback = callback;
       return () => {
@@ -1673,6 +1674,89 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.getByText("Planning discussion")).toBeTruthy();
     expect(screen.queryByText(CANONICAL_DM.name)).toBeNull();
+  }, 20_000);
+
+  // The session signal reaches the SHELL: cloudStatus derives the presence
+  // collaboration, so a sign-out must tear the old account's presence down
+  // (abort its long poll) and re-query the status immediately — not when
+  // some later refresh notices.
+  it("tears presence down and re-queries cloud status on a session change", async () => {
+    const user = userEvent.setup();
+    const sessionListeners: Array<
+      (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void
+    > = [];
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [CHATS_TAB_PATH],
+        activeTab: CHATS_TAB_PATH,
+        chatsVisible: false,
+      }),
+    );
+    bridge.onCloudSessionChanged = vi.fn(
+      (
+        callback: (event: {
+          sessionKey: string | null;
+          phase: "changing" | "ready";
+        }) => void,
+      ) => {
+        sessionListeners.push(callback);
+        return () => {};
+      },
+    );
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true,
+      email: "me@dohc.test",
+      serverUrl: "https://cloud.dohc.test",
+      relayUrl: "wss://relay.dohc.test",
+      workspaceSynced: true,
+    }));
+    bridge.listChatChannels = vi.fn(async () => ({
+      channels: [
+        {
+          id: "channel-team",
+          name: "team",
+          slug: "team",
+          kind: "channel" as const,
+          createdAtMs: 1,
+          updatedAtMs: 1,
+          threadCount: 0,
+          unreadCount: 0,
+        },
+      ],
+      fileThreads: [],
+    }));
+    const presence = Object.assign(bridge, {
+      listChatChannelShares: vi.fn(async () => ({
+        joined: [],
+        sessionKey: "session-a",
+        relay: { state: "answered" as const, granted: [], received: [] },
+      })),
+      presencePublish: vi.fn(async () => ({
+        ok: true as const,
+        snapshot: { version: 1, peers: [] },
+      })),
+      presencePoll: vi.fn(() => new Promise(() => {})),
+      presenceCancel: vi.fn(async () => ({ ok: true as const })),
+    });
+    renderShell(presence);
+
+    // Enter a channel in the Chats page: presence engages for its scope.
+    await user.click(await screen.findByTestId("chats-channel"));
+    await waitFor(() => expect(presence.presencePublish).toHaveBeenCalled());
+    const statusQueries = bridge.cloudStatus.mock.calls.length;
+
+    // Sign out. The signal alone must tear presence down — the collaboration
+    // rebuilds dormant off the dropped status — and re-query the status.
+    act(() => {
+      for (const listener of sessionListeners) {
+        listener({ sessionKey: null, phase: "ready" });
+      }
+    });
+    await waitFor(() => expect(presence.presenceCancel).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(bridge.cloudStatus.mock.calls.length).toBeGreaterThan(statusQueries),
+    );
   }, 20_000);
 
   // Chat mocks the Chats PAGE needs to load its feed and a thread. The base

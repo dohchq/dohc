@@ -2,12 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./ipc/channels";
 import { markPersonalFeedSeenReadOnlySafe } from "./workspaces/chatFollowAccess";
 import {
+  chatShareSessionKey,
   chatViewerAuthorId,
+  handleRelayUnauthorized,
   createChatChannelIpcHandler,
   createReadAwareChatIpcHandler,
   createSharedChannelWritableChatIpcHandler,
   createSetChatReactionIpcHandler,
   reactionsForViewer,
+  readRelayChatShareLanes,
+  RelaySessionError,
   awaitCredentialGeneration,
   setChatReactionFromMain,
   writeChatMessageFromMain,
@@ -510,5 +514,372 @@ describe("runtime main chat IPC boundaries", () => {
       expect.objectContaining({ threadId: "thread-writable" }),
     );
     expect(markThreadRead).toHaveBeenCalledOnce();
+  });
+});
+
+// #551: a relay outage must resolve as "unreachable", never as an empty
+// listing — an empty listing is an authoritative "there are no shares" and
+// clobbers whatever the renderer has cached. A missing or rejected session is
+// the third fact: "signed-out", which must CLEAR cached account-scoped rows
+// rather than preserve them across a logout or account switch.
+describe("readRelayChatShareLanes", () => {
+  it("reports a transport failure as unreachable, never as an empty listing", async () => {
+    const lanes = await readRelayChatShareLanes({
+      fetchListing: () => Promise.reject(new Error("relay down")),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(lanes).toEqual({ state: "unreachable" });
+  });
+
+  it("reports a session failure as signed-out, not as a transport outage", async () => {
+    const lanes = await readRelayChatShareLanes({
+      fetchListing: () =>
+        Promise.reject(
+          new RelaySessionError(
+            "Your dohc Cloud session expired. Sign in again, then retry.",
+          ),
+        ),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(lanes).toEqual({ state: "signed-out" });
+  });
+
+  it("answers an authoritative empty listing when the relay has no rows", async () => {
+    const lanes = await readRelayChatShareLanes({
+      fetchListing: () => Promise.resolve({}),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
+  });
+
+  it("maps chat-channel rows and scopes grants to this workspace's remote identity", async () => {
+    const lanes = await readRelayChatShareLanes({
+      fetchListing: () =>
+        Promise.resolve({
+          granted: [
+            {
+              shareId: "share-mine",
+              workspaceId: "remote-1",
+              recipientEmail: "ana@example.com",
+              revokedAtMs: null,
+              selector: {
+                kind: "chat-channel",
+                channelWireId: "wire-1",
+                access: "read-only",
+              },
+            },
+            // Managed by another workspace: not this listing's row.
+            {
+              shareId: "share-elsewhere",
+              workspaceId: "remote-2",
+              recipientEmail: "bo@example.com",
+              revokedAtMs: null,
+              selector: { kind: "chat-channel", channelWireId: "wire-2" },
+            },
+            // Not a chat-channel share.
+            { shareId: "share-doc", workspaceId: "remote-1", selector: { kind: "document" } },
+          ],
+          received: [
+            {
+              shareId: "share-in",
+              granterEmail: "owner@example.com",
+              selector: { kind: "chat-channel", channelWireId: "wire-in" },
+            },
+            { shareId: "share-other", selector: { kind: "document" } },
+          ],
+        }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(lanes).toEqual({
+      state: "answered",
+      granted: [
+        {
+          shareId: "share-mine",
+          channelWireId: "wire-1",
+          access: "read-only",
+          recipientEmail: "ana@example.com",
+          revokedAtMs: null,
+        },
+      ],
+      received: [
+        {
+          shareId: "share-in",
+          channelWireId: "wire-in",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+        },
+      ],
+    });
+  });
+
+  it("drops every grant when the workspace has no remote identity", async () => {
+    const lanes = await readRelayChatShareLanes({
+      fetchListing: () =>
+        Promise.resolve({
+          granted: [
+            {
+              shareId: "share-mine",
+              workspaceId: "remote-1",
+              recipientEmail: "ana@example.com",
+              revokedAtMs: null,
+              selector: { kind: "chat-channel", channelWireId: "wire-1" },
+            },
+          ],
+        }),
+      remoteWorkspaceId: null,
+    });
+    expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
+  });
+});
+
+// The session key scopes the renderer's cached relay rows to one account, so
+// preservation through an outage can never keep another account's rows.
+describe("chatShareSessionKey", () => {
+  it("answers null without a session", () => {
+    expect(chatShareSessionKey(null)).toBeNull();
+  });
+
+  it("is stable across token rotation and URL trailing slashes", () => {
+    const key = chatShareSessionKey({
+      serverUrl: "https://cloud.dohc.test",
+      relayUrl: "https://relay.dohc.test",
+      userId: "user-1",
+    });
+    expect(key).not.toBeNull();
+    expect(
+      chatShareSessionKey({
+        serverUrl: "https://cloud.dohc.test/",
+        relayUrl: "https://relay.dohc.test/",
+        userId: "user-1",
+      }),
+    ).toBe(key);
+  });
+
+  it("differs across users, servers, and relays", () => {
+    const key = chatShareSessionKey({
+      serverUrl: "https://cloud.dohc.test",
+      relayUrl: "https://relay.dohc.test",
+      userId: "user-1",
+    });
+    expect(
+      chatShareSessionKey({
+        serverUrl: "https://cloud.dohc.test",
+        relayUrl: "https://relay.dohc.test",
+        userId: "user-2",
+      }),
+    ).not.toBe(key);
+    expect(
+      chatShareSessionKey({
+        serverUrl: "https://other.dohc.test",
+        relayUrl: "https://relay.dohc.test",
+        userId: "user-1",
+      }),
+    ).not.toBe(key);
+    // The same account on ANOTHER relay has different rows: its cache must
+    // not carry over — including from a session with no relay configured.
+    expect(
+      chatShareSessionKey({
+        serverUrl: "https://cloud.dohc.test",
+        relayUrl: "https://relay-b.dohc.test",
+        userId: "user-1",
+      }),
+    ).not.toBe(key);
+    expect(
+      chatShareSessionKey({ serverUrl: "https://cloud.dohc.test", userId: "user-1" }),
+    ).not.toBe(key);
+  });
+});
+
+// A relay 401 acts if and only if it belongs to the CURRENT credentials, and
+// then it acts completely: memory, broadcast, persistent store — in that
+// order, so views re-scope immediately and a restart cannot read the dead
+// token back into a false connected state.
+describe("handleRelayUnauthorized", () => {
+  const sessionA = {
+    serverUrl: "https://cloud.dohc.test",
+    userId: "user-1",
+    token: "token-a",
+  };
+  const sessionB = {
+    serverUrl: "https://cloud.dohc.test",
+    userId: "user-2",
+    token: "token-b",
+  };
+
+  it("leaves the adopted session intact when a stale request's token 401s", async () => {
+    const steps: string[] = [];
+    const acted = await handleRelayUnauthorized({
+      // The request went out under A; the user has since adopted B.
+      requestCredentials: sessionA,
+      currentCredentials: sessionB,
+      clearCachedCredentials: () => steps.push("clear"),
+      notifySessionChanging: () => steps.push("notify changing"),
+      notifyCloudSessionChanged: () => steps.push("notify ready"),
+      invalidatePersistedSessionIf: async () => {
+        steps.push("invalidate store");
+      },
+    });
+    expect(acted).toBe(false);
+    expect(steps).toEqual([]);
+  });
+
+  it("acts completely and in order for a current-session 401", async () => {
+    const steps: string[] = [];
+    const expectedHandedToStore: unknown[] = [];
+    const acted = await handleRelayUnauthorized({
+      requestCredentials: sessionA,
+      currentCredentials: sessionA,
+      clearCachedCredentials: () => steps.push("clear"),
+      notifySessionChanging: () => steps.push("notify changing"),
+      notifyCloudSessionChanged: () => steps.push("notify ready"),
+      invalidatePersistedSessionIf: async (expected) => {
+        expectedHandedToStore.push(expected);
+        steps.push("invalidate store");
+      },
+    });
+    expect(acted).toBe(true);
+    // The second notify is the FINAL state, after the store settled: a
+    // status read raced by the first broadcast can have seen the expired
+    // on-disk session and reported connected.
+    expect(steps).toEqual([
+      "clear",
+      "notify changing",
+      "invalidate store",
+      "notify ready",
+    ]);
+    // The store does its own compare-and-clear atomically, against the
+    // request identity — never an unconditional clear.
+    expect(expectedHandedToStore).toEqual([sessionA]);
+  });
+
+  it("does not act on a rotated token of the same account", async () => {
+    const steps: string[] = [];
+    const acted = await handleRelayUnauthorized({
+      requestCredentials: sessionA,
+      currentCredentials: { ...sessionA, token: "token-a-rotated" },
+      clearCachedCredentials: () => steps.push("clear"),
+      notifySessionChanging: () => steps.push("notify changing"),
+      notifyCloudSessionChanged: () => steps.push("notify ready"),
+      invalidatePersistedSessionIf: async () => {
+        steps.push("invalidate store");
+      },
+    });
+    expect(acted).toBe(false);
+    expect(steps).toEqual([]);
+  });
+
+  it("keeps the session error and still broadcasts when the store step fails", async () => {
+    const steps: string[] = [];
+    const acted = await handleRelayUnauthorized({
+      requestCredentials: sessionA,
+      currentCredentials: sessionA,
+      clearCachedCredentials: () => steps.push("clear"),
+      notifySessionChanging: () => steps.push("notify changing"),
+      notifyCloudSessionChanged: () => steps.push("notify ready"),
+      invalidatePersistedSessionIf: async () => {
+        throw new Error("store unavailable");
+      },
+    });
+    expect(acted).toBe(true);
+    expect(steps).toEqual(["clear", "notify changing", "notify ready"]);
+  });
+});
+
+// The catch classification: signed-out is authoritative only when the relay
+// rejected the CURRENT credentials. A stale token's 401 — a listing still in
+// flight across a same-account rotation — says nothing about the current
+// session and must not clear cached rows.
+describe("readRelayChatShareLanes session classification", () => {
+  it("reports a stale session's 401 as unreachable, not signed-out", async () => {
+    const lanes = await readRelayChatShareLanes({
+      fetchListing: () =>
+        Promise.reject(
+          new RelaySessionError("Your dohc Cloud session expired.", {
+            sessionWasCurrent: false,
+          }),
+        ),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(lanes).toEqual({ state: "unreachable" });
+  });
+
+  // A 200 with a malformed body is not an authoritative answer either: a
+  // thrown mapping would reject the IPC call, which the renderer reads as an
+  // unknown listing and clears — the exact clobber this contract prevents.
+  it("reports a malformed 200 body as unreachable, not as a rejection", async () => {
+    const nullBody = await readRelayChatShareLanes({
+      fetchListing: () =>
+        Promise.resolve(null as unknown as { granted?: Array<Record<string, unknown>> }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(nullBody).toEqual({ state: "unreachable" });
+
+    const nonArray = await readRelayChatShareLanes({
+      fetchListing: () =>
+        Promise.resolve({ granted: 3 } as unknown as {
+          granted?: Array<Record<string, unknown>>;
+        }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(nonArray).toEqual({ state: "unreachable" });
+
+    // The ITERABLE non-array: a string lane iterates per character, every
+    // character filters out, and the result would read as an authoritative
+    // EMPTY answer — clearing rows out of garbage.
+    const stringLane = await readRelayChatShareLanes({
+      fetchListing: () =>
+        Promise.resolve({ granted: "malformed" } as unknown as {
+          granted?: Array<Record<string, unknown>>;
+        }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(stringLane).toEqual({ state: "unreachable" });
+
+    const stringReceived = await readRelayChatShareLanes({
+      fetchListing: () =>
+        Promise.resolve({ received: "malformed" } as unknown as {
+          received?: Array<Record<string, unknown>>;
+        }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(stringReceived).toEqual({ state: "unreachable" });
+  });
+
+  // Row-LEVEL validation lives inside the same guard: a 200 whose entries
+  // map cleanly but carry an invalid field would otherwise escape to the
+  // contract parse and reject the IPC call — the same clear-by-rejection.
+  it("reports invalid row fields as unreachable, not as a rejection", async () => {
+    // A chat-channel grant with no shareId at all.
+    const missingShareId = await readRelayChatShareLanes({
+      fetchListing: () =>
+        Promise.resolve({
+          granted: [
+            {
+              workspaceId: "remote-1",
+              recipientEmail: "ana@example.com",
+              revokedAtMs: null,
+              selector: { kind: "chat-channel", channelWireId: "wire-1" },
+            },
+          ],
+        }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(missingShareId).toEqual({ state: "unreachable" });
+
+    // A received row whose granterEmail is not an email or null.
+    const badEmail = await readRelayChatShareLanes({
+      fetchListing: () =>
+        Promise.resolve({
+          received: [
+            {
+              shareId: "share-in",
+              granterEmail: 42,
+              selector: { kind: "chat-channel", channelWireId: "wire-in" },
+            },
+          ],
+        }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(badEmail).toEqual({ state: "unreachable" });
   });
 });
