@@ -30,6 +30,7 @@ import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
 import {
   openEngineYdocProviderSession,
   isConflictStaleTargetRefusal,
+  isFileLockedRefusal,
   isYdocSessionNotFoundRefusal,
   YdocReleasedWithSettleFailureError,
   type EngineYdocProviderSession,
@@ -267,10 +268,15 @@ export interface WorkspaceVersionConflictResolveOutcome {
 // edit made outside dohc, which the settle must not overwrite (#338); the
 // advice "error" carries (try another edit) is wrong there, so it gets its own
 // state, exactly like "read-only".
+// "file-locked" is transient by contract: another program holds the file's
+// handle, the settle committed, and the provider retries with backoff until
+// the handle releases (#554) — distinct from "error" so the surface can say
+// what blocks the disk and that no user action is needed.
 export type EngineYDocSaveState =
   | "settling"
   | "saved"
   | "error"
+  | "file-locked"
   | "changed-on-disk";
 
 export interface WorkspaceEngineYDocCloseOptions {
@@ -2803,7 +2809,10 @@ export function createWorkspaceEngineCapture(
             settleFailureTokens.set(error, token);
           }
           onError(`ydoc settle of ${input.path}`, error);
-          reportSaveState("error", token);
+          // A file-locked refusal is the transient case the provider retries
+          // on its own (#554): report it as such, so the surface can name the
+          // blocker instead of advising another edit.
+          reportSaveState(isFileLockedRefusal(error) ? "file-locked" : "error", token);
         };
         let entry: LiveYDocSession | null = null;
         const { session, head, lineage } = await openRestartSafeRustYDocSession({

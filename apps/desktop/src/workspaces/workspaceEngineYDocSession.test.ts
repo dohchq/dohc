@@ -159,10 +159,10 @@ function methodCount(method: string): number {
 // discriminator reads; a bare Error never reaches that path.
 function wireRefusal(
   message: string,
-  code: "INVALID_PARAMS" | "INTERNAL" = "INVALID_PARAMS",
+  code: "INVALID_PARAMS" | "INTERNAL" | "OVERLOADED" = "INVALID_PARAMS",
 ): Error {
   return Object.assign(new Error(message), {
-    wireError: { code, message, retry: "no" },
+    wireError: { code, message, retry: code === "OVERLOADED" ? "afterBackoff" : "no" },
   });
 }
 
@@ -392,6 +392,34 @@ it("still reports an error for a stale-target settle while the document stays op
   await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
 
   expect(states.at(-1)).toBe("error");
+  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
+  settleRefusal = null;
+  await session.close({ settle: false });
+});
+
+// The transient lock gets its OWN state (#554): the engine keeps the write
+// durably pending and the provider retries by itself, so "error"'s advice
+// (try another edit) would be noise and "saved" a lie about the disk. The
+// surface needs to know which one it is showing.
+it("reports file-locked, not error, for a lock refusal", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed in dohc.");
+  await session.settleNow();
+  states.length = 0;
+  captureErrors = [];
+
+  settleRefusal = wireRefusal("file-locked", "OVERLOADED");
+  await expect(session.settleNow()).rejects.toThrow("file-locked");
+
+  expect(states).toContain("file-locked");
+  expect(states).not.toContain("error");
+  // Still loud in the log: the retry does not replace the report.
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
   settleRefusal = null;
   await session.close({ settle: false });

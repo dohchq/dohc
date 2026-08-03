@@ -104,6 +104,30 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     );
   });
 
+  it("names the blocker when another program holds the file", async () => {
+    // #554: a file-locked settle is transient by contract — the engine keeps
+    // the write pending and retries by itself. The chip must name the blocker
+    // and say the edits are safe, not advise another edit.
+    engineDocState.saveState = "file-locked";
+    const onSaveStateChange = vi.fn();
+    render(
+      <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
+    );
+
+    const header = await screen.findByTestId("markdown-save-state");
+    expect(header.getAttribute("data-state")).toBe("file-locked");
+    expect(header.textContent).toBe("File in use");
+    expect(header.getAttribute("title")).toContain("Another program has this file open");
+    expect(header.getAttribute("title")).toContain(
+      "Your edits are saved in this document's history",
+    );
+    expect(header.getAttribute("title")).toContain("dohc retries until the file is free");
+    // The tab dot stays dirty: the disk is behind this document.
+    await waitFor(() =>
+      expect(onSaveStateChange).toHaveBeenLastCalledWith("error"),
+    );
+  });
+
   it("names the outside edit when the file changed on disk", async () => {
     // #338: the settle committed, but the FILE holds an edit made outside dohc
     // that dohc refuses to overwrite. "Couldn't save" would be wrong twice —

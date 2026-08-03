@@ -11188,6 +11188,18 @@ fn now_ms() -> Result<i64, WireError> {
 }
 
 fn map_runtime(error: RuntimeError) -> WireError {
+    // A materialization that exhausted its replace retries against a lock an
+    // external program still holds (`MaterializeError::FileLocked`, or the
+    // storage-level equivalent). The settle committed and the write job is
+    // durably pending, so the ONLY missing piece is a later attempt — which
+    // is exactly `Overloaded`'s retry contract (afterBackoff). Flattening it
+    // to Internal (retry: no) is what left a locked file's save landing only
+    // on the next unrelated settle (#554).
+    if let RuntimeError::Materialize(materialize) = &error
+        && materialize.code() == "file-locked"
+    {
+        return wire(ErrorCode::Overloaded, "file-locked");
+    }
     if matches!(
         &error,
         RuntimeError::Collab(CollabError::ReplayParityViolation { .. })

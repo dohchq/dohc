@@ -1,5 +1,8 @@
 import type * as Y from "yjs";
-import { isYdocSessionNotFoundRefusal } from "../live/daemonLiveAdapter";
+import {
+  isFileLockedRefusal,
+  isYdocSessionNotFoundRefusal,
+} from "../live/daemonLiveAdapter";
 import {
   RemoteYdocApplyError,
   YdocLiveAdapter,
@@ -14,6 +17,13 @@ import type {
 } from "./ydocWireContract";
 
 const DEFAULT_SETTLE_DEBOUNCE_MS = 800;
+
+// The retry ceiling for a settle refused `file-locked` (an external program
+// holds the artifact's handle). The edits are journaled and the write job is
+// durably pending, so retrying is the only missing piece — the delay doubles
+// from the settle debounce up to this cap, which bounds how long the on-disk
+// artifact stays stale after the lock releases.
+const LOCKED_SETTLE_RETRY_CAP_MS = 10_000;
 
 // A close whose pre-close settle failed but whose daemon release SUCCEEDED.
 // Callers must distinguish this from a failed release: the session and its
@@ -205,6 +215,8 @@ export async function openEngineYdocProviderSession(
         );
         // onSettled is what lands the .md; its failure is a save failure too.
         await options.onSettled?.(result, token);
+        // Any settle that reached disk resets the lock-retry ladder.
+        lockedRetryMs = settleDebounceMs;
         return result;
       } catch (error) {
         notifySettleError(error, token);
@@ -218,12 +230,35 @@ export async function openEngineYdocProviderSession(
     return operation;
   }
 
+  // A settle refused `file-locked` retries on a doubling delay until the
+  // external handle releases (#554). Without this, the durable write job sat
+  // pending until an unrelated future edit triggered another settle, while
+  // the document read as saved-or-failed with the on-disk artifact stale. A
+  // newer armed settle (an edit during the backoff) owns the timer instead —
+  // an edit is the strongest retry trigger there is. Non-lock failures never
+  // retry: a stale-target refusal cannot be helped by trying again.
+  let lockedRetryMs = settleDebounceMs;
+
+  function scheduleLockedRetry(error: unknown): void {
+    if (closed || cancelSettle !== null || !isFileLockedRefusal(error)) return;
+    const delay = lockedRetryMs;
+    lockedRetryMs = Math.min(lockedRetryMs * 2, LOCKED_SETTLE_RETRY_CAP_MS);
+    cancelSettle = scheduleSettle(() => {
+      cancelSettle = null;
+      void runSettle().catch((retryError: unknown) => {
+        notifyError(options.onSessionError, retryError);
+        scheduleLockedRetry(retryError);
+      });
+    }, delay);
+  }
+
   function requestSettle(): void {
     cancelSettle?.();
     cancelSettle = scheduleSettle(() => {
       cancelSettle = null;
       void runSettle().catch((error: unknown) => {
         notifyError(options.onSessionError, error);
+        scheduleLockedRetry(error);
       });
     }, settleDebounceMs);
   }
@@ -284,7 +319,14 @@ export async function openEngineYdocProviderSession(
     async settleNow(settleOptions) {
       cancelSettle?.();
       cancelSettle = null;
-      return runSettle(settleOptions?.summary);
+      const operation = runSettle(settleOptions?.summary);
+      // The caller gets the rejection; the retry is armed here too, because
+      // an explicit flush that hit the lock leaves the same durably pending
+      // write as a debounced one.
+      operation.catch((error: unknown) => {
+        scheduleLockedRetry(error);
+      });
+      return operation;
     },
 
     applyExternalMarkdownEdit(markdown) {

@@ -1266,10 +1266,13 @@ function MarkdownView(props: {
       onSaveStateChange?.(saveState);
       return;
     }
-    // The shell's dot has three states; a read-only or changed-on-disk refusal
-    // is an unsaved document as far as the tab is concerned.
+    // The shell's dot has three states; a read-only, file-locked, or
+    // changed-on-disk refusal is an unsaved document as far as the tab is
+    // concerned.
     onSaveStateChange?.(
-      engine.saveState === "read-only" || engine.saveState === "changed-on-disk"
+      engine.saveState === "read-only" ||
+        engine.saveState === "file-locked" ||
+        engine.saveState === "changed-on-disk"
         ? "error"
         : engine.saveState,
     );
@@ -1605,13 +1608,15 @@ function MarkdownView(props: {
                 title={
                   engineChipState === "error"
                     ? "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit."
-                    : engineChipState === "read-only"
-                      ? "This document is shared with you to read. Your changes stay on screen but are not saved."
-                      : engineChipState === "changed-on-disk"
-                        ? "This file changed outside dohc while it was open. Open History to restore your text."
-                        : engineChipState === "recovery"
-                          ? "A set-aside edit is not saved. Copy or dismiss it in the notice below."
-                          : undefined
+                    : engineChipState === "file-locked"
+                      ? "Another program has this file open, so dohc can't update it on disk. Your edits are saved in this document's history. dohc retries until the file is free."
+                      : engineChipState === "read-only"
+                        ? "This document is shared with you to read. Your changes stay on screen but are not saved."
+                        : engineChipState === "changed-on-disk"
+                          ? "This file changed outside dohc while it was open. Open History to restore your text."
+                          : engineChipState === "recovery"
+                            ? "A set-aside edit is not saved. Copy or dismiss it in the notice below."
+                            : undefined
                 }
                 className={`font-mono text-[11px] ${
                   engineChipState === "saved" || engineChipState === "saving"
@@ -1623,13 +1628,15 @@ function MarkdownView(props: {
                   ? "Saved"
                   : engineChipState === "saving"
                     ? "Saving…"
-                    : engineChipState === "read-only"
-                      ? "Read-only"
-                      : engineChipState === "changed-on-disk"
-                        ? "Changed on disk"
-                        : engineChipState === "recovery"
-                          ? "Edit set aside"
-                          : "Couldn't save"}
+                    : engineChipState === "file-locked"
+                      ? "File in use"
+                      : engineChipState === "read-only"
+                        ? "Read-only"
+                        : engineChipState === "changed-on-disk"
+                          ? "Changed on disk"
+                          : engineChipState === "recovery"
+                            ? "Edit set aside"
+                            : "Couldn't save"}
               </span>
               <button
                 type="button"

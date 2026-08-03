@@ -396,10 +396,15 @@ export function parseEngineYDocRemoteUpdateEvent(
 // so the two must not share a string. "changed-on-disk" is the same kind of
 // separate refusal: the file was edited outside dohc while the document was
 // open, dohc kept that edit, and the document's own text is in History.
+// "file-locked" is the transient half of that split: another program holds
+// the file's handle, the settle committed, and the engine retries until the
+// handle releases — the user has nothing to do, so "error"'s advice would be
+// noise and "saved" would be a lie about the disk.
 export const ENGINE_YDOC_SAVE_STATES = [
   "settling",
   "saved",
   "error",
+  "file-locked",
   "read-only",
   "changed-on-disk",
 ] as const;

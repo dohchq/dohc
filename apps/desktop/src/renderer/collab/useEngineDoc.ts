@@ -29,7 +29,10 @@ import {
 // user has switched to B — the stale response is dropped and its session closed.
 
 // "error" = a settle FAILED, so the file on disk is behind what the editor
-// shows. "read-only" = the workspace is a read-only shared view and the edit
+// shows. "file-locked" = the same stale disk, but transient by contract:
+// another program holds the file's handle and the engine retries until it
+// releases (#554), so the copy names the blocker instead of advising an edit.
+// "read-only" = the workspace is a read-only shared view and the edit
 // was discarded outright; retrying cannot help, so it gets its own copy.
 // "changed-on-disk" = the file was edited outside dohc while this document was
 // open, and dohc kept that edit instead of overwriting it (#338).
@@ -38,6 +41,7 @@ export type EngineDocSaveState =
   | "saved"
   | "saving"
   | "error"
+  | "file-locked"
   | "read-only"
   | "changed-on-disk";
 
@@ -252,6 +256,7 @@ export function useEngineDoc(input: {
           if (event.sessionId !== sessionId) return;
           if (
             event.state === "error" ||
+            event.state === "file-locked" ||
             event.state === "read-only" ||
             event.state === "changed-on-disk"
           ) {

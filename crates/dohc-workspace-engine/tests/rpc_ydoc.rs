@@ -1617,7 +1617,11 @@ async fn settle_recovers_after_a_transient_replace_failure() {
         )
         .await
         .expect_err("a locked target must fail the settle");
-    assert_eq!(failed.code, ErrorCode::Internal);
+    // The wire names the lock and carries the retry contract (#554): the
+    // client retries this settle with backoff, so the write lands when the
+    // external handle releases instead of on the next unrelated settle.
+    assert_eq!(failed.code, ErrorCode::Overloaded);
+    assert_eq!(failed.message, "file-locked");
     // The settle COMMITTED (marker matches the projection) but the job is
     // still pending and the disk holds the old bytes: a prune-close now
     // would discard the CRDT with the artifact never replaced. Mutation

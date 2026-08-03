@@ -1064,6 +1064,11 @@ fn read_current_no_follow(target: &Path) -> Result<CurrentTarget, MaterializeErr
         match options.open(target) {
             Ok(file) => file,
             Err(err) if err.kind() == ErrorKind::NotFound => return Ok(CurrentTarget::Absent),
+            // A handle held without read sharing fails the preimage read
+            // BEFORE the replace loop can classify it. Name the lock here
+            // too (#554): the job stays pending either way, and callers key
+            // their retry contract off `FileLocked`, not the io grab-bag.
+            Err(err) if is_transient_lock(&err) => return Err(MaterializeError::FileLocked),
             Err(err) => return Err(MaterializeError::io(target, &err)),
         }
     };
