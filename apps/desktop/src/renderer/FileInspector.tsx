@@ -462,7 +462,12 @@ function ViewHeader(props: {
 // The source view's explicit copy affordance ("view source" implies "grab the
 // text"): quiet inline "Copied" confirmation, same swap-and-restore rhythm as
 // DocumentMenu / the code-block copy button (FEEDBACK_MS there is 1200 too).
-function CopySourceButton(props: { getSource: () => string | null }) {
+function CopySourceButton(props: {
+  getSource: () => string | null;
+  // The default is pinned by e2e; the orphaned-draft notice (#567) renders its
+  // own copy control beside a possible source view, so it needs its own name.
+  testId?: string;
+}) {
   const [label, setLabel] = useState<"Copy" | "Copied" | "Couldn't copy">("Copy");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
@@ -474,7 +479,7 @@ function CopySourceButton(props: { getSource: () => string | null }) {
   return (
     <button
       type="button"
-      data-testid="markdown-source-copy"
+      data-testid={props.testId ?? "markdown-source-copy"}
       onClick={() => {
         const source = props.getSource();
         const write = source === null ? undefined : navigator.clipboard?.writeText(source);
@@ -746,6 +751,44 @@ function MarkdownView(props: {
   const latestDraft = useRef(props.body);
   const serializeDraftRef = useRef<() => string>(() => props.body);
   const editing = surfaceMode !== "read";
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // True from the keystroke until a write for that draft has been ISSUED.
+  // The unmount flush keys off this — never off the timer handle, which stays
+  // set (already fired) after a completed autosave and would double-write.
+  const unsavedDraft = useRef(false);
+
+  // #567 cancel-and-restore: the moment `opening` flips true, the pending
+  // draft leaves the save pipeline. Writing it would land the previous
+  // version's text on the tree the reopen is binding; dropping it would lose
+  // keystrokes silently. So the armed autosave is cancelled, the draft is set
+  // aside, and the notice below surfaces it for the user to copy.
+  //
+  // DURING RENDER, not in an effect, for two reasons. The armed 800ms timer
+  // can fire between this commit and a passive effect — by then it has
+  // written. And `serializeDraftRef` still holds the PREVIOUS render's
+  // closure here, which reads the live editor this very commit is about to
+  // unmount — an effect would serialize the pre-edit body (the trap
+  // writeDraftNow documents). The transition guard keeps it idempotent under
+  // replayed renders (`readOnlyRef` precedent below).
+  const [orphanedDraft, setOrphanedDraft] = useState<string | null>(null);
+  const openingRef = useRef(opening);
+  if (opening && !openingRef.current) {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    if (unsavedDraft.current) {
+      // Clearing the flag is also what hands the surface back: the props.body
+      // sync effect below stands aside while a draft is pending, and the
+      // reopened content must flow in once the draft has lost its claim.
+      unsavedDraft.current = false;
+      setOrphanedDraft(serializeDraftRef.current());
+      // The set-aside edit is not on disk — "error" is the honest chip, and
+      // the notice carries the recovery.
+      setSaveState("error");
+    }
+  }
+  openingRef.current = opening;
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -806,11 +849,6 @@ function MarkdownView(props: {
   }, [pendingScrollLine, surfaceMode]);
 
   const { onSaveStateChange } = props;
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // True from the keystroke until a write for that draft has been ISSUED.
-  // The unmount flush keys off this — never off the timer handle, which stays
-  // set (already fired) after a completed autosave and would double-write.
-  const unsavedDraft = useRef(false);
 
   // Parse-once + visible-first (Phase 16): the memo stops re-parses on
   // unrelated re-renders (collab status flips, save-state ticks), and the
@@ -846,15 +884,19 @@ function MarkdownView(props: {
   // false->true transition with `readOnly === false` captured. Making the
   // document read-only was itself the write. Both now read `readOnlyRef`.
   //
-  // NOTE for #567: this makes the `readOnly` guards read the CURRENT value.
-  // It does not add `opening` to them — whether an opening document may drop
-  // an armed keystroke is that issue's product decision, not this one's.
+  // #567 decided the `opening` half: a reopen cancels the armed autosave and
+  // sets the draft aside (the render-phase capture above), and every write
+  // path refuses while `opening` holds, via `openingRef` — assigned during
+  // render for the same reason as `readOnlyRef`.
   //
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
   useEffect(() => {
-    onPendingDraftChange?.(unsavedDraft.current);
+    // An undismissed set-aside draft (#567) still counts: if a refusal
+    // replaces this view, the notice dies with it and the user is owed the
+    // "discarded" line.
+    onPendingDraftChange?.(unsavedDraft.current || orphanedDraft !== null);
   });
   const readOnly =
     !!props.forceReadOnly ||
@@ -1080,11 +1122,13 @@ function MarkdownView(props: {
     // zero-byte file: this reports the honest state, that the file on disk is
     // behind the editor.
     //
-    // The draft itself is still lost when the view is torn down in this state,
-    // and #567 owns that: preserving the TEXT needs eager serialization,
-    // because `serializeDraftRef` reads the live editor and a read-only window
-    // unmounts it — a naive rearm here writes the PRE-EDIT body.
-    if (writesBlocked()) {
+    // The draft itself is still lost when the view is torn down in this state:
+    // preserving the TEXT needs eager serialization, because
+    // `serializeDraftRef` reads the live editor and a read-only window
+    // unmounts it — a naive rearm here writes the PRE-EDIT body. The
+    // `opening` window is different: its render-phase capture serialized the
+    // draft eagerly and surfaced it, so this gate only refuses the write.
+    if (writesBlocked() || openingRef.current) {
       setSaveState("error");
       return;
     }
@@ -1211,7 +1255,9 @@ function MarkdownView(props: {
   useEffect(() => {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      if (!unsavedDraft.current || writesBlocked()) return;
+      // `opening` too (#567): unmounting mid-reopen must not land the
+      // previous version's draft on the tree the reopen is binding.
+      if (!unsavedDraft.current || writesBlocked() || openingRef.current) return;
       unsavedDraft.current = false;
       const text = serializeDraftRef.current();
       void bridge()
@@ -1234,8 +1280,9 @@ function MarkdownView(props: {
     if (!registerDraftFlush) return;
     registerDraftFlush(async () => {
       // The ref, not the captured value: the shell can call this seam between
-      // the refusal and the re-registration.
-      if (!unsavedDraft.current || writesBlocked()) return;
+      // the refusal and the re-registration. `opening` too (#567): a flush
+      // that arrives mid-reopen must not write the previous version's draft.
+      if (!unsavedDraft.current || writesBlocked() || openingRef.current) return;
       if (saveTimer.current) clearTimeout(saveTimer.current);
       await writeDraftNow({ rejectOnError: true });
     });
@@ -1244,6 +1291,36 @@ function MarkdownView(props: {
     // first render's closure stays correct for the whole mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
+
+  // The restore half of #567: the set-aside draft stays copyable until the
+  // user takes it or dismisses it. Rendered in both branches below — the
+  // reopen can resolve into either editor.
+  const orphanedDraftNotice =
+    orphanedDraft !== null ? (
+      <div
+        data-testid="orphaned-draft-notice"
+        className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
+      >
+        <span className="text-danger">
+          This document reopened before your last edit saved. Copy your text to
+          keep it.
+        </span>
+        <div className="flex items-center gap-2">
+          <CopySourceButton
+            testId="orphaned-draft-copy"
+            getSource={() => orphanedDraft}
+          />
+          <button
+            type="button"
+            data-testid="orphaned-draft-dismiss"
+            onClick={() => setOrphanedDraft(null)}
+            className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    ) : null;
 
   // Linked mentions live at the BOTTOM of the document, inside the reading
   // measure, in every markdown branch (engine / wysiwyg / read). Hidden when a
@@ -1328,6 +1405,7 @@ function MarkdownView(props: {
           }
         />
         {props.truncatedNotice}
+        {orphanedDraftNotice}
         {showSource ? (
           // Raw markdown, monospaced and read-only — frontmatter included, so
           // the top-matter zone (which renders the same metadata as chrome)
@@ -1457,7 +1535,12 @@ function MarkdownView(props: {
               >
                 Opening…
               </span>
-            ) : editing || saveState !== "saved" ? (
+            ) : null}
+            {/* Independent of "Opening…", not its else-branch (#567): a save
+                that fails inside the opening window must still surface. While
+                opening, `editing` is always false, so the chip appears there
+                only when the state is not "saved". */}
+            {editing || saveState !== "saved" ? (
               <span
                 data-testid="markdown-save-state"
                 data-state={saveState}
@@ -1502,6 +1585,7 @@ function MarkdownView(props: {
         }
       />
       {props.truncatedNotice}
+      {orphanedDraftNotice}
       {surfaceMode === "source" ? (
         <textarea
           data-testid="markdown-editor"
