@@ -184,20 +184,16 @@ pub fn classify_engine_file_path(path: &str) -> PathFloor {
     if first_norm == SHARED_WITH_ME_ROOT || has_ignored_segment(&normalized) {
         return PathFloor::Ignored;
     }
-    // Secret: any `.env` segment, or a basename ending `.env` / starting `.env.`.
+    // Secret: the shared rule (`policy::segments_are_secret`), over search's
+    // per-platform normalization (see module docs). Search deliberately does
+    // NOT call `normalized_path_is_secret`, which folds Win32 aliases on every
+    // platform — only the rule is shared, so a class added to it reaches
+    // search without importing the relay-facing normalization.
     let normalized_segments: Vec<String> = kept
         .iter()
-        .map(|s| {
-            let n = normalize_segment(s);
-            n.to_ascii_lowercase()
-        })
+        .map(|s| normalize_segment(s).to_ascii_lowercase())
         .collect();
-    if normalized_segments.iter().any(|s| s == ".env") {
-        return PathFloor::Secret;
-    }
-    if let Some(basename) = normalized_segments.last()
-        && (basename.ends_with(".env") || basename.starts_with(".env."))
-    {
+    if crate::policy::segments_are_secret(&normalized_segments) {
         return PathFloor::Secret;
     }
     PathFloor::Tracked
@@ -748,6 +744,10 @@ mod tests {
             PathFloor::Secret
         );
         assert_eq!(
+            classify_engine_file_path("secrets/.env/nested.md"),
+            PathFloor::Secret
+        );
+        assert_eq!(
             classify_engine_file_path(".dohc/engine/x"),
             PathFloor::Ignored
         );
@@ -774,6 +774,35 @@ mod tests {
             classify_engine_file_path("a%2f%2e%2e%2fb"),
             PathFloor::Ignored
         );
+    }
+
+    #[test]
+    fn search_floor_reads_the_shared_secret_rule() {
+        // Alias-free vectors (no trailing dots/spaces) inside both domains
+        // (relative, no reserved segments): there search's per-platform
+        // normalization reduces to lowercasing, the same as the shared
+        // predicate's, so the search floor and `normalized_path_is_secret`
+        // must agree exactly. A class added to either side alone fails here
+        // on the vectors that carry it (#543, the #484 shape one surface
+        // over).
+        for path in [
+            ".env",
+            "app/.env.local",
+            "config/db.env",
+            "config/.ENV",
+            "deploy/.env.production",
+            "secrets/.env/nested.md",
+            "notes/plan.md",
+            "environments.md",
+            "notes/envelope.md",
+            "backup/env.bak",
+        ] {
+            assert_eq!(
+                classify_engine_file_path(path) == PathFloor::Secret,
+                crate::policy::normalized_path_is_secret(path),
+                "search floor and the shared secret rule disagree for {path}"
+            );
+        }
     }
 
     #[test]

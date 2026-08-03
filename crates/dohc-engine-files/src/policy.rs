@@ -243,18 +243,26 @@ fn has_ignored_segment(path: &str) -> bool {
 /// here alone made deletes of it replayable (#484). One rule, one place, so a
 /// new class reaches both callers at once.
 ///
-/// One restatement remains: `search_policy.rs` carries its own copy of these
-/// rules for the search floor and does NOT read this predicate. A class added
-/// here alone still leaves already-indexed rows of it searchable until that
-/// copy moves too.
+/// The search floor (`search_policy.rs`) reads the same rule through
+/// [`segments_are_secret`], keeping its own per-platform normalization
+/// (#543): a class added there reaches search too.
 pub fn normalized_path_is_secret(path: &str) -> bool {
     let segments: Vec<String> = path
         .split('/')
         .map(strip_windows_alias_suffix)
         .map(str::to_lowercase)
         .collect();
-    let basename = segments.last().map(String::as_str).unwrap_or_default();
-    segments.iter().any(|segment| segment == ".env")
+    segments_are_secret(&segments)
+}
+
+/// THE secret-segment rule, over segments the caller already normalized
+/// (lowercased, with its own platform's alias folding applied). Add a new
+/// secret class HERE, never in a caller: [`normalized_path_is_secret`] and the
+/// search floor both read this rule, so one edit reaches the write floor, the
+/// share boundary, and search at once.
+pub fn segments_are_secret<S: AsRef<str>>(segments: &[S]) -> bool {
+    let basename = segments.last().map(AsRef::as_ref).unwrap_or_default();
+    segments.iter().any(|segment| segment.as_ref() == ".env")
         || basename.ends_with(".env")
         || basename.starts_with(".env.")
 }
