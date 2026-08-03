@@ -1,5 +1,8 @@
 import {
   classifyPath,
+  DOHC_TRASH_GUARD,
+  notARealFolderRefusal,
+  outsideWorkspaceRefusal,
   validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
@@ -657,18 +660,10 @@ export async function moveIntoWorkspaceTrash(
   // and the rename is the accepted residual (Node has no renameat dirfd).
   const trashStat = await lstat(trashDir);
   if (trashStat.isSymbolicLink() || !trashStat.isDirectory()) {
-    const squatter = trashStat.isSymbolicLink()
-      ? "link"
-      : trashStat.isFile()
-        ? "file"
-        : "item";
-    const article = squatter === "item" ? "An" : "A";
-    throw new Error(
-      `dohc could not move this to the workspace trash. ${article} ${squatter} is at .dohc/trash, which must be a real folder. Remove or rename that ${squatter}. Then retry.`,
-    );
+    throw new Error(notARealFolderRefusal(DOHC_TRASH_GUARD, trashStat));
   }
   if (!isInside(realRoot, await realpath(trashDir))) {
-    throw new Error(".dohc/trash resolves outside the workspace");
+    throw new Error(outsideWorkspaceRefusal(DOHC_TRASH_GUARD));
   }
   // Collision-resistant name: back-to-back deletes (multi-select) share a
   // Date.now() tick, and POSIX rename silently CLOBBERS an existing

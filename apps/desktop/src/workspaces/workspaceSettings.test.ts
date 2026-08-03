@@ -510,6 +510,21 @@ describe("workspace settings file store", () => {
     expect((await readWorkspaceSettingsFile(root)).source).toBe("recovered");
   });
 
+  // Reset is what an unreadable settings file tells the user to reach for, and
+  // it runs through the metadata resolver first. A FILE at .dohc used to be
+  // refused in developer vocabulary ("must be a real directory inside the
+  // workspace") — the wrong noun for this surface, and no next step (#586).
+  it("a reset when a FILE squats .dohc names the squatter in the same words", async () => {
+    const root = await tempRoot();
+    await writeFile(join(root, ".dohc"), "squatting");
+
+    await expect(resetWorkspaceSettingsFile(root)).rejects.toThrow(
+      "dohc could not open this workspace's .dohc folder. A file is at .dohc, which must be a real folder. Remove or rename that file. Then retry.",
+    );
+    // The squatter is never touched: dohc names it and stops.
+    expect(await readFile(join(root, ".dohc"), "utf8")).toBe("squatting");
+  });
+
   it("refuses to write through a symlinked .dohc and never lands files outside", async () => {
     const root = await tempRoot();
     const outside = await tempRoot();
@@ -517,7 +532,9 @@ describe("workspace settings file store", () => {
 
     await expect(
       writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS),
-    ).rejects.toThrow(/\.dohc/);
+    ).rejects.toThrow(
+      "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.",
+    );
     // The READ stays tolerant, like the symlinked-file case below: fail
     // closed (opted out, warning names the folder), and never follow the
     // link — nothing is read from or written into the link target.

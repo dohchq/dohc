@@ -201,7 +201,9 @@ describe("AgentIntegration", () => {
           rootFor: () => root,
           setAgentRun: (_id, run) => setSlot(run),
         });
-        await expect(integration.startAgentRun("ws")).rejects.toThrow(/\.dohc/);
+        await expect(integration.startAgentRun("ws")).rejects.toThrow(
+          "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.",
+        );
         // The escape target stayed untouched: no run log, no temp files.
         expect(await readdir(outside)).toEqual([]);
       } finally {

@@ -11,16 +11,21 @@ import {
   addFileChanges,
   createChangeSet,
   databaseSyncStrategy,
+  DOHC_METADATA_GUARD,
+  DOHC_TRASH_GUARD,
   frameworkConfigName,
   hasIgnoredSegment,
   hasWebDependency,
   mediaTypeForPath,
+  notARealFolderRefusal,
+  outsideWorkspaceRefusal,
   packageManagerFromFiles,
   validateUserMaterializePath,
   validateUserReadPath,
   type ChangeAuthor,
   type ChangeProvenance,
   type ChangeSetKind,
+  type DohcPathGuard,
   type DohcSiteConfig,
   type FileChange,
   type PackageJson,
@@ -275,29 +280,40 @@ async function ensureRecordable(ctx: ToolContext) {
   }
 }
 
+// mkdir{recursive} throws a raw errno (EEXIST, or a Windows variant) when
+// something that is not a directory squats the path, and every reason here
+// reaches the calling agent verbatim. Fall through on PRESENCE, never on an
+// errno allowlist: a DANGLING symlink squat raises ENOENT, which an allowlist
+// misses. When something is at the path, the check below names it and the way
+// out. When nothing is there, the mkdir itself failed (permissions, I/O) --
+// rethrow that.
+async function ensureGuardedDir(dir: string, guard: DohcPathGuard, root: string) {
+  try {
+    await mkdir(dir, { recursive: true });
+  } catch (error) {
+    if (!(await lstat(dir).catch(() => null))) throw error;
+  }
+  // Validate AFTER mkdir: mkdir{recursive} silently no-ops on an existing
+  // symlink-to-dir, so only the post-mkdir state proves where a write or a
+  // rename would land.
+  const link = await lstat(dir);
+  if (link.isSymbolicLink() || !link.isDirectory()) {
+    throw new Error(notARealFolderRefusal(guard, link));
+  }
+  if (!(await isWithinRealRoot(root, dir))) {
+    throw new Error(outsideWorkspaceRefusal(guard));
+  }
+}
+
 async function safeMetadataDir(ctx: ToolContext): Promise<string> {
   const dir = join(ctx.root, ".dohc");
-  await mkdir(dir, { recursive: true });
-  const link = await lstat(dir);
-  if (link.isSymbolicLink()) {
-    throw new Error("workspace metadata directory is a symlink");
-  }
-  if (!(await isWithinRealRoot(ctx.root, dir))) {
-    throw new Error("workspace metadata directory escapes workspace");
-  }
+  await ensureGuardedDir(dir, DOHC_METADATA_GUARD, ctx.root);
   return dir;
 }
 
 async function safeTrashDir(ctx: ToolContext): Promise<string> {
   const dir = join(await safeMetadataDir(ctx), "trash");
-  await mkdir(dir, { recursive: true });
-  const link = await lstat(dir);
-  if (link.isSymbolicLink()) {
-    throw new Error("workspace trash directory is a symlink");
-  }
-  if (!(await isWithinRealRoot(ctx.root, dir))) {
-    throw new Error("workspace trash directory escapes workspace");
-  }
+  await ensureGuardedDir(dir, DOHC_TRASH_GUARD, ctx.root);
   return dir;
 }
 
