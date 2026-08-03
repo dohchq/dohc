@@ -401,7 +401,13 @@ export interface WorkspaceEngineCapture {
   // itself (the delete IPC deletes on disk directly). Without this, a later
   // settle would resurrect the deleted file / orphan the object. No-op when
   // nothing is live at the path.
-  settleAndCloseLiveSessionsForPath(pathOrPrefix: string): Promise<void>;
+  // Answers a finisher the caller MUST call with the removal's outcome:
+  // `true` when the path is gone, `false` when the removal failed. Only the
+  // outcome decides whether a pending locked-write debt for that path is
+  // cancelled or restored (#595).
+  settleAndCloseLiveSessionsForPath(
+    pathOrPrefix: string,
+  ): Promise<(removed: boolean) => void>;
   // Version operations (PR 0M-4). Mutating operations run on the capture
   // chain; reads are served directly by the store (which already orders
   // reads after its own writes). All reject to the caller on failure.
@@ -1210,12 +1216,68 @@ export function createWorkspaceEngineCapture(
     close: (opts?: WorkspaceEngineYDocCloseOptions) => Promise<void>;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
-  // The detached locked-write debts, by path (#595 rounds 5-6): each entry is
-  // the payment routine its arming session left behind. The registry is what
-  // lets OTHER lifecycle edges find and drain a debt whose session is gone —
-  // a rename pays the debt for its endpoints before reading disk, and the
-  // debt's own timer stands down when the registry no longer names it.
-  const detachedLockedDebts = new Map<string, () => Promise<void>>();
+  // The detached locked-write debts, by path (#595 rounds 5-8): each entry is
+  // the payment routine its arming session left behind, plus the way to re-arm
+  // it. The registry is what lets OTHER lifecycle edges find a debt whose
+  // session is gone, and it is the single owner record — the debt's own timer
+  // stands down when the registry no longer names its routine.
+  //
+  // THE RELEASE RULE (#595 round 8): a debt leaves the registry only on PROOF
+  // — the write landed, the path is provably gone, or another owner took it.
+  // An operation merely ATTEMPTING is not proof: a payment that met the lock
+  // again, a delete that failed, a release that failed all keep the debt.
+  interface DetachedLockedDebt {
+    pay: () => Promise<void>;
+    arm: () => void;
+  }
+  const detachedLockedDebts = new Map<string, DetachedLockedDebt>();
+
+  // Take matching debts OUT of the registry without deciding their fate: the
+  // caller is about to attempt a removal, and only its OUTCOME says whether
+  // they are cancelled or restored. Suspended debts have no timer (the
+  // registry no longer names their routine), so nothing fires meanwhile.
+  function suspendDetachedDebts(
+    match: (path: string) => boolean,
+  ): Array<[string, DetachedLockedDebt]> {
+    const suspended: Array<[string, DetachedLockedDebt]> = [];
+    for (const [path, debt] of [...detachedLockedDebts.entries()]) {
+      if (!match(path)) continue;
+      detachedLockedDebts.delete(path);
+      suspended.push([path, debt]);
+    }
+    return suspended;
+  }
+
+  // The removal happened: cancel with a trace. A delayed payment would reopen
+  // the old path and RECREATE a deleted file or a moved-from tree — the
+  // clobber inverted. Nothing durable is lost: the edits stay in the object's
+  // lineage, which is where a deleted document's text lives anyway.
+  function cancelSuspendedDebts(
+    suspended: Array<[string, DetachedLockedDebt]>,
+    reason: string,
+  ): void {
+    for (const [path] of suspended) {
+      onError(
+        `ydoc close retry of ${path}`,
+        new Error(
+          `locked-write retry cancelled: ${reason} removed the path while a pending write waited; the edits remain in the document lineage`,
+        ),
+      );
+    }
+  }
+
+  // The removal did NOT happen (the same lock can block a trash/move too), so
+  // the path still exists and still owes its write: put the debts back and
+  // re-arm them.
+  function restoreSuspendedDebts(
+    suspended: Array<[string, DetachedLockedDebt]>,
+  ): void {
+    for (const [path, debt] of suspended) {
+      if (detachedLockedDebts.has(path)) continue;
+      detachedLockedDebts.set(path, debt);
+      debt.arm();
+    }
+  }
 
   async function openRestartSafeRustYDocSession(input: {
     versionId: string;
@@ -1761,33 +1823,14 @@ export function createWorkspaceEngineCapture(
       }
       await entry.close({ settle: false });
     }
-    // #595 round 7: detached locked-write debts are the SESSIONLESS residents
-    // of these same paths, and every caller of this vacate is about to remove
-    // or replace what sits under the matched paths. The pay-vs-cancel rule,
-    // per operation:
-    //
-    // - A single-file RENAME pays its exact endpoints BEFORE this vacate
-    //   (beginFileRename): the user wants the content to travel, so the
-    //   write lands first. A debt still here at vacate time could not land
-    //   (the lock held) and its path is about to stop existing.
-    // - Every DESTRUCTIVE match — delete, moved-away tree, version restore —
-    //   CANCELS with a trace, never pays: a delayed payment would reopen the
-    //   old path afterward and RECREATE a deleted file or a moved-from tree,
-    //   the clobber inverted. The user removed the path; dohc must not put
-    //   it back.
-    //
-    // Cancelling loses nothing durable: the edits stay in the object's
-    // lineage, which is where a deleted document's text lives anyway.
-    for (const path of [...detachedLockedDebts.keys()]) {
-      if (!match(path)) continue;
-      detachedLockedDebts.delete(path);
-      onError(
-        `ydoc close retry of ${path}`,
-        new Error(
-          `locked-write retry cancelled: a destructive operation (${summary}) removed or replaced the path while a pending write waited; the edits remain in the document lineage`,
-        ),
-      );
-    }
+    // Detached locked-write debts are NOT touched here (#595 round 8). This
+    // vacate runs for version operations and content refreshes that remove
+    // nothing, and its callers have only ATTEMPTED their operation at this
+    // point — neither is proof. Each edge decides for itself, above:
+    // `beginFileRename` pays and fails while the payment stays locked;
+    // `settleAndCloseLiveSessionsForPath` suspends and lets the delete's
+    // outcome cancel or restore; version switches leave the debt to its own
+    // version fence.
   }
 
   // The encrypted secret store (PR 08) shares engine.db; opened lazily so
@@ -3061,7 +3104,7 @@ export function createWorkspaceEngineCapture(
           // registry entries while a fired payment can already sit queued
           // behind it on the chain. The registry is the single owner record:
           // no longer named there means nothing left to do.
-          if (detachedLockedDebts.get(input.path) !== payDetachedLockedDebt) {
+          if (detachedLockedDebts.get(input.path)?.pay !== payDetachedLockedDebt) {
             return;
           }
           if (stopped) {
@@ -3105,17 +3148,27 @@ export function createWorkspaceEngineCapture(
             try {
               await retrySession.settleNow({ summary: "session close" });
             } finally {
-              await retrySession.close({ settle: false }).catch(() => undefined);
+              // The release is NOT suppressed (#595 round 8): a replicated
+              // update arriving between the settle and this release makes
+              // `settle: false` escalate to a settling close, and that can
+              // fail. Swallowing it dropped the debt while the daemon
+              // session could stay reserved and the newest update had no
+              // retry. Let it reach the handler below, which retains and
+              // re-arms — the next attempt completes the release.
+              await retrySession.close({ settle: false });
             }
+            // PROOF: the write landed and the session released.
             detachedLockedDebts.delete(input.path);
           } catch (retryError) {
             if (isFileLockedCause(retryError)) {
               armDetachedLockedRetry();
               return;
             }
-            detachedLockedDebts.delete(input.path);
-            // A non-lock failure is new information; the enqueue wrapper (or
-            // the draining task) reports it with its own context.
+            // No proof either way — a failed release leaves the session
+            // possibly reserved and the write possibly unlanded. Retain and
+            // re-arm; the throw reports this attempt through the caller's
+            // context without releasing the debt.
+            armDetachedLockedRetry();
             throw retryError;
           }
         };
@@ -3126,7 +3179,7 @@ export function createWorkspaceEngineCapture(
           setTimeout(() => {
             // Paid, transferred, or dropped by another edge while the timer
             // slept: the registry no longer names this routine — stand down.
-            if (detachedLockedDebts.get(input.path) !== payDetachedLockedDebt) {
+            if (detachedLockedDebts.get(input.path)?.pay !== payDetachedLockedDebt) {
               return;
             }
             enqueue(`ydoc close retry of ${input.path}`, payDetachedLockedDebt);
@@ -3134,7 +3187,10 @@ export function createWorkspaceEngineCapture(
         };
         const scheduleDetachedLockedSettle = (): void => {
           if (stopped) return;
-          detachedLockedDebts.set(input.path, payDetachedLockedDebt);
+          detachedLockedDebts.set(input.path, {
+            pay: payDetachedLockedDebt,
+            arm: armDetachedLockedRetry,
+          });
           armDetachedLockedRetry();
         };
         // A close whose settle met the transient lock keeps a debt nobody
@@ -3305,11 +3361,29 @@ export function createWorkspaceEngineCapture(
       // ordered against pending capture batches and version ops. Flushes +
       // releases every live session at OR under the path so no stale settle can
       // resurrect a deleted file / orphan the object afterward.
+      //
+      // Detached locked-write debts under the path are SUSPENDED, not
+      // cancelled (#595 round 8): the caller has only attempted the removal
+      // yet, and the same handle that blocks the write can block the OS
+      // trash and the workspace-trash fallback too. The returned finisher
+      // takes the outcome — `true` cancels with a trace (the path is gone;
+      // a later payment would recreate it), `false` restores and re-arms
+      // (the path is still there and still owes its write).
       return enqueueResult("close live session for destructive op", async () => {
+        const match = (p: string) =>
+          p === pathOrPrefix || p.startsWith(`${pathOrPrefix}/`);
         await settleAndCloseLiveYDocSessions(
-          (p) => p === pathOrPrefix || p.startsWith(`${pathOrPrefix}/`),
+          match,
           "Saved latest edits before removing the file",
         );
+        const suspended = suspendDetachedDebts(match);
+        return (removed: boolean) => {
+          if (removed) {
+            cancelSuspendedDebts(suspended, `a delete of ${pathOrPrefix}`);
+          } else {
+            restoreSuspendedDebts(suspended);
+          }
+        };
       });
     },
 
@@ -4554,12 +4628,24 @@ export function createWorkspaceEngineCapture(
         // cannot see it, and without this drain the rename would read the
         // STALE pre-lock artifact, record old bytes, and leave the retry
         // targeting the moved-from path. We are on the chain, so nothing
-        // interleaves with the payment. A payment that still meets the lock
-        // re-arms and the rename proceeds over the stale artifact — the same
-        // state any never-settled locked file has at rename time.
+        // interleaves with the payment.
+        //
+        // The payment must PROVE it landed (#595 round 8): it RESOLVES when
+        // it merely re-armed against a still-held lock, and proceeding there
+        // would read the stale pre-lock artifact and commit it through
+        // writeIfChanged — replacing the canonical Y.Doc head with pre-lock
+        // text, which the finisher's path rollback cannot undo. The registry
+        // is the proof: still named after the payment means it did not land,
+        // so the rename REFUSES and the debt survives for the retry ladder.
         for (const endpoint of [fromPath, toPath]) {
           const debt = detachedLockedDebts.get(endpoint);
-          if (debt) await debt();
+          if (!debt) continue;
+          await debt.pay();
+          if (detachedLockedDebts.has(endpoint)) {
+            throw new Error(
+              `dohc could not rename ${fromPath}: another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program, then rename again.`,
+            );
+          }
         }
         // WS-G2-C-2 (gate fix 3): a live Y.Doc session over either endpoint must
         // be flushed + released before the file moves, or a later settle would

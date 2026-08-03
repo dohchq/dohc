@@ -3356,16 +3356,27 @@ function registerIpcHandlers(
     // would, on a later settle, resurrect the file / orphan the object. Flush +
     // release it (and any session under a deleted folder) BEFORE the disk delete
     // so no stale settle can write the old path afterward.
-    await activity
+    const finishDebts = await activity
       .engineCaptureFor(workspace.workspaceId)
       ?.settleAndCloseLiveSessionsForPath(input.relativePath);
     // shell.trashItem first (recoverable on every platform); deletePath
     // falls back to the workspace's .dohc/trash where the OS rejects
     // (cross-filesystem mounts) — never a hard delete either way.
-    const result = await deletePath(workspace.rootPath, input.relativePath, (p) =>
-      shell.trashItem(p),
-    );
-    return DeleteWorkspacePathResult.parse(result);
+    //
+    // The finisher takes the OUTCOME (#595): a pending locked write is
+    // cancelled only once the path is provably gone. The same no-share
+    // handle that blocks the write can block the trash and the fallback
+    // move, and a failed delete leaves a file that still owes its write.
+    try {
+      const result = await deletePath(workspace.rootPath, input.relativePath, (p) =>
+        shell.trashItem(p),
+      );
+      finishDebts?.(true);
+      return DeleteWorkspacePathResult.parse(result);
+    } catch (error) {
+      finishDebts?.(false);
+      throw error;
+    }
   });
 
   ipcMain.handle(CHANNELS.exportWorkspaceZip, async (event, payload) => {

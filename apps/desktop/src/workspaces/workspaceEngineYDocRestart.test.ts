@@ -2868,7 +2868,8 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
   );
 
   // The user deletes the file, then the lock releases.
-  await capture.settleAndCloseLiveSessionsForPath("note.md");
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+  finishDelete(true); // the delete succeeded: the path is provably gone
   state.locked = false;
 
   // The cancel left a trace, and the retry window passes with no reopen and
@@ -2905,7 +2906,8 @@ it("a moved-away directory cancels detached locked debts under its prefix", asyn
     /released, but its pre-close settle failed/,
   );
 
-  await capture.settleAndCloseLiveSessionsForPath("dir");
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("dir");
+  finishDelete(true);
   state.locked = false;
 
   await expect
@@ -2919,3 +2921,129 @@ it("a moved-away directory cancels detached locked debts under its prefix", asyn
   expect(state.settledMarkdowns).toEqual([]);
   await capture.stop();
 }, 15_000);
+
+it("a FAILED delete restores the detached locked debt instead of cancelling it", async () => {
+  // #595 round 8: the same no-delete-share handle that blocks the write can
+  // block the OS trash AND the workspace-trash fallback. Cancelling on the
+  // ATTEMPT would strand the promised write forever over a file that is
+  // still there. The finisher takes the outcome: a failed delete restores
+  // and re-arms, so the release still lands the write.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-delete-failed-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "survives a failed delete");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The delete is attempted and FAILS (the same handle blocks it).
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+  finishDelete(false);
+  state.locked = false;
+
+  // The debt survived the failed attempt and pays itself once the lock goes.
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["survives a failed delete"]);
+  await capture.stop();
+}, 20_000);
+
+it("a rename REFUSES while its debt payment is still locked", async () => {
+  // #595 round 8: the payment RESOLVES when it merely re-armed against a
+  // still-held lock. Proceeding would read the stale pre-lock artifact and
+  // commit it through writeIfChanged — replacing the canonical Y.Doc head
+  // with pre-lock text, which the finisher's path rollback cannot undo. The
+  // registry is the proof: still named means it did not land, so the rename
+  // refuses and the debt stays.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-rename-locked-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "must not be lost");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The lock STILL holds when the rename runs: it must refuse, naming the
+  // blocker and the way out, and nothing may be written.
+  await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
+    /another program still has note\.md open/,
+  );
+  expect(state.settledMarkdowns).toEqual([]);
+
+  // The debt survived the refusal: releasing the lock still lands the write.
+  state.locked = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["must not be lost"]);
+  await capture.stop();
+}, 25_000);
+
+it("a failed release keeps the debt instead of dropping it", async () => {
+  // #595 round 8: a replicated update arriving between the retry's settle
+  // and its release makes `settle: false` escalate to a settling close,
+  // which can fail. Swallowing that dropped the debt while the daemon
+  // session could stay reserved and the newest update had no retry. The
+  // failure reaches the handler, which retains and re-arms — the next
+  // attempt completes the release.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-release-failed-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "release fails once");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The lock releases, but the retry's own RELEASE keeps failing.
+  state.locked = false;
+  state.replicated = false;
+  state.closeFailure = new Error("ydoc-unsettled-close");
+  await expect
+    .poll(
+      () => state.errors.filter((context) => context.includes("close retry")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+  const attemptsAtFailure = state.settleCalls.length;
+
+  // THE proof of retention: with the debt dropped, nothing would ever run
+  // again. It is retained, so attempts keep coming — and once the release
+  // works, one of them completes and the ladder stops.
+  await expect
+    .poll(() => state.settleCalls.length, { timeout: 15_000 })
+    .toBeGreaterThan(attemptsAtFailure);
+  state.closeFailure = null;
+  await expect
+    .poll(() => state.settledMarkdowns.length, { timeout: 15_000 })
+    .toBeGreaterThan(0);
+  await capture.stop();
+}, 25_000);

@@ -11189,16 +11189,31 @@ fn now_ms() -> Result<i64, WireError> {
 
 fn map_runtime(error: RuntimeError) -> WireError {
     // A materialization that exhausted its replace retries against a lock an
-    // external program still holds (`MaterializeError::FileLocked`, or the
-    // storage-level equivalent). The settle committed and the write job is
-    // durably pending, so the ONLY missing piece is a later attempt — which
-    // is exactly `Overloaded`'s retry contract (afterBackoff). Flattening it
-    // to Internal (retry: no) is what left a locked file's save landing only
-    // on the next unrelated settle (#554).
-    if let RuntimeError::Materialize(materialize) = &error
-        && materialize.code() == "file-locked"
-    {
-        return wire(ErrorCode::Overloaded, "file-locked");
+    // external program holds on the ARTIFACT. The settle committed and the
+    // write job is durably pending, so the ONLY missing piece is a later
+    // attempt — which is exactly `Overloaded`'s retry contract
+    // (afterBackoff). Flattening it to Internal (retry: no) is what left a
+    // locked file's save landing only on the next unrelated settle (#554).
+    //
+    // Matched on the VARIANT, never on `code()` (#595 round 8): the code
+    // delegates through `MaterializeError::Storage`, so a busy SQLite handle
+    // answers "file-locked" too — and the desktop would then tell the user
+    // another program has their DOCUMENT open while retrying a database
+    // contention. Storage contention gets its own message below.
+    if let RuntimeError::Materialize(materialize) = &error {
+        return match materialize {
+            dohc_engine_files::MaterializeError::FileLocked => {
+                wire(ErrorCode::Overloaded, "file-locked")
+            }
+            // Retryable like any contention, but honestly named: the engine
+            // database was busy, not the user's file.
+            dohc_engine_files::MaterializeError::Storage(
+                dohc_engine_storage::StorageError::FileLocked,
+            ) => wire(ErrorCode::Overloaded, "engine-store-busy"),
+            // Every other materialization failure keeps the prior mapping
+            // (the tail match below routed them to Internal).
+            _ => wire(ErrorCode::Internal, "workspace operation failed"),
+        };
     }
     if matches!(
         &error,
@@ -11523,6 +11538,36 @@ mod tests {
     use std::time::Duration;
 
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// #595 round 8: the artifact lock and a busy engine database are two
+    /// different contentions, and only the first may be reported as
+    /// `file-locked` — the desktop turns that message into "another program
+    /// has this file open" and retries the ARTIFACT write against it. The
+    /// code() of MaterializeError::Storage DELEGATES to the storage error, so
+    /// matching on the code alone reported a busy SQLite handle as an
+    /// artifact lock. Matching the variant is what keeps them apart.
+    ///
+    /// MUTATION: match on `materialize.code() == "file-locked"` again -> the
+    /// storage case below reports "file-locked".
+    #[test]
+    fn a_busy_engine_store_is_not_reported_as_a_locked_artifact() {
+        let artifact = map_runtime(RuntimeError::Materialize(
+            dohc_engine_files::MaterializeError::FileLocked,
+        ));
+        assert_eq!(artifact.code, ErrorCode::Overloaded);
+        assert_eq!(artifact.message, "file-locked");
+
+        let store = map_runtime(RuntimeError::Materialize(
+            dohc_engine_files::MaterializeError::Storage(
+                dohc_engine_storage::StorageError::FileLocked,
+            ),
+        ));
+        // Retryable, because a busy database is contention — but never under
+        // the artifact-lock message the desktop explains to the user.
+        assert_eq!(store.code, ErrorCode::Overloaded);
+        assert_ne!(store.message, "file-locked");
+        assert_eq!(store.message, "engine-store-busy");
+    }
 
     #[test]
     fn encoded_length_agrees_with_the_encoder_that_builds_the_frame() {
