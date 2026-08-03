@@ -22,6 +22,12 @@ export interface PullWorkspaceFromRelayResult {
   applied: number;
   skipped: number;
   conflictsOpened: number;
+  // An apply in this pull rewrote or appended OUTBOUND journal rows (a lost
+  // Y.Doc origination race adopted the winner's base and republished local
+  // content as deltas). The sync engine must schedule a follow-up push:
+  // nothing else will — sync materialization suppresses watcher events, and
+  // a pass pushes before it pulls.
+  pendingPush: boolean;
   pendingConflictResolves: number;
   // Identities behind pendingConflictResolves (0P-C gate fix): the sync
   // engine tracks these so its "a choice needs a look" notice clears when

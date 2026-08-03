@@ -6792,6 +6792,7 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
             deferred: true,
             reason: Some("ydoc-session-live"),
             conflicts_opened: 0,
+            pending_push: false,
         })
     );
 
@@ -7008,6 +7009,7 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             deferred: false,
             reason: Some("ydoc-base-conflict"),
             conflicts_opened: 1,
+            pending_push: false,
         })
     );
     assert_eq!(
@@ -7183,6 +7185,7 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            pending_push: false,
         })
     );
     let conflicts: i64 = engine
@@ -7489,6 +7492,7 @@ fn inbound_divergent_base_adopts_the_winner_and_republishes_local_content() {
             deferred: false,
             reason: Some("ydoc-base-adopted"),
             conflicts_opened: 0,
+            pending_push: true,
         })
     );
     assert_eq!(
@@ -7672,6 +7676,7 @@ fn a_live_lease_leaves_a_divergent_inbound_base_unacked() {
             deferred: true,
             reason: Some("ydoc-session-live"),
             conflicts_opened: 0,
+            pending_push: false,
         })
     );
 }
@@ -7790,6 +7795,557 @@ fn push_parks_at_a_refused_base_and_the_pass_stays_complete() {
         "the push cursor stays before the refused base row"
     );
     assert_eq!(*client.transport().pushes.lock().expect("calls"), 1);
+}
+
+/// #547 scaffolding: a workspace with a sync identity, a lineage claimed
+/// from `loser_doc`'s full state, and that base journaled as this machine's
+/// refused obligation. Returns the journal row's origin_seq.
+fn seed_losing_origination(
+    engine: &mut EngineStore,
+    key: &dohc_engine_collab::DocKey,
+    path: &str,
+    loser_base: &[u8],
+    kind: dohc_engine_collab::ContentKind,
+) -> i64 {
+    VersionedTextStore::new(&mut *engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_identity(engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws', ?1, 1_400)",
+                [key.object_id.as_str()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    dohc_engine_collab::claim_base(engine, key, kind, loser_base, &NoFaults, 1_500)
+        .expect("claim own base");
+    let journaled = engine
+        .write_with(&NoFaults, |tx| {
+            crate::journal::journal_local_op_in_tx(
+                tx,
+                "ws",
+                "ydoc.update",
+                &json!({
+                    "versionId": key.version_id,
+                    "objectId": key.object_id,
+                    "path": path,
+                    "contentKind": kind.as_str(),
+                    "updateBlobSha256": dohc_engine_storage::hex_sha256(loser_base),
+                    "isBaseState": true
+                }),
+                1_600,
+            )
+        })
+        .expect("journal own base");
+    match journaled {
+        dohc_engine_storage::TxnOutcome::Committed(seq) => seq,
+        other => panic!("journal crashed: {other:?}"),
+    }
+}
+
+fn winner_base_op(object_id: &str, path: &str, kind: &str, sha: &str) -> ReplicationEnvelope {
+    envelope(
+        "winner-origin",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": kind,
+            "updateBlobSha256": sha,
+            "isBaseState": true
+        }),
+    )
+}
+
+fn journaled_ydoc_rows(engine: &EngineStore) -> Vec<(i64, String, bool)> {
+    engine
+        .read_with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT origin_seq, payload_json FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='ydoc.update' AND imported=0 \
+                     ORDER BY origin_seq",
+                )
+                .map_err(SyncError::corrupt)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(SyncError::corrupt)?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (seq, payload_json) = row.map_err(SyncError::corrupt)?;
+                let payload: serde_json::Value =
+                    serde_json::from_str(&payload_json).expect("payload");
+                out.push((
+                    seq,
+                    payload["updateBlobSha256"]
+                        .as_str()
+                        .expect("sha")
+                        .to_owned(),
+                    payload["isBaseState"].as_bool().expect("flag"),
+                ));
+            }
+            Ok::<_, SyncError>(out)
+        })
+        .expect("journal scan")
+}
+
+#[test]
+fn adoption_survives_a_compacted_lineage_and_rewrites_the_refused_row() {
+    // Codex #597 P1: a replicated close forces compaction, which folds the
+    // seq-0 base away. Divergence must then be detected from THE OBLIGATION —
+    // this machine's own refused base row still unpushed in the journal — or
+    // the claim resumes, acks the winner, and every later push parks forever
+    // on ydoc_base_claimed. Mutation check: drop the own_unpushed_base_row
+    // arm of the divergence detector — the journal-rewrite assertion fails.
+    let (_scratch, _path, mut engine) = store();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-compact").expect("key");
+    let loser_doc = dohc_engine_collab::Ydoc::wire();
+    loser_doc.plaintext_insert(0, "loser text");
+    let loser_base = loser_doc.encode_full_state();
+    let base_seq = seed_losing_origination(
+        &mut engine,
+        &key,
+        "notes/compact.md",
+        &loser_base,
+        dohc_engine_collab::ContentKind::Plaintext,
+    );
+    // A later local edit plus the forced close-time compaction folds the
+    // seq-0 base snapshot away.
+    let edit = loser_doc.plaintext_insert(0, "compacted ");
+    dohc_engine_collab::record_local_update(&mut engine, &key, &edit, &NoFaults, 1_700)
+        .expect("local edit");
+    dohc_engine_collab::maybe_compact(&mut engine, &key, 0, &NoFaults, 1_800).expect("compact");
+    let seq0_gone: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_snapshots \
+                 WHERE workspace_id='ws' AND object_id='object-compact' AND up_to_seq=0",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("count");
+    assert_eq!(seq0_gone, 0, "compaction removed the seq-0 base");
+
+    let winner_doc = dohc_engine_collab::Ydoc::wire();
+    winner_doc.plaintext_insert(0, "winner text");
+    let winner_base = winner_doc.encode_full_state();
+    let winner_sha = engine.put_binary_blob(&winner_base).expect("winner blob");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &winner_base_op(
+            "object-compact",
+            "notes/compact.md",
+            "plaintext",
+            &winner_sha,
+        ),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("divergent base adopts despite the missing seq-0 snapshot");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-base-adopted"),
+            conflicts_opened: 0,
+            pending_push: true,
+        })
+    );
+    let rows = journaled_ydoc_rows(&engine);
+    assert_eq!(
+        rows.len(),
+        1,
+        "one republished piece: the compacted snapshot"
+    );
+    assert_eq!(rows[0].0, base_seq, "the refused row is rewritten in place");
+    assert!(!rows[0].2, "the obligation is now a delta, not a base");
+    let head_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.object_id='object-compact'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("head");
+    assert!(
+        head_text.contains("winner text") && head_text.contains("compacted "),
+        "the merged head carries both sides: {head_text:?}"
+    );
+}
+
+#[test]
+fn adoption_preserves_a_pending_dependent_update() {
+    // Codex #597 P1: a dependent Yjs update whose predecessor has not
+    // arrived is invisible to a state diff. Row-wise republishing keeps the
+    // parked row VERBATIM in the swapped lineage and in the journal, so it
+    // integrates when its dependency arrives — locally and on every peer.
+    // Mutation check: exclude the update tail from the pieces query — the
+    // pending-row assertions fail.
+    let (_scratch, _path, mut engine) = store();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-pending").expect("key");
+    let loser_doc = dohc_engine_collab::Ydoc::wire();
+    loser_doc.plaintext_insert(0, "loser text ");
+    let loser_base = loser_doc.encode_full_state();
+    seed_losing_origination(
+        &mut engine,
+        &key,
+        "notes/pending.md",
+        &loser_base,
+        dohc_engine_collab::ContentKind::Plaintext,
+    );
+    // A third origin's DEPENDENT update parks (its predecessor is missing).
+    let dep_doc = dohc_engine_collab::Ydoc::wire();
+    let predecessor = dep_doc.plaintext_insert(0, "dep base");
+    let dependent = dep_doc.plaintext_insert(0, "more ");
+    let dependent_sha = engine.put_binary_blob(&dependent).expect("dependent blob");
+    let predecessor_sha = engine
+        .put_binary_blob(&predecessor)
+        .expect("predecessor blob");
+    let dep_op = |seq: i64, sha: &str| {
+        envelope(
+            "dep-peer",
+            seq,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-pending",
+                "path": "notes/pending.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": sha,
+                "isBaseState": false
+            }),
+        )
+    };
+    apply_ydoc_envelope(
+        &mut engine,
+        &dep_op(0, &dependent_sha),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("dependent applies parked");
+
+    let winner_doc = dohc_engine_collab::Ydoc::wire();
+    winner_doc.plaintext_insert(0, "winner text ");
+    let winner_base = winner_doc.encode_full_state();
+    let winner_sha = engine.put_binary_blob(&winner_base).expect("winner blob");
+    apply_ydoc_envelope(
+        &mut engine,
+        &winner_base_op(
+            "object-pending",
+            "notes/pending.md",
+            "plaintext",
+            &winner_sha,
+        ),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("adopts");
+
+    // The parked row survived the swap — in the lineage AND in the journal.
+    let parked_in_lineage: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_updates \
+                 WHERE workspace_id='ws' AND object_id='object-pending' \
+                   AND update_blob_sha256=?1",
+                [&dependent_sha],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("count");
+    assert_eq!(parked_in_lineage, 1, "the pending row survives the swap");
+    let rows = journaled_ydoc_rows(&engine);
+    assert!(
+        rows.iter().any(|(_, sha, _)| sha == &dependent_sha),
+        "the pending row is republished for peers: {rows:?}"
+    );
+
+    // Its predecessor arrives; the content must integrate everywhere.
+    apply_ydoc_envelope(
+        &mut engine,
+        &dep_op(1, &predecessor_sha),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("predecessor applies");
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load")
+        .expect("lineage");
+    let projection = persisted
+        .doc
+        .project(dohc_engine_collab::ContentKind::Plaintext)
+        .expect("projection");
+    assert!(
+        projection.markdown.contains("more dep base")
+            && projection.markdown.contains("loser text")
+            && projection.markdown.contains("winner text"),
+        "everything integrates once the dependency resolves: {:?}",
+        projection.markdown
+    );
+    // A clean peer replays the winner base + republished journal rows + the
+    // predecessor and converges.
+    let peer = dohc_engine_collab::Ydoc::wire();
+    peer.apply(&winner_base).expect("peer base");
+    for (_, sha, _) in &rows {
+        let bytes = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                    [sha.as_str()],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .map_err(SyncError::corrupt)
+            })
+            .expect("piece blob");
+        peer.apply(&bytes).expect("peer piece");
+    }
+    peer.apply(&predecessor).expect("peer predecessor");
+    assert_eq!(
+        peer.plaintext_string(),
+        projection.markdown,
+        "a clean peer converges to the same integrated content"
+    );
+}
+
+#[test]
+fn cross_kind_adoption_opens_a_conflict_instead_of_hiding_the_losers_text() {
+    // Codex #597 P1: two kinds occupy different Y.Doc roots, so the winner's
+    // projection cannot show the loser's content even though the republished
+    // pieces carry it. Adoption takes the winner's kind (the arbitrated
+    // lineage) but must FREEZE the loser's visible head behind the same
+    // review conflict the plain-file branch opens. Mutation check: drop the
+    // cross_kind arm of the conflict condition — the head assertion fails
+    // with the winner's projection.
+    let (_scratch, _path, mut engine) = store();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-kind").expect("key");
+    let loser_doc = dohc_engine_collab::Ydoc::wire();
+    loser_doc.plaintext_insert(0, "loser text");
+    let loser_base = loser_doc.encode_full_state();
+    seed_losing_origination(
+        &mut engine,
+        &key,
+        "notes/kind.md",
+        &loser_base,
+        dohc_engine_collab::ContentKind::Plaintext,
+    );
+    // The loser's settled artifact is the visible head.
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-kind".to_owned(),
+                    path: "notes/kind.md".to_owned(),
+                    text: "loser text".to_owned(),
+                    moment_id: "m-kind-head".to_owned(),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_700,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("visible head");
+
+    let winner_doc = dohc_engine_collab::Ydoc::wire();
+    winner_doc.richdoc_append_paragraph("winner rich");
+    let winner_base = winner_doc.encode_full_state();
+    let winner_sha = engine.put_binary_blob(&winner_base).expect("winner blob");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &winner_base_op("object-kind", "notes/kind.md", "richdoc", &winner_sha),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cross-kind base adopts under a conflict");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-base-conflict"),
+            conflicts_opened: 1,
+            pending_push: true,
+        })
+    );
+    let head_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.object_id='object-kind'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("head");
+    assert_eq!(
+        head_text, "loser text",
+        "the loser's head stays under review"
+    );
+    let marker = dohc_engine_collab::read_marker(&engine, &key)
+        .expect("marker read")
+        .expect("marker");
+    assert_eq!(
+        marker.content_kind,
+        dohc_engine_collab::ContentKind::Richdoc,
+        "the lineage carries the arbitrated (winner) kind"
+    );
+    let open_conflicts: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws' AND status='open'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("count");
+    assert_eq!(open_conflicts, 1);
+    assert!(
+        !journaled_ydoc_rows(&engine).is_empty(),
+        "the loser's content is still republished for peers"
+    );
+}
+
+#[test]
+fn adoption_with_an_oversized_compacted_snapshot_stays_unacked() {
+    // Codex #597 P1 residual: a compacted snapshot can exceed the per-update
+    // cap, and republishing it would journal bytes every peer refuses
+    // (constraint 5). That one case must leave EVERYTHING untouched and the
+    // coordinate UNACKED — the obligation stays claimable for #549's measured
+    // bound — never ack the winner and retire the only recovery coordinate.
+    // Mutation check: drop the per-piece cap check in adoption — this apply
+    // succeeds and the Err assertion fails.
+    let (_scratch, _path, mut engine) = store();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-oversize").expect("key");
+    let loser_doc = dohc_engine_collab::Ydoc::wire();
+    loser_doc.plaintext_insert(0, "loser text");
+    let loser_base = loser_doc.encode_full_state();
+    let base_seq = seed_losing_origination(
+        &mut engine,
+        &key,
+        "notes/oversize.md",
+        &loser_base,
+        dohc_engine_collab::ContentKind::Plaintext,
+    );
+    // Three ~2 MiB edits (each under the per-update cap), then the forced
+    // compaction folds them into one snapshot over the cap.
+    for _ in 0..3 {
+        let chunk = "x".repeat(2 * 1024 * 1024);
+        let edit = loser_doc.plaintext_insert(0, &chunk);
+        dohc_engine_collab::record_local_update(&mut engine, &key, &edit, &NoFaults, 1_700)
+            .expect("large edit");
+    }
+    dohc_engine_collab::maybe_compact(&mut engine, &key, 0, &NoFaults, 1_800).expect("compact");
+
+    let winner_doc = dohc_engine_collab::Ydoc::wire();
+    winner_doc.plaintext_insert(0, "winner text");
+    let winner_base = winner_doc.encode_full_state();
+    let winner_sha = engine.put_binary_blob(&winner_base).expect("winner blob");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &winner_base_op(
+            "object-oversize",
+            "notes/oversize.md",
+            "plaintext",
+            &winner_sha,
+        ),
+        &NoFaults,
+        &NoLiveLeases,
+    );
+    assert!(
+        matches!(
+            outcome,
+            Err(SyncError::RetryableState { reason })
+                if reason.contains("MAX_YDOC_UPDATE_BYTES")
+        ),
+        "an unrepublishable lineage refuses UNACKED: {outcome:?}"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "winner-origin").expect("ack"),
+        -1,
+        "the winner's coordinate stays claimable"
+    );
+    let rows = journaled_ydoc_rows(&engine);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].0, rows[0].2),
+        (base_seq, true),
+        "the refused base obligation is untouched"
+    );
+}
+
+#[test]
+fn a_pull_that_adopts_reports_pending_push() {
+    // Codex #597 P1: the desktop pushes once BEFORE it pulls, and sync
+    // materialization suppresses watcher events — so after the pull's
+    // adoption rewrites the refused row, nothing would ever push it. The
+    // pull outcome must carry the parked state. Mutation check: drop the
+    // `pending_push` accumulation in `accumulate_pull_outcome` — this
+    // assertion fails.
+    let (_scratch, _path, mut engine) = store();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-pullpush").expect("key");
+    let loser_doc = dohc_engine_collab::Ydoc::wire();
+    loser_doc.plaintext_insert(0, "loser text");
+    let loser_base = loser_doc.encode_full_state();
+    seed_losing_origination(
+        &mut engine,
+        &key,
+        "notes/pullpush.md",
+        &loser_base,
+        dohc_engine_collab::ContentKind::Plaintext,
+    );
+    let winner_doc = dohc_engine_collab::Ydoc::wire();
+    winner_doc.plaintext_insert(0, "winner text");
+    let winner_base = winner_doc.encode_full_state();
+    let winner_sha = engine.put_binary_blob(&winner_base).expect("winner blob");
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![winner_base_op(
+                "object-pullpush",
+                "notes/pullpush.md",
+                "plaintext",
+                &winner_sha,
+            )],
+            next_cursor: 1,
+            has_more: false,
+        })),
+    });
+    let outcome = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("pull adopts");
+    assert!(
+        matches!(
+            outcome,
+            SyncPassOutcome::Complete {
+                pending_push: true,
+                ..
+            }
+        ),
+        "the pull must surface the rewritten outbox: {outcome:?}"
+    );
 }
 
 #[test]
@@ -7921,6 +8477,7 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            pending_push: false,
         }))
     ));
     assert_eq!(
@@ -7964,6 +8521,7 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            pending_push: false,
         })
     );
     assert_eq!(
@@ -8079,6 +8637,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
+                pending_push: false,
             }))
         ));
         let descendant = envelope(
@@ -8100,6 +8659,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
+                pending_push: false,
             }))
         ));
 
@@ -8361,6 +8921,7 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            pending_push: false,
         }))
     ));
     let deferred: i64 = engine
@@ -8513,6 +9074,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            pending_push: false,
         }))
     ));
     assert_eq!(
@@ -8602,6 +9164,7 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            pending_push: false,
         }))
     ));
     assert_eq!(
@@ -8646,6 +9209,7 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            pending_push: false,
         }))
     ));
     let placeholder_timestamp: i64 = engine
@@ -8745,6 +9309,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
+                pending_push: false,
             }))
         ));
     }
@@ -8866,6 +9431,7 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            pending_push: false,
         }))
     ));
     let base = envelope(
@@ -9197,6 +9763,7 @@ fn divergent_second_ydoc_base_adopts_acks_and_merges() {
             deferred: false,
             reason: Some("ydoc-base-adopted"),
             conflicts_opened: 0,
+            pending_push: false,
         })
     );
     assert_eq!(
@@ -15023,6 +15590,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            pending_push: false,
         }))
     ));
 

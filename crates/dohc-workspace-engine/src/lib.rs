@@ -10661,8 +10661,10 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             changed_paths,
             pending_resolves,
             refusals,
+            pending_push,
         } => json!({
             "status": "complete",
+            "pendingPush": pending_push,
             "pushed": pushed,
             "fetched": fetched,
             "hasMore": has_more,
@@ -10699,8 +10701,10 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             changed_paths,
             pending_resolves,
             refusals,
+            pending_push,
         } => json!({
             "status": "crashedAfterApply",
+            "pendingPush": pending_push,
             "applied": applied,
             "refused": refused,
             "skipped": skipped,
@@ -11852,6 +11856,7 @@ mod tests {
             changed_paths: Vec::new(),
             pending_resolves: Vec::new(),
             refusals: Vec::new(),
+            pending_push: false,
         });
 
         assert_eq!(value["status"], "complete");

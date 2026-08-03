@@ -19,6 +19,10 @@ pub struct RoutedApply {
     pub conflict: Option<ConflictApplyResult>,
     pub conflicts_opened: i64,
     pub materialization_changes: Vec<crate::MomentMaterializationChange>,
+    /// This apply rewrote or appended OUTBOUND journal rows (a Y.Doc base
+    /// adoption republished local content). The pull pass surfaces it so the
+    /// caller schedules a push.
+    pub pending_push: bool,
 }
 
 impl RoutedApply {
@@ -131,6 +135,7 @@ pub fn apply_replication_envelope(
             crate::apply_ydoc_envelope(store, envelope, faults, leases),
             |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,
+                pending_push: ydoc.pending_push,
                 ..RoutedApply::default()
             },
         ),

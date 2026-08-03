@@ -1235,6 +1235,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
                 operation: "write",
                 content_kind: "text",
             }],
+            pending_push: false,
         })
     );
     store

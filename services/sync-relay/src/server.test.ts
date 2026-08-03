@@ -226,6 +226,27 @@ describe("sync relay handler", () => {
     expect(fetched.ops).toEqual([]);
   });
 
+  it("keeps the one-base-per-lineage probe behind a partial expression index", async () => {
+    // dohc-ai/dohc#547 P2: appendOps checks every pushed base inside
+    // BEGIN IMMEDIATE; without this index the probe rescans the workspace's
+    // whole log per base and a legal 500-base batch can blow the 5-second
+    // busy timeout. MUTATION: dropping the CREATE INDEX makes this fail.
+    const root = await tempRoot("ydoc-base-index");
+    const path = join(root, "relay.sqlite");
+    storages.push(openSyncRelayStorage(path));
+    const probe = new InspectionDatabaseSync(path, { readOnly: true });
+    try {
+      const row = probe
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sync_relay_log_ydoc_bases'",
+        )
+        .get() as { name?: string } | undefined;
+      expect(row?.name).toBe("idx_sync_relay_log_ydoc_bases");
+    } finally {
+      probe.close();
+    }
+  });
+
   it("admits one Y.Doc base per lineage and refuses a divergent second base", async () => {
     // dohc-ai/dohc#547: the relay arbitrates Y.Doc lineage origination
     // first-claim-wins. MUTATION: dropping the base check in appendOps turns

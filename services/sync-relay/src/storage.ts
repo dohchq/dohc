@@ -320,6 +320,21 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_sync_relay_log_channel_creates
         ON sync_relay_log(workspace_id, relay_seq)
         WHERE op_kind = 'chat.channel.create';
+      -- One-base-per-lineage arbitration (dohc-ai/dohc#547): appendOps checks
+      -- every pushed base against the workspace's stored base for that
+      -- (versionId, objectId) coordinate, inside BEGIN IMMEDIATE. Without an
+      -- index that check rescans the workspace's whole log per base and a
+      -- legal 500-base batch can blow the 5-second busy timeout. This PARTIAL
+      -- expression index confines the probe to base rows keyed by the exact
+      -- coordinate the query names.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_log_ydoc_bases
+        ON sync_relay_log(
+          workspace_id,
+          json_extract(payload_json, '$.versionId'),
+          json_extract(payload_json, '$.objectId')
+        )
+        WHERE op_kind = 'ydoc.update'
+          AND json_extract(payload_json, '$.isBaseState') = 1;
 
       CREATE TABLE IF NOT EXISTS sync_relay_blobs (
         workspace_id TEXT NOT NULL,

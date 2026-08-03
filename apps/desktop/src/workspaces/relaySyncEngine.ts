@@ -258,7 +258,18 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     setSyncFailing(false);
     // The bootstrap pull done, immediately queue the first NORMAL pass so
     // local identity/journal ops reconcile without waiting for an edit.
-    if (bootstrapPass && !stopped && !authExpired && debounceTimer === undefined) {
+    //
+    // A pull that reports pendingPush queues one too: it rewrote or appended
+    // outbound journal rows (a lost Y.Doc origination race adopted the
+    // winner's base and republished local content), and nothing else would
+    // send them — sync materialization suppresses watcher events, and a
+    // pass pushes before it pulls.
+    if (
+      (bootstrapPass || pullResult.pendingPush) &&
+      !stopped &&
+      !authExpired &&
+      debounceTimer === undefined
+    ) {
       debounceTimer = setTimeout(() => {
         debounceTimer = undefined;
         void runPass(false);

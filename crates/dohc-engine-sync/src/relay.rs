@@ -384,6 +384,11 @@ pub enum SyncPassOutcome {
         /// The rejected mutations were rolled back before those coordinates
         /// were retired.
         refusals: Vec<crate::ReplicationRefusal>,
+        /// An apply in this pass rewrote or appended OUTBOUND journal rows
+        /// (a Y.Doc base adoption republished local content). The caller
+        /// must schedule a push: nothing else will - sync materialization
+        /// suppresses watcher events, and a pass pushes before it pulls.
+        pending_push: bool,
     },
     CrashedAfterRemoteCommit,
     CrashedAfterApply {
@@ -395,6 +400,7 @@ pub enum SyncPassOutcome {
         changed_paths: Vec<crate::MomentMaterializationChange>,
         pending_resolves: Vec<crate::PendingResolve>,
         refusals: Vec<crate::ReplicationRefusal>,
+        pending_push: bool,
     },
 }
 
@@ -549,6 +555,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             changed_paths: Vec::new(),
             pending_resolves: Vec::new(),
             refusals: Vec::new(),
+            pending_push: false,
         })
     }
 
@@ -614,6 +621,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut refused = 0_usize;
         let mut skipped = 0_usize;
         let mut conflicts_opened = 0_i64;
+        let mut pending_push = false;
         let mut pending_resolves = Vec::new();
         let mut refusals = Vec::new();
         let mut changed_paths = BTreeMap::new();
@@ -630,6 +638,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     &mut refused,
                     &mut skipped,
                     &mut conflicts_opened,
+                    &mut pending_push,
                     &mut pending_resolves,
                     &mut changed_paths,
                     &mut refusals,
@@ -653,6 +662,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             &mut refused,
                             &mut skipped,
                             &mut conflicts_opened,
+                            &mut pending_push,
                             &mut pending_resolves,
                             &mut changed_paths,
                             &mut refusals,
@@ -718,6 +728,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 changed_paths: changed_paths.into_values().collect(),
                 pending_resolves,
                 refusals,
+                pending_push,
             });
         }
         Ok(SyncPassOutcome::Complete {
@@ -732,6 +743,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             changed_paths: changed_paths.into_values().collect(),
             pending_resolves,
             refusals,
+            pending_push,
         })
     }
 
@@ -2988,6 +3000,7 @@ fn accumulate_pull_outcome(
     refused: &mut usize,
     skipped: &mut usize,
     conflicts_opened: &mut i64,
+    pending_push: &mut bool,
     pending_resolves: &mut Vec<crate::PendingResolve>,
     changed_paths: &mut BTreeMap<String, crate::MomentMaterializationChange>,
     refusals: &mut Vec<crate::ReplicationRefusal>,
@@ -3004,6 +3017,10 @@ fn accumulate_pull_outcome(
             *conflicts_opened = conflicts_opened
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
+            // A crash-redelivered adoption arrives as a Skip and does not
+            // re-set this flag; its rewritten rows already sit in the
+            // journal, and the next pass pushes them before it pulls.
+            *pending_push |= routed.pending_push;
             for change in routed.materialization_changes {
                 changed_paths.insert(change.path.clone(), change);
             }

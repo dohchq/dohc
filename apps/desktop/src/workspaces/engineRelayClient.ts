@@ -690,6 +690,7 @@ export class EngineRelayClient {
         let applied = 0;
         let skipped = 0;
         let conflictsOpened = 0;
+        let pendingPush = false;
         let nextCursor = 0;
         let previousCursor: number | null = null;
         let finalCursor: Record<string, JsonValue | undefined> | null = null;
@@ -726,6 +727,7 @@ export class EngineRelayClient {
             "conflictsOpened",
             "sync.pull",
           );
+          pendingPush = pendingPush || result.pendingPush === true;
           resolves.push(...pendingResolves(result.pendingResolves));
           for (const path of changedPaths(result.changedPaths, "sync.pull")) {
             changed.set(path.path, path);
@@ -744,6 +746,7 @@ export class EngineRelayClient {
           applied,
           skipped,
           conflictsOpened,
+          pendingPush,
           pendingConflictResolves: resolves.length,
           pendingResolves: resolves,
           fastForwardedPaths: [...changed.values()],

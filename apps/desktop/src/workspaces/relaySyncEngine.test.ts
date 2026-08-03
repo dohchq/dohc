@@ -34,6 +34,7 @@ function pullResult(
     applied: 0,
     skipped: 0,
     conflictsOpened: 0,
+    pendingPush: false,
     pendingConflictResolves: 0,
     pendingResolves: [],
     fastForwardedPaths: [],
@@ -123,6 +124,30 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("queues a follow-up pass when the pull reports a rewritten outbox", async () => {
+    // dohc-ai/dohc#547: a pull whose apply adopted a winning Y.Doc base
+    // rewrote outbound journal rows AFTER this pass's push already ran, and
+    // sync materialization suppresses the watcher events that would
+    // otherwise queue a pass. MUTATION: drop the pendingPush arm of the
+    // post-pass requeue — push stays at one call and this fails.
+    pullMock
+      .mockImplementationOnce(async () => pullResult({ pendingPush: true }))
+      .mockImplementation(async () => pullResult());
+    const sync = engine({ capture: capture() });
+
+    await sync.start();
+    expect(pushMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    expect(pullMock).toHaveBeenCalledTimes(2);
+
+    // The follow-up pass reported nothing owed: no third pass queues.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    await sync.stop();
+  });
+
   it("never invokes legacy TypeScript relay operations for a rooted daemon operation set", async () => {
     const operations: RelaySyncOperations = {
       push: vi.fn(async () => ({ pushed: 1, originsPushed: [] })),
