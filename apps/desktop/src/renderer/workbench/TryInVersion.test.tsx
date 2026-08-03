@@ -199,14 +199,15 @@ describe("TryInVersionReviewCard", () => {
   function renderCard(state: TryInVersionRunState, handlers?: {
     onOpenCompare?: (versionId: string) => void;
     onDismissed?: () => void;
-    onWorkspaceStateChanged?: () => void;
+    onWorkspaceStateChanged?: (activeVersionId?: string) => void;
+    flushActiveDraft?: () => Promise<void>;
   }) {
     return render(
       <TryInVersionReviewCard
         workspaceId="ws-try"
         state={state}
         activeTabDirty={false}
-        flushActiveDraft={async () => {}}
+        flushActiveDraft={handlers?.flushActiveDraft ?? (async () => {})}
         onOpenCompare={handlers?.onOpenCompare ?? (() => {})}
         onWorkspaceStateChanged={handlers?.onWorkspaceStateChanged ?? (() => {})}
         onDismissed={handlers?.onDismissed ?? (() => {})}
@@ -257,6 +258,51 @@ describe("TryInVersionReviewCard", () => {
     });
     expect(bridgeMock.dismissTryInVersionReview).toHaveBeenCalledOnce();
     expect(onWorkspaceStateChanged).toHaveBeenCalled();
+  });
+
+  // #579 review r11: the pre-switch flush is the SAME class the version menu
+  // fixed in r7, on the second switch surface. When the flush fails the
+  // switch never starts and the workspace never leaves its version —
+  // announcing a change would reopen the open document and set its
+  // still-editable draft aside for nothing (#567).
+  it("announces nothing when the pre-switch flush fails before the switch starts", async () => {
+    const onWorkspaceStateChanged = vi.fn();
+    const user = userEvent.setup();
+    renderCard(reviewState(), {
+      onWorkspaceStateChanged,
+      flushActiveDraft: async () => {
+        throw new Error("disk full");
+      },
+    });
+    await user.click(screen.getByTestId("try-review-set-aside"));
+
+    // MUTATION (switchIssued in backToMain): announce unconditionally from
+    // the catch. The bookkeeping reopen then sets the draft aside on the
+    // version the user never left.
+    await waitFor(() =>
+      expect(screen.getByTestId("try-review-error")).toBeTruthy(),
+    );
+    expect(bridgeMock.switchWorkspaceVersion).not.toHaveBeenCalled();
+    expect(onWorkspaceStateChanged).not.toHaveBeenCalled();
+  });
+
+  // ...but a failure AFTER the switch IPC started must still announce: main
+  // settles and closes live Y.Doc sessions on its way, so the reopen is what
+  // re-binds them.
+  it("still announces when the switch itself fails mid-way", async () => {
+    const onWorkspaceStateChanged = vi.fn();
+    const user = userEvent.setup();
+    bridgeMock.switchWorkspaceVersion.mockRejectedValueOnce(
+      new Error("switch failed mid-way"),
+    );
+    renderCard(reviewState(), { onWorkspaceStateChanged });
+    await user.click(screen.getByTestId("try-review-set-aside"));
+    await waitFor(() =>
+      expect(bridgeMock.switchWorkspaceVersion).toHaveBeenCalled(),
+    );
+    await waitFor(() => expect(onWorkspaceStateChanged).toHaveBeenCalled());
+    // Nobody knows what stuck, so the shell is sent to ask.
+    expect(onWorkspaceStateChanged).toHaveBeenCalledWith(undefined);
   });
 
   it("says so plainly when the agent changed nothing and offers the way back", () => {

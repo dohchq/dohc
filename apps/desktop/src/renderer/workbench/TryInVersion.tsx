@@ -134,6 +134,13 @@ export function TryInVersionReviewCard(props: {
     // Undefined until the switch settles, because until then a failure leaves
     // nobody knowing what stuck.
     let landedOn: string | undefined;
+    // Did the switch IPC start? The failure path keys on this (#579 review,
+    // r7 + r11): main settles and closes live Y.Doc sessions before it sets
+    // the active version, so a switch that failed mid-way needs the
+    // announcement — but a failure BEFORE it (the pre-switch flush, the
+    // version lookup) changed nothing, and announcing would reopen the
+    // document and set its still-editable draft aside on the same version.
+    let switchIssued = false;
     try {
       await props.flushActiveDraft();
       if (token !== liveToken.current) return;
@@ -142,6 +149,7 @@ export function TryInVersionReviewCard(props: {
       const main = versions.versions.find((version) => version.kind === "main");
       if (!main) throw new Error("Main is not available right now.");
       if (versions.activeVersionId !== main.id) {
+        switchIssued = true;
         await bridge().switchWorkspaceVersion({ workspaceId, versionId: main.id });
         if (token !== liveToken.current) return;
       }
@@ -157,9 +165,12 @@ export function TryInVersionReviewCard(props: {
     } catch (error) {
       if (token !== liveToken.current) return;
       setInlineError(ipcErrorMessage(error, "Could not switch back to Main."));
-      // Make the shell reflect reality. A dismissal that failed AFTER the
-      // switch does not un-know where the workspace landed, so do not send the
-      // shell looking for what this call already proved.
+      // Make the shell reflect reality — but only the reality this call may
+      // have CHANGED. A dismissal that failed AFTER the switch does not
+      // un-know where the workspace landed; a mid-switch failure needs the
+      // shell to ask; and a failure before the switch IPC ever started must
+      // announce nothing (#579 review, r11).
+      if (!switchIssued && landedOn === undefined) return;
       props.onWorkspaceStateChanged(landedOn);
     } finally {
       if (token === liveToken.current) setBusy(null);

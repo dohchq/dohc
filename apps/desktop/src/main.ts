@@ -269,6 +269,7 @@ import {
   type PublicUpdateState,
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
+import { createQuitGuard } from "./quitGuard";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import {
   applyDesktopIconToPlatform,
@@ -3104,29 +3105,33 @@ function requireAuthorizedWorkspace(
 // edits, whose nowMs becomes appliedAt (and createId the operationId) in the
 // persisted JSONL operation log. Omitted ⇒ the real wall clock / randomUUID,
 // identical to today's behavior.
-// Quit-ask state (#567): shared by the before-quit interceptor and the IPC
-// handlers the renderer answers through. Bounds a hung renderer's ACK, never
-// the user's decision — an answering renderer resumes or holds within
-// milliseconds.
-const QUIT_ASK_TIMEOUT_MS = 3_000;
-let quitApproved = false;
-let quitAskTimer: ReturnType<typeof setTimeout> | null = null;
-function clearQuitAskTimer(): void {
-  if (quitAskTimer) {
-    clearTimeout(quitAskTimer);
-    quitAskTimer = null;
-  }
-}
-function approveQuit(): void {
-  clearQuitAskTimer();
-  quitApproved = true;
-}
-function holdQuitAsk(): void {
-  clearQuitAskTimer();
-}
-function revokeQuitApproval(): void {
-  quitApproved = false;
-}
+// Quit-ask guard (#567): shared by the before-quit interceptor and the IPC
+// handlers the renderer answers through. The state machine lives in
+// quitGuard.ts so the busy-renderer promise is a tested fact: a silent ACK
+// window opens a MAIN-side dialog that names the loss — it never quits by
+// itself (#579 review, r11).
+const quitGuard = createQuitGuard({
+  askRenderer: () => {
+    const window = BrowserWindow.getAllWindows().find(
+      (candidate) => !candidate.isDestroyed(),
+    );
+    window?.webContents.send(CHANNELS.quitRequested);
+  },
+  confirmForceQuit: async () => {
+    const { response } = await dialog.showMessageBox({
+      type: "warning",
+      message: "dohc isn't responding.",
+      detail:
+        "Quitting now can lose unsaved recovery text. Wait, or quit anyway.",
+      buttons: ["Wait", "Quit anyway"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    return response === 1;
+  },
+  quit: () => app.quit(),
+});
 
 function registerIpcHandlers(
   deps: { now?: () => number; createId?: () => string } = {},
@@ -7907,11 +7912,11 @@ function registerIpcHandlers(
     // is about to start so the ask does not veto it and burn the latch
     // (#579 review, r10). A refused install revokes the approval: the next
     // plain quit must still ask.
-    approveQuit();
+    quitGuard.approve();
     const result = UpdateActionResult.parse(
       await autoUpdateController.installUpdate(),
     );
-    if (!result.accepted) revokeQuitApproval();
+    if (!result.accepted) quitGuard.revoke();
     return result;
   });
 
@@ -7919,13 +7924,12 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     // The renderer's recovery dialog owns the decision now; the quit stays
     // cancelled until the user resumes it (or never).
-    holdQuitAsk();
+    quitGuard.hold();
   });
 
   ipcMain.handle(CHANNELS.resumeQuit, (event) => {
     assertTrustedSender(event);
-    approveQuit();
-    app.quit();
+    quitGuard.resume();
   });
 
   ipcMain.on(CHANNELS.firstPaint, (event) => {
@@ -8111,24 +8115,15 @@ if (!app.requestSingleInstanceLock()) {
   // matters doubly for updates: electron-updater's quitAndInstall is
   // ONE-SHOT, so the decision has to come before it is ever called. The
   // renderer answers every ask promptly: resume (no drafts, or the user
-  // confirmed) or hold (its dialog owns the decision).
+  // confirmed) or hold (its dialog owns the decision). A silent renderer
+  // gets the guard's MAIN-side dialog, never a silent force-quit.
   app.on("before-quit", (event) => {
-    if (quitApproved) return;
     const window = BrowserWindow.getAllWindows().find(
       (candidate) => !candidate.isDestroyed(),
     );
+    // No window means nobody to ask and nothing rendered to lose.
     if (!window) return;
-    event.preventDefault();
-    clearQuitAskTimer();
-    quitAskTimer = setTimeout(() => {
-      // The renderer never answered — hung or crashed — and quit must stay
-      // possible. This bounds the renderer's ACK, not the user's decision:
-      // an answering renderer resumes or holds within milliseconds.
-      quitAskTimer = null;
-      quitApproved = true;
-      app.quit();
-    }, QUIT_ASK_TIMEOUT_MS);
-    window.webContents.send(CHANNELS.quitRequested);
+    quitGuard.beforeQuit(event);
   });
 
   app.on("before-quit", (event) => {
