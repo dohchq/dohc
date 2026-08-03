@@ -34,6 +34,7 @@ import {
   resolveWikilinkNavigation,
 } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+import { resetOrphanedDrafts } from "./orphanedDrafts";
 
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
@@ -933,12 +934,16 @@ describe("engine markdown source view", () => {
 
   beforeEach(() => {
     stubEditorGlobals();
+    // The reopen-refusal test below captures a set-aside draft into the
+    // module store (#567) — do not leak it across tests.
+    resetOrphanedDrafts();
   });
 
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    resetOrphanedDrafts();
   });
 
   async function renderEngineDoc(options?: {
@@ -1327,9 +1332,17 @@ describe("engine markdown source view", () => {
         await vi.advanceTimersByTimeAsync(5_000);
       });
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
-      // The user is TOLD the edit went nowhere. Losing it silently would be
-      // the same defect wearing the other face.
-      expect(notice.textContent).toContain("dohc discarded your unsaved edit.");
+      // The draft is not lost and not misreported: the reopen set it aside
+      // (#567), the store outlives the replaced view, and the refusal screen
+      // itself offers the copy. "Discarded" would be false here — that line
+      // is reserved for a draft that really went nowhere.
+      //
+      // MUTATION (refusal recovery): drop <OrphanedDraftNotices> from the
+      // not-in-version branch. The set-aside text survives in the store but
+      // the user has no way to reach it from this screen.
+      expect(screen.getByTestId("orphaned-draft-notice")).toBeTruthy();
+      expect(screen.queryByTestId("file-not-in-version-discarded")).toBeNull();
+      expect(notice.textContent).toContain("Switch to the version that has it.");
     } finally {
       vi.useRealTimers();
     }
@@ -1396,12 +1409,16 @@ describe("markdown document opening state", () => {
 
   beforeEach(() => {
     stubEditorGlobals();
+    // The set-aside drafts live in a module store on purpose (they must
+    // outlive the keyed view), so tests must not inherit each other's.
+    resetOrphanedDrafts();
   });
 
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    resetOrphanedDrafts();
   });
 
   // The user's real attempt: click the header's edit control, then type into
@@ -1584,9 +1601,7 @@ describe("markdown document opening state", () => {
   async function armDraftThenReopen(
     user: ReturnType<typeof userEvent.setup>,
     bridge: ReturnType<typeof makeHeldOpenBridge>,
-    extraProps: {
-      registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
-    } = {},
+    extraProps: Partial<Parameters<typeof FileInspector>[0]> = {},
   ) {
     const view = render(
       <FileInspector
@@ -1731,5 +1746,97 @@ describe("markdown document opening state", () => {
       await flush!();
     });
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
+  });
+
+  // #579 review P1: the notice promises the text stays recoverable, and the
+  // inspector is KEYED — every tab switch unmounts it. The drafts therefore
+  // live outside the view, keyed by workspace + path.
+  it("keeps the set-aside draft across an unmount and shows it again on remount", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const view = await armDraftThenReopen(user, bridge);
+    await screen.findByTestId("orphaned-draft-notice");
+
+    // The user switches tabs before copying, then comes back.
+    // MUTATION (survival): clear the path's drafts in the unmount cleanup —
+    // the component-local lifetime this store exists to escape. The remount
+    // below then has nothing to show.
+    view.unmount();
+    render(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={2} />);
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "# Plan\n\nBase paragraph.\nDraft!",
+      ),
+    );
+  });
+
+  // #579 review P2: a second reopen with the first notice still up must not
+  // destroy the first draft. Both stay, oldest first, each with its own copy.
+  it("keeps both set-aside drafts when a second reopen lands before the first is resolved", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const view = await armDraftThenReopen(user, bridge);
+
+    // The reopen resolves, the user types again, and a THIRD open starts.
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.type(screen.getByTestId("markdown-editor"), "More!");
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={3} />,
+    );
+
+    // MUTATION (append): make captureOrphanedDraft overwrite instead of
+    // append. Only one row survives and the first edit is gone.
+    await waitFor(() =>
+      expect(screen.getAllByTestId("orphaned-draft-notice")).toHaveLength(2),
+    );
+    const copies = screen.getAllByTestId("orphaned-draft-copy");
+    await user.click(copies[0]);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "# Plan\n\nBase paragraph.\nDraft!",
+      ),
+    );
+    await user.click(copies[1]);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "# Plan\n\nBase paragraph.\nMore!",
+      ),
+    );
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
+  });
+
+  // #579 review P2: Dismiss retires the whole signal — the chip and the
+  // shell's tab dot must not keep claiming an unsaved edit that no longer
+  // exists.
+  it("settles the chip and the tab dot when the set-aside draft is dismissed", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const states: string[] = [];
+    await armDraftThenReopen(user, bridge, {
+      onSaveStateChange: (state) => states.push(state),
+    });
+    await screen.findByTestId("orphaned-draft-notice");
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe("error");
+    await waitFor(() => expect(states.at(-1)).toBe("error"));
+
+    // MUTATION (derived signal): set a plain `saveState = "error"` at capture
+    // instead of deriving from the store. Dismiss then strands the chip and
+    // the tab dot on an edit that no longer exists.
+    await user.click(screen.getByTestId("orphaned-draft-dismiss"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
+    expect(screen.queryByTestId("markdown-save-state")).toBeNull();
+    await waitFor(() => expect(states.at(-1)).toBe("saved"));
   });
 });

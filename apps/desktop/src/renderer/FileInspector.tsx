@@ -37,6 +37,11 @@ import type {
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
+import {
+  captureOrphanedDraft,
+  dismissOrphanedDraft,
+  useOrphanedDrafts,
+} from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { IconButton, SectionLabel } from "./ui/controls";
@@ -499,6 +504,48 @@ function CopySourceButton(props: {
   );
 }
 
+// The restore half of #567's cancel-and-restore: one row per set-aside
+// draft, oldest first, because a second reopen must not cost the first draft
+// its row (#579 review, P2). Self-contained on the module store, so every
+// surface where the keyed document view dies — the editor branches AND the
+// not-in-version refusal — can show the same recovery.
+function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
+  const drafts = useOrphanedDrafts(props.workspaceId, props.path);
+  if (drafts.length === 0) return null;
+  return (
+    <div>
+      {drafts.map((draft) => (
+        <div
+          key={draft.id}
+          data-testid="orphaned-draft-notice"
+          className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
+        >
+          <span className="text-danger">
+            This document reopened before your last edit saved. Copy your text
+            to keep it.
+          </span>
+          <div className="flex items-center gap-2">
+            <CopySourceButton
+              testId="orphaned-draft-copy"
+              getSource={() => draft.text}
+            />
+            <button
+              type="button"
+              data-testid="orphaned-draft-dismiss"
+              onClick={() =>
+                dismissOrphanedDraft(props.workspaceId, props.path, draft.id)
+              }
+              className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PropertiesFallback() {
   return (
     <div className="dohc-page-properties">
@@ -763,14 +810,19 @@ function MarkdownView(props: {
   // keystrokes silently. So the armed autosave is cancelled, the draft is set
   // aside, and the notice below surfaces it for the user to copy.
   //
-  // DURING RENDER, not in an effect, for two reasons. The armed 800ms timer
-  // can fire between this commit and a passive effect — by then it has
-  // written. And `serializeDraftRef` still holds the PREVIOUS render's
-  // closure here, which reads the live editor this very commit is about to
-  // unmount — an effect would serialize the pre-edit body (the trap
+  // The drafts live in a module store keyed by workspace + path, not in this
+  // component's state: the notice promises the text stays recoverable, and
+  // this view unmounts on every tab switch (#579 review, P1). The hook
+  // subscribes; the capture appends.
+  //
+  // The capture runs DURING RENDER, not in an effect, for two reasons. The
+  // armed 800ms timer can fire between this commit and a passive effect — by
+  // then it has written. And `serializeDraftRef` still holds the PREVIOUS
+  // render's closure here, which reads the live editor this very commit is
+  // about to unmount — an effect would serialize the pre-edit body (the trap
   // writeDraftNow documents). The transition guard keeps it idempotent under
   // replayed renders (`readOnlyRef` precedent below).
-  const [orphanedDraft, setOrphanedDraft] = useState<string | null>(null);
+  const orphanedDrafts = useOrphanedDrafts(props.workspaceId, props.path);
   const openingRef = useRef(opening);
   if (opening && !openingRef.current) {
     if (saveTimer.current) {
@@ -782,13 +834,28 @@ function MarkdownView(props: {
       // sync effect below stands aside while a draft is pending, and the
       // reopened content must flow in once the draft has lost its claim.
       unsavedDraft.current = false;
-      setOrphanedDraft(serializeDraftRef.current());
-      // The set-aside edit is not on disk — "error" is the honest chip, and
-      // the notice carries the recovery.
-      setSaveState("error");
+      captureOrphanedDraft(
+        props.workspaceId,
+        props.path,
+        serializeDraftRef.current(),
+      );
+      // The armed save will never issue, so "saving" must not stand. The
+      // set-aside edit's own signal is DERIVED from the store below — that
+      // way Dismiss retires it (#579 review, P2) instead of stranding an
+      // error chip on a draft that no longer exists.
+      setSaveState("saved");
     }
   }
   openingRef.current = opening;
+  // What the chip and the shell's tab dot show: a real pending/failed save
+  // wins; otherwise an unresolved set-aside draft reads as "error" — the
+  // edit is not in the file — until the user copies or dismisses it.
+  const effectiveSaveState =
+    saveState !== "saved"
+      ? saveState
+      : orphanedDrafts.length > 0
+        ? "error"
+        : "saved";
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -893,10 +960,10 @@ function MarkdownView(props: {
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
   useEffect(() => {
-    // An undismissed set-aside draft (#567) still counts: if a refusal
-    // replaces this view, the notice dies with it and the user is owed the
-    // "discarded" line.
-    onPendingDraftChange?.(unsavedDraft.current || orphanedDraft !== null);
+    // Set-aside drafts (#567) deliberately do NOT count: they are not
+    // discarded — the store outlives this view and the refusal screen renders
+    // their notice itself, Copy included.
+    onPendingDraftChange?.(unsavedDraft.current);
   });
   const readOnly =
     !!props.forceReadOnly ||
@@ -1071,7 +1138,9 @@ function MarkdownView(props: {
   // engine Y.Doc is still settling.
   useEffect(() => {
     if (!engine.available) {
-      onSaveStateChange?.(saveState);
+      // The derived state, so dismissing a set-aside draft also settles the
+      // tab dot (#579 review, P2).
+      onSaveStateChange?.(effectiveSaveState);
       return;
     }
     // The shell's dot has three states; a read-only or changed-on-disk refusal
@@ -1081,7 +1150,7 @@ function MarkdownView(props: {
         ? "error"
         : engine.saveState,
     );
-  }, [saveState, engine.available, engine.saveState, onSaveStateChange]);
+  }, [effectiveSaveState, engine.available, engine.saveState, onSaveStateChange]);
 
   useEffect(() => {
     if (!readOnly) return;
@@ -1292,35 +1361,12 @@ function MarkdownView(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
 
-  // The restore half of #567: the set-aside draft stays copyable until the
+  // The restore half of #567: each set-aside draft stays copyable until the
   // user takes it or dismisses it. Rendered in both branches below — the
   // reopen can resolve into either editor.
-  const orphanedDraftNotice =
-    orphanedDraft !== null ? (
-      <div
-        data-testid="orphaned-draft-notice"
-        className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
-      >
-        <span className="text-danger">
-          This document reopened before your last edit saved. Copy your text to
-          keep it.
-        </span>
-        <div className="flex items-center gap-2">
-          <CopySourceButton
-            testId="orphaned-draft-copy"
-            getSource={() => orphanedDraft}
-          />
-          <button
-            type="button"
-            data-testid="orphaned-draft-dismiss"
-            onClick={() => setOrphanedDraft(null)}
-            className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
-          >
-            Dismiss
-          </button>
-        </div>
-      </div>
-    ) : null;
+  const orphanedDraftNotice = (
+    <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+  );
 
   // Linked mentions live at the BOTTOM of the document, inside the reading
   // measure, in every markdown branch (engine / wysiwyg / read). Hidden when a
@@ -1540,13 +1586,17 @@ function MarkdownView(props: {
                 that fails inside the opening window must still surface. While
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
-            {editing || saveState !== "saved" ? (
+            {editing || effectiveSaveState !== "saved" ? (
               <span
                 data-testid="markdown-save-state"
-                data-state={saveState}
-                className={`font-mono text-[11px] ${saveState === "error" ? "text-danger" : "text-subtle"}`}
+                data-state={effectiveSaveState}
+                className={`font-mono text-[11px] ${effectiveSaveState === "error" ? "text-danger" : "text-subtle"}`}
               >
-                {saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : "Couldn't save"}
+                {effectiveSaveState === "saved"
+                  ? "Saved"
+                  : effectiveSaveState === "saving"
+                    ? "Saving…"
+                    : "Couldn't save"}
               </span>
             ) : null}
             <button
@@ -2417,6 +2467,10 @@ export function FileInspector(props: {
           label="file"
           onShare={onShareCurrentPath}
         />
+        {/* A reopen's set-aside drafts (#567) survive this refusal in the
+            module store — recovery stays visible right here, not behind a
+            version switch. */}
+        <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
         <div
           data-testid="file-not-in-version"
           className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-subtle"
