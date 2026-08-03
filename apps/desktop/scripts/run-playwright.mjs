@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -32,17 +33,23 @@ export function playwrightRunEnv(baseEnv, cacheDir) {
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
   const cacheDir = mkdtempSync(join(tmpdir(), "dohc-playwright-cache-"));
+  const child = spawn(
+    process.execPath,
+    [playwrightCliPath(), "test", ...process.argv.slice(2)],
+    { stdio: "inherit", env: playwrightRunEnv(process.env, cacheDir) },
+  );
+  // The wrapper PID must be enough to stop the whole run: forward
+  // termination to the CLI child and stay alive until it exits, so the
+  // cleanup below runs on the cancel path too. Windows has no catchable
+  // SIGTERM — a hard kill can still leak the directory, which costs disk;
+  // a shared directory costs the run.
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.on(signal, () => child.kill(signal));
+  }
   try {
-    const result = spawnSync(
-      process.execPath,
-      [playwrightCliPath(), "test", ...process.argv.slice(2)],
-      { stdio: "inherit", env: playwrightRunEnv(process.env, cacheDir) },
-    );
-    if (result.error) throw result.error;
-    process.exitCode = result.status ?? 1;
+    const [code] = await once(child, "exit");
+    process.exitCode = code ?? 1;
   } finally {
-    // A hard kill can leak the directory. A leaked cache under the OS temp
-    // dir costs disk; a shared one costs the run.
     rmSync(cacheDir, { recursive: true, force: true });
   }
 }
