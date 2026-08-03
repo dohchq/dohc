@@ -16,6 +16,7 @@ import {
   outsideWorkspaceRefusal,
   type DohcPathGuard,
 } from "@dohc/workspace-core";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -75,7 +76,9 @@ export interface EngineWorkspaceRunOptions {
 export interface EngineWorkspaceSessionsOptions {
   transportRebindAttempts?: number;
   sleep?: (delayMs: number) => Promise<void>;
-  // Test injection for the retryDeadlineMs clock; production uses Date.now.
+  // Test injection for the retry-deadline clock; production uses
+  // performance.now, which is monotonic — a wall-clock jump (NTP, DST,
+  // sleep/wake) must not spend or extend a retry budget.
   now?: () => number;
   /**
    * Deadline for a single daemon `workspace.open`. Defaults to
@@ -212,6 +215,14 @@ export class EngineWorkspaceSessions {
   // still run — the quit teardown's closes go through run() too.
   private shuttingDown = false;
   private readonly sleepCancels = new Set<() => void>();
+  // The ambient budget a caller put over a REGION of daemon work
+  // (`withRetryBudget`). A per-run `retryDeadlineMs` bounds one run; this
+  // bounds every run the region makes, together — which is what a caller
+  // holding a shared resource across several daemon calls actually needs.
+  private readonly retryBudgets = new AsyncLocalStorage<{
+    budgetMs: number;
+    startedAtMs: number;
+  }>();
 
   constructor(
     private readonly source: EngineDaemonClientSource,
@@ -220,7 +231,7 @@ export class EngineWorkspaceSessions {
     this.transportRebindAttempts =
       options.transportRebindAttempts ?? TRANSPORT_REBIND_ATTEMPTS;
     this.sleep = options.sleep ?? defaultSleep;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? (() => performance.now());
     // `??` alone would accept 0, a negative, NaN or Infinity — an exported
     // option, so an invalid value would either fail every workspace.open or
     // quietly void the deadline guarantee this option exists to preserve.
@@ -342,9 +353,36 @@ export class EngineWorkspaceSessions {
     for (const cancel of [...this.sleepCancels]) cancel();
   }
 
+  /**
+   * Bound every retry ladder inside `task` by ONE budget, measured from
+   * here (#564). A caller that holds a shared resource across several daemon
+   * calls — the capture chain's document open, which reads the active
+   * version before it opens the provider — cannot bound itself by giving
+   * each call its own deadline: the calls add up. The budget is ambient so
+   * it reaches runs this caller does not issue itself (a store method's
+   * internal `run`), and per-async-context so two concurrent tasks never
+   * share one.
+   */
+  async withRetryBudget<T>(budgetMs: number, task: () => Promise<T>): Promise<T> {
+    if (
+      !Number.isInteger(budgetMs) ||
+      budgetMs <= 0 ||
+      budgetMs > MAX_TIMER_DELAY_MS
+    ) {
+      throw new TypeError(
+        `withRetryBudget budgetMs must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}, received ${String(budgetMs)}.`,
+      );
+    }
+    return await this.retryBudgets.run(
+      { budgetMs, startedAtMs: this.now() },
+      task,
+    );
+  }
+
   // The one deadline gate every retry ladder consults, on both sides of its
-  // backoff: once the deadline is spent, no new attempt starts — in any
-  // ladder, on any path.
+  // backoff: once a deadline is spent, no new attempt starts — in any
+  // ladder, on any path. Two can apply: the ambient region budget, and this
+  // run's own. Whichever is spent first stops the ladder.
   private throwPastRetryDeadline(
     workspaceId: string,
     retryDeadlineMs: number | undefined,
@@ -352,8 +390,22 @@ export class EngineWorkspaceSessions {
     attempt: number,
     cause: unknown,
   ): void {
+    const now = this.now();
+    const budget = this.retryBudgets.getStore();
+    if (budget !== undefined) {
+      const spentMs = now - budget.startedAtMs;
+      if (spentMs >= budget.budgetMs) {
+        throw new EngineWorkspaceRetryDeadlineError(
+          workspaceId,
+          budget.budgetMs,
+          spentMs,
+          attempt,
+          cause,
+        );
+      }
+    }
     if (retryDeadlineMs === undefined) return;
-    const waitedMs = this.now() - startedAtMs;
+    const waitedMs = now - startedAtMs;
     if (waitedMs < retryDeadlineMs) return;
     throw new EngineWorkspaceRetryDeadlineError(
       workspaceId,

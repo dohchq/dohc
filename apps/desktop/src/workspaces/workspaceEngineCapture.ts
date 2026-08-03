@@ -144,14 +144,23 @@ export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 
-// #564: how long ONE document open may keep retrying transport errors while
-// it holds the capture chain. Derived from the session constants it bounds —
-// two full open attempts plus two worst-case backoffs — so it always admits
-// the single-recovery path (daemon died, relaunched, second attempt bound:
-// ~2.1 s) and refuses the six-attempt ladder (~14.5 s derived, which starved
-// listMoments, readMoment, and capture.stop() for that whole window). A
-// healthy open never consults it: the deadline gates retries only. Measured
-// healthy opens on a busy chain are recorded in ydocOpenDeadline.test.ts.
+// #564: how long ONE document-open TASK may keep retrying transport errors
+// while it holds the capture chain. The task is more than the provider open —
+// it reads the active version first, and that read has its own six-attempt
+// ladder — so this is spent by the whole task through `withRetryBudget`,
+// never per call. Derived from the session constants it bounds: two full
+// open attempts plus two worst-case backoffs, so it always admits the
+// single-recovery path (daemon died, relaunched, second attempt bound:
+// ~2.1 s) and refuses the ladders that starved listMoments, readMoment, and
+// capture.stop(). A healthy open never consults it: the budget gates retries
+// only. Measured healthy opens on a busy chain are in ydocOpenDeadline.test.ts.
+//
+// What it does NOT bound: one in-flight `ydoc.open`. That request carries no
+// deadlineMs — unlike `workspace.open`, whose 2 s is in the derivation above —
+// so a daemon that accepts the open and then hangs holds the chain for as
+// long as it hangs. Bounding it needs a measured value for the opens it would
+// reject (a large document's lineage resurrection is the slow case #514
+// fought), which this issue did not measure. Tracked separately.
 export const YDOC_OPEN_RETRY_DEADLINE_MS =
   2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
 export const MAX_ENGINE_CAPTURE_TEXT_BYTES = MAX_HISTORY_TEXT_SNAPSHOT_BYTES;
@@ -1306,7 +1315,7 @@ export function createWorkspaceEngineCapture(
     let generations = 0;
     const openGeneration = async (
       seedAbsentLineage: boolean,
-      openOptions?: { retryTransportErrors?: boolean; retryDeadlineMs?: number },
+      openOptions?: { retryTransportErrors?: boolean },
     ): Promise<EngineYdocProviderSession> =>
       await sessions.run(
         workspace,
@@ -1367,9 +1376,6 @@ export function createWorkspaceEngineCapture(
         },
         {
           retryTransportErrors: openOptions?.retryTransportErrors ?? true,
-          ...(openOptions?.retryDeadlineMs !== undefined
-            ? { retryDeadlineMs: openOptions.retryDeadlineMs }
-            : {}),
         },
       );
 
@@ -1541,12 +1547,12 @@ export function createWorkspaceEngineCapture(
       }
     };
 
-    // The FIRST generation opens on the capture chain (#493), so its retry
-    // window is bounded (#564). Rebinds after a daemon death run on the
-    // session's own operation chain and keep the full ladder.
-    current = await openGeneration(true, {
-      retryDeadlineMs: YDOC_OPEN_RETRY_DEADLINE_MS,
-    });
+    // The FIRST generation opens on the capture chain (#493). Its retry
+    // window is bounded by the TASK's budget (#564), which the open runs
+    // inside — no per-run deadline here, or the task would carry two.
+    // Rebinds after a daemon death run on the session's own operation chain,
+    // outside that budget, and keep the full ladder.
+    current = await openGeneration(true);
     canonicalDoc = current.doc;
     const initialOpening = openingRemoteUpdates.get(current);
     if (initialOpening) {
@@ -2642,7 +2648,21 @@ export function createWorkspaceEngineCapture(
       // projection over the folder the switch had just written. Running the
       // open as a chain task makes "which version is active" and "this path
       // has a live session" one indivisible step against every version op.
-      return enqueueResult("open ydoc session", async () => {
+      return enqueueResult("open ydoc session", async () =>
+        // ONE budget for the whole task (#564). Bounding only the provider
+        // open left the task unbounded: the version read below runs first,
+        // through the store's own six-attempt transport ladder, so a
+        // daemon-down open failed THERE — holding the chain for that ladder
+        // and rejecting with a rebind error the surface reads as an ordinary
+        // fallback, which is the writable plain editor this bound exists to
+        // prevent.
+        await options.rustEngineSessions.withRetryBudget(
+          YDOC_OPEN_RETRY_DEADLINE_MS,
+          async () => await openYDocSessionTask(),
+        ),
+      );
+
+      async function openYDocSessionTask(): Promise<WorkspaceEngineYDocProviderSession> {
         // Resolve the active version through this capture's store, then open the
         // provider through the same Rust workspace-session owner. Capture,
         // version work, and Y.Doc work therefore share one daemon workspace lease.
@@ -3074,7 +3094,7 @@ export function createWorkspaceEngineCapture(
           },
           close: closeEntry,
         };
-      });
+      }
     },
 
     settleAndCloseLiveSessionsForPath(pathOrPrefix) {

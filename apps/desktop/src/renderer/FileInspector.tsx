@@ -1510,7 +1510,7 @@ function MarkdownView(props: {
       />
       {props.truncatedNotice}
       {engine.openTimedOut && props.onRetryEngineOpen ? (
-        <EngineOpenTimedOutNotice onRetry={props.onRetryEngineOpen} />
+        <EngineOpenTimedOutNotice onRetry={props.onRetryEngineOpen} contentShown />
       ) : null}
       {surfaceMode === "source" ? (
         <textarea
@@ -2173,15 +2173,23 @@ function Empty({ children }: { children: React.ReactNode }) {
 // #564: the engine open hit its retry deadline. The document stays read-only
 // — never the writable plain editor — with the reason stated and the retry
 // offered where the user is looking.
-function EngineOpenTimedOutNotice(props: { onRetry: () => void }) {
+function EngineOpenTimedOutNotice(props: {
+  onRetry: () => void;
+  // Is the document's content on screen? When the read failed too, it is
+  // not — and "It is read-only for now" would promise read access to
+  // content the user cannot see.
+  contentShown: boolean;
+}) {
   return (
     <div
       data-testid="engine-open-timeout-notice"
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
+      {/* "document", the noun the editing controls beside this already use
+          ("You can edit this document when it finishes opening."). */}
       <span>
-        dohc could not open this file for editing in time. It is read-only for
-        now.
+        dohc could not open this document for editing in time.
+        {props.contentShown ? " It is read-only for now." : ""}
       </span>
       <button
         type="button"
@@ -2313,10 +2321,18 @@ export function FileInspector(props: {
   // hook's request key, so a retry is a fresh open under the same
   // stale-response guard as any other request change.
   const [engineRetryNonce, setEngineRetryNonce] = useState(0);
-  const retryEngineOpen = useCallback(
-    () => setEngineRetryNonce((nonce) => nonce + 1),
-    [],
-  );
+  // Is a retry WE asked for still unanswered? Keyed on the hazard, not on
+  // whether the user ever clicked retry: an "ever retried" flag stayed true
+  // for the tab's life, and `opening` goes true again on every version
+  // switch — so a later switch silently refused the draft flush at the
+  // rename/move seam. Set on the click, cleared by the first render that
+  // sees the open answered. A ref, like every other write-guard signal
+  // here, because the guards run outside render.
+  const engineRetryPending = useRef(false);
+  const retryEngineOpen = useCallback(() => {
+    engineRetryPending.current = true;
+    setEngineRetryNonce((nonce) => nonce + 1);
+  }, []);
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -2337,16 +2353,25 @@ export function FileInspector(props: {
   // still holds the pre-refusal value when its unmount flush runs. A REF the
   // PARENT assigns during render is what crosses that gap — the object identity
   // is stable, so even the child's first-render closures read the live value.
-  // A timed-out open (#564) blocks writes the same way: the engine may still
-  // bind the document, and a draft written meanwhile would take the disk path
-  // #533 closed. The refusal stays active WHILE A RETRY IS PENDING, too:
-  // "Try again" changes the request key, which clears `openTimedOut` before
-  // the new open answers, and the write guards deliberately do not read
-  // `opening` (#567 owns that broader question) — without this, the retry
-  // window itself was writable and an armed autosave raced the Y.Doc bind.
-  const retryOpening = engineRetryNonce > 0 && engine.opening;
+  // The retry window blocks writes: "Try again" changes the request key,
+  // which clears `openTimedOut` before the new open answers, and the write
+  // guards deliberately do not read `opening` (#567/#579 own that broader
+  // question) — without this the retry window itself was writable and an
+  // armed autosave raced the Y.Doc bind. It ends the moment the open
+  // answers, whichever way it answers.
+  //
+  // NOTE for the #579 rebase: delete this and the ref above. #579 gates the
+  // armed autosave on `opening` for every reopen and sets the draft aside
+  // with a recovery notice — a superset of this window, and a better answer
+  // for the draft than dropping it.
+  if (!engine.opening) engineRetryPending.current = false;
+  const retryOpening = engineRetryPending.current;
+  // A timed-out open (#564) is handled by `readOnly` in the document below,
+  // which renders in the same commit that learns of it. This ref carries the
+  // two refusals that have no such render: the path-not-in-version
+  // replacement (#534), and the retry window above.
   const writesRefusedRef = useRef(false);
-  writesRefusedRef.current = notInVersion || engine.openTimedOut || retryOpening;
+  writesRefusedRef.current = notInVersion || retryOpening;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText
@@ -2416,7 +2441,7 @@ export function FileInspector(props: {
           // MarkdownView mounts — without this the timeout had no notice and
           // no retry on exactly the path where the engine session is the only
           // way back to the content.
-          <EngineOpenTimedOutNotice onRetry={retryEngineOpen} />
+          <EngineOpenTimedOutNotice onRetry={retryEngineOpen} contentShown={false} />
         ) : null}
         <Empty>{error ? "Couldn't read this file." : "Loading…"}</Empty>
       </div>

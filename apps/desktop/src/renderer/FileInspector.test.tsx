@@ -1113,7 +1113,7 @@ describe("engine markdown source view", () => {
       { timeout: 5_000 },
     );
     expect(notice.textContent).toContain(
-      "dohc could not open this file for editing in time.",
+      "dohc could not open this document for editing in time.",
     );
     expect(notice.textContent).toContain("It is read-only for now.");
     // The content still renders — read-only, not replaced.
@@ -1187,6 +1187,62 @@ describe("engine markdown source view", () => {
     }
   });
 
+  // #564, review round 2 B2: the OTHER direction of the same guard. The
+  // window must close when the retry answers — an "ever retried" flag stayed
+  // true for the tab's life, and `opening` goes true again on every version
+  // switch, so a later switch silently refused the draft flush at the
+  // rename/move seam. One successful retry earlier in the tab must not cost
+  // the user a keystroke afterwards.
+  it("stops refusing writes once the retry has answered", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      let opens = 0;
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        openEngineYDocSession: vi.fn(async () => {
+          opens += 1;
+          // Open 1 times out; the retry (open 2) answers "not engine-backed",
+          // so the plain editor is legitimately writable again.
+          return opens === 1
+            ? { available: false, openTimedOut: true }
+            : { available: false };
+        }),
+      });
+
+      const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId(
+        "engine-open-timeout-notice",
+        {},
+        { timeout: 5_000 },
+      );
+      await user.click(screen.getByText("Try again"));
+      await waitFor(() => expect(opens).toBe(2));
+      await waitFor(() =>
+        expect(screen.queryByTestId("engine-open-timeout-notice")).toBeNull(),
+      );
+
+      // A version switch later in the same tab: `opening` goes true again.
+      // MUTATION: key the guard on "ever clicked retry" -> this draft is
+      // silently dropped and writeWorkspaceText is never called.
+      await user.click(screen.getByTestId("markdown-edit-toggle"));
+      await user.type(
+        await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+        "typed",
+      );
+      view.rerender(
+        <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // #564, codex round 2 P2: when the content read itself failed, the
   // inspector returns from its loading/error branch before MarkdownView
   // mounts — the one path where the engine session is the only way back to
@@ -1214,10 +1270,12 @@ describe("engine markdown source view", () => {
       { timeout: 5_000 },
     );
     expect(notice.textContent).toContain(
-      "dohc could not open this file for editing in time.",
+      "dohc could not open this document for editing in time.",
     );
-    // The read failure stays stated beside it.
+    // The read failure stays stated beside it — and the notice must NOT
+    // promise read access to content that is not on screen.
     expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
+    expect(notice.textContent).not.toContain("read-only for now");
 
     await user.click(screen.getByText("Try again"));
     await waitFor(() => expect(opens).toBe(2));

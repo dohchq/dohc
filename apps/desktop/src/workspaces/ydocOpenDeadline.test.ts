@@ -3,10 +3,15 @@ import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client";
-import type {
-  EngineWorkspaceRunOptions,
+import {
+  VersionedLoopbackEngine,
+  type Request,
+  type Response,
+} from "@dohc/workspace-engine-client";
+import {
   EngineWorkspaceSessions,
+  isEngineWorkspaceRetryDeadlineError,
+  type EngineWorkspaceRunOptions,
 } from "@dohc/workspace-engine-client/daemon";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
@@ -84,7 +89,76 @@ function captureWith(root: string, sessions: EngineWorkspaceSessions) {
 }
 
 describe("the document open's capture-chain hold (#564)", () => {
-  it("passes the retry deadline for exactly the open that holds the chain", async () => {
+  it("bounds the WHOLE task, including the version read before the open", async () => {
+    // The hazard the reviewer instrumented: the task reads the active
+    // version FIRST, through the store's own six-attempt transport ladder.
+    // Bounding only the provider open left that read unbounded — a
+    // daemon-down open failed there, held the chain for the full ladder,
+    // and rejected with a rebind error the surface reads as an ordinary
+    // fallback (the writable plain editor this bound exists to prevent).
+    const root = await tempRoot();
+    await write(root, "note.md", "hello\n");
+    let nowMs = 0;
+    const sleeps: number[] = [];
+    // The daemon is UP while the store opens — the hazard is a daemon that
+    // drops afterwards, so the task begins at the version read exactly as it
+    // does in production. Each retry attempt costs 2.5 s of the injected
+    // clock: the shape of a workspace.open deadline plus overhead.
+    const loopback = new VersionedLoopbackEngine();
+    let daemonDown = false;
+    const client = {
+      close: () => undefined,
+      onEvent: () => () => undefined,
+      async sendRequest(request: Request): Promise<Response> {
+        if (daemonDown) {
+          nowMs += 2_500;
+          throw { code: "transport-error" };
+        }
+        if (request.method === "workspace.open") {
+          return {
+            id: request.id,
+            result: { workspace: String(WORKSPACE_ID) },
+          };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        return await loopback.sendRequest(request);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      {
+        now: () => nowMs,
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+        },
+      },
+    );
+    const engine = captureWith(root, sessions);
+    engine.start();
+    // Opens the store while the daemon is healthy.
+    await engine.flush();
+    daemonDown = true;
+
+    const refusal = await engine
+      .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+      .catch((error: unknown) => error);
+
+    // MUTATION: drop withRetryBudget from the task -> the version read runs
+    // its full ladder and this is an EngineWorkspaceRebindError instead,
+    // which main maps to a plain fallback rather than openTimedOut.
+    expect(isEngineWorkspaceRetryDeadlineError(refusal)).toBe(true);
+    expect((refusal as Error).message).toContain(
+      `limit of ${YDOC_OPEN_RETRY_DEADLINE_MS}ms`,
+    );
+    // The budget stopped the ladder well inside the six attempts it would
+    // otherwise have spent holding the chain.
+    expect(sleeps.length).toBeLessThanOrEqual(3);
+    await engine.stop();
+  });
+
+  it("passes no per-run deadline: the task budget is the only one", async () => {
     const root = await tempRoot();
     await write(root, "note.md", "hello\n");
     const { sessions, runOptions } = recordingSessions();
@@ -99,15 +173,11 @@ describe("the document open's capture-chain hold (#564)", () => {
     await session.close({ settle: false });
     await engine.stop();
 
-    // MUTATION: drop retryDeadlineMs from the first-generation open -> no run
-    // carries a deadline and the six-attempt ladder holds the chain again.
-    const bounded = runOptions.filter(
-      (options) => options?.retryDeadlineMs !== undefined,
-    );
-    expect(bounded).toHaveLength(1);
-    expect(bounded[0]?.retryDeadlineMs).toBe(YDOC_OPEN_RETRY_DEADLINE_MS);
-    // Every OTHER run on the chain keeps the full transport ladder: bounding
-    // a capture flush or a version op is not this issue's contract.
+    // One budget for the task, not one per call: a per-run deadline here
+    // would mean the task carries two clocks that disagree.
+    expect(
+      runOptions.filter((options) => options?.retryDeadlineMs !== undefined),
+    ).toHaveLength(0);
     expect(runOptions.length).toBeGreaterThan(1);
   });
 
