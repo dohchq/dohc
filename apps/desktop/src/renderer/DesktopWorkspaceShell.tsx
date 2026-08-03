@@ -1593,6 +1593,13 @@ export function DesktopWorkspaceShell(props: {
   // capability, read once from the existing settings IPC below — never a
   // second settings read.
   const [engineEnabled, setEngineEnabled] = useState(false);
+  // A shared view has no engine history surface regardless of that read
+  // (#540): it materializes no settings file, so the default flag reads ON —
+  // but the share's open deliberately installed no capture, and every
+  // engine-moments call could only error. Capability identity comes from
+  // main's registry summary. Chats and the other share-aware surfaces keep
+  // their own gating; only the history surface is engine-fed.
+  const isShareView = Boolean(props.workspace.shareView);
   // Engine history page state (flagged workspaces): newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
   // as the open-file refresh key.
@@ -1726,7 +1733,7 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const refreshHistory = useCallback(async () => {
-    if (engineEnabled) {
+    if (engineEnabled && !isShareView) {
       // Latest-COMMITTED-wins: each request advances the token, and an answer
       // displays only if it is newer than the answer already displayed, so an
       // older response can never overwrite newer moments or move
@@ -1790,7 +1797,7 @@ export function DesktopWorkspaceShell(props: {
     ]);
     setSyncStatus(status);
     setAgentActive(agent.activeRun !== null);
-  }, [engineEnabled, workspaceId]);
+  }, [engineEnabled, isShareView, workspaceId]);
 
   const loadMoreEngineHistory = useCallback(async () => {
     const cursor = engineHistory?.nextBeforeMomentOrder;
@@ -2934,7 +2941,7 @@ export function DesktopWorkspaceShell(props: {
   // second subscription). An opted-out workspace has NO
   // history source (retirement Phase C removed the legacy recorder), so the
   // timeline honestly says history is off instead of showing an empty list.
-  const historyTimeline = engineEnabled ? (
+  const historyTimeline = engineEnabled && !isShareView ? (
     <EngineHistoryView
       moments={engineHistory?.moments ?? []}
       hasMore={engineHistory?.nextBeforeMomentOrder != null}
@@ -2942,6 +2949,19 @@ export function DesktopWorkspaceShell(props: {
       onLoadMore={() => void loadMoreEngineHistory()}
       onOpenMoment={openMomentDiffTab}
     />
+  ) : isShareView ? (
+    // #540: a capability, not an opt-out. The Settings copy below would
+    // blame a toggle nobody touched, in a settings file a shared view does
+    // not even have.
+    <div
+      data-testid="history-off-placeholder"
+      className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+    >
+      <span className="text-xs text-muted">A shared view records no history</span>
+      <span className="text-[11px] text-subtle">
+        This workspace is a read-only view of files shared with you.
+      </span>
+    </div>
   ) : (
     <div
       data-testid="history-off-placeholder"

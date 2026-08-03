@@ -2212,6 +2212,36 @@ describe("history page", () => {
     ).toContain("History is off for this workspace");
   });
 
+  // #540 on the History surface itself: a shared view materializes no
+  // settings file, so the renderer's settings read comes back with the
+  // default flag ON — but the share's open deliberately installed no
+  // capture, so every engine call can only error. The surface must state
+  // the capability instead, and must never ask main for engine moments.
+  it("gives a shared view the capability truth and never asks for engine moments", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+    });
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    expect(placeholder.textContent).toContain("A shared view records no history");
+    // The false cause this pins against: the opt-out's Settings copy, about
+    // a toggle nobody touched.
+    expect(placeholder.textContent).not.toContain("Settings");
+
+    // Activity pushes take the no-engine refresh path too — this is the pin
+    // that kills a regression to the recurring "Could not open history"
+    // error loop.
+    await act(async () => {
+      bridge.emitWorkspaceActivity();
+      await Promise.resolve();
+    });
+    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+  });
+
   function historyMoment(id: string, summary: string): EngineMomentRecord {
     return {
       id,
