@@ -504,7 +504,7 @@ describe("workspace settings file store", () => {
     await writeFile(join(root, ".dohc", "trash"), "squatting");
 
     await expect(resetWorkspaceSettingsFile(root)).rejects.toThrow(
-      "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file, then retry.",
+      "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file. Then retry.",
     );
     // Nothing partial landed: the settings path still reads as recovered.
     expect((await readWorkspaceSettingsFile(root)).source).toBe("recovered");

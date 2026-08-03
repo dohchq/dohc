@@ -662,8 +662,9 @@ export async function moveIntoWorkspaceTrash(
       : trashStat.isFile()
         ? "file"
         : "item";
+    const article = squatter === "item" ? "An" : "A";
     throw new Error(
-      `dohc could not move this to the workspace trash. A ${squatter} is at .dohc/trash, which must be a real folder. Remove or rename that ${squatter}, then retry.`,
+      `dohc could not move this to the workspace trash. ${article} ${squatter} is at .dohc/trash, which must be a real folder. Remove or rename that ${squatter}. Then retry.`,
     );
   }
   if (!isInside(realRoot, await realpath(trashDir))) {

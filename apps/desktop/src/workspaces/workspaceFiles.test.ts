@@ -407,7 +407,7 @@ describe("deletePath", () => {
     await writeFile(join(root, ".dohc", "trash"), "squatting");
     await writeFile(join(root, "junk.md"), "keep me");
     await expect(deletePath(root, "junk.md", rejectingTrash)).rejects.toThrow(
-      "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file, then retry.",
+      "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file. Then retry.",
     );
     // The target stayed put and the squatter was not touched.
     expect(await readFile(join(root, "junk.md"), "utf8")).toBe("keep me");
