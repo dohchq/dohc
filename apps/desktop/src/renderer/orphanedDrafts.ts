@@ -144,6 +144,38 @@ export function orphanedDraftCount(): number {
   return count;
 }
 
+export type OrphanedDraftRow = {
+  workspaceId: string;
+  path: string;
+  draft: OrphanedDraft;
+};
+
+let allRowsCache: { version: number; rows: readonly OrphanedDraftRow[] } | null =
+  null;
+const EMPTY_ROWS: readonly OrphanedDraftRow[] = [];
+
+// Every unresolved draft, across workspaces, path-independent (#579 review,
+// r5): a deleted file has no inspector left to render its notice, so the
+// recovery surfaces that use this — the close-warning dialog and the notice
+// center — must not depend on any path still existing.
+export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
+  return useSyncExternalStore(subscribe, () => {
+    if (allRowsCache && allRowsCache.version === storeVersion) {
+      return allRowsCache.rows;
+    }
+    const rows: OrphanedDraftRow[] = [];
+    for (const [key, kept] of drafts) {
+      const [workspaceId, path] = JSON.parse(key) as [string, string];
+      for (const draft of kept) rows.push({ workspaceId, path, draft });
+    }
+    allRowsCache = {
+      version: storeVersion,
+      rows: rows.length === 0 ? EMPTY_ROWS : rows,
+    };
+    return allRowsCache.rows;
+  });
+}
+
 // Test seam: the store is module state, so suites that capture drafts reset
 // it between tests instead of leaking keys into each other.
 export function resetOrphanedDrafts(): void {

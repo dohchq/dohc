@@ -6282,58 +6282,32 @@ describe("set-aside draft recovery", () => {
     expect(within(active).queryByTestId("tab-dirty")).toBeNull();
   });
 
-  // #579 review r4: the set-aside drafts live in renderer memory only, so
-  // closing the window is the one irreversible exit — and an irreversible
-  // change must be announced before it runs. Electron cancels the close
-  // silently on preventDefault, so the dialog IS the announcement.
-  it("warns before closing while set-aside edits exist, and closes on 'Close anyway'", async () => {
+  // #579 review r5: a deleted file's tab is gone, so no inspector will ever
+  // render its notice again — the notice center is the path-independent
+  // surface where the draft stays reachable, Copy/Dismiss included.
+  it("keeps a deleted path's set-aside draft reachable from the notice center", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    captureOrphanedDraft(WORKSPACE.workspaceId, "a.md", "Kept!");
+    // The path is in no listing and no tab: only the store knows it.
+    captureOrphanedDraft(WORKSPACE.workspaceId, "deleted/gone.md", "Kept!");
     renderShell(bridge);
     await screen.findByTestId("file-tree");
 
-    // MUTATION (close guard): remove the beforeunload interception. The
-    // close proceeds unannounced and every set-aside edit dies with it.
-    const first = new Event("beforeunload", { cancelable: true });
-    act(() => {
-      window.dispatchEvent(first);
-    });
-    expect(first.defaultPrevented).toBe(true);
-    expect(await screen.findByTestId("recovery-close-warning")).toBeTruthy();
-
-    // Go back keeps everything.
-    await user.click(screen.getByTestId("recovery-close-goback"));
-    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
-
-    // Close anyway releases the guard and re-runs the close.
-    const closeSpy = vi
-      .spyOn(window, "close")
-      .mockImplementation(() => undefined);
-    const second = new Event("beforeunload", { cancelable: true });
-    act(() => {
-      window.dispatchEvent(second);
-    });
-    await user.click(await screen.findByTestId("recovery-close-anyway"));
-    expect(closeSpy).toHaveBeenCalled();
-    const third = new Event("beforeunload", { cancelable: true });
-    act(() => {
-      window.dispatchEvent(third);
-    });
-    expect(third.defaultPrevented).toBe(false);
-    closeSpy.mockRestore();
-  });
-
-  it("does not intercept closing when no set-aside edits exist", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    renderShell(bridge);
-    await screen.findByTestId("file-tree");
-    const event = new Event("beforeunload", { cancelable: true });
-    act(() => {
-      window.dispatchEvent(event);
-    });
-    expect(event.defaultPrevented).toBe(false);
-    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+    // MUTATION (notice-center surface): drop the set-aside section from
+    // NoticeCenter. The draft exists, the close warning demands action, and
+    // no reachable surface offers it.
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    const row = screen.getByTestId("recovery-list-row");
+    expect(row.textContent).toContain("deleted/gone.md");
+    await user.click(screen.getByTestId("recovery-list-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Kept!"),
+    );
+    await user.click(screen.getByTestId("recovery-list-dismiss"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull(),
+    );
   });
 
   // #579 review r4: a failed save-first flush aborts the switch, the

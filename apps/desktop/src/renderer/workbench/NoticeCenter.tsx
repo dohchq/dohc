@@ -11,6 +11,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SyncStatusResult, UpdateStateEvent } from "../../ipc/bridgeContract";
+import { useAllOrphanedDrafts } from "../orphanedDrafts";
+import { RecoveryList } from "../RecoveryList";
 import { bridge } from "../bridge";
 import type {
   AgentNotification,
@@ -376,7 +378,12 @@ export function NoticeCenter(props: {
     updateState,
   ]);
 
-  const count = notices.length;
+  // Set-aside drafts (#567) count as one notice: they may belong to paths
+  // that no longer exist (a deleted file's tab is gone), so this panel is
+  // their always-reachable surface (#579 review, r5) — the list below offers
+  // the same Copy/Dismiss the in-document notice does.
+  const recoveryRows = useAllOrphanedDrafts();
+  const count = notices.length + (recoveryRows.length > 0 ? 1 : 0);
 
   return (
     <>
@@ -439,7 +446,25 @@ export function NoticeCenter(props: {
               All clear
             </div>
           ) : (
-            <ul className="m-0 max-h-80 list-none overflow-y-auto p-0">
+            <div className="max-h-80 overflow-y-auto">
+              {recoveryRows.length > 0 ? (
+                <section
+                  data-testid="notice-set-aside-edits"
+                  className="border-b border-line px-3 py-2"
+                >
+                  <p className="m-0 text-[12px] font-medium text-ink">
+                    {recoveryRows.length === 1
+                      ? "1 set-aside edit is waiting"
+                      : `${recoveryRows.length} set-aside edits are waiting`}
+                  </p>
+                  <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                    They live only in this window. Copy or dismiss them to
+                    resolve.
+                  </p>
+                  <RecoveryList />
+                </section>
+              ) : null}
+            <ul className="m-0 list-none p-0">
               {notices.map((notice) => (
                 <li
                   key={notice.id}
@@ -496,6 +521,7 @@ export function NoticeCenter(props: {
                 </li>
               ))}
             </ul>
+            </div>
           )}
         </div>
       ) : null}

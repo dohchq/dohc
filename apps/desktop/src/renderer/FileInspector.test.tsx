@@ -2039,6 +2039,31 @@ describe("markdown document opening state", () => {
     );
   });
 
+  // #579 review r5: a set-aside draft on a path whose read FAILS (a rename
+  // raced an I/O failure) must still be copyable — the error branch is a
+  // state the marker and close warning point into, so it must offer the
+  // actions they demand.
+  it("offers recovery on the failed-read branch", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    bridge.bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      throw Object.assign(new Error("EIO"), { code: "EIO" });
+    });
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    // MUTATION (error-branch render): drop {recoveryNotices} from the
+    // loading/error branch. The screen says only "Couldn't read this file"
+    // while the close warning demands actions that render nowhere.
+    await screen.findByText("Couldn't read this file.");
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Kept!"),
+    );
+  });
+
   // #579 review P2 (engine half): a bound engine session's settled "Saved"
   // must not outrank an unresolved set-aside edit — the edit is NOT in the
   // document the engine settled.

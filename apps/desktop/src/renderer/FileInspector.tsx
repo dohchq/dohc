@@ -2563,6 +2563,10 @@ export function FileInspector(props: {
           label="file"
           onShare={onShareCurrentPath}
         />
+        {/* A failed read is exactly when the set-aside text matters most —
+            the marker and the close warning must not point at actions this
+            branch withholds (#579 review, r5). */}
+        {recoveryNotices}
         <Empty>{error ? "Couldn't read this file." : "Loading…"}</Empty>
       </div>
     );
