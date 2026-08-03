@@ -2988,17 +2988,17 @@ export function DesktopWorkspaceShell(props: {
   ) : isShareView ? (
     // #540: a capability, not an opt-out. The Settings copy below would
     // blame a toggle nobody touched, in a settings file a shared view does
-    // not even have. The next step matches the surface: Refresh exists only
-    // while the share is live, so an ended share must not name it.
+    // not even have. One line, per the empty-state recipe (copy.md): what is
+    // missing plus the next step — and the next step matches the surface,
+    // because Refresh exists only while the share is live.
     <div
       data-testid="history-off-placeholder"
-      className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+      className="flex flex-1 items-center justify-center px-4 text-center"
     >
-      <span className="text-xs text-muted">A shared view records no history</span>
-      <span className="text-[11px] text-subtle">
+      <span className="text-sm text-muted">
         {shareViewEnded
-          ? "This share was ended. You can still open the files it shared."
-          : "This workspace is a read-only view of files shared with you. Refresh the shared view to get the latest shared changes."}
+          ? "A shared view records no history. This share was ended. You can still open the files it shared."
+          : "A shared view records no history. Refresh the shared view to get the latest shared changes."}
       </span>
     </div>
   ) : (

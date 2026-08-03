@@ -2227,12 +2227,17 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
     const placeholder = await screen.findByTestId("history-off-placeholder");
-    expect(placeholder.textContent).toContain("A shared view records no history");
-    // The empty state owes a Next that works on this surface: the share
-    // banner's Refresh control, pinned to exist alongside the instruction.
+    // The empty-state recipe (copy.md): ONE text-sm text-muted line carrying
+    // the state and the Next together.
     expect(placeholder.textContent).toContain(
-      "Refresh the shared view to get the latest shared changes.",
+      "A shared view records no history. Refresh the shared view to get the latest shared changes.",
     );
+    const lines = placeholder.querySelectorAll("span");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.className).toContain("text-sm");
+    expect(lines[0]?.className).toContain("text-muted");
+    // The Next works on this surface: the share banner's Refresh control,
+    // pinned to exist alongside the instruction that names it.
     expect(screen.getByTestId("shared-view-refresh")).toBeTruthy();
     // The false cause this pins against: the opt-out's Settings copy, about
     // a toggle nobody touched.
@@ -2264,9 +2269,9 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
     const placeholder = await screen.findByTestId("history-off-placeholder");
-    expect(placeholder.textContent).toContain("A shared view records no history");
+    // Same single-line shape, with the ended share's own true Next.
     expect(placeholder.textContent).toContain(
-      "This share was ended. You can still open the files it shared.",
+      "A shared view records no history. This share was ended. You can still open the files it shared.",
     );
     expect(placeholder.textContent).not.toContain("Refresh");
     expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
