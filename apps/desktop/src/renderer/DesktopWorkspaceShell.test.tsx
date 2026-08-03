@@ -1805,8 +1805,9 @@ describe("ui-state merge-on-load", () => {
 
     // The DM answers in the same tick the user clicks the feed item: the
     // answer's continuation is queued first, and the click handler runs
-    // before it does. Only a cancellation issued synchronously inside the
-    // click wins this race.
+    // before it does. Only a cancellation issued before the next macrotask
+    // wins this race — the passive nav report flushes too late.
+    const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
     await act(async () => {
       bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
       postButton.dispatchEvent(
@@ -1817,6 +1818,13 @@ describe("ui-state merge-on-load", () => {
 
     expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
+    // The sharp assertion: the destination views alone cannot distinguish a
+    // won race from a lost one — chatsNav.current is last-write-wins, so the
+    // late report can paper over the DM destination before the remount seed
+    // reads it. A DM answer that WINS calls openChatsNavInTab, which bumps
+    // chatsPageRevision and remounts the page: a second overview load. The
+    // cancel won only if no such load happened.
+    expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
   }, 20_000);
 
   // The awaited form of the same click: a feed item carrying a focus target
