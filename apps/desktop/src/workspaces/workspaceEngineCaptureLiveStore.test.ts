@@ -341,21 +341,24 @@ describe("createCaptureLiveStores", () => {
 
     await expect(
       store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" }),
-    ).resolves.toMatchObject([
-      {
-        metadata: { origin: "local-file" },
-        base: {
-          exists: true,
-          path: "note.md",
-          text: "hello",
-          sha256: "a".repeat(64),
-          metadata: {
-            origin: "local-file",
-            summary: "side summary",
+    ).resolves.toMatchObject({
+      nextAfterConflictId: null,
+      conflicts: [
+        {
+          metadata: { origin: "local-file" },
+          base: {
+            exists: true,
+            path: "note.md",
+            text: "hello",
+            sha256: "a".repeat(64),
+            metadata: {
+              origin: "local-file",
+              summary: "side summary",
+            },
           },
         },
-      },
-    ]);
+      ],
+    });
   });
 
   it("preserves nonempty binary conflict-side byte lengths", async () => {
@@ -392,16 +395,18 @@ describe("createCaptureLiveStores", () => {
 
     await expect(
       store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" }),
-    ).resolves.toMatchObject([
-      {
-        current: {
-          exists: true,
-          contentKind: "binary",
-          sha256: "b".repeat(64),
-          byteLength: 17,
+    ).resolves.toMatchObject({
+      conflicts: [
+        {
+          current: {
+            exists: true,
+            contentKind: "binary",
+            sha256: "b".repeat(64),
+            byteLength: 17,
+          },
         },
-      },
-    ]);
+      ],
+    });
   });
 
   it("builds the daemon local conflict-resolution envelope", async () => {
