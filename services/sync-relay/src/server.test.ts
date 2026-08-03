@@ -226,6 +226,100 @@ describe("sync relay handler", () => {
     expect(fetched.ops).toEqual([]);
   });
 
+  it("admits one Y.Doc base per lineage and refuses a divergent second base", async () => {
+    // dohc-ai/dohc#547: the relay arbitrates Y.Doc lineage origination
+    // first-claim-wins. MUTATION: dropping the base check in appendOps turns
+    // the divergent push below into a 200 and this test fails.
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const baseA = Buffer.from("base-a-bytes");
+    const baseB = Buffer.from("base-b-bytes");
+    const shaA = sha256(baseA);
+    const shaB = sha256(baseB);
+    for (const [sha, bytes] of [
+      [shaA, baseA],
+      [shaB, baseB],
+    ] as const) {
+      expect(
+        (await h(request("a", `/sync/workspace-a/blobs/${sha}`, { method: "PUT", body: bytes })))
+          .status,
+      ).toBe(200);
+    }
+    const ydocOp = (originSeq: number, sha: string, isBaseState: boolean) => ({
+      originSeq,
+      opKind: "ydoc.update",
+      payload: {
+        versionId: "main",
+        objectId: "object-race",
+        path: "notes/race.md",
+        contentKind: "plaintext",
+        updateBlobSha256: sha,
+        isBaseState,
+      },
+      recordedAtMs: 1000 + originSeq,
+    });
+
+    // origin-a originates first: accepted.
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody({ originId: "origin-a", ops: [ydocOp(0, shaA, true)] }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    // origin-b's independently-originated base is refused, atomically, with
+    // the constraint, the winner, and the recovery named.
+    const refused = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({ originId: "origin-b", ops: [ydocOp(0, shaB, true)] }),
+      ),
+    );
+    expect(refused.status).toBe(409);
+    const body = await json(refused);
+    expect(body.code).toBe("ydoc_base_claimed");
+    expect(body.error).toContain("one Y.Doc base per lineage");
+    expect(body.error).toContain(shaA);
+    expect(body.error).toContain("origin-a");
+    const fetched = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
+    expect(fetched.ops).toHaveLength(1);
+
+    // Adoption's rewritten row — the same coordinate republished as a
+    // DELTA — is accepted: arbitration gates bases only.
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody({ originId: "origin-b", ops: [ydocOp(0, shaB, false)] }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    // A same-sha base from a third origin resumes idempotently (origin
+    // recovery redelivers the winner's own base on a fresh coordinate).
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody({ originId: "origin-c", ops: [ydocOp(0, shaA, true)] }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+  });
+
   it("rejects an origin_seq regression with mismatched content", async () => {
     const storage = await testStorage();
     const h = handler(storage);

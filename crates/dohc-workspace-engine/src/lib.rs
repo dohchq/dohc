@@ -11016,7 +11016,11 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
     match error {
         RelayError::Unauthorized => ErrorCode::AuthFailed,
         RelayError::Forbidden => ErrorCode::Forbidden,
-        RelayError::Conflict => ErrorCode::Conflict,
+        // A lost Y.Doc origination race (#547) rarely reaches the wire —
+        // `push_workspace` parks the origin and lets the pull's adoption
+        // recover — but any path that does surface it reports the 409 the
+        // relay answered with.
+        RelayError::Conflict | RelayError::YdocBaseClaimed => ErrorCode::Conflict,
         RelayError::OriginDiverged => ErrorCode::OriginDiverged,
         RelayError::ShareUnavailable => ErrorCode::ShareUnavailable,
         RelayError::KeyEnvelopeMissing => ErrorCode::KeyEnvelopeMissing,

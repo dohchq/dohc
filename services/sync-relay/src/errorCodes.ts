@@ -27,6 +27,7 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   stream_identity_mismatch: 409,
   too_many_paths: 400,
   unknown_chat_op: 403,
+  ydoc_base_claimed: 409,
 } as const);
 
 export type RelayErrorCode = keyof typeof RELAY_ERROR_STATUSES;

@@ -26,5 +26,6 @@
   { "code": "share_read_only", "status": 403 },
   { "code": "stream_identity_mismatch", "status": 409 },
   { "code": "too_many_paths", "status": 400 },
-  { "code": "unknown_chat_op", "status": 403 }
+  { "code": "unknown_chat_op", "status": 403 },
+  { "code": "ydoc_base_claimed", "status": 409 }
 ]

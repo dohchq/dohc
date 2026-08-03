@@ -443,6 +443,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 self.upload_missing_blobs(store, workspace_id, &identity, &ops)?;
 
                 let mut conflict = false;
+                let mut base_refused = false;
                 for batch in ops.chunks(crate::MAX_PUSH_OPS_PER_BATCH) {
                     let response = match self.transport.push(PushRequest {
                         workspace_id: workspace_id.to_owned(),
@@ -455,6 +456,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         Ok(response) => response,
                         Err(RelayError::Conflict) if attempt == 0 => {
                             conflict = true;
+                            break;
+                        }
+                        // A peer's base won this lineage at the relay (#547).
+                        // Not a transport failure and not retryable AS IS:
+                        // this origin's queue is parked at its refused base
+                        // row until the pull adopts the winner's base and
+                        // rewrites that row into a delta. Stop pushing this
+                        // origin for this pass — the pass's pull is the
+                        // recovery — and keep the rest of the push complete.
+                        Err(RelayError::YdocBaseClaimed) => {
+                            base_refused = true;
                             break;
                         }
                         Err(error) => return Err(error),
@@ -484,6 +496,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         .checked_add(response.inserted)
                         .ok_or(RelayError::InvalidResponse)?;
                     cursor = response.current_max_origin_seq;
+                }
+                if base_refused {
+                    break;
                 }
                 if !conflict {
                     continue;

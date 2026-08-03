@@ -21,6 +21,7 @@ import {
   SyncRelayBlobMissingError,
   SyncRelayConflictError,
   SyncRelayQuotaExceededError,
+  SyncRelayYdocBaseClaimedError,
   type EnforceWorkspaceIdentityResult,
   type SyncRelayLogInput,
   type SyncRelayShareRow,
@@ -1319,6 +1320,7 @@ function errorResponse(error: unknown): Response {
     error instanceof SyncRelayConflictError ||
     error instanceof SyncRelayQuotaExceededError ||
     error instanceof SyncRelayBlobMissingError ||
+    error instanceof SyncRelayYdocBaseClaimedError ||
     (Number.isInteger(duckStatus) && duckStatus! >= 400 && duckStatus! <= 499);
   if (!classified) {
     console.error("[sync-relay] unhandled error", error);
@@ -1331,14 +1333,16 @@ function errorResponse(error: unknown): Response {
     error instanceof HttpError ||
     error instanceof SyncRelayConflictError ||
     error instanceof SyncRelayQuotaExceededError ||
-    error instanceof SyncRelayBlobMissingError
+    error instanceof SyncRelayBlobMissingError ||
+    error instanceof SyncRelayYdocBaseClaimedError
       ? error.statusCode
       : duckStatus!;
   const code =
     error instanceof HttpError ||
     error instanceof SyncRelayConflictError ||
     error instanceof SyncRelayQuotaExceededError ||
-    error instanceof SyncRelayBlobMissingError
+    error instanceof SyncRelayBlobMissingError ||
+    error instanceof SyncRelayYdocBaseClaimedError
       ? error.code
       : typeof error === "object" && error && "code" in error
         ? String((error as { code?: unknown }).code)

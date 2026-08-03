@@ -1203,6 +1203,61 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         addedLogBytes += Buffer.byteLength(op.payloadJson, "utf8");
       }
 
+      // One base per lineage (dohc-ai/dohc#547): the relay arbitrates Y.Doc
+      // lineage origination the same way it arbitrates workspace identity —
+      // first claim wins. Object ids derive from the path, so two machines
+      // that each create the same document originate two different bases for
+      // one lineage coordinate; accepting both wedges every receiver in
+      // BaseStateDiverged. The first `isBaseState: true` op for a
+      // (workspace, versionId, objectId) coordinate is durable; a later base
+      // carrying DIFFERENT bytes is refused, and the losing origin adopts the
+      // stored base and republishes its rows as deltas. A same-sha base is
+      // accepted: a redelivery on a new coordinate (origin recovery) is valid
+      // and receivers resume it idempotently. The whole batch is refused
+      // atomically, like the gap and blob checks around it.
+      const storedBaseStmt = this.db.prepare(
+        `SELECT origin_id, json_extract(payload_json, '$.updateBlobSha256') AS sha
+         FROM sync_relay_log
+         WHERE workspace_id = ? AND op_kind = 'ydoc.update'
+           AND json_extract(payload_json, '$.isBaseState') = 1
+           AND json_extract(payload_json, '$.versionId') = ?
+           AND json_extract(payload_json, '$.objectId') = ?
+         LIMIT 1`,
+      );
+      const batchBaseShas = new Map<string, string>();
+      for (const op of newOps) {
+        if (op.opKind !== "ydoc.update") continue;
+        let payload: unknown;
+        try {
+          payload = JSON.parse(op.payloadJson);
+        } catch {
+          continue;
+        }
+        if (typeof payload !== "object" || payload === null) continue;
+        const record = payload as Record<string, unknown>;
+        if (record.isBaseState !== true) continue;
+        const versionId = typeof record.versionId === "string" ? record.versionId : "";
+        const objectId = typeof record.objectId === "string" ? record.objectId : "";
+        const sha = typeof record.updateBlobSha256 === "string" ? record.updateBlobSha256 : "";
+        if (!versionId || !objectId || !sha) continue;
+        const lineage = `${versionId}\u0000${objectId}`;
+        const stored = storedBaseStmt.get(input.workspaceId, versionId, objectId);
+        const winner = stored
+          ? { originId: String(stored.origin_id), sha: String(stored.sha) }
+          : batchBaseShas.has(lineage)
+            ? { originId: input.originId, sha: batchBaseShas.get(lineage)! }
+            : undefined;
+        if (winner && winner.sha !== sha) {
+          throw new SyncRelayYdocBaseClaimedError(
+            `one Y.Doc base per lineage: lineage ${versionId}/${objectId} already has ` +
+              `base ${winner.sha} from origin ${winner.originId}; refused base ${sha} ` +
+              `from origin ${input.originId} — adopt the stored base and republish ` +
+              `local rows as deltas`,
+          );
+        }
+        batchBaseShas.set(lineage, sha);
+      }
+
       this.assertWorkspaceQuota(input.workspaceId, addedLogBytes);
 
       // Data-integrity gate (0P sync-hardening): a log op must never be made
@@ -1680,6 +1735,16 @@ function rowToLogRow(row: Record<string, unknown>): SyncRelayLogRow {
 export class SyncRelayConflictError extends Error {
   readonly statusCode = RELAY_ERRORS.conflict.status;
   readonly code = RELAY_ERRORS.conflict.code;
+}
+
+// A log append tried to originate a SECOND base for a Y.Doc lineage that
+// already has one (dohc-ai/dohc#547). 409 with a distinct code: the push
+// client must not confuse this with same-origin log divergence (plain
+// `conflict`), because recovery is adoption — pull the winner's base and
+// republish local rows as deltas — not a rewind/probe.
+export class SyncRelayYdocBaseClaimedError extends Error {
+  readonly statusCode = RELAY_ERRORS.ydoc_base_claimed.status;
+  readonly code = RELAY_ERRORS.ydoc_base_claimed.code;
 }
 
 export class SyncRelayQuotaExceededError extends Error {

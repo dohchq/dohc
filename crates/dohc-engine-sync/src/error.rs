@@ -224,6 +224,8 @@ pub enum RelayError {
     StreamIdentityMismatch,
     #[error("relay authorship check failed")]
     AuthorshipMismatch,
+    #[error("relay refused a second Y.Doc base for an already-claimed lineage")]
+    YdocBaseClaimed,
     #[error("relay cannot verify this chat operation")]
     UnknownChatOperation,
     #[error("share is read-only")]

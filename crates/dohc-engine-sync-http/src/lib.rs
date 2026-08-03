@@ -732,6 +732,7 @@ define_server_error_codes! {
     "stream_identity_mismatch" => |_| RelayError::StreamIdentityMismatch,
     "too_many_paths" => |_| RelayError::BadRequest,
     "unknown_chat_op" => |_| RelayError::UnknownChatOperation,
+    "ydoc_base_claimed" => |_| RelayError::YdocBaseClaimed,
 }
 
 fn unavailable(context: RequestContext) -> RelayError {

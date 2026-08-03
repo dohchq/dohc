@@ -608,6 +608,191 @@ pub fn fold_resolution_into_ydoc_in_tx(
     Ok(())
 }
 
+/// The sha of the seq-0 base snapshot this lineage claimed, if it still
+/// exists (compaction legitimately folds it away).
+fn stored_seq0_base_sha(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+) -> Result<Option<String>, SyncError> {
+    conn.query_row(
+        "SELECT snapshot_blob_sha256 FROM ydoc_snapshots \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND up_to_seq=0",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
+}
+
+/// Adopt a peer's base over this machine's divergent claimed lineage (#547).
+///
+/// The relay admits ONE base per lineage coordinate, so an inbound base that
+/// differs from the locally claimed base means the peer won the origination
+/// race and this machine's own base was (or will be) refused at push. The old
+/// wedge — `BaseStateDiverged` leaving the coordinate unacked forever — is
+/// replaced by adoption: swap the durable lineage onto the winner's base,
+/// re-encode everything this machine holds as ONE delta against the winner's
+/// state vector, and republish that delta through this machine's journal —
+/// replacing the refused, never-pushed base row in place when it still
+/// exists, so the push lane unwedges without breaking per-origin sequence
+/// density. `merged` must be the persisted local doc with the winner's base
+/// already applied; the delta therefore carries every local row a clean peer
+/// would otherwise permanently miss.
+#[allow(clippy::too_many_arguments)]
+fn adopt_divergent_base_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    content_kind: dohc_engine_collab::ContentKind,
+    winner_base: &[u8],
+    winner_sv: &[u8],
+    merged: &dohc_engine_collab::Ydoc,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let delta = merged.diff(winner_sv).map_err(|error| {
+        map_collab_payload_error(error, "ydoc.update adoption delta could not be encoded")
+    })?;
+    // Never journal bytes a peer would refuse (constraint 5): the adoption
+    // delta rides the same MAX_YDOC_UPDATE_BYTES cap every apply enforces. A
+    // local lineage past that cap cannot republish itself in one delta; #549
+    // owns the measured base/limits story. The refusal acks the coordinate
+    // and rolls this mutation back, leaving the local lineage intact.
+    if delta.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
+        return Err(SyncError::InvalidInput {
+            reason: "ydoc.update adoption delta exceeds MAX_YDOC_UPDATE_BYTES (5 MiB per update)",
+        });
+    }
+    // Swap the durable lineage: winner base at seq 0, one local delta on top.
+    tx.execute(
+        "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(SyncError::persist)?;
+    tx.execute(
+        "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(SyncError::persist)?;
+    let base_sha =
+        dohc_engine_storage::put_binary_blob(tx, winner_base).map_err(SyncError::Storage)?;
+    let sv_sha = dohc_engine_storage::put_binary_blob(tx, winner_sv).map_err(SyncError::Storage)?;
+    tx.execute(
+        "INSERT INTO ydoc_snapshots \
+         (workspace_id, version_id, object_id, up_to_seq, \
+          snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms) \
+         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            base_sha,
+            sv_sha,
+            now_ms
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    let delta_sha = if delta.is_empty() {
+        None
+    } else {
+        let sha = dohc_engine_storage::put_binary_blob(tx, &delta).map_err(SyncError::Storage)?;
+        tx.execute(
+            "INSERT INTO ydoc_updates \
+             (workspace_id, version_id, object_id, seq, update_blob_sha256, \
+              actor_origin_id, recorded_at_ms) \
+             VALUES (?1, ?2, ?3, 1, ?4, NULL, ?5)",
+            params![key.workspace_id, key.version_id, key.object_id, sha, now_ms],
+        )
+        .map_err(SyncError::persist)?;
+        Some(sha)
+    };
+    tx.execute(
+        "UPDATE ydoc_docs SET regime='replicated', content_kind=?4, base_claimed=1, \
+         head_update_seq=?5, head_snapshot_seq=0, updated_at_ms=?6 \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            content_kind.as_str(),
+            i64::from(delta_sha.is_some()),
+            now_ms,
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    // Republish. Our own base row can only sit UNPUSHED in the journal here:
+    // the relay refused it (one base per lineage), so nothing after it went
+    // out either. Replace it in place — with the adoption delta, or, when the
+    // delta is empty, with the winner's own base (same sha, which the relay
+    // accepts and every receiver resumes idempotently) — so the push lane
+    // unwedges. Without a replaceable row (our base already pushed against a
+    // relay that predates arbitration, or never journaled), append the delta
+    // as a fresh op instead.
+    let origin: Option<String> = tx
+        .query_row(
+            "SELECT origin_id FROM sync_identity WHERE workspace_id = ?1",
+            [key.workspace_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some(origin) = origin else {
+        return Ok(());
+    };
+    let unpushed_base_seq: Option<i64> = tx
+        .query_row(
+            "SELECT origin_seq FROM replication_log \
+             WHERE workspace_id=?1 AND origin_id=?2 AND op_kind='ydoc.update' AND imported=0 \
+               AND json_extract(payload_json,'$.versionId')=?3 \
+               AND json_extract(payload_json,'$.objectId')=?4 \
+               AND json_extract(payload_json,'$.isBaseState')=1 \
+               AND origin_seq > COALESCE((SELECT pushed_seq FROM sync_relay_push_state \
+                                          WHERE workspace_id=?1 AND origin_id=?2), -1) \
+             ORDER BY origin_seq LIMIT 1",
+            params![key.workspace_id, origin, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let republished = match &delta_sha {
+        Some(sha) => (sha.as_str(), false),
+        None => (base_sha.as_str(), true),
+    };
+    let payload = serde_json::json!({
+        "versionId": key.version_id,
+        "objectId": key.object_id,
+        "path": path,
+        "contentKind": content_kind.as_str(),
+        "updateBlobSha256": republished.0,
+        "isBaseState": republished.1,
+    });
+    match unpushed_base_seq {
+        Some(seq) => {
+            let payload_json =
+                serde_json::to_string(&payload).map_err(|_| SyncError::InvalidInput {
+                    reason: "adoption payload is not valid JSON",
+                })?;
+            tx.execute(
+                "UPDATE replication_log SET payload_json=?4, recorded_at_ms=?5 \
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![key.workspace_id, origin, seq, payload_json, now_ms],
+            )
+            .map_err(SyncError::persist)?;
+        }
+        None => {
+            if delta_sha.is_some() {
+                crate::journal::journal_local_op_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    "ydoc.update",
+                    &payload,
+                    now_ms,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Store the projected markdown as a text blob so a conflict side can
 /// reference it (the conflict UI hydrates sides from `blobs`).
 fn put_projection_text_blob(
@@ -885,6 +1070,20 @@ pub fn apply_ydoc_envelope(
                 reason: "live lease on a non-replicated Y.Doc lineage",
             });
         }
+        // A DIVERGENT inbound base must not be acked-and-parked: the drain
+        // replays raw bytes and cannot run the base branch's adoption, so a
+        // parked divergent base would silently union while this machine's
+        // own refused base wedges the push lane forever. Leave it unacked;
+        // the retry adopts once the live session settles or closes.
+        if payload.is_base_state
+            && store
+                .read_with(|conn| stored_seq0_base_sha(conn, &key))?
+                .is_some_and(|stored| stored != payload.update_blob_sha256)
+        {
+            return Err(SyncError::RetryableState {
+                reason: "live Y.Doc session over a divergent inbound base",
+            });
+        }
         let deferred_key = key.clone();
         return crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
             // Record WHICH coordinate is pending in the same transaction as
@@ -935,6 +1134,7 @@ pub fn apply_ydoc_envelope(
         };
         let claim_key = key.clone();
         let claim_bytes = bytes.clone();
+        let claim_sha = payload.update_blob_sha256.clone();
         // The claim can PROMOTE a local-only lineage that already holds
         // update rows (a crash left them behind): the projection must be the
         // reconstructed lineage PLUS the base, or the visible snapshot would
@@ -942,8 +1142,15 @@ pub fn apply_ydoc_envelope(
         let (base_doc, lineage_has_state) = {
             let persisted =
                 dohc_engine_collab::load_persisted(store, &key).map_err(map_collab_hard_error)?;
+            // A claimed base counts as durable state even at head seq 0: the
+            // seq-0 snapshot does not advance either head counter, but the
+            // lineage it establishes already carries the local head — a
+            // second base coordinate must take the union/adoption path, not
+            // the plain-file conflict below.
             let lineage_has_state = persisted.as_ref().is_some_and(|persisted| {
-                persisted.marker.head_update_seq > 0 || persisted.marker.head_snapshot_seq > 0
+                persisted.marker.head_update_seq > 0
+                    || persisted.marker.head_snapshot_seq > 0
+                    || persisted.marker.base_claimed
             });
             let doc = match persisted {
                 Some(persisted) => persisted.doc,
@@ -995,17 +1202,40 @@ pub fn apply_ydoc_envelope(
                 ],
             )
             .map_err(SyncError::persist)?;
-            dohc_engine_collab::claim_base_in_tx(
-                tx,
-                &claim_key,
-                kind,
-                &claim_bytes,
-                &sv_bytes,
-                op.recorded_at_ms,
-            )
-            .map_err(|error| {
-                map_collab_payload_error(error, "ydoc.update base could not be claimed")
-            })?;
+            // #547: an inbound base that differs from OUR claimed base means
+            // the peer won the origination race at the relay (which admits
+            // one base per lineage), so this machine adopts instead of
+            // wedging in BaseStateDiverged. A missing seq-0 snapshot leaves
+            // divergence unverifiable (compaction folds it away) and resumes
+            // via the claim below, exactly as before.
+            let adopted = dohc_engine_collab::read_marker_in_tx(tx, &claim_key)
+                .map_err(map_collab_hard_error)?
+                .is_some_and(|marker| marker.base_claimed)
+                && stored_seq0_base_sha(tx, &claim_key)?.is_some_and(|stored| stored != claim_sha);
+            if adopted {
+                adopt_divergent_base_in_tx(
+                    tx,
+                    &claim_key,
+                    &base_path,
+                    kind,
+                    &claim_bytes,
+                    &sv_bytes,
+                    &base_doc,
+                    op.recorded_at_ms,
+                )?;
+            } else {
+                dohc_engine_collab::claim_base_in_tx(
+                    tx,
+                    &claim_key,
+                    kind,
+                    &claim_bytes,
+                    &sv_bytes,
+                    op.recorded_at_ms,
+                )
+                .map_err(|error| {
+                    map_collab_payload_error(error, "ydoc.update base could not be claimed")
+                })?;
+            }
             // The FIRST base is not a CRDT merge: a local head that no shared
             // lineage ever merged (capture or an external editor wrote it, and
             // the receiver holds no durable Y.Doc rows to union with) must not
@@ -1095,6 +1325,8 @@ pub fn apply_ydoc_envelope(
                 }
             }
             // A fresh base-only replica gets its FILE, not just CRDT rows.
+            // After an adoption this projects the MERGED doc — the winner's
+            // base plus everything this machine held.
             project_and_write_in_tx(
                 tx,
                 &claim_key,
@@ -1108,7 +1340,11 @@ pub fn apply_ydoc_envelope(
             )?;
             Ok(YdocApplyResult {
                 deferred: false,
-                reason: None,
+                reason: if adopted {
+                    Some("ydoc-base-adopted")
+                } else {
+                    None
+                },
                 conflicts_opened: 0,
             })
         })?;

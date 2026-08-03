@@ -984,6 +984,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "share_read_only" => RelayError::ShareReadOnly,
         "stream_identity_mismatch" => RelayError::StreamIdentityMismatch,
         "unknown_chat_op" => RelayError::UnknownChatOperation,
+        "ydoc_base_claimed" => RelayError::YdocBaseClaimed,
         unknown => panic!("fixture code {unknown} needs an expected Rust variant"),
     }
 }

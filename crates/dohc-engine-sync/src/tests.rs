@@ -7393,6 +7393,406 @@ fn resolution_fold_names_the_cap_it_hits() {
 }
 
 #[test]
+fn inbound_divergent_base_adopts_the_winner_and_republishes_local_content() {
+    // #547: both peers originated the same path-derived lineage. The relay
+    // admits one base per lineage, so an inbound base that differs from OUR
+    // claimed base means this machine lost the race. Instead of wedging in
+    // BaseStateDiverged, adopt: swap the lineage onto the winner's base,
+    // re-encode local content as one delta on top, rewrite the refused
+    // journal row into that delta, and project the merged doc. Mutation
+    // check: restore the unconditional `claim_base_in_tx` — this apply
+    // errors CoordinateDiverged and the expect below fails.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-race',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-race").expect("key");
+
+    // This machine originated first, locally: claimed base plus journal row.
+    let loser_doc = dohc_engine_collab::Ydoc::wire();
+    loser_doc.plaintext_insert(0, "loser text");
+    let loser_base = loser_doc.encode_full_state();
+    let loser_sha = dohc_engine_storage::hex_sha256(&loser_base);
+    match dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        &loser_base,
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim own base")
+    {
+        dohc_engine_storage::TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed {
+            ..
+        }) => {}
+        other => panic!("unexpected claim outcome: {other:?}"),
+    }
+    let journaled = engine
+        .write_with(&NoFaults, |tx| {
+            crate::journal::journal_local_op_in_tx(
+                tx,
+                "ws",
+                "ydoc.update",
+                &json!({
+                    "versionId": "main",
+                    "objectId": "object-race",
+                    "path": "notes/race.md",
+                    "contentKind": "plaintext",
+                    "updateBlobSha256": loser_sha,
+                    "isBaseState": true
+                }),
+                1_600,
+            )
+        })
+        .expect("journal own base");
+    let base_seq = match journaled {
+        dohc_engine_storage::TxnOutcome::Committed(seq) => seq,
+        other => panic!("journal crashed: {other:?}"),
+    };
+
+    // The peer's independently-originated base arrives through the pull.
+    let winner_doc = dohc_engine_collab::Ydoc::wire();
+    winner_doc.plaintext_insert(0, "winner text");
+    let winner_base = winner_doc.encode_full_state();
+    let winner_sha = engine.put_binary_blob(&winner_base).expect("winner blob");
+    let base_op = envelope(
+        "winner-origin",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-race",
+            "path": "notes/race.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_sha,
+            "isBaseState": true
+        }),
+    );
+    let outcome = apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases)
+        .expect("divergent base adopts instead of wedging");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-base-adopted"),
+            conflicts_opened: 0,
+        })
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "winner-origin").expect("ack"),
+        0
+    );
+
+    // The lineage now stands on the winner's base with ONE local delta.
+    let (seq0_sha, head_update_seq): (String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT s.snapshot_blob_sha256, d.head_update_seq \
+                 FROM ydoc_snapshots s JOIN ydoc_docs d \
+                   ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id \
+                  AND d.object_id=s.object_id \
+                 WHERE s.workspace_id='ws' AND s.version_id='main' \
+                   AND s.object_id='object-race' AND s.up_to_seq=0",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("adopted lineage");
+    assert_eq!(
+        seq0_sha, winner_sha,
+        "the winner's base is the seq-0 snapshot"
+    );
+    assert_eq!(head_update_seq, 1, "local content rides one delta on top");
+    let delta_sha: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT update_blob_sha256 FROM ydoc_updates \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='object-race' AND seq=1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("adoption delta row");
+
+    // The refused, never-pushed journal row now carries the delta in place.
+    let payload_json: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT payload_json FROM replication_log \
+                 WHERE workspace_id='ws' AND origin_id='local' AND origin_seq=?1",
+                [base_seq],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("rewritten journal row");
+    let rewritten: serde_json::Value =
+        serde_json::from_str(&payload_json).expect("rewritten payload");
+    assert_eq!(rewritten["isBaseState"], json!(false));
+    assert_eq!(rewritten["updateBlobSha256"], json!(delta_sha));
+
+    // The visible head is the merged doc — nothing local was lost.
+    let head_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.version_id='main' AND s.object_id='object-race'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("merged head");
+    assert!(
+        head_text.contains("winner text") && head_text.contains("loser text"),
+        "the merged head must carry both sides, got {head_text:?}"
+    );
+
+    // A clean peer holding only the winner's base converges from the
+    // republished delta alone.
+    let delta_bytes = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                [&delta_sha],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("delta blob");
+    let clean_peer = dohc_engine_collab::Ydoc::wire();
+    clean_peer.apply(&winner_base).expect("peer base");
+    clean_peer.apply(&delta_bytes).expect("peer delta");
+    assert_eq!(
+        clean_peer.plaintext_string(),
+        head_text,
+        "a clean peer reconstructs the merged content"
+    );
+}
+
+#[test]
+fn a_live_lease_leaves_a_divergent_inbound_base_unacked() {
+    // Adoption cannot run through the deferred-drain path (it replays raw
+    // bytes), so a divergent base under a live lease must stay UNACKED and
+    // retry after the session ends — never ack-and-park. Mutation check:
+    // drop the divergence guard in the lease branch — the divergent base
+    // defers (acked) and both assertions fail.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-lease-race',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-lease-race").expect("key");
+    let loser_doc = dohc_engine_collab::Ydoc::wire();
+    loser_doc.plaintext_insert(0, "loser text");
+    let loser_base = loser_doc.encode_full_state();
+    let loser_sha = dohc_engine_storage::hex_sha256(&loser_base);
+    dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        &loser_base,
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim own base");
+
+    let winner_doc = dohc_engine_collab::Ydoc::wire();
+    winner_doc.plaintext_insert(0, "winner text");
+    let winner_base = winner_doc.encode_full_state();
+    let winner_sha = engine.put_binary_blob(&winner_base).expect("winner blob");
+    let divergent = envelope(
+        "winner-origin",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-lease-race",
+            "path": "notes/lease-race.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_sha,
+            "isBaseState": true
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &divergent, &NoFaults, &AlwaysLive),
+        Err(SyncError::RetryableState {
+            reason: "live Y.Doc session over a divergent inbound base"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "winner-origin").expect("ack"),
+        -1,
+        "a divergent base under a live lease stays unacked"
+    );
+
+    // The SAME base redelivered on a fresh coordinate still defers normally.
+    let same = envelope(
+        "resume-origin",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-lease-race",
+            "path": "notes/lease-race.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": loser_sha,
+            "isBaseState": true
+        }),
+    );
+    assert_eq!(
+        apply_ydoc_envelope(&mut engine, &same, &NoFaults, &AlwaysLive).expect("same base defers"),
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            reason: Some("ydoc-session-live"),
+            conflicts_opened: 0,
+        })
+    );
+}
+
+struct BaseClaimedRelay {
+    pushes: Mutex<usize>,
+}
+
+impl RelayTransport for BaseClaimedRelay {
+    fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        *self.pushes.lock().expect("push lock") += 1;
+        if req.ops.iter().any(|op| {
+            op.op_kind == "ydoc.update"
+                && op.payload.get("isBaseState") == Some(&serde_json::Value::Bool(true))
+        }) {
+            return Err(RelayError::YdocBaseClaimed);
+        }
+        let accepted = req.ops.len();
+        Ok(PushResponse {
+            accepted,
+            inserted: accepted,
+            skipped: 0,
+            current_max_origin_seq: req.ops.last().map_or(req.after_seq, |op| op.origin_seq),
+        })
+    }
+    fn pull(&self, _req: PullRequest) -> Result<PullResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn claim_workspace(&self, _req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn rotate_epoch(&self, _req: EpochRequest) -> Result<EpochResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn blobs_have(&self, _req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
+        Ok(BlobHaveResponse {
+            missing: Vec::new(),
+        })
+    }
+    fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
+        Ok(())
+    }
+    fn download_blob(&self, _req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::BlobMissing)
+    }
+    fn upload_key_envelope(
+        &self,
+        _req: KeyEnvelopeRequest,
+    ) -> Result<KeyEnvelopeResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn download_key_envelope(
+        &self,
+        _req: KeyEnvelopeDownloadRequest,
+    ) -> Result<KeyEnvelopeDownloadResponse, RelayError> {
+        Err(RelayError::KeyEnvelopeMissing)
+    }
+    fn shared_channel_pull(
+        &self,
+        _req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn shared_channel_push(
+        &self,
+        _req: SharedChannelRequest,
+    ) -> Result<SharedChannelResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn share_view_pull(&self, _req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn share_blob(&self, _req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::ShareUnavailable)
+    }
+}
+
+#[test]
+fn push_parks_at_a_refused_base_and_the_pass_stays_complete() {
+    // The relay refusing a second base for a lineage is an arbitration
+    // outcome, not a transport failure: the push parks this origin's queue
+    // at the refused row (the pull's adoption rewrites it) and the pass
+    // completes. Mutation check: drop the YdocBaseClaimed arm in
+    // `push_workspace` — this returns Err and the expect fails.
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let base_seq = journal_test_op(
+        &mut engine,
+        "ydoc.update",
+        &json!({
+            "versionId": "main",
+            "objectId": "object-race",
+            "path": "notes/race.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": dohc_engine_storage::hex_sha256(b"pretend-base"),
+            "isBaseState": true
+        }),
+    );
+    assert_eq!(base_seq, 1);
+    let client = RelaySyncClient::new(BaseClaimedRelay {
+        pushes: Mutex::new(0),
+    });
+    let outcome = client
+        .push_workspace(&mut engine, "ws", &NoFaults)
+        .expect("a refused base must not fail the pass");
+    assert!(
+        matches!(outcome, SyncPassOutcome::Complete { pushed: 0, .. }),
+        "nothing before the refused batch had been accepted: {outcome:?}"
+    );
+    assert_eq!(
+        read_pushed_seq(&engine, "ws", "local").expect("pushed seq"),
+        -1,
+        "the push cursor stays before the refused base row"
+    );
+    assert_eq!(*client.transport().pushes.lock().expect("calls"), 1);
+}
+
+#[test]
 fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
     let (_scratch, _path, mut engine) = store();
     let install_abort_trigger = |engine: &mut EngineStore, trigger_name: &str, table_name: &str| {
@@ -8742,7 +9142,7 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
 }
 
 #[test]
-fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
+fn divergent_second_ydoc_base_adopts_acks_and_merges() {
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");
     let first_doc = dohc_engine_collab::Ydoc::wire();
@@ -8780,41 +9180,67 @@ fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
         Ok(ApplyOutcome::Applied(_))
     ));
 
+    // #547 replaced the old hard-unacked wedge: a divergent second base now
+    // ADOPTS (the relay admits one base per lineage, so a pulled divergent
+    // base means the local lineage lost the race). This receiver has no sync
+    // identity, so adoption must swap and merge WITHOUT journaling anything.
     let second = apply_ydoc_envelope(
         &mut engine,
         &base("second-base-peer", &second_sha),
         &NoFaults,
         &NoLiveLeases,
+    )
+    .expect("divergent base adopts");
+    assert_eq!(
+        second,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-base-adopted"),
+            conflicts_opened: 0,
+        })
     );
-    assert!(matches!(second, Err(SyncError::CoordinateDiverged)));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "second-base-peer").expect("second-base ack"),
-        -1,
-        "a divergent lineage must not advance the peer coordinate"
+        0,
+        "the adopted base coordinate acks"
     );
     let journaled: i64 = engine
         .read_with(|conn| {
             conn.query_row(
-                "SELECT COUNT(*) FROM replication_log \
-                 WHERE workspace_id='ws' AND origin_id='second-base-peer'",
+                "SELECT COUNT(*) FROM replication_log WHERE workspace_id='ws' AND imported=0",
                 [],
                 |row| row.get(0),
             )
         })
-        .expect("divergent journal count");
+        .expect("local journal count");
     assert_eq!(
         journaled, 0,
-        "MUTATION: mapping BaseStateDiverged to InvalidInput journals and ACKs the unusable lineage"
+        "an identity-less receiver adopts without journaling anything of its own"
     );
     let key =
         dohc_engine_collab::DocKey::new("ws", "main", "object-divergent-base").expect("doc key");
+    let seq0_sha: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT snapshot_blob_sha256 FROM ydoc_snapshots \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='object-divergent-base' AND up_to_seq=0",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("adopted seq-0 base");
+    assert_eq!(
+        seq0_sha, second_sha,
+        "the lineage stands on the adopted base"
+    );
     let persisted = dohc_engine_collab::load_persisted(&engine, &key)
         .expect("load")
         .expect("lineage");
-    assert_eq!(
-        persisted.doc.plaintext_string(),
-        "first",
-        "the refusal savepoint must preserve the originally claimed base"
+    let merged = persisted.doc.plaintext_string();
+    assert!(
+        merged.contains("first") && merged.contains("second"),
+        "adoption preserves both bases' content, got {merged:?}"
     );
 }
 

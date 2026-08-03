@@ -502,10 +502,19 @@ daemons cannot share a relay workspace yet (#356).
   coalesce the conflict's incoming side instead of writing the head. A lineage
   that already holds durable rows still takes the union path — the CRDT is the
   merge there.
-- **#547 — two peers can originate the same lineage.** Object ids derive from
-  the path, so both peers claim a base for one coordinate and
-  `BaseStateDiverged` wedges it. Base-once needs relay-wide arbitration, or
-  object ids need to stop deriving from the path.
+- **#547 — two peers can originate the same lineage. Built, as relay-side
+  arbitration.** The relay admits ONE base per (workspace, version, object)
+  lineage coordinate and refuses a later base carrying different bytes
+  (`ydoc_base_claimed`, first-claim-wins — the same pattern as workspace
+  identity). The loser's push parks at its refused base row; its pull then
+  receives the winner's base, and the inbound base branch ADOPTS instead of
+  wedging: swap the durable lineage onto the winner's base, re-encode all
+  local content as one delta against the winner's state vector, rewrite the
+  refused journal row into that delta in place, and project the merged doc.
+  The alternative — deriving object ids from creation provenance instead of
+  the path — was rejected: deterministic path-derived ids are what let the
+  file lane converge object identity across machines without coordination,
+  and forking id derivation per lane would split one file into two objects.
 - **#548 — origination is not retried when a missing dependency resolves.** The
   encoder declines while a pending row would be dropped, and only a later local
   append asks again. The drain that resolves the dependency must ask too.
