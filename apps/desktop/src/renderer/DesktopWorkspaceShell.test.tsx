@@ -2228,6 +2228,12 @@ describe("history page", () => {
     await user.click(screen.getByTestId("activity-history"));
     const placeholder = await screen.findByTestId("history-off-placeholder");
     expect(placeholder.textContent).toContain("A shared view records no history");
+    // The empty state owes a Next that works on this surface: the share
+    // banner's Refresh control, pinned to exist alongside the instruction.
+    expect(placeholder.textContent).toContain(
+      "Refresh the shared view to get the latest shared changes.",
+    );
+    expect(screen.getByTestId("shared-view-refresh")).toBeTruthy();
     // The false cause this pins against: the opt-out's Settings copy, about
     // a toggle nobody touched.
     expect(placeholder.textContent).not.toContain("Settings");
@@ -2240,6 +2246,30 @@ describe("history page", () => {
       await Promise.resolve();
     });
     expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+  });
+
+  // The ended share has no Refresh control, so its placeholder must not
+  // instruct one — the false-instruction class this lane exists to kill.
+  it("an ended share's placeholder does not name the Refresh it no longer has", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        ended: true,
+      },
+    });
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    expect(placeholder.textContent).toContain("A shared view records no history");
+    expect(placeholder.textContent).toContain(
+      "This share was ended. You can still open the files it shared.",
+    );
+    expect(placeholder.textContent).not.toContain("Refresh");
+    expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
   });
 
   function historyMoment(id: string, summary: string): EngineMomentRecord {

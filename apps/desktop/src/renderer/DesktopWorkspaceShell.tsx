@@ -2936,6 +2936,41 @@ export function DesktopWorkspaceShell(props: {
     });
   }, [commands]);
 
+  // Read-only shared view (PR 18): the workspace was received through a
+  // share grant. It refreshes on open and on demand, and every edit surface
+  // is disabled with honest copy. Declared before the history timeline: the
+  // shared-view placeholder's next step depends on whether the share is
+  // still live (#540 — Refresh exists only while it is).
+  const shareView = props.workspace.shareView ?? null;
+  const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
+  const [shareRefreshing, setShareRefreshing] = useState(false);
+  const refreshShareView = useCallback(async () => {
+    if (!shareView || shareViewEnded) return;
+    setShareRefreshing(true);
+    try {
+      const outcome = await bridge().refreshSharedView({ workspaceId });
+      if (outcome.status === "ended") {
+        setShareViewEnded(true);
+        return;
+      }
+      if (outcome.changedPaths > 0) {
+        await refreshFiles();
+        // Re-read open editors: the shared view's files changed on disk.
+        setVersionEpoch((epoch) => epoch + 1);
+      }
+    } catch (error) {
+      reportShellError("Couldn't refresh the shared view.", error);
+    } finally {
+      setShareRefreshing(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shareView?.shareId, shareViewEnded, workspaceId]);
+  useEffect(() => {
+    // One automatic refresh when a shared view opens; afterwards on demand.
+    if (shareView && !shareViewEnded) void refreshShareView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
   // ONE history timeline element, rendered by the side panel's History view
   // and the history tab — the engine page state is root-owned (never a
   // second subscription). An opted-out workspace has NO
@@ -2952,14 +2987,17 @@ export function DesktopWorkspaceShell(props: {
   ) : isShareView ? (
     // #540: a capability, not an opt-out. The Settings copy below would
     // blame a toggle nobody touched, in a settings file a shared view does
-    // not even have.
+    // not even have. The next step matches the surface: Refresh exists only
+    // while the share is live, so an ended share must not name it.
     <div
       data-testid="history-off-placeholder"
       className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
     >
       <span className="text-xs text-muted">A shared view records no history</span>
       <span className="text-[11px] text-subtle">
-        This workspace is a read-only view of files shared with you.
+        {shareViewEnded
+          ? "This share was ended. You can still open the files it shared."
+          : "This workspace is a read-only view of files shared with you. Refresh the shared view to get the latest shared changes."}
       </span>
     </div>
   ) : (
@@ -2990,39 +3028,6 @@ export function DesktopWorkspaceShell(props: {
   const graphKey = engineEnabled
     ? `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`
     : graphRefreshKey;
-
-  // Read-only shared view (PR 18): the workspace was received through a
-  // share grant. It refreshes on open and on demand, and every edit surface
-  // is disabled with honest copy.
-  const shareView = props.workspace.shareView ?? null;
-  const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
-  const [shareRefreshing, setShareRefreshing] = useState(false);
-  const refreshShareView = useCallback(async () => {
-    if (!shareView || shareViewEnded) return;
-    setShareRefreshing(true);
-    try {
-      const outcome = await bridge().refreshSharedView({ workspaceId });
-      if (outcome.status === "ended") {
-        setShareViewEnded(true);
-        return;
-      }
-      if (outcome.changedPaths > 0) {
-        await refreshFiles();
-        // Re-read open editors: the shared view's files changed on disk.
-        setVersionEpoch((epoch) => epoch + 1);
-      }
-    } catch (error) {
-      reportShellError("Couldn't refresh the shared view.", error);
-    } finally {
-      setShareRefreshing(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shareView?.shareId, shareViewEnded, workspaceId]);
-  useEffect(() => {
-    // One automatic refresh when a shared view opens; afterwards on demand.
-    if (shareView && !shareViewEnded) void refreshShareView();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
 
   const explorerView = (
     <>
