@@ -76,6 +76,10 @@ pub struct YdocApplyResult {
 pub struct YdocDrainResult {
     pub drained: usize,
     pub refusals: Vec<crate::ReplicationRefusal>,
+    /// The drain's dependency-resolution retrigger journaled a base: the
+    /// pull must surface it as a pending push, exactly like the append,
+    /// cursor, and settlement edges.
+    pub originated: bool,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -414,13 +418,20 @@ pub fn drain_deferred_ydoc_for_key(
         // workspace-replication gates live inside, so a claimed or private
         // lineage is a cheap no-op.
         if let Some(path) = &originate_path {
-            crate::ydoc_originate::originate_ydoc_base_in_tx(tx, key, path, payload_recorded_at)?;
+            return Ok(crate::ydoc_originate::originate_ydoc_base_in_tx(
+                tx,
+                key,
+                path,
+                payload_recorded_at,
+            )?
+            .is_some());
         }
-        Ok::<_, SyncError>(())
+        Ok::<_, SyncError>(false)
     })?;
-    if matches!(cleared, TxnOutcome::Crashed { .. }) {
-        return Err(SyncError::FaultCrash);
-    }
+    let originated = match cleared {
+        TxnOutcome::Committed(originated) => originated,
+        TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+    };
     // The count is DRAINED COORDINATES, not newly-applied rows: a marker
     // surviving an earlier failed drain redelivers its row as a dedupe, and
     // callers (the settle's remote-updates-pending refusal) must still see
@@ -429,6 +440,7 @@ pub fn drain_deferred_ydoc_for_key(
     Ok(YdocDrainResult {
         drained: drained_coordinates.len(),
         refusals,
+        originated,
     })
 }
 
@@ -1504,13 +1516,14 @@ pub fn apply_ydoc_envelope(
     // phase drain FIRST, so the projection below reconstructs the COMPLETE
     // applied lineage (a partial projection would materialize a file missing
     // parked content).
-    let drain_refusals = if dohc_engine_collab::read_marker(store, &key)
+    let (drain_refusals, drain_originated) = if dohc_engine_collab::read_marker(store, &key)
         .map_err(map_collab_hard_error)?
         .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
     {
-        drain_deferred_ydoc_for_key(store, &key, faults)?.refusals
+        let drain = drain_deferred_ydoc_for_key(store, &key, faults)?;
+        (drain.refusals, drain.originated)
     } else {
-        Vec::new()
+        (Vec::new(), false)
     };
     // Reconstruct the post-apply doc OUTSIDE the admission tx (commutative:
     // the in-tx apply of the same bytes yields the same converged state, and
@@ -1600,6 +1613,7 @@ pub fn apply_ydoc_envelope(
         origin_seq: envelope.origin_seq,
         bytes,
     };
+    let mut originated_in_apply = false;
     let outcome =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
             let applied = apply_remote_update_in_transaction(tx, &key, &remote, op.recorded_at_ms)
@@ -1636,12 +1650,13 @@ pub fn apply_ydoc_envelope(
                     // to refuse (a stale or hostile path), outside the
                     // savepoint that unwinds the refusal. Claimed lineages
                     // and non-replicating workspaces no-op inside.
-                    crate::ydoc_originate::originate_ydoc_base_in_tx(
+                    originated_in_apply = crate::ydoc_originate::originate_ydoc_base_in_tx(
                         tx,
                         &key,
                         &update_path,
                         op.recorded_at_ms,
-                    )?;
+                    )?
+                    .is_some();
                     tx.execute_batch("RELEASE dohc_ydoc_projection")
                         .map_err(SyncError::persist)?;
                 }
@@ -1672,7 +1687,18 @@ pub fn apply_ydoc_envelope(
             reason: "ydoc.update compaction failed",
         })?;
     }
-    Ok(map_applied_ydoc_outcome(outcome).with_refusals(drain_refusals))
+    // A dependency-resolving apply or drain that ORIGINATED journaled a
+    // base after this pass's push already ran: the pull must surface it,
+    // exactly like the adoption, cursor, and settlement edges. (A drain
+    // origination beside a refused primary outcome has no Applied result
+    // to ride; its base goes out with the next pass's push.)
+    let mut mapped = map_applied_ydoc_outcome(outcome);
+    if (originated_in_apply || drain_originated)
+        && let ApplyOutcome::Applied(result) = &mut mapped
+    {
+        result.pending_push = true;
+    }
+    Ok(mapped.with_refusals(drain_refusals))
 }
 
 fn map_applied_ydoc_outcome(

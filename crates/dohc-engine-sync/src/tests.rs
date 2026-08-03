@@ -7686,6 +7686,88 @@ fn a_refused_projection_never_originates() {
 }
 
 #[test]
+fn a_pull_that_resolves_a_dependency_reports_pending_push() {
+    // Codex #598 round 4: the dependency-triggered origination journaled a
+    // base and DISCARDED the fact — the third instance of the
+    // origination-without-push class after the cursor and settlement edges.
+    // The pull outcome must carry it. MUTATION: discard the origination
+    // result again (or hard-code pending_push in the map) — the
+    // pending_push assertion fails.
+    let (_scratch, _path, mut engine) = store();
+    let key = seed_owed_lineage(
+        &mut engine,
+        "object-pull-dep",
+        "notes/pull-dep.md",
+        "local text ",
+        dohc_engine_collab::Regime::Replicated,
+    );
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_cursors \
+                 (workspace_id, cursor, replication_epoch, stream_identity) \
+                 VALUES ('ws','0','epoch-1','stream-1')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("relay position");
+    let remote_doc = dohc_engine_collab::Ydoc::wire();
+    let predecessor = remote_doc.plaintext_insert(0, "remote base");
+    let dependent = remote_doc.plaintext_insert(0, "more ");
+    let dependent_sha = engine.put_binary_blob(&dependent).expect("dependent blob");
+    let predecessor_sha = engine
+        .put_binary_blob(&predecessor)
+        .expect("predecessor blob");
+    let dep_op = |seq: i64, sha: &str| {
+        envelope(
+            "peer",
+            seq,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-pull-dep",
+                "path": "notes/pull-dep.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": sha,
+                "isBaseState": false
+            }),
+        )
+    };
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![dep_op(0, &dependent_sha), dep_op(1, &predecessor_sha)],
+            next_cursor: 2,
+            has_more: false,
+        })),
+    });
+    let outcome = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("pull resolves the dependency");
+    assert!(
+        matches!(
+            outcome,
+            SyncPassOutcome::Complete {
+                pending_push: true,
+                ..
+            }
+        ),
+        "the dependency-resolving origination must surface: {outcome:?}"
+    );
+    assert_eq!(
+        journaled_ydoc_base_ops(&engine).len(),
+        1,
+        "the pull originated exactly one base"
+    );
+    let marker = dohc_engine_collab::read_marker(&engine, &key)
+        .expect("marker read")
+        .expect("marker");
+    assert!(marker.base_claimed);
+}
+
+#[test]
 fn a_coalesced_conflict_still_recounts_on_redelivery() {
     // Codex #596 P2: a later delta coalesces the conflict and rewrites its
     // incoming anchor, so a crash-redelivery recount keyed on the conflict
