@@ -2609,7 +2609,9 @@ describe("history page", () => {
     expect(placeholder.textContent).not.toContain("turned off in Settings");
 
     // Activity pushes take the no-engine refresh path too — the pin that
-    // kills the recurring listEngineMoments error loop.
+    // kills the recurring listEngineMoments error loop. (Residual outside
+    // this vector: before the FIRST status lands, one engine fetch can still
+    // fire and error once — a single IPC round-trip, not a loop.)
     const statusCalls = bridge.getSyncStatus.mock.calls.length;
     act(() => {
       bridge.emitWorkspaceActivity();
@@ -2668,9 +2670,21 @@ describe("history page", () => {
   });
 
   // #540's class on this surface: a shared view records no history BY
-  // DESIGN — a capability, not an opt-out, so no Settings blame.
+  // DESIGN — a capability, not an opt-out, so no Settings blame. The status
+  // is the one main REALLY produces for a shared view (capture === null sets
+  // historyRecordingOff, and the decision carries historyShareView): with a
+  // causeless fixture the share branch would be reached through a status no
+  // real share view has, and demoting it below the status checks — the #540
+  // bug reborn as Settings copy — would survive this suite.
   it("states the shared-view capability instead of blaming Settings", async () => {
     const bridge = makeBridge(Promise.resolve(null));
+    const shareStatus = {
+      ...SYNC_STATUS,
+      historyRecordingOff: true,
+      historyShareView: true,
+    };
+    bridge.openWorkspace = vi.fn(async () => shareStatus);
+    bridge.getSyncStatus = vi.fn(async () => shareStatus);
     const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
@@ -2679,7 +2693,9 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
     const placeholder = await screen.findByTestId("history-off-placeholder");
-    expect(placeholder.textContent).toContain("A shared view records no history");
+    await waitFor(() =>
+      expect(placeholder.textContent).toContain("A shared view records no history"),
+    );
     expect(placeholder.textContent).not.toContain("Settings");
   });
 
@@ -2690,6 +2706,14 @@ describe("history page", () => {
   // the capability instead, and must never ask main for engine moments.
   it("gives a shared view the capability truth and never asks for engine moments", async () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
+    // The status a real share view carries (capture === null, share cause).
+    const shareStatus = {
+      ...SYNC_STATUS,
+      historyRecordingOff: true,
+      historyShareView: true,
+    };
+    bridge.openWorkspace = vi.fn(async () => shareStatus);
+    bridge.getSyncStatus = vi.fn(async () => shareStatus);
     const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
@@ -2728,6 +2752,14 @@ describe("history page", () => {
   // instruct one — the false-instruction class this lane exists to kill.
   it("an ended share's placeholder does not name the Refresh it no longer has", async () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
+    // The status a real share view carries (capture === null, share cause).
+    const shareStatus = {
+      ...SYNC_STATUS,
+      historyRecordingOff: true,
+      historyShareView: true,
+    };
+    bridge.openWorkspace = vi.fn(async () => shareStatus);
+    bridge.getSyncStatus = vi.fn(async () => shareStatus);
     const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
