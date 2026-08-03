@@ -369,6 +369,24 @@ const bridge: DohcDesktopBridge = {
     }
     return { accepted: raw.accepted, completed: raw.completed, state };
   },
+  resumeUpdateInstall: async () => {
+    const result: unknown = await ipcRenderer.invoke(
+      CHANNELS.resumeUpdateInstall,
+    );
+    if (typeof result !== "object" || result === null || Array.isArray(result)) {
+      throw new Error("Invalid update install result from main process.");
+    }
+    const raw = result as Record<string, unknown>;
+    const state = parseUpdateStateEvent(raw.state);
+    if (
+      typeof raw.accepted !== "boolean" ||
+      typeof raw.completed !== "boolean" ||
+      !state
+    ) {
+      throw new Error("Invalid update install result from main process.");
+    }
+    return { accepted: raw.accepted, completed: raw.completed, state };
+  },
   // Content search (Phase E5.0): results stream main→renderer as bounded
   // batches; the searchId round-trips so stale batches drop renderer-side.
   searchWorkspace: (payload) =>

@@ -7881,6 +7881,20 @@ function registerIpcHandlers(
     return UpdateActionResult.parse(await autoUpdateController.installUpdate());
   });
 
+  ipcMain.handle(CHANNELS.resumeUpdateInstall, async (event) => {
+    assertTrustedSender(event);
+    if (!autoUpdateController) {
+      return UpdateActionResult.parse({
+        accepted: false,
+        completed: false,
+        state: currentUpdateState(),
+      });
+    }
+    return UpdateActionResult.parse(
+      await autoUpdateController.resumeBlockedInstall(),
+    );
+  });
+
   ipcMain.on(CHANNELS.firstPaint, (event) => {
     if (isTrustedFrame(event.senderFrame?.url ?? "")) {
       launchMarks.firstPaint();

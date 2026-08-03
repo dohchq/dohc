@@ -1397,18 +1397,25 @@ function MarkdownView(props: {
       // still landing. If that write FAILS, `unsavedDraft` is true again by
       // the time this resumes, and the retry below lands it before the move.
       //
-      // A LOOP, not one await (#579 review, r8): a queued writer parked in
-      // writeDraftNow's own wait resumes FIRST when the active write
-      // settles, claims the slot, and clears `unsavedDraft` — a single await
-      // would return here with that successor still landing. Each pass
-      // re-reads the slot, so the loop exits only when nothing is in flight.
-      while (pendingWrite.current) await pendingWrite.current;
-      // The ref, not the captured value: the shell can call this seam between
-      // the refusal and the re-registration. `opening` too (#567): a flush
-      // that arrives mid-reopen must not write the previous version's draft.
-      if (!unsavedDraft.current || writesBlocked() || openingRef.current) return;
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      await writeDraftNow({ rejectOnError: true });
+      // Drain until the queue is empty AT RELEASE (#579 review, r8 + r9):
+      // a queued writer parked in writeDraftNow's own wait resumes FIRST
+      // when the active write settles and claims the slot — including one
+      // that queued DURING this seam's own final write (Ctrl+S mid-flush).
+      // Each pass waits out everything in flight and lands any re-armed
+      // draft; the seam returns only when nothing is pending and nothing is
+      // queued, so no writer can still hold the previous version's text.
+      for (;;) {
+        while (pendingWrite.current) await pendingWrite.current;
+        // The ref, not the captured value: the shell can call this seam
+        // between the refusal and the re-registration. `opening` too (#567):
+        // a flush that arrives mid-reopen must not write the previous
+        // version's draft.
+        if (!unsavedDraft.current || writesBlocked() || openingRef.current) {
+          return;
+        }
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        await writeDraftNow({ rejectOnError: true });
+      }
     });
     return () => registerDraftFlush(null);
     // writeDraftNow reads refs (latestDraft) + per-mount-stable props only, so the

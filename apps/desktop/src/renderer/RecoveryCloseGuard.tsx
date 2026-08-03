@@ -12,14 +12,23 @@ import { RecoveryList } from "./RecoveryList";
 // beforeunload, cleared when the request itself fails without unloading.
 type PendingUnload = {
   kind: "reload" | "update";
-  resume: () => void;
+  // Re-runs the blocked action. Resolves TRUE when the action was accepted
+  // and an unload should follow, FALSE when it failed without unloading —
+  // the guard re-arms itself on false (#579 review, r9).
+  resume: () => Promise<boolean>;
 };
 let pendingUnload: PendingUnload | null = null;
 
 export function requestGuardedReload(): void {
   const attempt: PendingUnload = {
     kind: "reload",
-    resume: () => void bridge().reloadRenderer(),
+    resume: () =>
+      bridge()
+        .reloadRenderer()
+        .then(
+          () => true,
+          () => false,
+        ),
   };
   pendingUnload = attempt;
   void bridge()
@@ -30,13 +39,21 @@ export function requestGuardedReload(): void {
 }
 
 // The update install returns a result its callers surface (error copy, retry
-// affordances); the guard only records how to RETRY the restart. A request
+// affordances); the guard only records how to RESUME the restart. A resume
+// is not a second install request — main's in-flight gate refuses those —
+// so it goes through the dedicated resume IPC (#579 review, r9). A request
 // main refuses never unloads, so the slot is cleared instead of mislabeling
 // the user's next plain close as an update restart.
 export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult> {
   const attempt: PendingUnload = {
     kind: "update",
-    resume: () => void bridge().installUpdate(),
+    resume: () =>
+      bridge()
+        .resumeUpdateInstall()
+        .then(
+          (result) => result.accepted,
+          () => false,
+        ),
   };
   pendingUnload = attempt;
   try {
@@ -50,6 +67,12 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult>
     throw error;
   }
 }
+
+// Fail-safe for a bypassed unload that never happens and gives no failure
+// signal (window.close can be vetoed by another listener): the guard comes
+// back on its own. Not a rejection limit — real unloads land in
+// milliseconds; this only bounds how long the drafts go unguarded.
+const BYPASS_REARM_MS = 10_000;
 
 // Set-aside drafts (#567) live in renderer memory only, so closing or
 // reloading this window is the one exit that destroys them — and an
@@ -71,16 +94,29 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     count: number;
     // What the user asked for — the confirm button resumes exactly it.
     kind: "close" | "reload" | "update";
-    resume: (() => void) | null;
+    resume: (() => Promise<boolean>) | null;
   } | null>(null);
   const bypassCloseGuard = useRef(false);
+  const bypassRearmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rearmGuard = () => {
+    bypassCloseGuard.current = false;
+    if (bypassRearmTimer.current) {
+      clearTimeout(bypassRearmTimer.current);
+      bypassRearmTimer.current = null;
+    }
+  };
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       // Consumed either way: if this unload proceeds the slot dies with the
       // page, and if it is blocked the dialog now owns the answer.
       const pending = pendingUnload;
       pendingUnload = null;
-      if (bypassCloseGuard.current) return;
+      if (bypassCloseGuard.current) {
+        // One-shot (#579 review, r9): the bypass covers exactly the resumed
+        // unload attempt — never a later, unrelated close.
+        rearmGuard();
+        return;
+      }
       const count = orphanedDraftCount();
       if (count === 0) return;
       event.preventDefault();
@@ -91,7 +127,12 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       });
     };
     window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      if (bypassRearmTimer.current) clearTimeout(bypassRearmTimer.current);
+    };
+    // rearmGuard only touches refs; the handler registers once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
     <>
@@ -147,14 +188,32 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                 type="button"
                 data-testid="recovery-close-anyway"
                 onClick={() => {
-                  const resume = closeWarning.resume;
-                  bypassCloseGuard.current = true;
-                  setCloseWarning(null);
                   // Resume exactly what the user asked for: a requested
                   // reload or update restart must not become a plain exit
                   // (#579 review, r7 + r8).
-                  if (resume) resume();
-                  else window.close();
+                  const resume =
+                    closeWarning.resume ??
+                    (() => {
+                      window.close();
+                      return Promise.resolve(true);
+                    });
+                  setCloseWarning(null);
+                  // The bypass is scoped to THIS attempt (#579 review, r9):
+                  // consumed by the unload it permits, restored on an
+                  // explicit failure signal, and restored by the fail-safe
+                  // timer when no signal exists — a resumed action that
+                  // never unloads must not leave a later close unguarded.
+                  bypassCloseGuard.current = true;
+                  if (bypassRearmTimer.current) {
+                    clearTimeout(bypassRearmTimer.current);
+                  }
+                  bypassRearmTimer.current = setTimeout(
+                    rearmGuard,
+                    BYPASS_REARM_MS,
+                  );
+                  void resume().then((unloading) => {
+                    if (!unloading) rearmGuard();
+                  });
                 }}
                 className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
               >

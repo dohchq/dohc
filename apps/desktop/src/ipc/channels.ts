@@ -624,6 +624,7 @@ export const CHANNELS = {
   getUpdateState: "desktop:get-update-state",
   checkForUpdates: "desktop:check-for-updates",
   installUpdate: "desktop:install-update",
+  resumeUpdateInstall: "desktop:resume-update-install",
   workspaceActivity: "desktop:workspace-activity",
   cloudSessionChanged: "desktop:cloud-session-changed",
   firstPaint: "desktop:first-paint",

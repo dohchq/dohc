@@ -202,20 +202,29 @@ describe("RecoveryCloseGuard", () => {
   // plain close that leaves the app running without the update.
   it("a blocked update restart resumes as the update, never a plain exit", async () => {
     const user = userEvent.setup();
+    const readyState = {
+      status: "ready" as const,
+      message: "Update 1.2.4 is ready.",
+      currentVersion: "1.2.3",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.4",
+    };
     const installUpdate = vi.fn(async () => ({
       accepted: true,
       completed: false,
-      state: {
-        status: "ready" as const,
-        message: "Update 1.2.4 is ready.",
-        currentVersion: "1.2.3",
-        channel: "latest",
-        canCheck: false,
-        canInstall: true,
-        version: "1.2.4",
-      },
+      state: readyState,
     }));
-    vi.stubGlobal("dohcDesktop", { installUpdate });
+    // The resume IPC, not a second install request: main's in-flight gate
+    // refuses double requests, and "Restart anyway" is a resume (#579
+    // review, r9).
+    const resumeUpdateInstall = vi.fn(async () => ({
+      accepted: true,
+      completed: false,
+      state: readyState,
+    }));
+    vi.stubGlobal("dohcDesktop", { installUpdate, resumeUpdateInstall });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     render(
       <RecoveryCloseGuard>
@@ -242,9 +251,65 @@ describe("RecoveryCloseGuard", () => {
       .spyOn(window, "close")
       .mockImplementation(() => undefined);
     await user.click(screen.getByTestId("recovery-close-anyway"));
-    expect(installUpdate).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(resumeUpdateInstall).toHaveBeenCalledTimes(1));
+    expect(installUpdate).toHaveBeenCalledTimes(1);
     expect(closeSpy).not.toHaveBeenCalled();
     closeSpy.mockRestore();
+  });
+
+  // #579 review r9: the bypass is scoped to the one resumed unload attempt.
+  // If the resume fails without unloading, the guard must come BACK — a
+  // stuck bypass would let the next ordinary close destroy every draft
+  // silently.
+  it("re-arms the guard when the resumed action fails to unload", async () => {
+    const user = userEvent.setup();
+    const readyState = {
+      status: "ready" as const,
+      message: "Update 1.2.4 is ready.",
+      currentVersion: "1.2.3",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.4",
+    };
+    const installUpdate = vi.fn(async () => ({
+      accepted: true,
+      completed: false,
+      state: readyState,
+    }));
+    const resumeUpdateInstall = vi.fn(async () => ({
+      accepted: false,
+      completed: false,
+      state: readyState,
+    }));
+    vi.stubGlobal("dohcDesktop", { installUpdate, resumeUpdateInstall });
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+
+    await requestGuardedUpdateInstall();
+    const blocked = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(blocked);
+    });
+    await screen.findByTestId("recovery-close-warning");
+    await user.click(screen.getByTestId("recovery-close-anyway"));
+    await waitFor(() => expect(resumeUpdateInstall).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // MUTATION (scoped bypass): leave the bypass set after a failed resume.
+    // This close then passes unguarded and the drafts die silently.
+    const second = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(second);
+    });
+    expect(second.defaultPrevented).toBe(true);
+    expect(await screen.findByTestId("recovery-close-warning")).toBeTruthy();
   });
 
   it("a refused update install does not mislabel the next close as a restart", async () => {

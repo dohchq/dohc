@@ -3401,6 +3401,10 @@ export interface DohcDesktopBridge {
   getUpdateState(): Promise<UpdateStateEvent>;
   checkForUpdates(): Promise<UpdateCheckResult>;
   installUpdate(): Promise<UpdateActionResult>;
+  // Resumes an install whose quit the renderer's close guard blocked: the
+  // in-flight gate refuses a second install REQUEST, and "Restart anyway"
+  // needs a resume, not a request (#579 review, r9).
+  resumeUpdateInstall(): Promise<UpdateActionResult>;
   // Workspace content search (Phase E5.0). Resolves when the search has been
   // ACCEPTED and the rg child spawned; results stream separately through
   // onSearchResults. Issuing a new search cancels the previous one in main.
