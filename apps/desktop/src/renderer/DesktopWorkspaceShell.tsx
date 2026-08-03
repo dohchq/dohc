@@ -1933,16 +1933,37 @@ export function DesktopWorkspaceShell(props: {
       } else {
         // Nobody could name it: the operation changed no version, or it failed
         // and left an unknown one active. Ask. This read is the only remaining
-        // asynchronous boundary, it cannot retract an answer admitted while it
-        // was in flight, and a failure leaves the previous statement standing
-        // — which is not permanent blindness, because history answers carry
-        // the active version too and the next refresh to succeed was issued
-        // later. Narrowing what is left is #555.
+        // asynchronous boundary, and a failure leaves the previous statement
+        // standing — which is not permanent blindness, because history answers
+        // carry the active version too and the next refresh to succeed was
+        // issued later.
         void bridge()
           .listWorkspaceVersions({ workspaceId })
-          .then(({ activeVersionId: active }) =>
-            noteActiveEngineVersion(versionToken, active),
-          )
+          .then(({ activeVersionId: active }) => {
+            noteActiveEngineVersion(versionToken, active);
+            // A boundary that arrives after the answers it must judge is not
+            // a boundary (#555): while this lookup was in flight, an answer
+            // issued BEFORE it could commit against a guard that still named
+            // the version the user left. So judge the committed page now, by
+            // the same question every answer faces. Committed by a request
+            // older than this statement and naming a version the newest
+            // statement contradicts, it describes a timeline nobody is on —
+            // drop it and ask again. A merge or a resolution never trips
+            // this: they change no version, so the lookup only restates what
+            // the committed page already says.
+            const truth = activeEngineVersion.current.versionId;
+            if (
+              committedEngineHistoryToken.current < versionToken &&
+              committedEngineVersionId.current !== null &&
+              committedEngineVersionId.current !== truth
+            ) {
+              committedEngineVersionId.current = null;
+              setEngineHistory(null);
+              void refreshHistory().catch((error) =>
+                reportShellError("Could not refresh history.", error),
+              );
+            }
+          })
           .catch(() => undefined);
       }
       void refreshFiles().catch((error) =>
