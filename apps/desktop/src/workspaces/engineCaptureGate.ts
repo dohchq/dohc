@@ -79,8 +79,17 @@ export function engineOffRefusal(
   notEnabled: string,
   recovery: EngineOffRecovery,
 ): string {
-  // #483: the warning already names the unreadable file and the fix.
-  if (status.settingsWarning) return status.settingsWarning;
+  // #483: the warning already names the unreadable file and the fix. Its
+  // canonical closing instruction is restart — right for a retained session.
+  // On a retry path the entry is gone, so fixing the file and trying again
+  // rebuilds the capture without a restart. If the warning's format ever
+  // drifts past the replace, the untouched text still says restart — heavier
+  // than needed on that path, but never false.
+  if (status.settingsWarning) {
+    return recovery === "retry"
+      ? status.settingsWarning.replace(/ Then restart dohc.$/, " Then try again.")
+      : status.settingsWarning;
+  }
   if (status.historyRecordingUnavailable) {
     return recovery === "retry"
       ? "dohc could not start the workspace engine for this workspace. Try again."
@@ -89,28 +98,31 @@ export function engineOffRefusal(
   return notEnabled;
 }
 
-// The dispatch-run seam of the same refusal (#541, codex P2 on #583): the
-// caller holds a TRANSIENT open, and releasing it deletes the workspace's
-// activity entry — a status read after the release sees cause-less defaults
-// that read as the opt-out. This helper owns the order: the refusal is built
-// from the live status, THEN the hold is released, then it throws. A caller
-// with a capture attached gets a no-op.
+// The dispatch-run seam of the same refusal (#541, codex P2s on #583). Two
+// facts have to be read at the only moment each is true:
+// - the CAUSE comes from the status BEFORE the release — releasing a
+//   transient open deletes the entry, and its defaults read as the opt-out;
+// - the RECOVERY comes from what the release ACTUALLY did, not a pre-open
+//   snapshot — a workspace retained between open and release keeps its
+//   failed decision, and "try again" would be false there.
+// So: read the status, release, then build the message from whether the
+// release closed the entry. A caller with a capture attached gets a no-op.
 export async function releaseAndRefuseWithoutCapture(input: {
   capture: object | null;
   status: () => {
     settingsWarning?: string;
     historyRecordingUnavailable: boolean;
   };
-  release: () => Promise<void>;
+  // Resolves to whether it CLOSED the workspace's activity entry.
+  release: () => Promise<boolean>;
   notEnabled: string;
-  // Whether this open's release really closes the entry: a transient open
-  // recovers by retry, a retained one only by restart.
-  recovery: EngineOffRecovery;
 }): Promise<void> {
   if (input.capture) return;
-  const refusal = engineOffRefusal(input.status(), input.notEnabled, input.recovery);
-  await input.release();
-  throw new Error(refusal);
+  const status = input.status();
+  const closed = await input.release();
+  throw new Error(
+    engineOffRefusal(status, input.notEnabled, closed ? "retry" : "restart"),
+  );
 }
 
 // The gate's predicate on its own, for callers that must honor the opt-out

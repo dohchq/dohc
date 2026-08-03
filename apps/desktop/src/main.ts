@@ -2091,30 +2091,31 @@ async function closeDispatchRunActivity(workspaceId: string): Promise<void> {
 
 async function acquireDispatchRunActivity(
   workspace: CreatedWorkspace,
-): Promise<{ release: () => Promise<void>; transient: boolean }> {
+): Promise<() => Promise<boolean>> {
   const alreadyOpen = activity
     .listOpenWorkspaceIds()
     .includes(workspace.workspaceId);
-  // Transient means the release below really closes the entry — so a failed
-  // capture build recovers by simply trying again (the next open rebuilds
-  // it), where a retained session recovers only by restart (#541).
-  const transient =
-    !alreadyOpen && !retainedWorkspaceActivities.has(workspace.workspaceId);
   await workspaceChatLifecycle.open(
     workspace,
     () => ensureWorkspaceActivityOpen(workspace),
   );
   let released = false;
-  return {
-    transient,
-    release: async () => {
-      if (released) return;
-      released = true;
-      if (alreadyOpen || retainedWorkspaceActivities.has(workspace.workspaceId)) {
-        return;
-      }
-      await closeDispatchRunActivity(workspace.workspaceId);
-    },
+  let closed = false;
+  // The release resolves to whether it CLOSED the activity entry, decided at
+  // release time — not from a pre-open snapshot, because a retention that
+  // lands between open and release keeps the entry (and its failed capture
+  // decision) alive. The refusal's recovery instruction derives from this
+  // fact (#541): a closed entry is rebuilt by the next attempt; a kept one
+  // holds its decision until restart.
+  return async () => {
+    if (released) return closed;
+    released = true;
+    if (alreadyOpen || retainedWorkspaceActivities.has(workspace.workspaceId)) {
+      return closed;
+    }
+    await closeDispatchRunActivity(workspace.workspaceId);
+    closed = true;
+    return closed;
   };
 }
 
@@ -2207,17 +2208,18 @@ const chatDispatchService = createChatDispatchService({
     if (!registered) {
       throw new Error(`Unknown workspace: ${workspace.workspaceId}`);
     }
-    const { release, transient } = await acquireDispatchRunActivity(registered);
-    // The helper owns the read-then-release order: releasing the transient
-    // open deletes the status entry, and its defaults read as the opt-out.
+    const release = await acquireDispatchRunActivity(registered);
+    // The helper owns both orders (#583): cause read before the release,
+    // recovery derived from what the release actually did.
     await releaseAndRefuseWithoutCapture({
       capture: activity.engineCaptureFor(workspace.workspaceId),
       status: () => activity.getStatus(workspace.workspaceId),
       release,
       notEnabled: "Chats are not enabled for this workspace.",
-      recovery: transient ? "retry" : "restart",
     });
-    return release;
+    return async () => {
+      await release();
+    };
   },
   authorizeServiceNote: async (workspace, threadId, verifiedUserId) => {
     try {

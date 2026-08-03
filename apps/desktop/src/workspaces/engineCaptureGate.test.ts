@@ -181,6 +181,23 @@ describe("engineOffRefusal", () => {
     expect(refusal).toBe(warning);
     expect(refusal).toContain("/ws/.dohc/settings.local.json");
   });
+
+  // Codex P2 on #583 (round 3): on a retry path the entry is gone, so fixing
+  // the named file and trying again rebuilds the capture — the warning's
+  // restart instruction is the retained path's, not this one's. The file
+  // stays named either way.
+  it("keeps the file and adapts the unreadable-settings instruction on retry", () => {
+    const warning =
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
+    const refusal = engineOffRefusal(
+      { settingsWarning: warning, historyRecordingUnavailable: false },
+      NOT_ENABLED,
+      "retry",
+    );
+    expect(refusal).toBe(
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then try again.",
+    );
+  });
 });
 
 // Codex P2 on #583: releasing a dispatch's transient open deletes the
@@ -190,7 +207,7 @@ describe("engineOffRefusal", () => {
 describe("releaseAndRefuseWithoutCapture", () => {
   const NOT_ENABLED = "Chats are not enabled for this workspace.";
 
-  it("reads the cause before releasing the transient open", async () => {
+  it("reads the cause before releasing, and derives retry from the actual close", async () => {
     let released = false;
     await expect(
       releaseAndRefuseWithoutCapture({
@@ -203,17 +220,51 @@ describe("releaseAndRefuseWithoutCapture", () => {
             : { historyRecordingUnavailable: true },
         release: async () => {
           released = true;
+          return true;
         },
         notEnabled: NOT_ENABLED,
-        recovery: "retry",
       }),
     ).rejects.toThrow(
-      // The transient open's true next step: the release closed the entry,
-      // so the next attempt rebuilds the capture — no restart needed.
+      // The release CLOSED the entry, so the next attempt rebuilds the
+      // capture — no restart needed.
       "dohc could not start the workspace engine for this workspace. Try again.",
     );
     // The hold is still released — the refusal never leaks the open.
     expect(released).toBe(true);
+  });
+
+  // Codex P2 on #583 (round 3): the recovery derives from what the release
+  // ACTUALLY did. A workspace retained between open and release keeps its
+  // failed decision — the release closes nothing, and "Try again" would
+  // retry into the same kept failure forever.
+  it("says restart when the release kept the entry (retained race)", async () => {
+    await expect(
+      releaseAndRefuseWithoutCapture({
+        capture: null,
+        status: () => ({ historyRecordingUnavailable: true }),
+        release: async () => false,
+        notEnabled: NOT_ENABLED,
+      }),
+    ).rejects.toThrow(
+      "dohc could not start the workspace engine for this workspace. Restart dohc to try again.",
+    );
+  });
+
+  it("names the file and says try again for an unreadable-settings transient open", async () => {
+    await expect(
+      releaseAndRefuseWithoutCapture({
+        capture: null,
+        status: () => ({
+          settingsWarning:
+            "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.",
+          historyRecordingUnavailable: false,
+        }),
+        release: async () => true,
+        notEnabled: NOT_ENABLED,
+      }),
+    ).rejects.toThrow(
+      "Fix /ws/.dohc/settings.local.json. Then try again.",
+    );
   });
 
   it("keeps the hold and refuses nothing when the capture is attached", async () => {
@@ -223,9 +274,9 @@ describe("releaseAndRefuseWithoutCapture", () => {
       status: () => ({ historyRecordingUnavailable: false }),
       release: async () => {
         released = true;
+        return true;
       },
       notEnabled: NOT_ENABLED,
-      recovery: "retry",
     });
     expect(released).toBe(false);
   });
