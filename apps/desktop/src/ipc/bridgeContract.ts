@@ -2440,8 +2440,15 @@ export type ShareChatChannelResult = z.infer<typeof ShareChatChannelResult>;
 // enforce it. readRelayChatShareLanes applies it to the RELAY lanes before
 // this schema sees them: a relay-controlled body over the cap would otherwise
 // fail the parse below, reject the IPC call, and clear every cached row on the
-// sharing surface (#608). The joined lane is local and grows only when this
-// machine joins a channel, so the schema is its only guard.
+// sharing surface (#608).
+//
+// The joined lane is NOT guarded here, and it is not local-only either.
+// autoJoinReceivedDms appends a sharedChannels row per received DM grant on
+// every syncDms, with no user action, and endJoinedChannel only marks
+// `ended: true` — so that lane is relay-fed and grows monotonically. Past the
+// cap the parse below throws through the same door, and the count never
+// shrinks, so it stays broken. Tracked separately; do not read this comment as
+// a claim that the lane is safe.
 export const MAX_CHAT_CHANNEL_SHARE_ROWS = 1000;
 
 export const ChatChannelShareGrantRow = z.object({
