@@ -142,6 +142,24 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     // — resume when nothing is at stake, hold when the dialog takes over —
     // so main's hung-renderer fail-safe never fires for a live renderer.
     let unsubscribeQuit: (() => void) | undefined;
+    let unsubscribeRecoveryCheck: (() => void) | undefined;
+    try {
+      // Main re-asks at the quit boundary (#579 review, r12) — the answer is
+      // read at ANSWER time, so an edit set aside after this renderer's own
+      // check still blocks the install. The bypass means the user already
+      // decided in the dialog.
+      unsubscribeRecoveryCheck = bridge().onRecoveryCheckRequested?.(
+        (requestId) => {
+          void bridge().answerRecoveryCheck({
+            requestId,
+            blocked:
+              !bypassCloseGuard.current && orphanedDraftCount() > 0,
+          });
+        },
+      );
+    } catch {
+      unsubscribeRecoveryCheck = undefined;
+    }
     try {
       // Optional-call: a missing bridge or an older preload without the quit
       // API degrades to "no quit interception", never to a crashed guard —
@@ -170,6 +188,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       openRecoveryWarning = null;
       window.removeEventListener("beforeunload", onBeforeUnload);
       unsubscribeQuit?.();
+      unsubscribeRecoveryCheck?.();
       if (bypassRearmTimer.current) clearTimeout(bypassRearmTimer.current);
     };
     // rearmGuard only touches refs; the handlers register once.

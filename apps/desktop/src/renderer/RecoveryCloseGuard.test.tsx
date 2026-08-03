@@ -325,6 +325,57 @@ describe("RecoveryCloseGuard", () => {
     expect(await screen.findByTestId("recovery-close-warning")).toBeTruthy();
   });
 
+  // #579 review r12: main re-asks at the QUIT BOUNDARY, because a reopen can
+  // set an edit aside after the renderer's own pre-install check. The answer
+  // must be read when main asks, not when the install was requested.
+  it("answers main's boundary re-check with the state at answer time", async () => {
+    let checkListener: ((requestId: number) => void) | null = null;
+    const onRecoveryCheckRequested = vi.fn((listener: (id: number) => void) => {
+      checkListener = listener;
+      return () => {
+        checkListener = null;
+      };
+    });
+    const answerRecoveryCheck = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", {
+      onRecoveryCheckRequested,
+      answerRecoveryCheck,
+    });
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await waitFor(() => expect(checkListener).not.toBeNull());
+
+    // Nothing set aside yet: the install may proceed.
+    act(() => {
+      checkListener?.(1);
+    });
+    await waitFor(() =>
+      expect(answerRecoveryCheck).toHaveBeenCalledWith({
+        requestId: 1,
+        blocked: false,
+      }),
+    );
+
+    // A reopen sets an edit aside INSIDE the gap — the very race this
+    // re-check exists for.
+    // MUTATION (boundary re-check): answer a snapshot taken when the install
+    // was requested (or never register this listener). The install proceeds
+    // and quitAndInstall destroys the only copy.
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    act(() => {
+      checkListener?.(2);
+    });
+    await waitFor(() =>
+      expect(answerRecoveryCheck).toHaveBeenCalledWith({
+        requestId: 2,
+        blocked: true,
+      }),
+    );
+  });
+
   // #579 review r10: a native quit (Cmd+Q, tray Quit) is main-initiated —
   // main asks first, and the renderer's answer must resume the QUIT, never
   // swap it for a window close that leaves the process running on macOS.

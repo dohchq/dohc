@@ -374,6 +374,24 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.on(CHANNELS.quitRequested, handler);
     return () => ipcRenderer.removeListener(CHANNELS.quitRequested, handler);
   },
+  onRecoveryCheckRequested: (listener: (requestId: number) => void) => {
+    const handler = (_event: unknown, requestId: unknown) => {
+      // Only a number ever crosses this boundary; anything else is dropped.
+      if (typeof requestId === "number") listener(requestId);
+    };
+    ipcRenderer.on(CHANNELS.recoveryCheckRequested, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.recoveryCheckRequested, handler);
+  },
+  answerRecoveryCheck: async (payload: {
+    requestId: number;
+    blocked: boolean;
+  }) => {
+    await ipcRenderer.invoke(CHANNELS.recoveryCheckAnswer, {
+      requestId: payload.requestId,
+      blocked: payload.blocked,
+    });
+  },
   holdQuit: async () => {
     await ipcRenderer.invoke(CHANNELS.holdQuit);
   },

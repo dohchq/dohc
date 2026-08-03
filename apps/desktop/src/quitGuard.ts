@@ -25,6 +25,90 @@ export type QuitGuard = {
 // renderer resumes or holds within milliseconds.
 export const QUIT_ASK_TIMEOUT_MS = 3_000;
 
+// Which renderer answers for the quit. Not every window runs the workspace:
+// the PDF export creates a hidden, preload-less one, and asking IT about
+// set-aside drafts answers nothing while the user sees an "isn't responding"
+// dialog over drafts that were fully available (#579 review, r12). So the
+// workspace windows are TRACKED at creation, never guessed from a live-window
+// list.
+export type WorkspaceWindowRegistry<W> = {
+  track(window: W): W;
+  forget(window: W): void;
+  live(): W | undefined;
+};
+
+export function createWorkspaceWindowRegistry<W>(
+  isDestroyed: (window: W) => boolean,
+): WorkspaceWindowRegistry<W> {
+  const windows = new Set<W>();
+  return {
+    track(window) {
+      windows.add(window);
+      return window;
+    },
+    forget(window) {
+      windows.delete(window);
+    },
+    live() {
+      for (const window of windows) {
+        if (!isDestroyed(window)) return window;
+      }
+      return undefined;
+    },
+  };
+}
+
+// The recovery re-check at the quit boundary (#579 review, r12). The renderer
+// checks its own drafts before it asks for an install, and a reopen can set an
+// edit aside in the gap between that check and the IPC handler — separate
+// processes, and a queued render lands inside it. So main asks AGAIN at the
+// moment it would approve the quit.
+//
+// Fail-closed: a renderer that does not answer inside the window counts as
+// blocked. Refusing an install costs a retry; approving one destroys the only
+// copy of the user's text.
+export const RECOVERY_CHECK_TIMEOUT_MS = 2_000;
+
+export type RecoveryChecker = {
+  // True when unresolved set-aside drafts must stop the quit.
+  ask(): Promise<boolean>;
+  answer(requestId: number, blocked: boolean): void;
+};
+
+export function createRecoveryChecker(options: {
+  // Sends the request to the renderer; returns false when there is no
+  // renderer to ask (nothing rendered means nothing to lose).
+  send: (requestId: number) => boolean;
+  timeoutMs?: number;
+}): RecoveryChecker {
+  const timeoutMs = options.timeoutMs ?? RECOVERY_CHECK_TIMEOUT_MS;
+  let sequence = 0;
+  const pending = new Map<number, (blocked: boolean) => void>();
+  const settle = (requestId: number, blocked: boolean): void => {
+    const resolve = pending.get(requestId);
+    if (!resolve) return;
+    pending.delete(requestId);
+    resolve(blocked);
+  };
+  return {
+    ask() {
+      const requestId = ++sequence;
+      return new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => settle(requestId, true), timeoutMs);
+        timer.unref?.();
+        pending.set(requestId, (blocked) => {
+          clearTimeout(timer);
+          resolve(blocked);
+        });
+        if (!options.send(requestId)) settle(requestId, false);
+      });
+    },
+    answer(requestId, blocked) {
+      settle(requestId, blocked);
+    },
+  };
+}
+
 export function createQuitGuard(options: {
   askRenderer: () => void;
   // Main-side force-quit confirmation for a renderer that never answered.

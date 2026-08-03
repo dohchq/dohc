@@ -269,7 +269,11 @@ import {
   type PublicUpdateState,
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
-import { createQuitGuard } from "./quitGuard";
+import {
+  createQuitGuard,
+  createRecoveryChecker,
+  createWorkspaceWindowRegistry,
+} from "./quitGuard";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import {
   applyDesktopIconToPlatform,
@@ -1115,8 +1119,24 @@ function prioritizePreferredWorkspace(
   ];
 }
 
+// The windows that RUN the workspace renderer. Not every BrowserWindow does:
+// the PDF export creates a hidden, preload-less one, and asking IT about
+// set-aside drafts would answer nothing (#579 review, r12). Tracked at
+// creation instead of guessed from getAllWindows().
+const workspaceWindows = createWorkspaceWindowRegistry<BrowserWindow>(
+  (window) => window.isDestroyed(),
+);
+function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
+  workspaceWindows.track(window);
+  window.on("closed", () => workspaceWindows.forget(window));
+  return window;
+}
+function liveWorkspaceWindow(): BrowserWindow | undefined {
+  return workspaceWindows.live();
+}
+
 function targetWindow(window: BrowserWindow | undefined): BrowserWindow | undefined {
-  return window ?? BrowserWindow.getAllWindows()[0];
+  return window ?? liveWorkspaceWindow() ?? BrowserWindow.getAllWindows()[0];
 }
 
 function sendWorkspaceActivated(
@@ -2752,7 +2772,9 @@ async function showOrCreateMainWindow(): Promise<void> {
     return;
   }
   const { createMainWindow } = await import("./window/createMainWindow");
-  const window = createMainWindow({ beforeRendererReload: prepareForRendererReload });
+  const window = trackWorkspaceWindow(
+    createMainWindow({ beforeRendererReload: prepareForRendererReload }),
+  );
   window.show();
   window.focus();
 }
@@ -3112,10 +3134,11 @@ function requireAuthorizedWorkspace(
 // itself (#579 review, r11).
 const quitGuard = createQuitGuard({
   askRenderer: () => {
-    const window = BrowserWindow.getAllWindows().find(
-      (candidate) => !candidate.isDestroyed(),
-    );
-    window?.webContents.send(CHANNELS.quitRequested);
+    // The WORKSPACE window, never an arbitrary live one: the PDF export's
+    // hidden preload-less window would answer nothing and the user would get
+    // the unresponsive dialog over drafts that were fully available (#579
+    // review, r12).
+    liveWorkspaceWindow()?.webContents.send(CHANNELS.quitRequested);
   },
   confirmForceQuit: async () => {
     const { response } = await dialog.showMessageBox({
@@ -3131,6 +3154,24 @@ const quitGuard = createQuitGuard({
     return response === 1;
   },
   quit: () => app.quit(),
+});
+
+// Recovery re-check at the quit boundary (#579 review, r12). The renderer's
+// own check happens before it asks for the install, and a reopen can set an
+// edit aside in the gap between the two — separate processes, and a queued
+// render lands inside it. So main asks again HERE, and only then approves the
+// quit that quitAndInstall starts.
+//
+// Fail-closed: a renderer that does not answer inside the window is treated
+// as blocked. Refusing an install costs a retry; approving one destroys the
+// only copy of the user's text.
+const recoveryChecker = createRecoveryChecker({
+  send: (requestId) => {
+    const window = liveWorkspaceWindow();
+    if (!window) return false;
+    window.webContents.send(CHANNELS.recoveryCheckRequested, requestId);
+    return true;
+  },
 });
 
 function registerIpcHandlers(
@@ -7907,17 +7948,36 @@ function registerIpcHandlers(
         state: currentUpdateState(),
       });
     }
-    // The renderer decided BEFORE this call (its recovery check runs first,
-    // because quitAndInstall is one-shot) — pre-approve the quit the install
-    // is about to start so the ask does not veto it and burn the latch
-    // (#579 review, r10). A refused install revokes the approval: the next
-    // plain quit must still ask.
+    // Re-ask at the QUIT BOUNDARY (#579 review, r12): the renderer checked
+    // before it called, and a reopen can set an edit aside in the gap. Only
+    // once main has a fresh answer does it approve the quit that
+    // quitAndInstall starts — the ask cannot veto it afterwards, because
+    // that would burn the one-shot latch (#579 review, r10).
+    if (await recoveryChecker.ask()) {
+      return UpdateActionResult.parse({
+        accepted: false,
+        completed: false,
+        state: currentUpdateState(),
+      });
+    }
     quitGuard.approve();
     const result = UpdateActionResult.parse(
       await autoUpdateController.installUpdate(),
     );
     if (!result.accepted) quitGuard.revoke();
     return result;
+  });
+
+  ipcMain.handle(CHANNELS.recoveryCheckAnswer, (event, payload: unknown) => {
+    assertTrustedSender(event);
+    const answer = payload as { requestId?: unknown; blocked?: unknown };
+    if (
+      typeof answer?.requestId !== "number" ||
+      typeof answer?.blocked !== "boolean"
+    ) {
+      return;
+    }
+    recoveryChecker.answer(answer.requestId, answer.blocked);
   });
 
   ipcMain.handle(CHANNELS.holdQuit, (event) => {
@@ -8118,11 +8178,10 @@ if (!app.requestSingleInstanceLock()) {
   // confirmed) or hold (its dialog owns the decision). A silent renderer
   // gets the guard's MAIN-side dialog, never a silent force-quit.
   app.on("before-quit", (event) => {
-    const window = BrowserWindow.getAllWindows().find(
-      (candidate) => !candidate.isDestroyed(),
-    );
-    // No window means nobody to ask and nothing rendered to lose.
-    if (!window) return;
+    // No workspace window means nobody to ask and no renderer-held drafts to
+    // lose — a hidden export window is not a reason to intercept, and not a
+    // renderer that could answer (#579 review, r12).
+    if (!liveWorkspaceWindow()) return;
     quitGuard.beforeQuit(event);
   });
 
@@ -8217,7 +8276,9 @@ if (!app.requestSingleInstanceLock()) {
     // did-finish-load and never send at all.
     const drainedWorkspace = await flushPendingOpenPaths();
     const activatedWorkspace = drainedWorkspace ?? initialActivatedWorkspace;
-    const window = createMainWindow({ beforeRendererReload: prepareForRendererReload });
+    const window = trackWorkspaceWindow(
+      createMainWindow({ beforeRendererReload: prepareForRendererReload }),
+    );
     // Same tick as the window, so the load cannot finish before this listener.
     window.webContents.once("did-finish-load", () => {
       if (activatedWorkspace) sendWorkspaceActivated(window, activatedWorkspace);

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createQuitGuard } from "./quitGuard";
+import {
+  createQuitGuard,
+  createRecoveryChecker,
+  createWorkspaceWindowRegistry,
+} from "./quitGuard";
 
 function makeGuard(overrides: {
   confirmForceQuit?: () => Promise<boolean>;
@@ -130,5 +134,114 @@ describe("quit guard", () => {
     const afterRefusal = quitEvent();
     expect(guard.beforeQuit(afterRefusal)).toBe("asked");
     expect(afterRefusal.prevented).toBe(true);
+  });
+});
+
+// #579 review r12: which renderer answers for the quit. Not every window runs
+// the workspace — the PDF export creates a hidden, preload-less one — and
+// asking IT would answer nothing while the user sees the unresponsive dialog
+// over drafts that were fully available.
+describe("workspace window registry", () => {
+  type FakeWindow = { id: string; destroyed: boolean };
+
+  it("answers with a tracked workspace window, never another live window", () => {
+    const registry = createWorkspaceWindowRegistry<FakeWindow>(
+      (window) => window.destroyed,
+    );
+    const workspace: FakeWindow = { id: "workspace", destroyed: false };
+    // The PDF export's hidden window is never tracked.
+    const pdfExport: FakeWindow = { id: "pdf-export", destroyed: false };
+    registry.track(workspace);
+
+    // MUTATION (window targeting): pick the first live window from a list
+    // that includes untracked ones. The quit check reaches a renderer that
+    // cannot answer.
+    expect(registry.live()).toBe(workspace);
+    expect(registry.live()).not.toBe(pdfExport);
+  });
+
+  it("skips destroyed windows and forgets closed ones", () => {
+    const registry = createWorkspaceWindowRegistry<FakeWindow>(
+      (window) => window.destroyed,
+    );
+    const closed: FakeWindow = { id: "old", destroyed: true };
+    const open: FakeWindow = { id: "new", destroyed: false };
+    registry.track(closed);
+    registry.track(open);
+    expect(registry.live()).toBe(open);
+
+    registry.forget(open);
+    expect(registry.live()).toBeUndefined();
+  });
+});
+
+// #579 review r12: the renderer checks its drafts before it asks for an
+// install, and a reopen can set an edit aside in the gap before main's
+// handler runs. Main asks AGAIN at the moment it would approve the quit.
+describe("recovery boundary check", () => {
+  it("blocks when the renderer reports set-aside drafts at answer time", async () => {
+    let asked: number | null = null;
+    const checker = createRecoveryChecker({
+      send: (requestId) => {
+        asked = requestId;
+        return true;
+      },
+      timeoutMs: 1_000,
+    });
+    const pending = checker.ask();
+    expect(asked).not.toBeNull();
+    checker.answer(asked!, true);
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it("clears the quit when the renderer reports nothing set aside", async () => {
+    let asked: number | null = null;
+    const checker = createRecoveryChecker({
+      send: (requestId) => {
+        asked = requestId;
+        return true;
+      },
+      timeoutMs: 1_000,
+    });
+    const pending = checker.ask();
+    checker.answer(asked!, false);
+    await expect(pending).resolves.toBe(false);
+  });
+
+  it("fails CLOSED when the renderer never answers", async () => {
+    vi.useFakeTimers();
+    const checker = createRecoveryChecker({
+      send: () => true,
+      timeoutMs: 1_000,
+    });
+    const pending = checker.ask();
+    // MUTATION (fail-closed): resolve the timeout as false. An unanswered
+    // check would approve the quit and quitAndInstall destroys the drafts.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it("does not block when there is no renderer to ask", async () => {
+    const checker = createRecoveryChecker({ send: () => false });
+    // Nothing rendered means no renderer-held drafts to lose.
+    await expect(checker.ask()).resolves.toBe(false);
+  });
+
+  it("keeps answers keyed to their own request", async () => {
+    const ids: number[] = [];
+    const checker = createRecoveryChecker({
+      send: (requestId) => {
+        ids.push(requestId);
+        return true;
+      },
+      timeoutMs: 1_000,
+    });
+    const first = checker.ask();
+    const second = checker.ask();
+    expect(ids).toHaveLength(2);
+    checker.answer(ids[1]!, false);
+    checker.answer(ids[0]!, true);
+    await expect(first).resolves.toBe(true);
+    await expect(second).resolves.toBe(false);
   });
 });
