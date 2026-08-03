@@ -1526,11 +1526,10 @@ describe("engine markdown source view", () => {
         <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={0} />,
       );
       await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
-      await user.click(screen.getByTestId("markdown-edit-toggle"));
-      await user.type(
-        await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
-        "phantom",
-      );
+      // Same draft, no pointer: this test's typed click reached prosemirror's
+      // mousedown and threw AFTER it passed, which failed the whole run with
+      // every assertion green. See typeIntoSourceEditor.
+      await typeIntoSourceEditor(`${DOC_MARKDOWN}phantom`);
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
       // The version switch. Same mount, same pending draft, same armed timer.
