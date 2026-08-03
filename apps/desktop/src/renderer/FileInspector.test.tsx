@@ -1088,6 +1088,48 @@ describe("engine markdown source view", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  // #564. The engine open hit its retry deadline. Like notInVersion, this
+  // must NOT downgrade to the writable plain editor — the engine may still
+  // bind the document, and a plain autosave meanwhile would take the disk
+  // path #533 closed. The document stays readable, read-only, with the
+  // reason stated and a retry that issues a fresh open.
+  it("keeps a timed-out open read-only with the reason, and retries on request", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    let opens = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      openEngineYDocSession: vi.fn(async () => {
+        opens += 1;
+        return { available: false, openTimedOut: true };
+      }),
+    });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const notice = await screen.findByTestId(
+      "engine-open-timeout-notice",
+      {},
+      { timeout: 5_000 },
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not open this file for editing in time.",
+    );
+    expect(notice.textContent).toContain("It is read-only for now.");
+    // The content still renders — read-only, not replaced.
+    expect(screen.getByTestId("view-markdown")).toBeTruthy();
+    // MUTATION: drop openTimedOut from the readOnly computation -> the edit
+    // toggle is enabled over a session the engine may still bind.
+    expect(
+      (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(opens).toBe(1);
+
+    // Try again is a FRESH open (a new request key), not a repaint.
+    await user.click(screen.getByText("Try again"));
+    await waitFor(() => expect(opens).toBe(2));
+  });
+
   // THE P1 the review reproduced. Typing during the open wait arms an 800ms
   // autosave AND leaves a pending draft. When the refusal arrived, `readOnly`
   // flipped false->true; `readOnly` was a dependency of the unmount-flush
