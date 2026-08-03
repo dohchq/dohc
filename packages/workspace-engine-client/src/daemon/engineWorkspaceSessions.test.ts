@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DaemonRefusalError } from "../live/daemonLiveAdapter";
 import type { Request } from "../ydoc/generated/Request";
 import type { Response } from "../ydoc/generated/Response";
 import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
@@ -865,6 +866,44 @@ describe("EngineWorkspaceSessions", () => {
       expect(reads).toBeLessThanOrEqual(4);
     });
 
+    it("bounds an afterReconnect storm, which takes no backoff at all", async () => {
+      // codex round 3: an `afterReconnect` retry skipped the whole waiting
+      // block, so it consulted neither gate — six attempts, each paying a
+      // 2 s workspace.open, holding the capture chain for ~12 s.
+      const workspace = await tempWorkspace("workspace-reconnect-storm");
+      const client = new MockClient("handle-reconnect");
+      let nowMs = 0;
+      let attempts = 0;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .run(
+          workspace,
+          async () => {
+            attempts += 1;
+            nowMs += 2_000;
+            throw new DaemonRefusalError(
+              {
+                code: "CONFLICT",
+                message: "workspace moved",
+                retry: "afterReconnect",
+              },
+              undefined,
+            );
+          },
+          { retryTransportErrors: true, retryDeadlineMs: 5_000 },
+        )
+        .catch((error: unknown) => error);
+
+      // MUTATION: gate only the transport branch -> six attempts and a
+      // DaemonRefusalError instead.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(attempts).toBe(3);
+    });
+
     it("rejects an invalid deadline instead of quietly voiding it", async () => {
       const workspace = await tempWorkspace("workspace-bad-deadline");
       const client = new MockClient("handle-bad-deadline");
@@ -944,6 +983,36 @@ describe("EngineWorkspaceSessions", () => {
       });
       sessions.beginShutdown();
       await expect(run).rejects.toBeInstanceOf(EngineWorkspaceRebindError);
+    });
+
+    it("makes a later afterReconnect refusal final too", async () => {
+      // Same gap from the shutdown side: an afterReconnect storm at quit
+      // never consulted `shuttingDown`, so it kept reopening the workspace
+      // while the teardown waited on the chain behind it.
+      const workspace = await tempWorkspace("workspace-reconnect-shutdown");
+      const client = new MockClient("handle-reconnect-quit");
+      let attempts = 0;
+      const sessions = new EngineWorkspaceSessions({
+        currentClient: () => client,
+      });
+      sessions.beginShutdown();
+
+      await expect(
+        sessions.run(workspace, async () => {
+          attempts += 1;
+          throw new DaemonRefusalError(
+            {
+              code: "CONFLICT",
+              message: "workspace moved",
+              retry: "afterReconnect",
+            },
+            undefined,
+          );
+        }, { retryTransportErrors: true }),
+      ).rejects.toBeInstanceOf(DaemonRefusalError);
+      // MUTATION: gate only the transport branch -> the full six-attempt
+      // ladder runs while the quit teardown waits behind it.
+      expect(attempts).toBe(1);
     });
 
     it("makes a later transport failure final instead of retried", async () => {

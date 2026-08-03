@@ -1077,7 +1077,18 @@ function MarkdownView(props: {
     }
   }, [props.body, editing]);
 
-  async function writeDraftNow(options: { rejectOnError?: boolean } = {}): Promise<void> {
+  async function writeDraftNow(
+    options: {
+      rejectOnError?: boolean;
+      // Landing a draft that predates a timed-out open, at the moment the
+      // user asks to retry (#564, codex round 3). The document is read-only
+      // BECAUSE that open timed out, so the ordinary guard would refuse the
+      // one write that makes the retry safe: no session is bound yet, and
+      // writing now is what puts the keystrokes into the file the engine is
+      // about to seed from. Every other refusal still applies.
+      landingBeforeRetry?: boolean;
+    } = {},
+  ): Promise<void> {
     // The REF, not the captured value. The 800ms autosave timer holds the
     // closure from the render that armed it, where readOnly was false — so a
     // document that turned read-only after the keystroke still wrote (#534).
@@ -1091,7 +1102,11 @@ function MarkdownView(props: {
     // and #567 owns that: preserving the TEXT needs eager serialization,
     // because `serializeDraftRef` reads the live editor and a read-only window
     // unmounts it — a naive rearm here writes the PRE-EDIT body.
-    if (writesBlocked()) {
+    if (
+      options.landingBeforeRetry
+        ? props.writesRefusedRef.current
+        : writesBlocked()
+    ) {
       setSaveState("error");
       return;
     }
@@ -1134,6 +1149,38 @@ function MarkdownView(props: {
     latestDraft.current = next;
     if (mode === "read") setSavedBody(next);
     scheduleSave();
+  }
+
+  /**
+   * "Try again" after a timed-out open (#564, codex round 3).
+   *
+   * A draft typed BEFORE the reopen is still armed here: its 800 ms timer and
+   * `unsavedDraft` outlive the timeout, and a successful retry clears the
+   * write guard — so the timer (or the unmount flush) could then write that
+   * stale text OVER the artifact the engine just bound. Landing it FIRST is
+   * what gives those keystrokes somewhere to go: no session exists yet, so
+   * the write is the plain editor's to make, and the engine seeds from a file
+   * that already holds it.
+   *
+   * A failed landing still retries — the save state says "Couldn't save", and
+   * refusing to reopen would strand the user in a read-only document. The
+   * text a user types DURING the retry window is #579's set-aside case, not
+   * this one's.
+   */
+  function landDraftThenRetry(): void {
+    const retry = props.onRetryEngineOpen;
+    if (!retry) return;
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    if (!unsavedDraft.current) {
+      retry();
+      return;
+    }
+    void writeDraftNow({ landingBeforeRetry: true })
+      .catch(() => undefined)
+      .finally(() => retry());
   }
 
   function scheduleSave() {
@@ -1510,7 +1557,7 @@ function MarkdownView(props: {
       />
       {props.truncatedNotice}
       {engine.openTimedOut && props.onRetryEngineOpen ? (
-        <EngineOpenTimedOutNotice onRetry={props.onRetryEngineOpen} contentShown />
+        <EngineOpenTimedOutNotice onRetry={landDraftThenRetry} contentShown />
       ) : null}
       {surfaceMode === "source" ? (
         <textarea
@@ -2425,7 +2472,13 @@ export function FileInspector(props: {
     );
   }
 
-  if (isText && (text === null || loadedPath !== props.path)) {
+  // An engine document that BOUND does not need the file read: the canonical
+  // Y.Doc is the content, and main holds the live session. Without this, a
+  // read that failed before a successful retry left the user at "Couldn't
+  // read this file." with no document and no way back, while the session it
+  // describes was live (#564, codex round 3).
+  const engineDocBound = engine.available && engine.doc !== null;
+  if (isText && !engineDocBound && (text === null || loadedPath !== props.path)) {
     // Keep the inspector frame mounted while loading/erroring so the surface
     // is stable (and testable) rather than flickering between containers.
     return (

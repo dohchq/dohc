@@ -309,21 +309,25 @@ export class EngineWorkspaceSessions {
           }
           rebindStarted = true;
           lastError = error;
+          // Both gates bound WAITING, never a healthy first attempt: at quit
+          // the failure is final, and past the caller's deadline the run
+          // stops starting new attempts (#564). They gate EVERY retry,
+          // whichever disposition asked for it — an `afterReconnect` retry
+          // takes no backoff, so it used to skip these entirely and spend
+          // six full opens holding the capture chain, through the quit timer.
+          if (this.shuttingDown) throw error;
+          this.throwPastRetryDeadline(
+            workspace.workspaceId,
+            retryDeadlineMs,
+            startedAtMs,
+            attempt,
+            error,
+          );
           if (retryAfterTransport) {
-            // Both gates bound WAITING, never a healthy first attempt: at
-            // quit the failure is final, and past the caller's deadline the
-            // run stops starting new backoff/attempt rounds (#564). The
-            // deadline is checked on BOTH sides of the backoff — an attempt
-            // that ends just inside it must not ride the backoff over the
-            // line and then start a fresh open on a spent budget.
-            if (this.shuttingDown) throw error;
-            this.throwPastRetryDeadline(
-              workspace.workspaceId,
-              retryDeadlineMs,
-              startedAtMs,
-              attempt,
-              error,
-            );
+            // Only a transport retry waits, and the deadline is checked on
+            // BOTH sides of that wait — an attempt that ends just inside it
+            // must not ride the backoff over the line and then start a fresh
+            // open on a spent budget.
             await this.interruptibleSleep(transportBackoffMs(attempt));
             if (this.shuttingDown) throw error;
             this.throwPastRetryDeadline(

@@ -1209,16 +1209,118 @@ describe("engine markdown source view", () => {
 
       await user.click(screen.getByText("Try again"));
       await waitFor(() => expect(opens).toBe(3));
-      // The retry is pending: openTimedOut has cleared, and the armed 800ms
-      // autosave fires inside this window. MUTATION: drop the retry-window
-      // gate from writesRefusedRef -> this write lands.
+      // ONE write: the retry landed the pending draft before asking to
+      // reopen (round 3 P1). Nothing else may reach disk while the open is
+      // in flight — MUTATION: drop the retry-window gate from
+      // writesRefusedRef -> a second, stale write lands inside the window.
+      const writesAfterLanding = bridgeMock.writeWorkspaceText.mock.calls.length;
+      expect(writesAfterLanding).toBe(1);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
       });
-      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+      expect(bridgeMock.writeWorkspaceText.mock.calls).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // #564, codex round 3 P1: a draft typed BEFORE the timed-out reopen is
+  // still armed — its timer and `unsavedDraft` outlive the timeout, and a
+  // SUCCESSFUL retry clears the write guard, so that stale text could land
+  // on top of the artifact the engine just bound. The retry lands it FIRST,
+  // while no session exists, so the engine seeds from a file that holds it.
+  it("lands a pending draft before the retry binds, never after", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      let opens = 0;
+      const order: string[] = [];
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        writeWorkspaceText: vi.fn(async () => {
+          order.push("write");
+          return { path: "a.md", recorded: true };
+        }),
+        openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
+          opens += 1;
+          order.push(`open-${opens}`);
+          // Open 1: plain fallback (writable) — the draft is typed here.
+          // Open 2 (a version switch): times out.
+          // Open 3 ("Try again"): BINDS.
+          if (opens === 1) return { available: false };
+          if (opens === 2) return { available: false, openTimedOut: true };
+          return await bridgeMock.openEngineYDocSession(payload);
+        }),
+      });
+
+      const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+      await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
+
+      view.rerender(
+        <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
+      );
+      await screen.findByTestId(
+        "engine-open-timeout-notice",
+        {},
+        { timeout: 5_000 },
+      );
+      // The armed timer must not have written during the read-only window.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      expect(order).toEqual(["open-1", "open-2"]);
+
+      fireEvent.click(screen.getByText("Try again"));
+      await waitFor(() => expect(opens).toBe(3));
+      // MUTATION: retry without landing the draft -> the write lands AFTER
+      // open-3, over the artifact the engine just bound (or never at all,
+      // and the keystrokes are gone).
+      expect(order).toEqual(["open-1", "open-2", "write", "open-3"]);
+
+      // Nothing stale is left armed to fire over the bound session.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(order.filter((step) => step === "write")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // #564, codex round 3 P2: the read had failed, so the inspector's
+  // loading/error branch owned the surface. A SUCCESSFUL retry clears
+  // `openTimedOut` — and the user was left at "Couldn't read this file."
+  // with no document and no retry, while main held a live session.
+  it("renders the document when the retry binds after a failed read", async () => {
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    let opens = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      readWorkspaceText: vi.fn(async () => {
+        throw new Error("read failed");
+      }),
+      openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
+        opens += 1;
+        return opens === 1
+          ? { available: false, openTimedOut: true }
+          : await bridgeMock.openEngineYDocSession(payload);
+      }),
+    });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId(
+      "engine-open-timeout-notice",
+      {},
+      { timeout: 5_000 },
+    );
+    fireEvent.click(screen.getByText("Try again"));
+
+    // MUTATION: let the read-error branch win over a bound engine doc ->
+    // this never appears and the user keeps "Couldn't read this file."
+    await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+    expect(screen.queryByText("Couldn't read this file.")).toBeNull();
   });
 
   // #564, review round 2 B2: the OTHER direction of the same guard. The
