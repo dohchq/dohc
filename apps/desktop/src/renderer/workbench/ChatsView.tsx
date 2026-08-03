@@ -2855,6 +2855,16 @@ export function ChatsView(props: {
   );
 
   const goBack = useCallback(() => {
+    // Back is an explicit command like any conversation click: report it
+    // synchronously through the same seam, so a DM answer queued in this
+    // tick cannot pass its isCurrent() check and remount over the place the
+    // user just went back to. Every BackHeader (and the keyboard shortcut)
+    // routes through here.
+    props.onNavCommand?.(
+      nav.level === "thread"
+        ? { level: "channel", channel: nav.channel }
+        : { level: "channels" },
+    );
     liveToken.current += 1;
     if (nav.level === "thread") {
       // Re-open the channel so thread ordering/badges reflect what happened
@@ -2876,7 +2886,7 @@ export function ChatsView(props: {
       setDmDraft("");
       void refreshDms();
     }
-  }, [nav, openChannel, refreshDms, refreshOverview]);
+  }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
 
   const reactionsByMessage = useMemo(() => {
     const result = new Map<string, ChatReactionRecord[]>();

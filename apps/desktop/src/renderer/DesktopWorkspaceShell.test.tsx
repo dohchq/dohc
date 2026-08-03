@@ -1827,6 +1827,52 @@ describe("ui-state merge-on-load", () => {
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
   }, 20_000);
 
+  // The same race through the BACK button: every BackHeader and the keyboard
+  // shortcut route through goBack, which must issue the same synchronous
+  // command — a DM answer queued in the tick of the Back click would
+  // otherwise pass its isCurrent() check and remount the DM over the channel
+  // the user went back to.
+  it("discards a DM answer that lands in the same tick as the Back click", async () => {
+    const user = userEvent.setup();
+    const bridge = chatsPageBridge(CHATS_PAGE_STATE);
+    renderShell(bridge);
+
+    // Land in a thread via the feed.
+    await user.click(await screen.findByTestId("chats-feed-link"));
+    const post = await screen.findByText("Feed update worth revisiting");
+    await user.click(post.closest("button")!);
+    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
+
+    // Start a canonical DM navigation from the graph and leave it in flight.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    const dmCallsBefore = bridge.syncDms.mock.calls.length;
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() =>
+      expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1),
+    );
+    await user.click(screen.getByTestId("activity-graph"));
+
+    // The DM answers in the same tick the user presses Back.
+    const backButton = screen.getByTestId("chats-thread-back");
+    const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
+    await act(async () => {
+      bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
+      backButton.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByTestId("chats-channel-view")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
+    // Same proof as the feed-click race: a DM answer that wins remounts the
+    // page, which loads the overview again. The cancel won only if it
+    // did not.
+    expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
+  }, 20_000);
+
   // The awaited form of the same click: a feed item carrying a focus target
   // navigates in place (openConversation -> command + report), and the DM
   // answers late. The destination write must cancel it.
