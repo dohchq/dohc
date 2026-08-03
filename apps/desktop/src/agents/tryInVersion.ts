@@ -34,10 +34,9 @@ export interface TryVersionSnapshotLike {
 export interface TryVersionOperations {
   listVersions(): Promise<TryVersionSnapshotLike>;
   createVersion(name: string): Promise<TryVersionSnapshotLike>;
-  compareVersions(
-    sourceVersionId: string,
-    targetVersionId?: string,
-  ): Promise<Array<{ path: string }>>;
+  // The review card needs the count only; counting reads the engine's
+  // metadata listing and hydrates no text (#562).
+  compareVersionsChangedCount(sourceVersionId: string): Promise<number>;
 }
 
 export type TryInVersionRunState =
@@ -150,8 +149,9 @@ export function createTryInVersionSessions(options: TryInVersionSessionsOptions)
     const task = (async () => {
       let changedFileCount: number | null = null;
       try {
-        const changes = await session.ops.compareVersions(session.state.versionId);
-        changedFileCount = changes.length;
+        changedFileCount = await session.ops.compareVersionsChangedCount(
+          session.state.versionId,
+        );
       } catch {
         // Count unavailable — the review state says so (null), never guesses.
       }

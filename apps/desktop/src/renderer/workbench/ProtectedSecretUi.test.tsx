@@ -81,6 +81,7 @@ describe("VersionComparePage protected rows", () => {
           incomingText: "new text\n",
         },
       ],
+      nextAfterPath: null,
     });
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });

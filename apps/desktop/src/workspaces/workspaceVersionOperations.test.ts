@@ -623,10 +623,14 @@ async function openDivergedTextConflict(incomingText: string | null = "draft\n")
 
   const draftId = await versionIdByName(engine, "Draft");
   const merge = await engine.mergeVersionIntoMain(draftId);
-  if (merge.conflicts.length !== 1) {
-    throw new Error(`Expected one conflict, received ${merge.conflicts.length}.`);
+  if (merge.conflictCount !== 1) {
+    throw new Error(`Expected one conflict, received ${merge.conflictCount}.`);
   }
-  return { root, loopback, engine, conflict: merge.conflicts[0] };
+  const page = await engine.listOpenConflictsPage();
+  if (page.conflicts.length !== 1) {
+    throw new Error(`Expected one open conflict, received ${page.conflicts.length}.`);
+  }
+  return { root, loopback, engine, conflict: page.conflicts[0] };
 }
 
 describe("active-version capture routing", () => {
@@ -952,19 +956,22 @@ describe("compareVersions", () => {
 
     const draftId = await versionIdByName(engine, "Draft");
     const changes = await engine.compareVersions(draftId);
-    expect(changes).toEqual([
-      { path: "added.md", status: "added", incomingText: "new in draft\n" },
-      {
-        path: "plan.md",
-        status: "modified",
-        currentText: "v1 text\n",
-        incomingText: "draft text\n",
-      },
-    ]);
+    expect(changes).toEqual({
+      files: [
+        { path: "added.md", status: "added", incomingText: "new in draft\n" },
+        {
+          path: "plan.md",
+          status: "modified",
+          currentText: "v1 text\n",
+          incomingText: "draft text\n",
+        },
+      ],
+      nextAfterPath: null,
+    });
 
     await engine.switchVersion("main");
     const noChanges = await engine.compareVersions("main");
-    expect(noChanges).toEqual([]);
+    expect(noChanges).toEqual({ files: [], nextAfterPath: null });
     await engine.stop();
   });
 });
@@ -984,7 +991,7 @@ describe("mergeVersionIntoMain", () => {
 
     const draftId = await versionIdByName(engine, "Draft");
     const result = await engine.mergeVersionIntoMain(draftId);
-    expect(result.conflicts).toEqual([]);
+    expect(result.conflictCount).toBe(0);
     expect(result.mergedFileCount).toBe(1);
     // Main is active: the merged content lands on disk.
     expect(await readText(root, "plan.md")).toBe("draft text\n");
@@ -1052,15 +1059,17 @@ describe("mergeVersionIntoMain", () => {
     const draftId = await versionIdByName(engine, "Draft");
     const result = await engine.mergeVersionIntoMain(draftId);
     expect(result.mergedFileCount).toBe(0);
-    expect(result.conflicts).toHaveLength(1);
-    const conflict = result.conflicts[0];
+    expect(result.conflictCount).toBe(1);
+    const open = await engine.listOpenConflictsPage();
+    expect(open.conflicts).toHaveLength(1);
+    expect(open.nextAfterConflictId).toBeNull();
+    const conflict = open.conflicts[0];
     expect(conflict.path).toBe("plan.md");
     expect(conflict.base.text).toBe("base line\n");
     expect(conflict.current.text).toBe("main line\n");
     expect(conflict.incoming.text).toBe("draft line\n");
     // Main's disk state is untouched while the conflict is open.
     expect(await readText(root, "plan.md")).toBe("main line\n");
-    expect(await engine.listOpenConflicts()).toHaveLength(1);
     await engine.stop();
   });
 
@@ -1090,14 +1099,19 @@ describe("mergeVersionIntoMain", () => {
 
     const draftId = await versionIdByName(engine, "Draft");
     const merge = await engine.mergeVersionIntoMain(draftId);
-    expect(merge.conflicts).toHaveLength(3);
-    const byPath = new Map(merge.conflicts.map((conflict) => [conflict.path, conflict]));
+    expect(merge.conflictCount).toBe(3);
+    const mergeConflicts = (await engine.listOpenConflictsPage()).conflicts;
+    expect(mergeConflicts).toHaveLength(3);
+    const byPath = new Map(
+      mergeConflicts.map((conflict) => [conflict.path, conflict]),
+    );
 
     const kept = await engine.resolveConflict(byPath.get("a.md")!.id, {
       kind: "keep-current",
     });
     expect(kept.conflict.resolution).toBe("kept-current");
-    expect(kept.remaining).toHaveLength(2);
+    expect(kept.remaining.conflicts).toHaveLength(2);
+    expect(kept.remaining.nextAfterConflictId).toBeNull();
     expect(await readText(root, "a.md")).toBe("main a.md\n");
 
     const incoming = await engine.resolveConflict(byPath.get("b.md")!.id, {
@@ -1112,9 +1126,10 @@ describe("mergeVersionIntoMain", () => {
       text: "combined c\n",
     });
     expect(merged.conflict.resolution).toBe("applied-merged");
-    expect(merged.remaining).toHaveLength(0);
+    expect(merged.remaining.conflicts).toHaveLength(0);
+    expect(merged.remaining.nextAfterConflictId).toBeNull();
     expect(await readText(root, "c.md")).toBe("combined c\n");
-    expect(await engine.listOpenConflicts()).toHaveLength(0);
+    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(0);
 
     // Resolution disk writes never re-capture.
     const momentsBefore = (await readDaemonMoments(loopback)).length;
@@ -1147,7 +1162,7 @@ describe("mergeVersionIntoMain", () => {
 
     const draftId = await versionIdByName(engine, "Draft");
     const merge = await engine.mergeVersionIntoMain(draftId);
-    expect(merge.conflicts).toEqual([]);
+    expect(merge.conflictCount).toBe(0);
     expect(merge.mergedFileCount).toBe(1);
     // Main is active, so the merged bytes reach the folder byte-exactly.
     expect(await readBytes(root, "logo.png")).toEqual(draftBytes);
@@ -1174,8 +1189,8 @@ describe("mergeVersionIntoMain", () => {
 
     const draftId = await versionIdByName(engine, "Draft");
     const merge = await engine.mergeVersionIntoMain(draftId);
-    expect(merge.conflicts).toHaveLength(1);
-    const conflict = merge.conflicts[0]!;
+    expect(merge.conflictCount).toBe(1);
+    const conflict = (await engine.listOpenConflictsPage()).conflicts[0]!;
     expect(conflict.incoming.contentKind).toBe("binary");
 
     const resolved = await engine.resolveConflict(conflict.id, {
@@ -1213,8 +1228,8 @@ describe("mergeVersionIntoMain", () => {
     await engine.flush();
 
     const draftId = await versionIdByName(engine, "Draft");
-    const merge = await engine.mergeVersionIntoMain(draftId);
-    const conflict = merge.conflicts[0]!;
+    await engine.mergeVersionIntoMain(draftId);
+    const conflict = (await engine.listOpenConflictsPage()).conflicts[0]!;
     loopback.dropHeadAfterBinaryResolve("logo.png");
 
     // The message reaches the conflict panel, so it must read as user copy:
@@ -1247,8 +1262,8 @@ describe("mergeVersionIntoMain", () => {
     await engine.flush();
 
     const draftId = await versionIdByName(engine, "Draft");
-    const merge = await engine.mergeVersionIntoMain(draftId);
-    const conflict = merge.conflicts[0]!;
+    await engine.mergeVersionIntoMain(draftId);
+    const conflict = (await engine.listOpenConflictsPage()).conflicts[0]!;
     expect(conflict.incoming.contentKind).toBe("binary");
     const resolved = await engine.resolveConflict(conflict.id, {
       kind: "keep-current",
@@ -1257,7 +1272,7 @@ describe("mergeVersionIntoMain", () => {
     // Both choices cannot mirror the same side.
     expect(resolved.conflict.resolution).toBe("kept-current");
     expect(resolved.conflict.chosenFrom).toBe("current");
-    expect(resolved.remaining).toHaveLength(0);
+    expect(resolved.remaining.conflicts).toHaveLength(0);
     expect(await readBytes(root, "logo.png")).toEqual(mainBytes);
     await engine.stop();
   });
@@ -1292,7 +1307,7 @@ describe("mergeVersionIntoMain", () => {
       engine.resolveConflict(conflict.id, { kind: "apply-incoming" }),
     ).rejects.toThrow(/conflict-stale-target/);
     expect(await readText(root, "plan.md")).toBe("newer current\n");
-    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(1);
     await engine.stop();
   });
 
@@ -1320,7 +1335,7 @@ describe("mergeVersionIntoMain", () => {
 
     expect(merged.conflict.resolution).toBe("applied-merged");
     expect(await readText(root, "plan.md")).toBe(combined);
-    expect(await engine.listOpenConflicts()).toHaveLength(0);
+    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(0);
     // NOTHING was fetched to get here. The body the answer withheld is the
     // body this call submitted, so the write materialized from what the caller
     // already held.
@@ -1361,15 +1376,16 @@ describe("mergeVersionIntoMain", () => {
     loopback.seedSettledText(WORKSPACE_ID, draftId, "plan.md", incoming);
 
     const merge = await engine.mergeVersionIntoMain(draftId);
-    expect(merge.conflicts).toHaveLength(1);
+    expect(merge.conflictCount).toBe(1);
+    const conflictId = (await engine.listOpenConflictsPage()).conflicts[0]!.id;
     loopback.failEveryBlobRead = true;
-    const applied = await engine.resolveConflict(merge.conflicts[0].id, {
+    const applied = await engine.resolveConflict(conflictId, {
       kind: "apply-incoming",
     });
 
     expect(applied.conflict.resolution).toBe("applied-incoming");
     expect(await readText(root, "plan.md")).toBe(incoming);
-    expect(await engine.listOpenConflicts()).toHaveLength(0);
+    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(0);
     await engine.stop();
   });
 
@@ -1433,7 +1449,7 @@ describe("mergeVersionIntoMain", () => {
       engine.resolveConflict(conflict.id, { kind: "apply-merged", text: justPast }),
     ).rejects.toThrow(/merged-text-exceeds-wire-limit/);
     expect(await readText(root, "plan.md")).toBe("current\n");
-    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(1);
     await engine.stop();
   });
 
@@ -1452,7 +1468,7 @@ describe("mergeVersionIntoMain", () => {
       ),
     );
     expect(await readText(root, "plan.md")).toBe("current\n");
-    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(1);
     await engine.stop();
   });
 
@@ -1479,7 +1495,7 @@ describe("mergeVersionIntoMain", () => {
         },
       }),
     ).rejects.toThrow(/conflict-not-found/);
-    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(1);
     await engine.stop();
   });
 
@@ -1498,14 +1514,17 @@ describe("mergeVersionIntoMain", () => {
 
     const draftId = await versionIdByName(engine, "Draft");
     const first = await engine.mergeVersionIntoMain(draftId);
-    expect(first.conflicts).toHaveLength(1);
+    expect(first.conflictCount).toBe(1);
+    const firstOpen = (await engine.listOpenConflictsPage()).conflicts;
+    expect(firstOpen).toHaveLength(1);
 
     // User closed the conflict panel; merging again surfaces the SAME open
     // conflict — duplicates never pile up.
     const second = await engine.mergeVersionIntoMain(draftId);
-    expect(second.conflicts).toHaveLength(1);
-    expect(second.conflicts[0].id).toBe(first.conflicts[0].id);
-    expect(await engine.listOpenConflicts()).toHaveLength(1);
+    expect(second.conflictCount).toBe(1);
+    const secondOpen = (await engine.listOpenConflictsPage()).conflicts;
+    expect(secondOpen).toHaveLength(1);
+    expect(secondOpen[0].id).toBe(firstOpen[0].id);
     await engine.stop();
   });
 

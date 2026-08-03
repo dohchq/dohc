@@ -110,6 +110,7 @@ import {
   CompareWorkspaceVersionsResult,
   MergeWorkspaceVersionPayload,
   MergeWorkspaceVersionResult,
+  ListWorkspaceVersionConflictsPayload,
   ListWorkspaceVersionConflictsResult,
   ResolveWorkspaceVersionConflictPayload,
   ResolveWorkspaceVersionConflictResult,
@@ -1608,8 +1609,7 @@ function engineForWorkspace(
     // Post-pass open-conflict truth: pulled peer resolutions and local
     // resolutions both clear the status-bar/notice conflict state, and the
     // ids lifecycle the pending remote-resolve notice (0P-C gate fix).
-    listOpenConflictIds: async () =>
-      (await capture.listOpenConflicts()).map((conflict) => conflict.id),
+    listOpenConflictIds: async () => await capture.listOpenConflictIds(),
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
     ...(engineOptions.joinBootstrap ? { joinBootstrap: true } : {}),
@@ -5158,9 +5158,10 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = CompareWorkspaceVersionsPayload.parse(payload);
     const capture = await requireVersionOperations(input.workspaceId);
-    return CompareWorkspaceVersionsResult.parse({
-      files: await capture.compareVersions(input.versionId),
+    const page = await capture.compareVersions(input.versionId, {
+      ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
     });
+    return CompareWorkspaceVersionsResult.parse(page);
   });
 
   ipcMain.handle(CHANNELS.mergeWorkspaceVersion, async (event, payload) => {
@@ -5169,20 +5170,29 @@ function registerIpcHandlers(
     const capture = await requireVersionOperations(input.workspaceId);
     const result = await capture.mergeVersionIntoMain(input.versionId);
     notifyRenderer();
+    // The merge reports a count; the rows are open conflicts in the engine,
+    // read back one page at a time like every other conflict reader (#562).
+    const page =
+      result.conflictCount > 0
+        ? await capture.listOpenConflictsPage()
+        : { conflicts: [], nextAfterConflictId: null };
     return MergeWorkspaceVersionResult.parse({
       mergedFileCount: result.mergedFileCount,
       unchangedFileCount: result.unchangedFileCount,
-      conflicts: result.conflicts.map(versionConflictForIpc),
+      conflictCount: result.conflictCount,
+      conflicts: page.conflicts.map(versionConflictForIpc),
+      nextAfterConflictId: page.nextAfterConflictId,
     });
   });
 
   ipcMain.handle(CHANNELS.listWorkspaceVersionConflicts, async (event, payload) => {
     assertTrustedSender(event);
-    const input = ListWorkspaceFilesPayload.parse(payload);
+    const input = ListWorkspaceVersionConflictsPayload.parse(payload);
     const capture = await requireVersionOperations(input.workspaceId);
-    const conflicts = await capture.listOpenConflicts();
+    const page = await capture.listOpenConflictsPage(input.afterConflictId);
     return ListWorkspaceVersionConflictsResult.parse({
-      conflicts: conflicts.map(versionConflictForIpc),
+      conflicts: page.conflicts.map(versionConflictForIpc),
+      nextAfterConflictId: page.nextAfterConflictId,
     });
   });
 
@@ -5205,7 +5215,8 @@ function registerIpcHandlers(
       activity.queueCloudSync(input.workspaceId);
       notifyRenderer();
       return ResolveWorkspaceVersionConflictResult.parse({
-        conflicts: outcome.remaining.map(versionConflictForIpc),
+        conflicts: outcome.remaining.conflicts.map(versionConflictForIpc),
+        nextAfterConflictId: outcome.remaining.nextAfterConflictId,
       });
     },
   );

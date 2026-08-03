@@ -524,6 +524,28 @@ export class VersionedLiveAdapter {
     });
   }
 
+  // One page of the daemon's whole-version comparison: differing paths with
+  // status only, in path order, under the daemon's own page budget. Callers
+  // hydrate the sides they need per path (#562).
+  async compareVersionFilesPage(input: {
+    workspaceId: string;
+    sourceVersionId: string;
+    targetVersionId: string;
+    afterPath?: string;
+  }): Promise<{
+    entries: VersionedMethodResultMap["versions.compareFiles"]["entries"];
+    nextAfterPath: string | null;
+  }> {
+    this.assertWorkspace(input.workspaceId);
+    const page = await this.request(VERSIONED_METHOD.versionsCompareFiles, {
+      workspaceId: input.workspaceId,
+      sourceVersionId: input.sourceVersionId,
+      targetVersionId: input.targetVersionId,
+      ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
+    });
+    return { entries: page.entries, nextAfterPath: page.nextCursor };
+  }
+
   async mergeTextFileFromVersion(input: {
     workspaceId: string;
     targetVersionId: string;
@@ -553,26 +575,32 @@ export class VersionedLiveAdapter {
     );
   }
 
+  // ONE `conflicts.list` page, passed through with the daemon's own
+  // continuation. This adapter used to drain every page into one array, which
+  // undid the daemon's paging for every caller at once (#562).
   async listTextConflicts(input: {
     workspaceId: string;
     status?: "open" | "resolved";
-  }): Promise<ConflictRecord[]> {
+    afterConflictId?: string;
+  }): Promise<{
+    conflicts: ConflictRecord[];
+    nextAfterConflictId: string | null;
+  }> {
     this.assertWorkspace(input.workspaceId);
-    const conflicts: ConflictRecord[] = [];
-    let afterConflictId: string | undefined;
-    do {
-      const params: ConflictListParams = {
-        ...(input.status !== undefined ? { status: input.status } : {}),
-        ...(afterConflictId !== undefined ? { afterConflictId } : {}),
-      };
-      const page = await this.workspaceRequest(
-        WORKSPACE_METHOD.conflictsList,
-        params,
-      );
-      conflicts.push(...page.conflicts);
-      afterConflictId = page.nextAfterConflictId ?? undefined;
-    } while (afterConflictId !== undefined);
-    return conflicts;
+    const params: ConflictListParams = {
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.afterConflictId !== undefined
+        ? { afterConflictId: input.afterConflictId }
+        : {}),
+    };
+    const page = await this.workspaceRequest(
+      WORKSPACE_METHOD.conflictsList,
+      params,
+    );
+    return {
+      conflicts: page.conflicts,
+      nextAfterConflictId: page.nextAfterConflictId,
+    };
   }
 
   async openTextConflict(

@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import type {
+  ResolveWorkspaceVersionConflictResult,
   WorkspaceVersionConflict,
   WorkspaceVersionFileChange,
   WorkspaceVersionRecord,
@@ -776,7 +777,14 @@ type MergeStage =
   | { stage: "confirm" }
   | { stage: "running" }
   | { stage: "clean"; mergedFileCount: number }
-  | { stage: "conflicts"; conflicts: WorkspaceVersionConflict[] }
+  // One loaded window of the open-conflict listing (#562): the rows shown so
+  // far, and the continuation for the rest. Resolving replaces the window
+  // with the first page of what remains.
+  | {
+      stage: "conflicts";
+      conflicts: WorkspaceVersionConflict[];
+      nextAfterConflictId: string | null;
+    }
   | { stage: "resolved-all" }
   | { stage: "error"; message: string };
 
@@ -821,8 +829,15 @@ export function VersionMergeDialog(props: {
       });
       if (token !== liveToken.current) return;
       props.onWorkspaceStateChanged();
-      if (result.conflicts.length > 0) {
-        setStage({ stage: "conflicts", conflicts: result.conflicts });
+      // The merge's own count decides the stage: the rows are the first page
+      // of ALL open conflicts, and a lingering sync conflict must not turn a
+      // clean merge into a conflicted one.
+      if (result.conflictCount > 0) {
+        setStage({
+          stage: "conflicts",
+          conflicts: result.conflicts,
+          nextAfterConflictId: result.nextAfterConflictId,
+        });
       } else {
         setStage({ stage: "clean", mergedFileCount: result.mergedFileCount });
       }
@@ -836,16 +851,39 @@ export function VersionMergeDialog(props: {
   }, [props, source.id, workspaceId]);
 
   const onResolved = useCallback(
-    (remaining: WorkspaceVersionConflict[]) => {
+    (remaining: ResolveWorkspaceVersionConflictResult) => {
       props.onWorkspaceStateChanged();
       setStage(
-        remaining.length > 0
-          ? { stage: "conflicts", conflicts: remaining }
+        remaining.conflicts.length > 0 || remaining.nextAfterConflictId !== null
+          ? {
+              stage: "conflicts",
+              conflicts: remaining.conflicts,
+              nextAfterConflictId: remaining.nextAfterConflictId,
+            }
           : { stage: "resolved-all" },
       );
     },
     [props],
   );
+
+  const loadMoreConflicts = useCallback(async () => {
+    if (stage.stage !== "conflicts" || stage.nextAfterConflictId === null) return;
+    const token = liveToken.current;
+    const page = await bridge().listWorkspaceVersionConflicts({
+      workspaceId,
+      afterConflictId: stage.nextAfterConflictId,
+    });
+    if (token !== liveToken.current) return;
+    setStage((current) =>
+      current.stage === "conflicts"
+        ? {
+            stage: "conflicts",
+            conflicts: [...current.conflicts, ...page.conflicts],
+            nextAfterConflictId: page.nextAfterConflictId,
+          }
+        : current,
+    );
+  }, [stage, workspaceId]);
 
   // Closing while merging is never allowed. While conflicts are open, closing
   // is EXPLICIT only ("Finish later"): a stray backdrop click or Escape must
@@ -941,16 +979,18 @@ export function VersionMergeDialog(props: {
           {stage.stage === "conflicts" ? (
             <>
               <p className="m-0 text-xs leading-5 text-muted" role="status" data-testid="version-merge-status">
-                {source.name} and Main both changed{" "}
-                {stage.conflicts.length === 1
-                  ? "one file"
-                  : `${stage.conflicts.length} files`}
-                . Choose which copy Main should keep — nothing is lost either way.
+                {conflictCountCopy(
+                  stage.conflicts.length,
+                  stage.nextAfterConflictId !== null,
+                )}{" "}
+                Choose which copy Main should keep — nothing is lost either way.
               </p>
               <div className="mt-3">
                 <ConflictList
                   workspaceId={workspaceId}
                   conflicts={stage.conflicts}
+                  hasMore={stage.nextAfterConflictId !== null}
+                  onLoadMore={loadMoreConflicts}
                   sourceNameFor={() => source.name}
                   onResolved={onResolved}
                 />
@@ -1178,7 +1218,7 @@ function ConflictResolver(props: {
   sourceName: string;
   expanded: boolean;
   onToggle: () => void;
-  onResolved: (remaining: WorkspaceVersionConflict[]) => void;
+  onResolved: (remaining: ResolveWorkspaceVersionConflictResult) => void;
 }) {
   const { conflict, expanded, sourceName, workspaceId } = props;
   const [busy, setBusy] = useState(false);
@@ -1286,7 +1326,7 @@ function ConflictResolver(props: {
           resolution,
         });
         if (token !== liveToken.current) return;
-        props.onResolved(result.conflicts);
+        props.onResolved(result);
       } catch (caught) {
         if (token !== liveToken.current) return;
         setError(ipcErrorMessage(caught, "Could not apply that choice."));
@@ -1476,22 +1516,39 @@ function ConflictResolver(props: {
   );
 }
 
-// Every open conflict, one card each, ONE of them expanded (#536). Both
-// conflict surfaces render through this: the merge dialog and the standalone
-// review dialog. The list can be any length — the engine pages `conflicts.list`
-// but the desktop client drains every page into one array (#562) — so what the
-// list PAINTS must not grow with it.
+// The loaded window of open conflicts, one card each, ONE of them expanded
+// (#536). Both conflict surfaces render through this: the merge dialog and
+// the standalone review dialog. The window is one or more engine pages
+// (#562): "Show more files" fetches the next page, and resolving replaces
+// the window with the first page of what remains.
 function ConflictList(props: {
   workspaceId: string;
   conflicts: WorkspaceVersionConflict[];
+  // Whether a continuation exists past the loaded window.
+  hasMore: boolean;
+  onLoadMore: () => Promise<void>;
   sourceNameFor: (conflict: WorkspaceVersionConflict) => string;
-  onResolved: (remaining: WorkspaceVersionConflict[]) => void;
+  onResolved: (remaining: ResolveWorkspaceVersionConflictResult) => void;
 }) {
   // `undefined` means the user has not chosen yet. `null` means the user
   // collapsed the open card, which is a state they are allowed to be in — the
   // two must not be the same value, or closing a card reopens the first one.
   const [chosenId, setChosenId] = useState<string | null | undefined>(undefined);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const openId = openConflictId(props.conflicts, chosenId);
+  const { onLoadMore } = props;
+  const loadMore = useCallback(() => {
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    void onLoadMore()
+      .catch((error) => {
+        setLoadMoreError(
+          ipcErrorMessage(error, "Couldn't load more conflicting files."),
+        );
+      })
+      .finally(() => setLoadingMore(false));
+  }, [onLoadMore]);
 
   return (
     <div className="flex flex-col gap-3">
@@ -1508,8 +1565,41 @@ function ConflictList(props: {
           onResolved={props.onResolved}
         />
       ))}
+      {props.hasMore ? (
+        <div className="flex flex-col items-start gap-1">
+          <button
+            type="button"
+            data-testid="conflict-list-show-more"
+            disabled={loadingMore}
+            onClick={loadMore}
+            className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+          >
+            {loadingMore ? "Loading…" : "Show more files"}
+          </button>
+          {loadMoreError ? (
+            <p className="m-0 text-[11px] leading-4 text-danger" role="alert">
+              {loadMoreError}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
+}
+
+/// The count sentence both conflict surfaces open with. The loaded window may
+/// not be the whole listing (#562): while a continuation is open more
+/// conflicts exist past the window, so the sentence says "more than" — never
+/// a number that could be under the truth.
+export function conflictCountCopy(count: number, hasMore: boolean): string {
+  if (hasMore) {
+    return count === 1
+      ? "More than one file has two copies."
+      : `More than ${count} files have two copies.`;
+  }
+  return count === 1
+    ? "One file has two copies."
+    : `${count} files have two copies.`;
 }
 
 /// Which conflict is expanded. Exported for its own tests: the three states it
@@ -1561,14 +1651,20 @@ export function VersionComparePage(props: {
     | {
         status: "ready";
         versionName: string;
+        // The loaded window of the comparison (#562): one or more pages, and
+        // the continuation for the rest.
         files: WorkspaceVersionFileChange[];
+        nextAfterPath: string | null;
       }
   >({ status: "loading" });
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
+    setLoadMoreError(null);
     void (async () => {
       const [versions, comparison] = await Promise.all([
         bridge().listWorkspaceVersions({ workspaceId }),
@@ -1578,7 +1674,12 @@ export function VersionComparePage(props: {
       const name =
         versions.versions.find((version) => version.id === versionId)?.name ??
         "This version";
-      setState({ status: "ready", versionName: name, files: comparison.files });
+      setState({
+        status: "ready",
+        versionName: name,
+        files: comparison.files,
+        nextAfterPath: comparison.nextAfterPath,
+      });
     })().catch((error) => {
       if (cancelled) return;
       setState({
@@ -1590,6 +1691,35 @@ export function VersionComparePage(props: {
       cancelled = true;
     };
   }, [workspaceId, versionId, refreshNonce]);
+
+  const loadMore = useCallback(() => {
+    if (state.status !== "ready" || state.nextAfterPath === null) return;
+    const afterPath = state.nextAfterPath;
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    void bridge()
+      .compareWorkspaceVersions({ workspaceId, versionId, afterPath })
+      .then((page) => {
+        setState((current) =>
+          // Guarded by the cursor: a refresh that replaced the window resets
+          // nextAfterPath, and a stale page for the old cursor must not
+          // append to the new window.
+          current.status === "ready" && current.nextAfterPath === afterPath
+            ? {
+                ...current,
+                files: [...current.files, ...page.files],
+                nextAfterPath: page.nextAfterPath,
+              }
+            : current,
+        );
+      })
+      .catch((error) => {
+        setLoadMoreError(
+          ipcErrorMessage(error, "Couldn't load more changed files."),
+        );
+      })
+      .finally(() => setLoadingMore(false));
+  }, [state, workspaceId, versionId]);
 
   return (
     <section
@@ -1608,11 +1738,17 @@ export function VersionComparePage(props: {
             <p className="mb-0 mt-1 text-[11px] text-muted">
               {state.files.length === 0
                 ? "The two versions have the same text files."
-                : `${state.files.length} file${
-                    state.files.length === 1 ? "" : "s"
-                  } differ${state.files.length === 1 ? "s" : ""} between ${
-                    state.versionName
-                  } and Main.`}
+                : state.nextAfterPath !== null
+                  ? `More than ${state.files.length} file${
+                      state.files.length === 1 ? "" : "s"
+                    } differ${state.files.length === 1 ? "s" : ""} between ${
+                      state.versionName
+                    } and Main.`
+                  : `${state.files.length} file${
+                      state.files.length === 1 ? "" : "s"
+                    } differ${state.files.length === 1 ? "s" : ""} between ${
+                      state.versionName
+                    } and Main.`}
             </p>
           ) : null}
         </div>
@@ -1705,6 +1841,24 @@ export function VersionComparePage(props: {
                 )}
               </section>
             ))}
+            {state.nextAfterPath !== null ? (
+              <div className="flex flex-col items-center gap-1">
+                <button
+                  type="button"
+                  data-testid="version-compare-show-more"
+                  disabled={loadingMore}
+                  onClick={loadMore}
+                  className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+                >
+                  {loadingMore ? "Loading…" : "Show more files"}
+                </button>
+                {loadMoreError ? (
+                  <p className="m-0 text-[11px] leading-4 text-danger" role="alert">
+                    {loadMoreError}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         )}
       </div>
@@ -1732,7 +1886,12 @@ export function ConflictReviewDialog(props: {
   const [state, setState] = useState<
     | { status: "loading" }
     | { status: "error"; message: string }
-    | { status: "ready"; conflicts: WorkspaceVersionConflict[]; resolvedAny: boolean }
+    | {
+        status: "ready";
+        conflicts: WorkspaceVersionConflict[];
+        nextAfterConflictId: string | null;
+        resolvedAny: boolean;
+      }
   >({ status: "loading" });
   const [versionNames, setVersionNames] = useState<Map<string, string>>(new Map());
   const liveToken = useRef(0);
@@ -1761,7 +1920,12 @@ export function ConflictReviewDialog(props: {
             (versions?.versions ?? []).map((version) => [version.id, version.name]),
           ),
         );
-        setState({ status: "ready", conflicts: result.conflicts, resolvedAny: false });
+        setState({
+          status: "ready",
+          conflicts: result.conflicts,
+          nextAfterConflictId: result.nextAfterConflictId,
+          resolvedAny: false,
+        });
       } catch (error) {
         if (token !== liveToken.current) return;
         setState({
@@ -1773,18 +1937,47 @@ export function ConflictReviewDialog(props: {
   }, [workspaceId]);
 
   const onResolved = useCallback(
-    (remaining: WorkspaceVersionConflict[]) => {
+    (remaining: ResolveWorkspaceVersionConflictResult) => {
       props.onWorkspaceStateChanged();
-      setState({ status: "ready", conflicts: remaining, resolvedAny: true });
+      setState({
+        status: "ready",
+        conflicts: remaining.conflicts,
+        nextAfterConflictId: remaining.nextAfterConflictId,
+        resolvedAny: true,
+      });
     },
     [props],
   );
 
+  const loadMoreConflicts = useCallback(async () => {
+    if (state.status !== "ready" || state.nextAfterConflictId === null) return;
+    const token = liveToken.current;
+    const page = await bridge().listWorkspaceVersionConflicts({
+      workspaceId,
+      afterConflictId: state.nextAfterConflictId,
+    });
+    if (token !== liveToken.current) return;
+    setState((current) =>
+      current.status === "ready"
+        ? {
+            ...current,
+            conflicts: [...current.conflicts, ...page.conflicts],
+            nextAfterConflictId: page.nextAfterConflictId,
+          }
+        : current,
+    );
+  }, [state, workspaceId]);
+
   const conflicts = state.status === "ready" ? state.conflicts : [];
+  const hasMoreConflicts =
+    state.status === "ready" && state.nextAfterConflictId !== null;
+  // A continuation with an empty window still means open conflicts exist —
+  // the empty state and the close discipline must not read it as "all done".
+  const anyOpen = conflicts.length > 0 || hasMoreConflicts;
   // Same close discipline as the merge dialog: while conflicts are open,
   // closing is explicit only — a stray backdrop click must not discard a
   // hand-written combined copy.
-  const canCloseFromBackdrop = state.status !== "ready" || conflicts.length === 0;
+  const canCloseFromBackdrop = state.status !== "ready" || !anyOpen;
 
   return (
     <Overlay onClose={() => (canCloseFromBackdrop ? props.onClose() : undefined)}>
@@ -1801,9 +1994,7 @@ export function ConflictReviewDialog(props: {
           </h3>
           {state.status === "ready" && conflicts.length > 0 ? (
             <p className="mb-0 mt-1 text-xs leading-5 text-muted">
-              {conflicts.length === 1
-                ? "One file has two copies."
-                : `${conflicts.length} files have two copies.`}{" "}
+              {conflictCountCopy(conflicts.length, hasMoreConflicts)}{" "}
               Choose what stays — nothing is lost either way, and History keeps
               both.
             </p>
@@ -1821,7 +2012,7 @@ export function ConflictReviewDialog(props: {
               {state.message}
             </p>
           ) : null}
-          {state.status === "ready" && conflicts.length === 0 ? (
+          {state.status === "ready" && !anyOpen ? (
             <p
               data-testid="conflict-review-empty"
               className="m-0 text-xs leading-5 text-success"
@@ -1836,6 +2027,8 @@ export function ConflictReviewDialog(props: {
             <ConflictList
               workspaceId={workspaceId}
               conflicts={conflicts}
+              hasMore={hasMoreConflicts}
+              onLoadMore={loadMoreConflicts}
               sourceNameFor={(conflict) =>
                 versionNames.get(conflict.sourceVersionId) ?? "the other version"
               }
@@ -1851,7 +2044,7 @@ export function ConflictReviewDialog(props: {
             onClick={props.onClose}
             className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
           >
-            {conflicts.length > 0 ? "Finish later" : "Done"}
+            {anyOpen ? "Finish later" : "Done"}
           </button>
         </footer>
       </div>
