@@ -267,11 +267,78 @@ describe("EngineWorkspaceSessions", () => {
           { workspaceId: "workspace", rootPath },
           async (binding) => binding.workspace,
         ),
-      ).rejects.toThrow("must not be a symlink");
+      ).rejects.toThrow(
+        relativeLink === ".dohc"
+          ? "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry."
+          : "dohc could not start the engine for this workspace. A link is at .dohc/engine, which must be a real folder. Remove or rename that link. Then retry.",
+      );
       expect(requests).toBe(0);
       await expect(
         readFile(join(outside, "SHADOW_CLONE"), "utf8"),
       ).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  // The squat shapes an errno allowlist gets wrong. mkdir raises EEXIST for a
+  // file and ENOENT for a dangling link, so the old `isAlreadyExists` check
+  // rethrew the dangling case as a bare errno and answered the file case with
+  // "must not be a symlink" -- about a plain file. Presence decides now, and
+  // both name what is actually there (#612).
+  it.each([
+    [
+      "a file",
+      ".dohc",
+      async (rootPath: string) => {
+        await writeFile(join(rootPath, ".dohc"), "squatting");
+      },
+      "dohc could not open this workspace's .dohc folder. A file is at .dohc, which must be a real folder. Remove or rename that file. Then retry.",
+    ],
+    [
+      "a dangling link",
+      ".dohc",
+      async (rootPath: string) => {
+        // Measured on this host: a plain mkdir answers EEXIST for a dangling
+        // link of either kind, while mkdir{recursive} answers ENOENT. So the
+        // errno an allowlist would have to know differs by CALL, not only by
+        // platform -- which is the argument for keying on presence instead.
+        await symlink(join(rootPath, "nowhere"), join(rootPath, ".dohc"), "dir");
+      },
+      "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.",
+    ],
+    [
+      "a file",
+      ".dohc/engine",
+      async (rootPath: string) => {
+        await mkdir(join(rootPath, ".dohc"));
+        await writeFile(join(rootPath, ".dohc", "engine"), "squatting");
+      },
+      "dohc could not start the engine for this workspace. A file is at .dohc/engine, which must be a real folder. Remove or rename that file. Then retry.",
+    ],
+  ])(
+    "names %s squatting %s, never a raw errno",
+    async (_shape, _path, squat, refusal) => {
+      const rootPath = await tempRoot();
+      await squat(rootPath);
+      let requests = 0;
+      const client: EngineDaemonClient = {
+        close: () => undefined,
+        async sendRequest(request) {
+          requests += 1;
+          return { id: request.id, result: { workspace: "workspace-handle" } };
+        },
+      };
+      const sessions = new EngineWorkspaceSessions({
+        currentClient: () => client,
+      });
+
+      await expect(
+        sessions.run(
+          { workspaceId: "workspace", rootPath },
+          async (binding) => binding.workspace,
+        ),
+      ).rejects.toThrow(refusal);
+      // Nothing opened, and the refusal never printed the absolute host path.
+      expect(requests).toBe(0);
     },
   );
 
@@ -318,7 +385,9 @@ describe("EngineWorkspaceSessions", () => {
         { workspaceId: "workspace", rootPath },
         async (binding) => binding.workspace,
       ),
-    ).rejects.toThrow("must not be a symlink");
+    ).rejects.toThrow(
+      "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.",
+    );
     expect(opens).toBe(1);
   });
 

@@ -1,5 +1,10 @@
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { join, sep } from "node:path";
+import {
+  DOHC_METADATA_GUARD,
+  notARealFolderRefusal,
+  outsideWorkspaceRefusal,
+} from "@dohc/workspace-core";
 
 // THE resolver for a workspace's internal metadata directory (<root>/.dohc).
 // Every main-process writer of internal metadata (ui-state.json,
@@ -27,13 +32,13 @@ export async function resolveWorkspaceMetadataDir(rootPath: string): Promise<str
     stats = await lstat(dir);
   }
   if (stats.isSymbolicLink() || !stats.isDirectory()) {
-    throw new Error(".dohc must be a real directory inside the workspace");
+    throw new Error(notARealFolderRefusal(DOHC_METADATA_GUARD, stats));
   }
   // Belt and braces: with the root resolved and .dohc a real directory the
   // resolved dir IS the joined path; anything else means an escape.
   const realDir = await realpath(dir);
   if (realDir !== dir && !realDir.startsWith(realRoot + sep)) {
-    throw new Error(".dohc resolves outside the workspace");
+    throw new Error(outsideWorkspaceRefusal(DOHC_METADATA_GUARD));
   }
   return dir;
 }

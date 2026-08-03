@@ -380,19 +380,83 @@ describe("mcp tool path containment", () => {
       const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-metadata-outside-"));
       await symlink(outside, join(ctx.root, ".dohc"));
 
+      // The refusal an agent reads is the same sentence the desktop shows a
+      // user: what is at the path, what it must be, and the way out.
+      const refusal =
+        "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.";
       await expect(
         writeWorkspaceFile(ctx, { path: "notes/new.txt", content: "nope" }),
-      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("symlink") });
+      ).resolves.toMatchObject({ ok: false, reason: refusal });
       await expect(readFile(join(ctx.root, "notes/new.txt"), "utf8")).rejects.toThrow();
 
       await writeFile(join(ctx.root, "keep.txt"), "still here");
       await expect(deleteWorkspacePath(ctx, { path: "keep.txt" })).resolves.toMatchObject({
         ok: false,
-        reason: expect.stringContaining("symlink"),
+        reason: refusal,
       });
       await expect(readFile(join(ctx.root, "keep.txt"), "utf8")).resolves.toBe("still here");
 
       await rm(outside, { recursive: true, force: true });
+    });
+  });
+
+  // dohc_delete_path is the tool that MOVES a user's file into .dohc/trash, so
+  // a squatter there is reachable from an ordinary agent request. Every squat
+  // used to reach the agent as a raw errno from mkdir (#544, #585): "EEXIST:
+  // file already exists, mkdir …" names no constraint and no next step. The
+  // three squat shapes below are one test because they must all answer the
+  // same way -- and because a dangling link raises a DIFFERENT errno than the
+  // other two, which is exactly what an errno allowlist would get wrong.
+  describe("a squatted .dohc/trash", () => {
+    async function deleteThrough(squat: (trash: string) => Promise<void>) {
+      return await withWorkspace(async (ctx) => {
+        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+        await squat(join(ctx.root, ".dohc", "trash"));
+        await writeFile(join(ctx.root, "keep.txt"), "still here");
+        const result = await deleteWorkspacePath(ctx, { path: "keep.txt" });
+        // Whatever the refusal said, the user's file never moved.
+        expect(await readFile(join(ctx.root, "keep.txt"), "utf8")).toBe("still here");
+        return result;
+      });
+    }
+
+    it("names a FILE squatter instead of handing the agent a raw errno", async () => {
+      await expect(
+        deleteThrough((trash) => writeFile(trash, "squatting")),
+      ).resolves.toMatchObject({
+        ok: false,
+        reason:
+          "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file. Then retry.",
+      });
+    });
+
+    it("names a DANGLING link squatter, which an errno allowlist would miss", async () => {
+      await expect(
+        deleteThrough((trash) => symlink(join(trash, "..", "nowhere"), trash, "dir")),
+      ).resolves.toMatchObject({
+        ok: false,
+        reason:
+          "dohc could not move this to the workspace trash. A link is at .dohc/trash, which must be a real folder. Remove or rename that link. Then retry.",
+      });
+    });
+
+    it("names a link to a real OUTSIDE folder and lands nothing there", async () => {
+      const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-trash-outside-"));
+      try {
+        await expect(
+          deleteThrough((trash) => symlink(outside, trash, "dir")),
+        ).resolves.toMatchObject({
+          ok: false,
+          reason:
+            "dohc could not move this to the workspace trash. A link is at .dohc/trash, which must be a real folder. Remove or rename that link. Then retry.",
+        });
+        // Why the guard runs AFTER mkdir: mkdir{recursive} no-ops on an
+        // existing symlink-to-dir, so a pre-check would see nothing. Drop
+        // both this lstat and the containment check and keep.txt lands here.
+        expect(await readdir(outside)).toEqual([]);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
     });
   });
 });

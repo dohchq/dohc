@@ -125,7 +125,9 @@ describe("ui-state file store", () => {
     const outside = await tempRoot();
     await symlink(outside, join(root, ".dohc"), "dir");
 
-    await expect(writeUiStateFile(root, STATE)).rejects.toThrow(/\.dohc/);
+    await expect(writeUiStateFile(root, STATE)).rejects.toThrow(
+      "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.",
+    );
     expect(await readUiStateFile(root)).toBeNull();
     // The escape target stayed untouched: no ui-state.json, no temp files.
     expect(await readdir(outside)).toEqual([]);
