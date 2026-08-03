@@ -1606,6 +1606,217 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
   });
 
+  // #545: the DM roll-up sits in the SAME list, but it refreshed only on the
+  // 5-second poll — a DM badge lagging beside a live channel badge reads as
+  // "no new DMs".
+  it("raises the DM roll-up badge the moment a write arrives, not on the next poll", async () => {
+    // Fake timers, never advanced: with the clock frozen the 5s poll cannot
+    // fire, so it structurally cannot answer for the activity signal — a
+    // slow machine cannot false-pass this by letting the poll tick land
+    // inside a real-time wait.
+    vi.useFakeTimers();
+    try {
+      let unreadCount = 0;
+      bridgeMock.syncDms.mockImplementation(() =>
+        Promise.resolve({ available: true, dms: [dm({ unreadCount })] }),
+      );
+      renderView();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      screen.getByTestId("chats-dm-item");
+      expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
+      const syncsBefore = bridgeMock.syncDms.mock.calls.length;
+
+      // An agent's DM write lands while the list is on screen.
+      unreadCount = 2;
+      act(() => emitWorkspaceActivity());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // MUTATION: remove `void refreshDms()` from the channels-level activity
+      // branch. With the clock frozen, no other caller exists to sync.
+      expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThan(syncsBefore);
+      expect(screen.getByTestId("chats-dm-unread").textContent).toBe("2");
+      // Nothing navigated: the badge appeared on the list itself.
+      expect(screen.getByTestId("chats-channels-heading")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The activity signal fires for every settled file batch and run update,
+  // and syncDms is a relay sync, not a local read. The rule (badgeRead
+  // precedent): one sync in flight, and a burst arriving mid-sync runs
+  // exactly one trailing pass when it settles.
+  it("coalesces an activity burst into one in-flight DM sync plus one trailing pass", async () => {
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+    renderView();
+    await screen.findByTestId("chats-dm-item");
+    const syncsBefore = bridgeMock.syncDms.mock.calls.length;
+
+    let release!: () => void;
+    const held = new Promise<{ available: boolean; dms: DmRecord[] }>(
+      (resolve) => {
+        release = () =>
+          resolve({ available: true, dms: [dm({ unreadCount: 1 })] });
+      },
+    );
+    bridgeMock.syncDms.mockImplementation(() => held);
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1),
+    );
+
+    // The burst lands while that sync is in flight.
+    // MUTATION: revert refreshDms to a plain un-coalesced sync. Each of these
+    // starts its own relay sync and the count below reads syncsBefore + 4.
+    act(() => {
+      emitWorkspaceActivity();
+      emitWorkspaceActivity();
+      emitWorkspaceActivity();
+    });
+    expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1);
+
+    // One trailing pass when the held sync settles — not one per event.
+    await act(async () => {
+      release();
+      await held;
+    });
+    await waitFor(() =>
+      expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2),
+    );
+    expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("1");
+    expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2);
+  });
+
+  // The renderer invariant (AGENTS.md): a slow response for workspace A must
+  // never repaint workspace B. The drain made syncDms multi-pass, so the
+  // per-pass token check is what stands between a stale relay answer and the
+  // switched list (#582 review).
+  it("drops a slow DM sync from the workspace the user left", async () => {
+    type DmPage = { available: boolean; dms: DmRecord[] };
+    let resolveStale!: (value: DmPage) => void;
+    const stale = new Promise<DmPage>((resolve) => {
+      resolveStale = resolve;
+    });
+    let oldReads = 0;
+    bridgeMock.syncDms.mockImplementation(
+      ({ workspaceId }: { workspaceId: string }) => {
+        if (workspaceId !== "workspace-old") {
+          return Promise.resolve({
+            available: true,
+            dms: [
+              dm({
+                channelId: "channel-dm-new",
+                peerLabel: "carol@example.com",
+                unreadCount: 0,
+              }),
+            ],
+          });
+        }
+        oldReads += 1;
+        return oldReads === 1
+          ? Promise.resolve({ available: true, dms: [dm()] })
+          : stale;
+      },
+    );
+    const view = render(
+      <ChatsView
+        workspaceId="workspace-old"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("chats-dm-item");
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(oldReads).toBe(2));
+
+    view.rerender(
+      <ChatsView
+        workspaceId="workspace-new"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-dm-name").textContent).toBe(
+        "carol@example.com",
+      ),
+    );
+
+    // MUTATION: delete the per-pass `if (token !== liveToken.current) return;`
+    // inside the drain. This stale answer then repaints the new workspace's
+    // list with the old one's DM and a badge of 9.
+    await act(async () => {
+      resolveStale({ available: true, dms: [dm({ unreadCount: 9 })] });
+      await stale;
+    });
+    expect(screen.getByTestId("chats-dm-name").textContent).toBe(
+      "carol@example.com",
+    );
+    expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
+  });
+
+  // The dead-era yield: a workspace switch during a stalled old-workspace
+  // sync must steal the drain's slot, not queue onto it — a queued pass on a
+  // sync that never settles would leave the new workspace's DM list empty
+  // forever (#582 review).
+  it("never queues the new workspace's DM sync onto the stalled one it left", async () => {
+    type DmPage = { available: boolean; dms: DmRecord[] };
+    const leftBehind = new Promise<DmPage>(() => {
+      // never settles: the drain the switch must not wait on
+    });
+    let oldReads = 0;
+    let newReads = 0;
+    bridgeMock.syncDms.mockImplementation(
+      ({ workspaceId }: { workspaceId: string }) => {
+        if (workspaceId !== "workspace-old") {
+          newReads += 1;
+          return Promise.resolve({
+            available: true,
+            dms: [
+              dm({
+                channelId: "channel-dm-new",
+                peerLabel: "carol@example.com",
+              }),
+            ],
+          });
+        }
+        oldReads += 1;
+        return oldReads === 1
+          ? Promise.resolve({ available: true, dms: [dm()] })
+          : leftBehind;
+      },
+    );
+    const view = render(
+      <ChatsView
+        workspaceId="workspace-old"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("chats-dm-item");
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(oldReads).toBe(2));
+
+    // MUTATION: weaken the drain's entry guard to `if (active !== null)`.
+    // The switch's own refreshDms then queues onto the dead drain and no
+    // workspace-new sync ever starts — not even the poll can get past it.
+    view.rerender(
+      <ChatsView
+        workspaceId="workspace-new"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(newReads).toBeGreaterThan(0), { timeout: 2_000 });
+    expect((await screen.findByTestId("chats-dm-name")).textContent).toBe(
+      "carol@example.com",
+    );
+  });
+
   it("drops a slow list refresh from the workspace the user left", async () => {
     type ChannelListPage = {
       channels: ChatChannelRecord[];

@@ -1352,16 +1352,43 @@ export function ChatsView(props: {
   // member's local ops, pull the peers') and refresh the list. Best-effort —
   // offline keeps the current list and the next pass retries. A late response
   // for a stale workspace/nav is dropped by the token guard.
+  //
+  // ONE sync in flight (#545, badgeRead precedent). The activity signal below
+  // fires for every settled file batch and run update, and this is a relay
+  // sync, not a local read — a burst must not fan out into a sync per event.
+  // A call landing mid-sync is not dropped: it runs exactly one more pass when
+  // the sync settles. A drain whose token era ended can commit nothing, so the
+  // next caller takes the slot instead of queueing onto it.
+  const dmSync = useRef<{ token: number; pending: boolean } | null>(null);
   const refreshDms = useCallback(async () => {
     if (readOnly) return;
-    const token = liveToken.current;
+    const active = dmSync.current;
+    if (active !== null && active.token === liveToken.current) {
+      active.pending = true;
+      return;
+    }
+    const mine = { token: liveToken.current, pending: false };
+    dmSync.current = mine;
     try {
-      const result = await bridge().syncDms({ workspaceId });
-      if (token !== liveToken.current) return;
-      setDmAvailable(result.available);
-      setDms(result.dms);
-    } catch {
-      // DMs are optional: Chats stays fully usable without them.
+      do {
+        mine.pending = false;
+        mine.token = liveToken.current;
+        const token = mine.token;
+        try {
+          const result = await bridge().syncDms({ workspaceId });
+          if (token !== liveToken.current) return;
+          setDmAvailable(result.available);
+          setDms(result.dms);
+        } catch {
+          // DMs are optional: Chats stays fully usable without them.
+        }
+      } while (
+        mine.pending &&
+        mine.token === liveToken.current &&
+        dmSync.current === mine
+      );
+    } finally {
+      if (dmSync.current === mine) dmSync.current = null;
     }
   }, [readOnly, workspaceId]);
 
@@ -1865,6 +1892,10 @@ export function ChatsView(props: {
         // The roll-up unread badge lives on this list, so a write to a chat
         // the user does not have open is only visible here.
         void refreshChannelBadges();
+        // The DM roll-up lives on the same list and used to wait for the 5s
+        // poll beside a live channel badge (#545). Same signal, same moment —
+        // refreshDms coalesces the burst itself.
+        void refreshDms();
         return;
       }
       if (nav.level === "feed") {
@@ -1963,6 +1994,7 @@ export function ChatsView(props: {
     refreshOpenDm,
     refreshFollows,
     refreshChannelBadges,
+    refreshDms,
   ]);
 
   // The anti-forum move: typing in the channel composer STARTS the chat.
