@@ -84,6 +84,16 @@ const NOT_ENABLED_COPY: Record<EngineFeature, string> = {
   "Chat mentions": "Chat mentions are not enabled for this workspace.",
 };
 
+// What happened to the caller's action, leading the unreadable-settings
+// refusal — the warning that follows says why, names the file, and gives
+// the recovery.
+const UNAVAILABLE_COPY: Record<EngineFeature, string> = {
+  Versions: "Versions are unavailable.",
+  Chats: "Chats are unavailable.",
+  "Engine history": "Engine history is unavailable.",
+  "Chat mentions": "Chat mentions are unavailable.",
+};
+
 // What a refusal may SAY when the gate produced no capture (#541). "Not
 // enabled" asserts a decision, and after a failed capture build — or an
 // unreadable settings file — the truth is a failure, not a setting the user
@@ -105,9 +115,13 @@ export function engineOffRefusal(
   // drifts past the replace, the untouched text still says restart — heavier
   // than needed on that path, but never false.
   if (status.settingsWarning) {
-    return recovery === "retry"
-      ? status.settingsWarning.replace(/ Then restart dohc.$/, " Then try again.")
-      : status.settingsWarning;
+    // Same noun rule as below (#541 round 7): lead with what happened to the
+    // FEATURE the caller invoked, then the warning's why / file / recovery.
+    const warning =
+      recovery === "retry"
+        ? status.settingsWarning.replace(/ Then restart dohc.$/, " Then try again.")
+        : status.settingsWarning;
+    return `${UNAVAILABLE_COPY[feature]} ${warning}`;
   }
   if (status.historyRecordingUnavailable) {
     return recovery === "retry"

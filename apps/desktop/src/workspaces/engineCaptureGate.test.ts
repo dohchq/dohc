@@ -210,8 +210,27 @@ describe("engineOffRefusal", () => {
       FEATURE,
       "restart",
     );
-    expect(refusal).toBe(warning);
+    // Round 7: what happened to the caller's feature leads, then the
+    // warning's why, file, and recovery — nothing of the warning is lost.
+    expect(refusal).toBe(`Versions are unavailable. ${warning}`);
     expect(refusal).toContain("/ws/.dohc/settings.local.json");
+  });
+
+  // Round 7's per-caller pin for the unreadable-settings branch: the same
+  // noun rule as the build-failure branch — swapping or hard-wiring fails.
+  it("leads the unreadable-settings refusal with each caller's own feature", () => {
+    const warning =
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
+    const status = { settingsWarning: warning, historyRecordingUnavailable: false };
+    expect(engineOffRefusal(status, "Chats", "restart")).toBe(
+      `Chats are unavailable. ${warning}`,
+    );
+    expect(engineOffRefusal(status, "Engine history", "restart")).toBe(
+      `Engine history is unavailable. ${warning}`,
+    );
+    expect(engineOffRefusal(status, "Chat mentions", "restart")).toBe(
+      `Chat mentions are unavailable. ${warning}`,
+    );
   });
 
   // Codex P2 on #583 (round 3): on a retry path the entry is gone, so fixing
@@ -227,7 +246,7 @@ describe("engineOffRefusal", () => {
       "retry",
     );
     expect(refusal).toBe(
-      "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then try again.",
+      "Versions are unavailable. Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then try again.",
     );
   });
 });
