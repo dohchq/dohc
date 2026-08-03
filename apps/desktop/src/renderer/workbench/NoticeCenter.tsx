@@ -282,7 +282,14 @@ export function NoticeCenter(props: {
     // status the renderer already consumes (#483). A second read here could
     // name a cause that never happened, or promise "no history" for a
     // workspace that is recording.
-    if (props.syncStatus?.settingsWarning) {
+    //
+    // A shared view leads the cascade (#540): it never gets a recorder BY
+    // DESIGN — a capability, not an opt-out and not a failure — and its
+    // banner already says what the surface is. No notice: every history-off
+    // body below states a cause that is false for a shared view.
+    if (props.syncStatus?.historyShareView) {
+      // Nothing to warn about.
+    } else if (props.syncStatus?.settingsWarning) {
       next.push({
         id: "workspace-settings-unreadable",
         tone: "warning",

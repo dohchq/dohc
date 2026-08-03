@@ -1593,6 +1593,14 @@ export function DesktopWorkspaceShell(props: {
   // capability, read once from the existing settings IPC below — never a
   // second settings read.
   const [engineEnabled, setEngineEnabled] = useState(false);
+  // A shared view has no engine history surface regardless of that read
+  // (#540): it materializes no settings file, so the default flag reads ON —
+  // but the share's open deliberately installed no capture, and every
+  // engine-moments call could only error. Capability identity comes from
+  // main's registry summary. This gates the HISTORY surface only: Chats has
+  // its own share-aware gating, and the versions surface still keys on the
+  // settings read alone (pre-existing, tracked separately).
+  const isShareView = Boolean(props.workspace.shareView);
   // Engine history page state (flagged workspaces): newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
   // as the open-file refresh key.
@@ -1726,7 +1734,7 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const refreshHistory = useCallback(async () => {
-    if (engineEnabled) {
+    if (engineEnabled && !isShareView) {
       // Latest-COMMITTED-wins: each request advances the token, and an answer
       // displays only if it is newer than the answer already displayed, so an
       // older response can never overwrite newer moments or move
@@ -1790,7 +1798,7 @@ export function DesktopWorkspaceShell(props: {
     ]);
     setSyncStatus(status);
     setAgentActive(agent.activeRun !== null);
-  }, [engineEnabled, workspaceId]);
+  }, [engineEnabled, isShareView, workspaceId]);
 
   const loadMoreEngineHistory = useCallback(async () => {
     const cursor = engineHistory?.nextBeforeMomentOrder;
@@ -2941,51 +2949,11 @@ export function DesktopWorkspaceShell(props: {
     });
   }, [commands]);
 
-  // ONE history timeline element, rendered by the side panel's History view
-  // and the history tab — the engine page state is root-owned (never a
-  // second subscription). An opted-out workspace has NO
-  // history source (retirement Phase C removed the legacy recorder), so the
-  // timeline honestly says history is off instead of showing an empty list.
-  const historyTimeline = engineEnabled ? (
-    <EngineHistoryView
-      moments={engineHistory?.moments ?? []}
-      hasMore={engineHistory?.nextBeforeMomentOrder != null}
-      loadingMore={engineHistoryLoadingMore}
-      onLoadMore={() => void loadMoreEngineHistory()}
-      onOpenMoment={openMomentDiffTab}
-    />
-  ) : (
-    <div
-      data-testid="history-off-placeholder"
-      className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
-    >
-      <span className="text-xs text-muted">History is off for this workspace</span>
-      <span className="text-[11px] text-subtle">
-        The workspace engine is turned off in Settings → Advanced, so changes
-        are not being recorded. Turn it on and reopen the workspace to record
-        history again.
-      </span>
-    </div>
-  );
-  // Open-file refresh: history growth re-reads the active file. The floor
-  // keeps the counter monotonic within the session even when the timeline is
-  // dropped and re-fetched (#555) — a cache-buster that revisits a value can
-  // suppress a needed re-read. Opted-out workspaces have no history growth
-  // to react to. (Max-tracking a ref during render is idempotent, so a
-  // repeated render commits the same value.)
-  const historyRefreshFloor = useRef(0);
-  historyRefreshFloor.current = Math.max(
-    historyRefreshFloor.current,
-    engineHistory ? engineHistory.latestMomentOrder + 1 : 0,
-  );
-  const historyRefreshCounter = engineEnabled ? historyRefreshFloor.current : 0;
-  const graphKey = engineEnabled
-    ? `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`
-    : graphRefreshKey;
-
   // Read-only shared view (PR 18): the workspace was received through a
   // share grant. It refreshes on open and on demand, and every edit surface
-  // is disabled with honest copy.
+  // is disabled with honest copy. Declared before the history timeline: the
+  // shared-view placeholder's next step depends on whether the share is
+  // still live (#540 — Refresh exists only while it is).
   const shareView = props.workspace.shareView ?? null;
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
   const [shareRefreshing, setShareRefreshing] = useState(false);
@@ -3015,6 +2983,66 @@ export function DesktopWorkspaceShell(props: {
     if (shareView && !shareViewEnded) void refreshShareView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
+
+  // ONE history timeline element, rendered by the side panel's History view
+  // and the history tab — the engine page state is root-owned (never a
+  // second subscription). An opted-out workspace has NO
+  // history source (retirement Phase C removed the legacy recorder), so the
+  // timeline honestly says history is off instead of showing an empty list.
+  const historyTimeline = engineEnabled && !isShareView ? (
+    <EngineHistoryView
+      moments={engineHistory?.moments ?? []}
+      hasMore={engineHistory?.nextBeforeMomentOrder != null}
+      loadingMore={engineHistoryLoadingMore}
+      onLoadMore={() => void loadMoreEngineHistory()}
+      onOpenMoment={openMomentDiffTab}
+    />
+  ) : isShareView ? (
+    // #540: a capability, not an opt-out. The Settings copy below would
+    // blame a toggle nobody touched, in a settings file a shared view does
+    // not even have. One line, per the empty-state recipe (copy.md): what is
+    // missing plus the next step — and the next step matches the surface,
+    // because Refresh exists only while the share is live.
+    <div
+      data-testid="history-off-placeholder"
+      className="flex flex-1 items-center justify-center px-4 text-center"
+    >
+      <span className="text-sm text-muted">
+        {shareViewEnded
+          ? // Active voice, named actor (copy.md): the banner already names
+            // who ended the share, so this line does too.
+            `A shared view records no history. ${shareView?.granterEmail ?? "The person who shared it"} ended this share. You can still open the files it shared.`
+          : "A shared view records no history. Refresh the shared view to get the latest shared changes."}
+      </span>
+    </div>
+  ) : (
+    <div
+      data-testid="history-off-placeholder"
+      className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+    >
+      <span className="text-xs text-muted">History is off for this workspace</span>
+      <span className="text-[11px] text-subtle">
+        The workspace engine is turned off in Settings → Advanced, so changes
+        are not being recorded. Turn it on and reopen the workspace to record
+        history again.
+      </span>
+    </div>
+  );
+  // Open-file refresh: history growth re-reads the active file. The floor
+  // keeps the counter monotonic within the session even when the timeline is
+  // dropped and re-fetched (#555) — a cache-buster that revisits a value can
+  // suppress a needed re-read. Opted-out workspaces have no history growth
+  // to react to. (Max-tracking a ref during render is idempotent, so a
+  // repeated render commits the same value.)
+  const historyRefreshFloor = useRef(0);
+  historyRefreshFloor.current = Math.max(
+    historyRefreshFloor.current,
+    engineHistory ? engineHistory.latestMomentOrder + 1 : 0,
+  );
+  const historyRefreshCounter = engineEnabled ? historyRefreshFloor.current : 0;
+  const graphKey = engineEnabled
+    ? `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`
+    : graphRefreshKey;
 
   const explorerView = (
     <>

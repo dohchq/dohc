@@ -259,7 +259,7 @@ it.skipIf(engine.missing)(
           daemonOwnsCapture: true,
         });
         openedState.capture = capture;
-        return { capture };
+        return { capture, shareView: false };
       },
     });
 

@@ -993,20 +993,23 @@ describe("try-in-version IPC contract (PR 0N-2)", () => {
   });
 });
 
-describe("sync status IPC contract (#505)", () => {
+describe("sync status IPC contract (#505, #540)", () => {
   it("refuses a status that cannot say why history is off", () => {
     const status = {
       state: "synced",
       pendingChangeCount: 0,
       lastSyncedAtMs: null,
       historyRecordingUnavailable: false,
+      historyShareView: false,
     };
     expect(SyncStatusResult.safeParse(status).success).toBe(true);
-    // historyRecordingUnavailable is REQUIRED where its neighbours are
-    // optional: an omitted boolean would read as "the user chose this",
-    // which is the false cause #505 exists to kill.
-    const { historyRecordingUnavailable: _dropped, ...withoutCause } = status;
-    expect(SyncStatusResult.safeParse(withoutCause).success).toBe(false);
+    // Both cause fields are REQUIRED where their neighbours are optional: an
+    // omitted boolean would read as "the user chose this", which is the false
+    // cause #505 (build failure) and #540 (shared view) exist to kill.
+    const { historyRecordingUnavailable: _dropped, ...withoutFailureCause } = status;
+    expect(SyncStatusResult.safeParse(withoutFailureCause).success).toBe(false);
+    const { historyShareView: _alsoDropped, ...withoutShareCause } = status;
+    expect(SyncStatusResult.safeParse(withoutShareCause).success).toBe(false);
   });
 });
 

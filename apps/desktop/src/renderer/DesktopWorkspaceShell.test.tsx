@@ -77,11 +77,12 @@ const SYNC_STATUS = {
   state: "synced" as const,
   pendingChangeCount: 0,
   lastSyncedAtMs: null,
-  // Required on the contract (#505): every status states whether the recorder
-  // failed to build. This fake is not type-checked against SyncStatusResult,
-  // so it declares the cause by hand rather than shipping a payload main
-  // could never produce.
+  // Required on the contract (#505, #540): every status states whether the
+  // recorder failed to build and whether the workspace is a shared view. This
+  // fake is not type-checked against SyncStatusResult, so it declares the
+  // causes by hand rather than shipping a payload main could never produce.
   historyRecordingUnavailable: false,
+  historyShareView: false,
 };
 
 const IDLE_UPDATE_STATE: UpdateStateEvent = {
@@ -2542,6 +2543,74 @@ describe("history page", () => {
     expect(
       within(page).getByTestId("history-off-placeholder").textContent,
     ).toContain("History is off for this workspace");
+  });
+
+  // #540 on the History surface itself: a shared view materializes no
+  // settings file, so the renderer's settings read comes back with the
+  // default flag ON — but the share's open deliberately installed no
+  // capture, so every engine call can only error. The surface must state
+  // the capability instead, and must never ask main for engine moments.
+  it("gives a shared view the capability truth and never asks for engine moments", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+    });
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    // The empty-state recipe (copy.md): ONE text-sm text-muted line carrying
+    // the state and the Next together.
+    expect(placeholder.textContent).toContain(
+      "A shared view records no history. Refresh the shared view to get the latest shared changes.",
+    );
+    const lines = placeholder.querySelectorAll("span");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.className).toContain("text-sm");
+    expect(lines[0]?.className).toContain("text-muted");
+    // The Next works on this surface: the share banner's Refresh control,
+    // pinned to exist alongside the instruction that names it.
+    expect(screen.getByTestId("shared-view-refresh")).toBeTruthy();
+    // The false cause this pins against: the opt-out's Settings copy, about
+    // a toggle nobody touched.
+    expect(placeholder.textContent).not.toContain("Settings");
+
+    // Activity pushes take the no-engine refresh path too — this is the pin
+    // that kills a regression to the recurring "Could not open history"
+    // error loop.
+    await act(async () => {
+      bridge.emitWorkspaceActivity();
+      await Promise.resolve();
+    });
+    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+  });
+
+  // The ended share has no Refresh control, so its placeholder must not
+  // instruct one — the false-instruction class this lane exists to kill.
+  it("an ended share's placeholder does not name the Refresh it no longer has", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        ended: true,
+      },
+    });
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    // Same single-line shape, with the ended share's own true Next — and an
+    // active sentence naming who ended it (copy.md), not a passive
+    // "was ended" with no actor.
+    expect(placeholder.textContent).toContain(
+      "A shared view records no history. granter@dohc.test ended this share. You can still open the files it shared.",
+    );
+    expect(placeholder.textContent).not.toContain("was ended");
+    expect(placeholder.textContent).not.toContain("Refresh");
+    expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
   });
 
   function historyMoment(id: string, summary: string): EngineMomentRecord {

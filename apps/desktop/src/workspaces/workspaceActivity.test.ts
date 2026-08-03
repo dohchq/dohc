@@ -3,7 +3,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWorkspaceActivity } from "./workspaceActivity";
+import { captureForFlaggedWorkspace } from "./engineCaptureGate";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+
+// The shared-view pin drives the REAL gate, which never reaches the engine
+// for a shared view — these sessions prove it by throwing on any use.
+const engineUnreachableSessions = new Proxy({} as EngineWorkspaceSessions, {
+  get(_target, property) {
+    throw new Error(
+      `workspaceActivity.test: sessions.${String(property)} was used, but a shared view must not reach the engine`,
+    );
+  },
+});
 
 // Retirement Phase C (WS-H1): the legacy change-set read surface
 // (listChangeSets/readChangeSet) is gone from this layer — engine moments
@@ -41,6 +53,7 @@ describe("workspaceActivity capture hooks", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: () => ({
+        shareView: false,
         capture: {
           start: vi.fn(),
           captureBatch,
@@ -74,7 +87,7 @@ describe("workspaceActivity capture hooks", () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (_workspace, hooks) => {
         liveSlot = hooks.activeAgentRun;
-        return { capture: null };
+        return { capture: null, shareView: false };
       },
     });
     await activity.open(workspace());
@@ -94,7 +107,7 @@ describe("workspaceActivity capture hooks", () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (_workspace, hooks) => {
         liveSlot = hooks.activeAgentRun;
-        return { capture: null };
+        return { capture: null, shareView: false };
       },
     });
     await activity.open(workspace());
@@ -122,15 +135,40 @@ describe("workspaceActivity capture hooks", () => {
 describe("workspaceActivity history-off status (retirement Phase C)", () => {
   it("reports historyRecordingOff when captureFor yields no capture (engine opt-out)", async () => {
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () => ({ capture: null }),
+      captureFor: () => ({ capture: null, shareView: false }),
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingOff).toBe(true);
     expect(activity.getStatus("activity-test").historyRecordingOff).toBe(true);
-    // A decision, not a failure: the notice may name Settings for this one.
+    // A decision, not a failure and not a shared view: the notice may name
+    // Settings for this one and only this one.
     expect(status.historyRecordingUnavailable).toBe(false);
+    expect(status.historyShareView).toBe(false);
     // No capture also means no versions surface.
     expect(activity.engineCaptureFor("activity-test")).toBeNull();
+    await activity.stopAll();
+  });
+
+  // #540: a shared view's null capture is a capability — the view is fed by
+  // the share's pull and never records here. Without this cause on the
+  // status, the notice blames a Settings toggle nobody touched. Wired
+  // through the REAL gate, so the share rule and the status thread are
+  // pinned together: deleting either breaks this test.
+  it("separates a shared view's null capture from the engine opt-out", async () => {
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: (w, hooks) =>
+        captureForFlaggedWorkspace(
+          { workspaceId: w.workspaceId, rootPath: w.rootPath, shareView: true },
+          hooks,
+          engineUnreachableSessions,
+        ),
+    });
+    const status = await activity.open(workspace());
+    expect(status.historyRecordingOff).toBe(true);
+    expect(status.historyShareView).toBe(true);
+    expect(activity.getStatus("activity-test").historyShareView).toBe(true);
+    // A capability, not a failure.
+    expect(status.historyRecordingUnavailable).toBe(false);
     await activity.stopAll();
   });
 
@@ -141,7 +179,7 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     const warning =
       "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () => ({ capture: null, warning }),
+      captureFor: () => ({ capture: null, warning, shareView: false }),
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingOff).toBe(true);
@@ -152,7 +190,7 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
 
   it("carries no reason when the open-time read was fine", async () => {
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () => ({ capture: null }),
+      captureFor: () => ({ capture: null, shareView: false }),
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingOff).toBe(true);

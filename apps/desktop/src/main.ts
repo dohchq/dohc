@@ -1625,13 +1625,20 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   },
   engineFor: engineForWorkspace,
   // The flag-gated engine capture (see engineCaptureGate.ts — shared with the
-  // arc-gate QA harness so the harness asserts against the REAL gate).
-  // Shared views (PR 18) never get capture: they are fed exclusively by the
-  // share's filtered pull, and a watcher would re-journal materialized files.
+  // arc-gate QA harness so the harness asserts against the REAL gate). The
+  // gate also owns the shared-view rule (#540): main only states the share
+  // identity from the registry, and the decision carries the cause so the
+  // null capture never wears the Settings opt-out's copy.
   captureFor: async (workspace, hooks) =>
-    findWorkspace(workspace.workspaceId)?.shareView
-      ? { capture: null }
-      : captureForFlaggedWorkspace(workspace, hooks, requireEngineSessions()),
+    captureForFlaggedWorkspace(
+      {
+        workspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
+        shareView: !!findWorkspace(workspace.workspaceId)?.shareView,
+      },
+      hooks,
+      requireEngineSessions(),
+    ),
 });
 const panelAgentRunSlots = new Map<string, string>();
 // Local agent integration: owns the per-workspace MCP child + active-run slot
@@ -1973,7 +1980,12 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
   if (!workspace || sharedViewOf(workspaceId)) return false;
   const scoped = (async () => {
     const { capture } = await captureForFlaggedWorkspace(
-      workspace,
+      {
+        workspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
+        // Guarded above: a shared view already returned false.
+        shareView: false,
+      },
       {
         activeAgentRun: () => null,
         onCaptureOutcome: () => undefined,

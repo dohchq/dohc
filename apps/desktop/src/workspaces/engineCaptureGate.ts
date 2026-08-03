@@ -20,18 +20,28 @@ import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daem
 // reach here without one. Accepting a null would mean silently recording history
 // through the legacy TypeScript engine instead.
 export async function captureForFlaggedWorkspace(
-  workspace: { workspaceId: string; rootPath: string },
+  workspace: { workspaceId: string; rootPath: string; shareView: boolean },
   hooks: WorkspaceCaptureHooks,
   rustEngineSessions: EngineWorkspaceSessions,
 ): Promise<WorkspaceCaptureDecision> {
+  // A shared view never gets a recorder (#540): it is fed exclusively by
+  // the share's filtered pull, and a watcher would re-journal materialized
+  // files. Decided BEFORE the settings read — a shared view materializes no
+  // settings file, so reading defaults here would start a capture. The
+  // caller states the share identity (it owns the registry); the gate owns
+  // what that identity means for the decision.
+  if (workspace.shareView) {
+    return { capture: null, shareView: true };
+  }
   // ONE read decides both the recorder and what the user is told about it.
   // A second read taken later (the renderer's) could disagree with this one
   // and give the notice a cause that never happened.
   const { settings, warning } = await readWorkspaceSettingsFile(workspace.rootPath);
   if (!settings.experimental.workspaceEngineAlpha) {
-    return { capture: null, ...(warning ? { warning } : {}) };
+    return { capture: null, shareView: false, ...(warning ? { warning } : {}) };
   }
   return {
+    shareView: false,
     capture: createWorkspaceEngineCapture({
       workspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
