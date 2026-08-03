@@ -7,6 +7,7 @@ import {
   DaemonRefusalError,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
+  YdocReleasedWithSettleFailureError,
   VersionedLoopbackEngine,
   YdocLoopbackEngine,
   type EngineTransport,
@@ -2403,7 +2404,12 @@ async function lockedRebindCapture(prefix: string) {
   );
   const state = {
     locked: false,
+    // The replicated shape (#595 round 4): the compaction release SUCCEEDS
+    // over a failed pre-close settle, so close throws
+    // YdocReleasedWithSettleFailureError instead of the refusal itself.
+    replicated: false,
     closeFailure: null as Error | null,
+    closeSettleFailure: null as Error | null,
     journal: [] as Uint8Array[],
     settleCalls: [] as number[],
     settledMarkdowns: [] as string[],
@@ -2467,12 +2473,22 @@ async function lockedRebindCapture(prefix: string) {
         // locked, records the settled markdown when it lands.
         state.settleCalls.push(gen);
         const token = ++tokens;
+        if (state.replicated && state.closeSettleFailure) {
+          options.onSettleError?.(state.closeSettleFailure, token);
+          throw new YdocReleasedWithSettleFailureError(
+            options.path,
+            state.closeSettleFailure,
+          );
+        }
         if (state.locked) {
           const refusal = new DaemonRefusalError(
             { code: "OVERLOADED", message: "file-locked", retry: "afterBackoff" },
             new Error("daemon response"),
           );
           options.onSettleError?.(refusal, token);
+          if (state.replicated) {
+            throw new YdocReleasedWithSettleFailureError(options.path, refusal);
+          }
           throw refusal;
         }
         state.settledMarkdowns.push(doc.getText("plainText").toString());
@@ -2616,5 +2632,68 @@ it("a close that fails for a non-lock cause is not retried by the capture layer"
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.settledMarkdowns).toEqual([]);
   expect(state.settleCalls).toEqual([]);
+  await capture.stop();
+}, 10_000);
+
+it("pays a locked close debt even when a replicated release succeeds", async () => {
+  // #595 round 4: a replicated lineage compacts on release without the
+  // local-only pending-job guard, so the close RELEASES over the locked
+  // settle — the session and its entry are gone, and the per-entry ladder
+  // with them. The detached retry reopens enough state to settle once the
+  // lock releases: no reopen by anyone else, no restart.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-replicated-close-",
+  );
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "replicated edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["replicated edit"]);
+  await capture.stop();
+}, 20_000);
+
+it("a replicated release with a non-lock settle failure arms no detached retry", async () => {
+  // The inverse guard: only the lock is worth reopening for. A terminal
+  // settle failure under a succeeded release stays what it was — loud once,
+  // then nothing scheduled.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-replicated-terminal-",
+  );
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "terminal edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.replicated = true;
+  state.closeSettleFailure = new Error("persist-failed");
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.closeSettleFailure = null;
+
+  // Past the first retry delay: no reopen, nothing settled.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(1);
+  expect(state.settledMarkdowns).toEqual([]);
   await capture.stop();
 }, 10_000);

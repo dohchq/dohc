@@ -2988,6 +2988,54 @@ export function createWorkspaceEngineCapture(
         // ONLY when teardown succeeds (gate fix 5): a failing close retains a
         // failing-close entry so the reservation/retry are not lost and capture
         // stays deferred for the path.
+        // #595 round 4: a REPLICATED lineage compacts on release without the
+        // local-only pending-job guard (durable.rs), so a close can RELEASE
+        // successfully over a locked settle — the provider then throws
+        // YdocReleasedWithSettleFailureError with the lock as its cause, and
+        // the session AND its entry are gone, so the per-entry ladder below
+        // cannot pay that debt. This detached ladder reopens enough state to
+        // settle: the lineage is durable, an unchanged projection routes
+        // through the engine's idempotent settle, and that replays the
+        // pending write. A live entry for the path means a newer session
+        // owns the same debt (every settle of the doc replays the pending
+        // job) — stand down silently, including when the reopen loses that
+        // race to the daemon's busy refusal.
+        const scheduleDetachedLockedSettle = (delayMs: number): void => {
+          if (stopped) return;
+          setTimeout(() => {
+            void (async () => {
+              if (stopped || liveYDocSessions.has(input.path)) return;
+              const { session: retrySession } =
+                await openRestartSafeRustYDocSession({
+                  versionId,
+                  path: input.path,
+                  ...(input.contentKind
+                    ? { contentKind: input.contentKind }
+                    : {}),
+                  onRemoteUpdate: () => undefined,
+                  onSettleStart: () => undefined,
+                  onSettleError: () => undefined,
+                  onSettled: () => undefined,
+                });
+              try {
+                await retrySession.settleNow({ summary: "session close" });
+              } finally {
+                await retrySession
+                  .close({ settle: false })
+                  .catch(() => undefined);
+              }
+            })().catch((retryError: unknown) => {
+              if (liveYDocSessions.has(input.path)) return;
+              if (isFileLockedCause(retryError)) {
+                scheduleDetachedLockedSettle(
+                  Math.min(delayMs * 2, LOCKED_CLOSE_RETRY_CAP_MS),
+                );
+                return;
+              }
+              onError(`ydoc close retry of ${input.path}`, retryError);
+            });
+          }, delayMs);
+        };
         // A close whose settle met the transient lock keeps a debt nobody
         // else will pay (#595): the renderer forgets the session on a failed
         // close, and the durably pending write would sit until restart. The
@@ -3029,6 +3077,13 @@ export function createWorkspaceEngineCapture(
             await session.close(opts);
           } catch (error) {
             if (error instanceof YdocReleasedWithSettleFailureError) {
+              // A locked settle under a SUCCEEDED release is the replicated
+              // shape (#595 round 4): this error is the last time anyone
+              // hears about the durably pending write, so arm the detached
+              // debt BEFORE the entry goes away.
+              if (isFileLockedCause(error.cause)) {
+                scheduleDetachedLockedSettle(LOCKED_CLOSE_RETRY_INITIAL_MS);
+              }
               // The daemon session and its lease ARE gone — only the settle
               // failed. Lift the guard like a clean teardown (capture of the
               // path must resume; nothing holds the reservation).
