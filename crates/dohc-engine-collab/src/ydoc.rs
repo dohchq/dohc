@@ -438,11 +438,14 @@ impl Ydoc {
     /// deletes the current content and writes the choice in the lineage's own
     /// kind, keeping CRDT convergence while making the choice durable.
     ///
-    /// Plaintext replaces the [`ROOT_PLAINTEXT`] text. Richdoc clears
-    /// [`ROOT_FRONTMATTER`] and [`ROOT_BODY`] and appends one plain paragraph
-    /// per blank-line-separated block: the chosen bytes are markdown SOURCE,
-    /// so re-emitting them as paragraph text preserves the content, and the
-    /// rich node structure the user rejected is not reconstructed.
+    /// Plaintext replaces the [`ROOT_PLAINTEXT`] text. Richdoc parses the
+    /// chosen markdown SOURCE into the projection's own block schema —
+    /// frontmatter scalars, headings, blockquotes, bullet/ordered/task
+    /// lists, fenced code blocks, horizontal rules, and paragraphs — so the
+    /// folded document projects the chosen bytes back AND renders as
+    /// structure, not literal syntax. A construct the parser does not model
+    /// stays verbatim paragraph text, which the projector re-emits
+    /// byte-identically (plain text runs are never escaped on projection).
     pub fn rewrite_content_to_markdown(
         &self,
         content_kind: ContentKind,
@@ -462,19 +465,22 @@ impl Ydoc {
             ContentKind::Richdoc => {
                 let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
                 let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+                let (frontmatter, body) = split_markdown_frontmatter(markdown);
+                let blocks = parse_markdown_blocks(body);
                 self.with_delta(|txn| {
                     let keys: Vec<String> = map.iter(txn).map(|(key, _)| key.to_string()).collect();
                     for key in keys {
                         map.remove(txn, &key);
                     }
+                    for (key, value) in &frontmatter {
+                        map.insert(txn, key.as_str(), value.as_str());
+                    }
                     let len = frag.len(txn);
                     if len > 0 {
                         frag.remove_range(txn, 0, len);
                     }
-                    for (index, block) in markdown.split("\n\n").enumerate() {
-                        let el =
-                            frag.insert(txn, index as u32, XmlElementPrelim::empty("paragraph"));
-                        el.insert(txn, 0, XmlTextPrelim::new(block));
+                    for (index, block) in blocks.iter().enumerate() {
+                        insert_md_block(txn, &frag, index as u32, block);
                     }
                 })
             }
@@ -509,6 +515,280 @@ impl Ydoc {
             edit(&mut txn);
         }
         self.doc.transact().encode_state_as_update_v1(&before)
+    }
+}
+
+/// One block of the conflict-resolution fold's markdown parse — the subset
+/// of the projection schema the fold reconstructs. Anything else stays a
+/// verbatim [`MdBlock::Paragraph`], which the projector re-emits
+/// byte-identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MdBlock {
+    Heading { level: i64, text: String },
+    Paragraph(String),
+    Quote(Vec<MdBlock>),
+    BulletList(Vec<String>),
+    OrderedList { start: i64, items: Vec<String> },
+    TaskList(Vec<(bool, String)>),
+    CodeBlock { language: String, content: String },
+    Rule,
+}
+
+/// Split a leading `---` frontmatter block of flat `key: value` scalars off
+/// the chosen markdown. Only the exact shape the projector emits is claimed;
+/// anything else stays in the body and parses as blocks.
+fn split_markdown_frontmatter(markdown: &str) -> (Vec<(String, String)>, &str) {
+    let Some(rest) = markdown.strip_prefix("---\n") else {
+        return (Vec::new(), markdown);
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (Vec::new(), markdown);
+    };
+    let after = &rest[end + "\n---".len()..];
+    let body = after
+        .strip_prefix("\n\n")
+        .or_else(|| after.strip_prefix('\n'))
+        .unwrap_or(after);
+    if !after.is_empty() && !after.starts_with('\n') {
+        return (Vec::new(), markdown);
+    }
+    let mut entries = Vec::new();
+    for line in rest[..end].lines() {
+        let Some((key, value)) = line.split_once(": ") else {
+            // Nested maps, typed scalars, or free text: not the flat shape
+            // this fold claims. Leave the whole document to the body parser.
+            return (Vec::new(), markdown);
+        };
+        if key.trim().is_empty() || key.starts_with(' ') {
+            return (Vec::new(), markdown);
+        }
+        entries.push((key.to_string(), value.to_string()));
+    }
+    (entries, body)
+}
+
+fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let mut blocks = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.is_empty() {
+            index += 1;
+            continue;
+        }
+        if let Some(fence_language) = line.strip_prefix("```") {
+            let mut content = Vec::new();
+            let mut cursor = index + 1;
+            let mut closed = false;
+            while cursor < lines.len() {
+                if lines[cursor] == "```" {
+                    closed = true;
+                    break;
+                }
+                content.push(lines[cursor]);
+                cursor += 1;
+            }
+            if closed {
+                blocks.push(MdBlock::CodeBlock {
+                    language: fence_language.to_string(),
+                    content: content.join("\n"),
+                });
+                index = cursor + 1;
+                continue;
+            }
+            // An unclosed fence is not a code block: fall through to text.
+        }
+        if line == "---" {
+            blocks.push(MdBlock::Rule);
+            index += 1;
+            continue;
+        }
+        if let Some((level, text)) = parse_heading(line) {
+            blocks.push(MdBlock::Heading { level, text });
+            index += 1;
+            continue;
+        }
+        if line == ">" || line.starts_with("> ") {
+            let mut inner = Vec::new();
+            while index < lines.len() {
+                let quoted = lines[index];
+                if quoted == ">" {
+                    inner.push("");
+                } else if let Some(stripped) = quoted.strip_prefix("> ") {
+                    inner.push(stripped);
+                } else {
+                    break;
+                }
+                index += 1;
+            }
+            blocks.push(MdBlock::Quote(parse_markdown_blocks(&inner.join("\n"))));
+            continue;
+        }
+        if parse_task_item(line).is_some() {
+            let mut items = Vec::new();
+            while let Some(item) = lines.get(index).and_then(|line| parse_task_item(line)) {
+                items.push(item);
+                index += 1;
+            }
+            blocks.push(MdBlock::TaskList(items));
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("- ") {
+            let mut items = vec![item.to_string()];
+            index += 1;
+            while let Some(next) = lines.get(index).and_then(|line| {
+                (parse_task_item(line).is_none())
+                    .then(|| line.strip_prefix("- "))
+                    .flatten()
+            }) {
+                items.push(next.to_string());
+                index += 1;
+            }
+            blocks.push(MdBlock::BulletList(items));
+            continue;
+        }
+        if let Some((start, item)) = parse_ordered_item(line) {
+            let mut items = vec![item];
+            let mut expected = start + 1;
+            index += 1;
+            while let Some((ordinal, next)) =
+                lines.get(index).and_then(|line| parse_ordered_item(line))
+            {
+                if ordinal != expected {
+                    break;
+                }
+                items.push(next);
+                expected += 1;
+                index += 1;
+            }
+            blocks.push(MdBlock::OrderedList { start, items });
+            continue;
+        }
+        // Paragraph: consecutive lines until a blank line or a structural
+        // line. Interior single newlines stay inside one text run, which the
+        // projector re-emits verbatim.
+        let mut para = vec![line];
+        index += 1;
+        while index < lines.len() {
+            let next = lines[index];
+            if next.is_empty()
+                || next == "---"
+                || next.starts_with("```")
+                || next == ">"
+                || next.starts_with("> ")
+                || next.starts_with("- ")
+                || parse_heading(next).is_some()
+                || parse_ordered_item(next).is_some()
+            {
+                break;
+            }
+            para.push(next);
+            index += 1;
+        }
+        blocks.push(MdBlock::Paragraph(para.join("\n")));
+    }
+    blocks
+}
+
+fn parse_heading(line: &str) -> Option<(i64, String)> {
+    let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let rest = line[hashes..].strip_prefix(' ')?;
+    if rest.is_empty() {
+        return None;
+    }
+    Some((hashes as i64, rest.to_string()))
+}
+
+fn parse_task_item(line: &str) -> Option<(bool, String)> {
+    line.strip_prefix("- [x] ")
+        .map(|text| (true, text.to_string()))
+        .or_else(|| {
+            line.strip_prefix("- [ ] ")
+                .map(|text| (false, text.to_string()))
+        })
+}
+
+fn parse_ordered_item(line: &str) -> Option<(i64, String)> {
+    let (ordinal, rest) = line.split_once(". ")?;
+    let ordinal = ordinal.parse::<i64>().ok()?;
+    if ordinal < 0 || rest.is_empty() {
+        return None;
+    }
+    Some((ordinal, rest.to_string()))
+}
+
+fn insert_md_paragraph<F: XmlFragment>(
+    txn: &mut yrs::TransactionMut<'_>,
+    parent: &F,
+    index: u32,
+    text: &str,
+) {
+    let el = parent.insert(txn, index, XmlElementPrelim::empty("paragraph"));
+    if !text.is_empty() {
+        el.insert(txn, 0, XmlTextPrelim::new(text));
+    }
+}
+
+fn insert_md_block<F: XmlFragment>(
+    txn: &mut yrs::TransactionMut<'_>,
+    parent: &F,
+    index: u32,
+    block: &MdBlock,
+) {
+    match block {
+        MdBlock::Paragraph(text) => insert_md_paragraph(txn, parent, index, text),
+        MdBlock::Heading { level, text } => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("heading"));
+            el.insert_attribute(txn, "level", *level);
+            el.insert(txn, 0, XmlTextPrelim::new(text.as_str()));
+        }
+        MdBlock::Quote(children) => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("blockquote"));
+            for (child_index, child) in children.iter().enumerate() {
+                insert_md_block(txn, &el, child_index as u32, child);
+            }
+        }
+        MdBlock::BulletList(items) => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("bulletList"));
+            for (item_index, item) in items.iter().enumerate() {
+                let li = el.insert(txn, item_index as u32, XmlElementPrelim::empty("listItem"));
+                insert_md_paragraph(txn, &li, 0, item);
+            }
+        }
+        MdBlock::OrderedList { start, items } => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("orderedList"));
+            if *start != 1 {
+                el.insert_attribute(txn, "start", *start);
+            }
+            for (item_index, item) in items.iter().enumerate() {
+                let li = el.insert(txn, item_index as u32, XmlElementPrelim::empty("listItem"));
+                insert_md_paragraph(txn, &li, 0, item);
+            }
+        }
+        MdBlock::TaskList(items) => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("taskList"));
+            for (item_index, (checked, item)) in items.iter().enumerate() {
+                let li = el.insert(txn, item_index as u32, XmlElementPrelim::empty("taskItem"));
+                li.insert_attribute(txn, "checked", *checked);
+                insert_md_paragraph(txn, &li, 0, item);
+            }
+        }
+        MdBlock::CodeBlock { language, content } => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("codeBlock"));
+            if !language.is_empty() {
+                el.insert_attribute(txn, "language", language.as_str());
+            }
+            if !content.is_empty() {
+                el.insert(txn, 0, XmlTextPrelim::new(content.as_str()));
+            }
+        }
+        MdBlock::Rule => {
+            parent.insert(txn, index, XmlElementPrelim::empty("horizontalRule"));
+        }
     }
 }
 
@@ -3059,5 +3339,71 @@ mod projection_tests {
                 max_nodes: MAX_PROJECTION_NODES
             })
         ));
+    }
+
+    #[test]
+    fn resolution_fold_reconstructs_rich_structure_and_projection() {
+        // The fold must parse the chosen markdown into the projection's own
+        // schema: the projection reproduces the chosen bytes AND the body
+        // holds real nodes, not literal syntax inside paragraphs. MUTATION:
+        // flattening the fold back to plain paragraphs keeps the projection
+        // equal for most constructs but fails every structure assertion.
+        let doc = Ydoc::wire();
+        doc.richdoc_append_paragraph("old content");
+        let chosen = "---
+title: Chosen
+---
+
+# Heading
+
+plain para
+second line
+
+> quoted para
+
+- one
+- two
+
+1. first
+2. second
+
+- [x] done
+- [ ] todo
+
+```rust
+fn main() {}
+```
+
+---
+
+| a | b |
+|---|---|";
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen);
+        let projected = doc.project(ContentKind::Richdoc).expect("projection");
+        assert_eq!(
+            projected.markdown, chosen,
+            "the folded document projects the chosen bytes back"
+        );
+        let body = serde_json::to_string(&doc.canonical_content()["body"]).expect("body json");
+        for tag in [
+            "heading",
+            "blockquote",
+            "bulletList",
+            "orderedList",
+            "taskList",
+            "codeBlock",
+            "horizontalRule",
+        ] {
+            assert!(
+                body.contains(tag),
+                "the fold must rebuild {tag} nodes, got {body}"
+            );
+        }
+        let frontmatter =
+            serde_json::to_string(&doc.canonical_content()["frontmatter"]).expect("fm json");
+        assert!(
+            frontmatter.contains("Chosen"),
+            "frontmatter scalars are parsed, got {frontmatter}"
+        );
     }
 }

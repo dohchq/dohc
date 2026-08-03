@@ -9279,15 +9279,27 @@ fn ydoc_settle_on_store(
         // over stale disk bytes) AND a changed-projection settle (whose new
         // job's preimage is the unmaterialized head; skipping the replay
         // would strand it in a permanent materialization conflict).
-        let pending_job_id = format!("ydoc-mat_{}", current.latest_moment_id);
+        // The head's pending job can be a SETTLE job or a conflict-RESOLUTION
+        // job: a resolution write on this object enqueues `resolve-mat_<id>`
+        // and the fold advances last_settled_sha in the same transaction, so
+        // skipping it here would leave the disk pre-resolution while every
+        // marker reports the choice as settled.
+        let mut pending_job = None;
+        for prefix in ["ydoc-mat_", "resolve-mat_"] {
+            let candidate = format!("{prefix}{}", current.latest_moment_id);
+            if let Some(job) = store
+                .load_materialization_job(&candidate)?
+                .filter(|job| job.status == dohc_engine_storage::JobStatus::Pending)
+            {
+                pending_job = Some(job);
+                break;
+            }
+        }
         // PENDING only: a completed/conflicted job must not replay here — a
         // completed one would re-read the target on every settle (and fail
         // the whole settle pre-commit on a transient read error), and a
         // conflicted one already ran its compensation.
-        if let Some(job) = store
-            .load_materialization_job(&pending_job_id)?
-            .filter(|job| job.status == dohc_engine_storage::JobStatus::Pending)
-        {
+        if let Some(job) = pending_job {
             // Suppression BEFORE the replace, exactly like the fresh path —
             // the watcher can observe the replayed bytes the instant they
             // land; retract on a conflicted job.

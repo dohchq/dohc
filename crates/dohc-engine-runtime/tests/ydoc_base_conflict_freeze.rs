@@ -316,3 +316,76 @@ async fn resolving_keep_current_folds_the_choice_into_the_lineage() {
         "the peer reads the same resolved content"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pending_resolution_job_replays_before_the_next_settle() {
+    // Codex #596 P1: a resolution write enqueues `resolve-mat_<moment>`, and
+    // the fold marks the choice settled in the same transaction. If that job
+    // has not landed yet, the next settle's pending-job recovery must replay
+    // it — probing only `ydoc-mat_<moment>` leaves the disk pre-resolution
+    // while every marker reports the choice as settled. MUTATION: revert the
+    // recovery probe to the single ydoc-mat prefix — the disk assertion
+    // fails with the pre-resolution bytes.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let (key, _winner_base, _winner_doc, conflict_id) = {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        seed_divergent_base(&mut store)
+    };
+    std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
+    std::fs::write(scratch.path().join(PATH), "local truth").expect("seed disk");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 10).expect("open actor").actor;
+    handle
+        .conflict_resolve(
+            ResolveTextConflict {
+                workspace_id: WS.to_owned(),
+                conflict_id,
+                resolution: ResolveConflictKind::ApplyMerged {
+                    text: "merged truth".to_owned(),
+                },
+                object_id: "resolution-fresh-object".to_owned(),
+                write_moment_id: "m-resolve-merged".to_owned(),
+                delete_moment_id: "m-resolve-delete".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 11,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("merged resolution");
+    // The resolution's materialization job is still pending (nothing ran
+    // it): the disk holds the pre-resolution bytes.
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("disk"),
+        "local truth"
+    );
+
+    handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            None,
+            "replay-session".to_owned(),
+            Arc::new(NoRecorder),
+            12,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("settle replays the pending resolution job");
+    supervisor.close(&db).expect("close actor");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("disk after settle"),
+        "merged truth",
+        "the resolution's materialization replays before the settle answers"
+    );
+}

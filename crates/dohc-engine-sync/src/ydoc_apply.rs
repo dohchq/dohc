@@ -149,26 +149,58 @@ pub(crate) fn redelivered_conflicts_opened(
     ) else {
         return Ok(0);
     };
-    let incoming_moment_id = ydoc_apply_moment_id(
-        &key,
-        &payload.path,
-        &envelope.origin_id,
-        envelope.origin_seq,
-    );
-    store.read_with(|conn| {
+    let _ = key;
+    let recorded: Option<String> = store.read_with(|conn| {
         conn.query_row(
-            "SELECT COUNT(*) FROM conflicts \
-             WHERE workspace_id=?1 AND metadata_origin='sync' \
-               AND incoming_latest_moment_id=?2 AND created_at_ms=?3",
-            params![
-                envelope.workspace_id,
-                incoming_moment_id,
-                envelope.recorded_at_ms
-            ],
+            "SELECT payload_hash FROM engine_requests \
+             WHERE request_id=?1 AND kind='sync-ydoc-conflict'",
+            [ydoc_conflict_decision_id(envelope)],
             |row| row.get(0),
         )
+        .optional()
         .map_err(SyncError::corrupt)
-    })
+    })?;
+    match recorded {
+        Some(count) => count.parse::<i64>().map_err(|_| SyncError::InvalidInput {
+            reason: "recorded ydoc conflict count is invalid",
+        }),
+        None => Ok(0),
+    }
+}
+
+/// The immutable per-envelope decision id for the conflicts a base opened
+/// (crash-redelivery recount). The CONFLICT row itself is mutable — a later
+/// delta coalesces it and rewrites its incoming anchor — so the recount must
+/// never depend on it.
+fn ydoc_conflict_decision_id(envelope: &ReplicationEnvelope) -> String {
+    let coordinate = format!(
+        "{}\0{}\0{}",
+        envelope.workspace_id, envelope.origin_id, envelope.origin_seq
+    );
+    format!(
+        "sync-ydoc-conflict:{}",
+        dohc_engine_storage::hex_sha256(coordinate.as_bytes())
+    )
+}
+
+fn record_ydoc_conflicts_opened(
+    tx: &rusqlite::Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    conflicts_opened: i64,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "INSERT INTO engine_requests \
+         (request_id,payload_hash,result_seq,committed_at,kind) \
+         VALUES (?1,?2,?3,?4,'sync-ydoc-conflict')",
+        params![
+            ydoc_conflict_decision_id(envelope),
+            conflicts_opened.to_string(),
+            envelope.origin_seq,
+            envelope.recorded_at_ms,
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
 }
 
 /// Drain acked Y.Doc envelopes deferred while `key` was leased. The
@@ -488,6 +520,25 @@ pub fn fold_resolution_into_ydoc_in_tx(
         DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "conflict resolution coordinates are invalid",
         })?;
+    // Acked-but-parked remote updates for this object were never part of
+    // EITHER reviewed side, and the drain that lands them runs after the
+    // review gate would have closed. Refuse the resolution while they are
+    // queued: a resync or session close drains them, the open conflict
+    // coalesces to the freshest incoming state, and the user resolves what
+    // they can actually see.
+    let deferred: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if deferred {
+        return Err(SyncError::InvalidInput {
+            reason: "ydoc-deferred-updates-pending",
+        });
+    }
     let Some(marker) =
         dohc_engine_collab::read_marker_in_tx(tx, &key).map_err(map_collab_hard_error)?
     else {
@@ -505,8 +556,10 @@ pub fn fold_resolution_into_ydoc_in_tx(
     if projection.markdown != chosen_text {
         let update = doc.rewrite_content_to_markdown(marker.content_kind, chosen_text);
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
-            return Err(SyncError::InvalidInput {
-                reason: "conflict resolution fold exceeds MAX_YDOC_UPDATE_BYTES (5 MiB per update)",
+            return Err(SyncError::BlobTooLarge {
+                constraint: "MAX_YDOC_UPDATE_BYTES (conflict resolution fold)",
+                limit_bytes: dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
+                observed_bytes: update.len(),
             });
         }
         let outcome = dohc_engine_collab::record_update_in_tx(tx, &key, &update, now_ms).map_err(
@@ -1029,6 +1082,11 @@ pub fn apply_ydoc_envelope(
                             recorded_at_ms: op.recorded_at_ms,
                         },
                     )?;
+                    // Immutable per-envelope record of what THIS coordinate
+                    // opened: a later delta coalesces the conflict and
+                    // rewrites its incoming anchor, so a crash-redelivery
+                    // recount must not depend on the mutable conflict row.
+                    record_ydoc_conflicts_opened(tx, op, conflicts_opened)?;
                     return Ok(YdocApplyResult {
                         deferred: false,
                         reason: Some("ydoc-base-conflict"),

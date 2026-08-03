@@ -7198,6 +7198,201 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
 }
 
 #[test]
+fn a_coalesced_conflict_still_recounts_on_redelivery() {
+    // Codex #596 P2: a later delta coalesces the conflict and rewrites its
+    // incoming anchor, so a crash-redelivery recount keyed on the conflict
+    // row finds nothing. The count now lives in an immutable per-envelope
+    // decision record. MUTATION: drop the `record_ydoc_conflicts_opened`
+    // call (or key the recount back on the conflict row) — this returns 0.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-recount',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-recount".to_owned(),
+                    path: "notes/recount.md".to_owned(),
+                    text: "local truth".to_owned(),
+                    moment_id: "m-recount-local".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("local head");
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "remote truth");
+    let base_sha = engine
+        .put_binary_blob(&base_doc.encode_full_state())
+        .expect("base blob");
+    let base_op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-recount",
+            "path": "notes/recount.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base conflicts");
+    // A later delta coalesces the conflict, rewriting its incoming anchor.
+    let delta = base_doc.plaintext_insert(0, "more ");
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let delta_op = envelope(
+        "peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-recount",
+            "path": "notes/recount.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "isBaseState": false
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases).expect("delta coalesces");
+    assert_eq!(
+        crate::router::redelivered_conflicts_opened(&engine, &base_op).expect("recount"),
+        1,
+        "the redelivered base still reports the conflict it opened"
+    );
+}
+
+#[test]
+fn resolution_fold_refuses_while_deferred_updates_are_parked() {
+    // Codex #596 P1: acked-but-parked remote updates were never part of
+    // either reviewed side, and their drain runs after the review gate
+    // closes. The fold — and with it the whole resolution transaction —
+    // refuses until they drain. MUTATION: drop the deferred-updates check in
+    // `fold_resolution_into_ydoc_in_tx` — the Err assertion fails.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-parked',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates \
+                 (workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms) \
+                 VALUES ('ws','main','object-parked','peer',0,1_500)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("parked row");
+    let refused = engine.write_with(&NoFaults, |tx| {
+        crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+            tx,
+            "ws",
+            "main",
+            "object-parked",
+            "notes/parked.md",
+            "chosen text",
+            1_600,
+        )
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(SyncError::InvalidInput {
+                reason: "ydoc-deferred-updates-pending"
+            })
+        ),
+        "a parked queue must refuse the resolution: {refused:?}"
+    );
+}
+
+#[test]
+fn resolution_fold_names_the_cap_it_hits() {
+    // Codex #596 P2: the fold's size refusal must name the constraint, the
+    // limit, and the observed bytes. MUTATION: revert it to a static
+    // InvalidInput — the BlobTooLarge match fails.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-fold-cap',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-fold-cap").expect("key");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "small");
+    dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        &doc.encode_full_state(),
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim");
+    let oversized = "x".repeat(dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES + 1);
+    let refused = engine.write_with(&NoFaults, |tx| {
+        crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+            tx,
+            "ws",
+            "main",
+            "object-fold-cap",
+            "notes/fold-cap.md",
+            &oversized,
+            1_600,
+        )
+    });
+    match refused {
+        Err(SyncError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        }) => {
+            assert!(constraint.contains("MAX_YDOC_UPDATE_BYTES"));
+            assert_eq!(
+                limit_bytes,
+                dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+            );
+            assert!(observed_bytes > limit_bytes, "observed usage is reported");
+        }
+        other => panic!("the fold cap must name limit and usage: {other:?}"),
+    }
+}
+
+#[test]
 fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
     let (_scratch, _path, mut engine) = store();
     let install_abort_trigger = |engine: &mut EngineStore, trigger_name: &str, table_name: &str| {
