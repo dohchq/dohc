@@ -1849,6 +1849,102 @@ describe("markdown document opening state", () => {
     expect(states.at(-1)).toBe("saved");
   });
 
+  // #579 review r3, the last unguarded interleaving: an autosave that already
+  // passed the guards and is AWAITING its IPC write. `unsavedDraft` clears at
+  // issue time, so a flush that only reads it would return at once, the
+  // version would switch, and the outstanding write would land the previous
+  // version's text on the new tree. The seam must hold until the write lands.
+  it("holds the shell's flush until an in-flight autosave lands, so a switch cannot race the write", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    let releaseWrite!: () => void;
+    const heldWrite = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseWrite = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => heldWrite);
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    let flush: (() => Promise<void>) | null = null;
+    const registerDraftFlush = (next: (() => Promise<void>) | null) => {
+      flush = next;
+    };
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        registerDraftFlush={registerDraftFlush}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(
+      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      "Draft!",
+    );
+    // The 800ms timer fires; the write is now in flight, held by the mock.
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    // MUTATION (in-flight window): remove `await pendingWrite.current` from
+    // the draft-flush seam. The flush below settles with the write still in
+    // flight, and the switch it gates proceeds while the previous version's
+    // text is still landing.
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(flushSettled).toBe(false);
+
+    // The write lands; only then does the flush release its caller.
+    await act(async () => {
+      releaseWrite();
+      await heldWrite;
+    });
+    await act(async () => {
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    // The draft landed exactly once, into the version being left — not lost,
+    // not duplicated.
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([
+      [
+        {
+          workspaceId: "ws-1",
+          relativePath: "a.md",
+          text: "# Plan\n\nBase paragraph.\nDraft!",
+        },
+      ],
+    ]);
+
+    // The switch now reopens the document; nothing further writes.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={2}
+        registerDraftFlush={registerDraftFlush}
+      />,
+    );
+    expect(screen.getByTestId("markdown-open-state").textContent).toBe(
+      "Opening…",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
   // #579 review P2 (engine half): a bound engine session's settled "Saved"
   // must not outrank an unresolved set-aside edit — the edit is NOT in the
   // document the engine settled.

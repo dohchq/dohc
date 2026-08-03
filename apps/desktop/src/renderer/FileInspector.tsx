@@ -803,6 +803,12 @@ function MarkdownView(props: {
   // The unmount flush keys off this — never off the timer handle, which stays
   // set (already fired) after a completed autosave and would double-write.
   const unsavedDraft = useRef(false);
+  // The write in flight, retained from issue to settle. `unsavedDraft`
+  // clears at ISSUE time, so a flush that only reads it cannot see a write
+  // already awaiting its IPC — the one window a version switch could race
+  // (#579 review, r3). Never-rejecting: waiters only need "landed or
+  // failed"; the failure itself is reported through unsavedDraft/saveState.
+  const pendingWrite = useRef<Promise<void> | null>(null);
 
   // #567 cancel-and-restore: the moment `opening` flips true, the pending
   // draft leaves the save pipeline. Writing it would land the previous
@@ -1217,12 +1223,21 @@ function MarkdownView(props: {
     latestDraft.current = text;
     unsavedDraft.current = false;
     setSaveState("saving");
+    const write = bridge().writeWorkspaceText({
+      workspaceId: props.workspaceId,
+      relativePath: props.path,
+      text,
+    });
+    // Retained from issue to settle (see pendingWrite). Registered BEFORE
+    // this function's own await, so a waiter resuming off it runs after the
+    // state below has been applied.
+    const inFlight = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    pendingWrite.current = inFlight;
     try {
-      await bridge().writeWorkspaceText({
-        workspaceId: props.workspaceId,
-        relativePath: props.path,
-        text,
-      });
+      await write;
       setDraft(text);
       setSavedBody(text);
       setSaveState("saved");
@@ -1232,6 +1247,8 @@ function MarkdownView(props: {
       unsavedDraft.current = true;
       setSaveState("error");
       if (options.rejectOnError) throw error;
+    } finally {
+      if (pendingWrite.current === inFlight) pendingWrite.current = null;
     }
   }
 
@@ -1360,6 +1377,12 @@ function MarkdownView(props: {
   useEffect(() => {
     if (!registerDraftFlush) return;
     registerDraftFlush(async () => {
+      // A write already past the guards is the same obligation as an armed
+      // timer (#579 review, r3): the caller is about to move paths or switch
+      // versions, and must not proceed while the previous state's text is
+      // still landing. If that write FAILS, `unsavedDraft` is true again by
+      // the time this resumes, and the retry below lands it before the move.
+      if (pendingWrite.current) await pendingWrite.current;
       // The ref, not the captured value: the shell can call this seam between
       // the refusal and the re-registration. `opening` too (#567): a flush
       // that arrives mid-reopen must not write the previous version's draft.
