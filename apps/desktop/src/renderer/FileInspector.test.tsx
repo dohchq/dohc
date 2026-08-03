@@ -873,6 +873,33 @@ describe("markdown editor unmount flush", () => {
 describe("engine markdown source view", () => {
   const DOC_MARKDOWN = "---\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.\n";
 
+  /**
+   * Put a draft in the document WITHOUT any pointer event.
+   *
+   * A click into the mounted WYSIWYG surface reaches prosemirror's mousedown,
+   * which calls `elementFromPoint` — jsdom 27 does not implement it, so the
+   * handler throws asynchronously, AFTER the test that caused it has passed.
+   * Vitest reports that as an unhandled error and fails the whole run with
+   * every assertion green. Stepping to source mode (a textarea) and firing a
+   * change event keeps the draft path honest and the pointer out of it.
+   */
+  async function typeIntoSourceEditor(value: string): Promise<HTMLElement> {
+    // Read -> WYSIWYG -> source: the surface may start in any of the three,
+    // so step until the editor is the textarea.
+    for (let step = 0; step < 4; step += 1) {
+      const candidate = screen.queryByTestId("markdown-editor");
+      if (candidate?.tagName === "TEXTAREA") {
+        fireEvent.change(candidate, { target: { value } });
+        return candidate;
+      }
+      fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+    throw new Error("The source editor never appeared.");
+  }
+
   function makeEngineBridge(markdown: string) {
     const serverDoc = markdownToYDoc(markdown);
     const remoteListeners = new Set<
@@ -1163,11 +1190,11 @@ describe("engine markdown source view", () => {
 
       const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
       await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
-      await user.click(screen.getByTestId("markdown-edit-toggle"));
-      await user.type(
-        await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
-        "typed",
-      );
+      // fireEvent + the SOURCE textarea, never a pointer into the WYSIWYG
+      // surface: prosemirror's mousedown calls elementFromPoint, which jsdom
+      // does not implement, and it throws AFTER the test — failing the run
+      // with every assertion green.
+      await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
       // A version switch reopens the engine session; this open times out.
@@ -1238,20 +1265,7 @@ describe("engine markdown source view", () => {
       // surface reaches prosemirror's mousedown, which needs layout jsdom
       // does not have — and that throws AFTER the test, failing the run
       // with every assertion green.
-      // Step to SOURCE mode, whose editor is a textarea a draft can be typed
-      // into without touching the WYSIWYG surface at all.
-      let editor: HTMLElement | null = null;
-      for (let click = 0; click < 3 && editor === null; click += 1) {
-        fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
-        const candidate = await screen.findByTestId(
-          "markdown-editor",
-          {},
-          { timeout: 5_000 },
-        );
-        if (candidate.tagName === "TEXTAREA") editor = candidate;
-      }
-      expect(editor).not.toBeNull();
-      fireEvent.change(editor!, { target: { value: `${DOC_MARKDOWN}typed` } });
+      await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
       view.rerender(
         <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
       );
