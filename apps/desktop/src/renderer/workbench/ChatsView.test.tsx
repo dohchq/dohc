@@ -1606,6 +1606,83 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
   });
 
+  // #545: the DM roll-up sits in the SAME list, but it refreshed only on the
+  // 5-second poll — a DM badge lagging beside a live channel badge reads as
+  // "no new DMs".
+  it("raises the DM roll-up badge the moment a write arrives, not on the next poll", async () => {
+    let unreadCount = 0;
+    bridgeMock.syncDms.mockImplementation(() =>
+      Promise.resolve({ available: true, dms: [dm({ unreadCount })] }),
+    );
+    renderView();
+    await screen.findByTestId("chats-dm-item");
+    expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
+    const syncsBefore = bridgeMock.syncDms.mock.calls.length;
+
+    // An agent's DM write lands while the list is on screen.
+    unreadCount = 2;
+    act(() => emitWorkspaceActivity());
+
+    // MUTATION: remove `void refreshDms()` from the channels-level activity
+    // branch. No sync runs until the 5s poll; the 2s ceiling below is what
+    // keeps that poll from answering for the signal.
+    await waitFor(
+      () =>
+        expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThan(
+          syncsBefore,
+        ),
+      { timeout: 2_000 },
+    );
+    expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("2");
+    // Nothing navigated: the badge appeared on the list itself.
+    expect(screen.getByTestId("chats-channels-heading")).toBeTruthy();
+  });
+
+  // The activity signal fires for every settled file batch and run update,
+  // and syncDms is a relay sync, not a local read. The rule (badgeRead
+  // precedent): one sync in flight, and a burst arriving mid-sync runs
+  // exactly one trailing pass when it settles.
+  it("coalesces an activity burst into one in-flight DM sync plus one trailing pass", async () => {
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+    renderView();
+    await screen.findByTestId("chats-dm-item");
+    const syncsBefore = bridgeMock.syncDms.mock.calls.length;
+
+    let release!: () => void;
+    const held = new Promise<{ available: boolean; dms: DmRecord[] }>(
+      (resolve) => {
+        release = () =>
+          resolve({ available: true, dms: [dm({ unreadCount: 1 })] });
+      },
+    );
+    bridgeMock.syncDms.mockImplementation(() => held);
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1),
+    );
+
+    // The burst lands while that sync is in flight.
+    // MUTATION: revert refreshDms to a plain un-coalesced sync. Each of these
+    // starts its own relay sync and the count below reads syncsBefore + 4.
+    act(() => {
+      emitWorkspaceActivity();
+      emitWorkspaceActivity();
+      emitWorkspaceActivity();
+    });
+    expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1);
+
+    // One trailing pass when the held sync settles — not one per event.
+    await act(async () => {
+      release();
+      await held;
+    });
+    await waitFor(() =>
+      expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2),
+    );
+    expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("1");
+    expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2);
+  });
+
   it("drops a slow list refresh from the workspace the user left", async () => {
     type ChannelListPage = {
       channels: ChatChannelRecord[];
