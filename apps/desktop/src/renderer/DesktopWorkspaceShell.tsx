@@ -2088,6 +2088,18 @@ export function DesktopWorkspaceShell(props: {
     },
     [setChatsDestination],
   );
+  // The Chats PAGE's explicit clicks arrive here, with the same rule as
+  // openChatsNavInTab: a user command cancels a pending DM lookup even when
+  // it repeats the current destination — an exact-repeat backlink still
+  // re-loads and re-scrolls, and the page it lands on must not be replaced by
+  // a DM answering late. Only the passive onChatsNav report stays conditional.
+  const onChatsNavCommand = useCallback(
+    (nav: ChatsNav) => {
+      invalidateDmNavigation(dmNavigationRequest);
+      setChatsDestination(nav);
+    },
+    [setChatsDestination],
+  );
   // Unsent drafts ride the same handoff: mirrored live (a ref write per
   // keystroke, no re-render) and seeded into the next mount, so expanding
   // or collapsing chats never discards what the user typed.
@@ -3022,6 +3034,7 @@ export function DesktopWorkspaceShell(props: {
     initialNav: chatsNav.current ?? undefined,
     initialDrafts: chatsDrafts.current ?? undefined,
     onNavChange: onChatsNav,
+    onNavCommand: onChatsNavCommand,
     onDraftsChange: onChatsDrafts,
     onThreadRead: onChatsThreadRead,
     onOpenFileChat: openFileChatInPanel,

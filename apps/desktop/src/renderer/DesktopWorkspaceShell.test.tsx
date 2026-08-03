@@ -1674,6 +1674,242 @@ describe("ui-state merge-on-load", () => {
     expect(screen.queryByText(CANONICAL_DM.name)).toBeNull();
   }, 20_000);
 
+  // Chat mocks the Chats PAGE needs to load its feed and a thread. The base
+  // engine bridge only stubs the navigator's overview surface.
+  function chatsPageBridge(uiState: WorkspaceUiState) {
+    const bridge = makeEngineBridge(Promise.resolve(uiState));
+    const syncAnswers: Array<
+      (value: { available: boolean; dms: DmRecord[] }) => void
+    > = [];
+    bridge.syncDms = vi.fn(
+      () =>
+        new Promise<{ available: boolean; dms: DmRecord[] }>((resolve) => {
+          syncAnswers.push(resolve);
+        }),
+    );
+    bridge.listChatChannels = vi.fn(async () => ({
+      channels: [
+        {
+          id: "channel-team",
+          name: "team",
+          slug: "team",
+          kind: "channel" as const,
+          createdAtMs: 1,
+          updatedAtMs: 1,
+          threadCount: 1,
+          unreadCount: 0,
+        },
+      ],
+      fileThreads: [],
+    }));
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [DM_GRAPH_NODE],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    return Object.assign(bridge, {
+      syncAnswers,
+      listPersonalChatFeed: vi.fn(async () => ({
+        items: [
+          {
+            message: {
+              id: "message-feed",
+              threadId: "thread-team",
+              authorKind: "human" as const,
+              authorDisplayName: "You",
+              body: "Feed update worth revisiting",
+              createdAtMs: 1,
+            },
+            thread: {
+              id: "thread-team",
+              title: "Feed thread",
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              channelId: "channel-team",
+              messageCount: 1,
+              lastReadSequence: 1,
+              unreadCount: 0,
+            },
+            channel: {
+              id: "channel-team",
+              name: "team",
+              slug: "team",
+              kind: "channel" as const,
+            },
+            reactions: [],
+            matchedBy: ["channel" as const],
+          },
+        ],
+      })),
+      listChatMessages: vi.fn(async () => ({
+        messages: [
+          {
+            id: "message-feed",
+            threadId: "thread-team",
+            authorKind: "human" as const,
+            authorDisplayName: "You",
+            body: "Feed update worth revisiting",
+            createdAtMs: 1,
+          },
+        ],
+      })),
+      listChatReactions: vi.fn(async () => ({ reactions: [], viewerAuthorId: "you" })),
+      listChatThreadDecisions: vi.fn(async () => ({ decisions: [] })),
+      listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
+      chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
+      chatDispatchStateForThread: vi.fn(async () => ({
+        liveRun: false,
+        pendingCount: 0,
+        paused: false,
+      })),
+      markChatThreadRead: vi.fn(async () => ({ lastReadSequence: 1, revision: 1 })),
+    });
+  }
+
+  const CHATS_PAGE_STATE: WorkspaceUiState = {
+    ...STORED_STATE,
+    tabs: [CHATS_TAB_PATH],
+    activeTab: CHATS_TAB_PATH,
+    chatsVisible: false,
+  };
+
+  // #552: the Chats PAGE's feed/backlink click is a COMMAND. It must cancel a
+  // pending DM lookup synchronously in the click — the passive nav report is
+  // an effect that flushes after the microtask queue, so a DM answer landing
+  // in the same tick as the click would pass its isCurrent() check first and
+  // remount the page over the message the user just jumped to.
+  it("discards a DM answer that lands in the same tick as a page feed click", async () => {
+    const user = userEvent.setup();
+    const bridge = chatsPageBridge(CHATS_PAGE_STATE);
+    renderShell(bridge);
+
+    // The page mounts on the Chats tab; go to the Feed.
+    await user.click(await screen.findByTestId("chats-feed-link"));
+    const post = await screen.findByText("Feed update worth revisiting");
+    const postButton = post.closest("button")!;
+
+    // Start a canonical DM navigation from the graph and leave it in flight.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    const dmCallsBefore = bridge.syncDms.mock.calls.length;
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() =>
+      expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1),
+    );
+    // Collapse the sidebar so only the Chats page answers the queries below.
+    await user.click(screen.getByTestId("activity-graph"));
+
+    // The DM answers in the same tick the user clicks the feed item: the
+    // answer's continuation is queued first, and the click handler runs
+    // before it does. Only a cancellation issued synchronously inside the
+    // click wins this race.
+    await act(async () => {
+      bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
+      postButton.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
+  }, 20_000);
+
+  // The awaited form of the same click: a feed item carrying a focus target
+  // navigates in place (openConversation -> command + report), and the DM
+  // answers late. The destination write must cancel it.
+  it("discards an in-flight DM navigation when a page feed click jumps to a message", async () => {
+    const user = userEvent.setup();
+    const bridge = chatsPageBridge(CHATS_PAGE_STATE);
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("chats-feed-link"));
+    const post = await screen.findByText("Feed update worth revisiting");
+
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    const dmCallsBefore = bridge.syncDms.mock.calls.length;
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() =>
+      expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1),
+    );
+    await user.click(screen.getByTestId("activity-graph"));
+
+    // The user jumps to the message. The DM answers late; it is stale.
+    await user.click(post.closest("button")!);
+    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
+    await act(async () => {
+      bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("chats-thread-view")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
+  }, 20_000);
+
+  // The surviving mutant from #552's review: openFile's heading-target
+  // invalidation. A heading jump into the ALREADY-ACTIVE file moves no tab,
+  // so mutateWb's transition check cannot see it — only openFile's own
+  // `if (target)` branch cancels the pending DM.
+  it("discards an in-flight DM navigation when a heading jump lands in the active file", async () => {
+    const heading = {
+      path: "a.md#plan",
+      kind: "heading" as const,
+      filePath: "a.md",
+      headingAnchor: "plan",
+      title: "Plan",
+      incoming: 1,
+      outgoing: 0,
+    };
+    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["a.md"],
+        activeTab: "a.md",
+        chatsVisible: false,
+      }),
+    );
+    bridge.readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [DM_GRAPH_NODE, heading],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 1,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    bridge.syncDms = vi.fn(() => sync.promise);
+    renderShell(bridge);
+
+    // Start a canonical DM navigation and leave it in flight.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+
+    // Jump to a heading in the file that is ALREADY the active tab: no tab
+    // moves, only the in-document destination changes.
+    await user.click(
+      (await screen.findAllByTestId("graph-file-row")).find(
+        (row) => row.dataset.path === heading.path,
+      )!,
+    );
+    expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+
+    await act(async () => {
+      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      await sync.promise;
+    });
+    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+  }, 20_000);
+
   // A request that is merely in flight has not answered anything, and a
   // request that fails never will. Superseding on ISSUE would drop the only
   // answer there is and leave the explorer empty with nothing to retry it.

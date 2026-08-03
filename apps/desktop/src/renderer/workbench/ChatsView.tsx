@@ -888,6 +888,13 @@ export function ChatsView(props: {
   // Reports every navigation so the shell can seed the next mount (panel or
   // expanded tab) with this instance's current conversation.
   onNavChange?: (nav: ChatsNav) => void;
+  // The page variant's counterpart of the panel's onOpenInTab: an explicit
+  // conversation click, reported BEFORE the view navigates in place. It is a
+  // user command, so the shell cancels a pending cross-surface navigation
+  // (the DM lookup) unconditionally — even when the click repeats the current
+  // destination, which still re-loads and re-scrolls. The passive onNavChange
+  // report only says where the view already is and stays conditional.
+  onNavCommand?: (nav: ChatsNav) => void;
   // The compact panel is a navigator: selecting a conversation can hand its
   // destination to the shell so it opens in the editor instead of replacing
   // the panel's list. The page variant always navigates in place.
@@ -2380,13 +2387,25 @@ export function ChatsView(props: {
         props.onOpenInTab(target);
         return;
       }
+      // In-place navigation is still a command. Report it as one before the
+      // local loaders run: an exact repeat of the current destination changes
+      // no nav state, so the passive report alone would cancel nothing.
+      props.onNavCommand?.(target);
       if (target.level === "feed") openFeed();
       else if (target.level === "channel") void openChannel(target.channel);
       else if (target.level === "thread") {
         void openThread(target.channel, target.thread, target.focusMessageId);
       } else void openDm(target.dm, target.focusMessageId);
     },
-    [openChannel, openDm, openFeed, openThread, props.onOpenInTab, variant],
+    [
+      openChannel,
+      openDm,
+      openFeed,
+      openThread,
+      props.onNavCommand,
+      props.onOpenInTab,
+      variant,
+    ],
   );
 
   // Expand-to-tab seam, outbound: report where this view is (and what's
