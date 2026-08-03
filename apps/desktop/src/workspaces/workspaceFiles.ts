@@ -639,7 +639,16 @@ export async function moveIntoWorkspaceTrash(
 ): Promise<string> {
   const realRoot = await realpath(rootPath);
   const trashDir = join(await resolveWorkspaceMetadataDir(rootPath), "trash");
-  await mkdir(trashDir, { recursive: true });
+  // mkdir{recursive} throws a raw errno (EEXIST, or a Windows variant) when a
+  // non-directory squats .dohc/trash. When SOMETHING is at the path, fall
+  // through: the check below names the squatter and the way out, which the
+  // errno does not. When nothing is there, the mkdir itself failed
+  // (permissions, I/O) — rethrow that.
+  try {
+    await mkdir(trashDir, { recursive: true });
+  } catch (error) {
+    if (!(await lstat(trashDir).catch(() => null))) throw error;
+  }
   // Validate AFTER mkdir, lstat-first (a pre-check is insufficient: mkdir
   // {recursive} silently no-ops on an existing symlink-to-dir, so only the
   // post-mkdir state proves where the rename would land). The check sits
@@ -648,7 +657,15 @@ export async function moveIntoWorkspaceTrash(
   // and the rename is the accepted residual (Node has no renameat dirfd).
   const trashStat = await lstat(trashDir);
   if (trashStat.isSymbolicLink() || !trashStat.isDirectory()) {
-    throw new Error(".dohc/trash must be a real directory inside the workspace");
+    const squatter = trashStat.isSymbolicLink()
+      ? "link"
+      : trashStat.isFile()
+        ? "file"
+        : "item";
+    const article = squatter === "item" ? "An" : "A";
+    throw new Error(
+      `dohc could not move this to the workspace trash. ${article} ${squatter} is at .dohc/trash, which must be a real folder. Remove or rename that ${squatter}. Then retry.`,
+    );
   }
   if (!isInside(realRoot, await realpath(trashDir))) {
     throw new Error(".dohc/trash resolves outside the workspace");

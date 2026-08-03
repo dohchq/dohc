@@ -490,6 +490,26 @@ describe("workspace settings file store", () => {
     ).toBe(false);
   });
 
+  it("a reset over a FILE squatting .dohc/trash names the squatter, never a raw errno", async () => {
+    // Reset moves the settings-path squatter into .dohc/trash. A plain file
+    // at .dohc/trash made that mkdir throw raw "EEXIST: file already exists,
+    // mkdir …" straight into the Settings dialog (#544), while reset is the
+    // advertised recovery from an unreadable settings file. The refusal must
+    // name .dohc/trash, what squats it, and the way out.
+    const root = await tempRoot();
+    const path = join(root, ".dohc", WORKSPACE_SETTINGS_FILE);
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    await rm(path);
+    await mkdir(path); // a directory squats the settings path: file unreadable
+    await writeFile(join(root, ".dohc", "trash"), "squatting");
+
+    await expect(resetWorkspaceSettingsFile(root)).rejects.toThrow(
+      "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file. Then retry.",
+    );
+    // Nothing partial landed: the settings path still reads as recovered.
+    expect((await readWorkspaceSettingsFile(root)).source).toBe("recovered");
+  });
+
   it("refuses to write through a symlinked .dohc and never lands files outside", async () => {
     const root = await tempRoot();
     const outside = await tempRoot();
