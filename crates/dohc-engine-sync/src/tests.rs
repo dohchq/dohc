@@ -6352,7 +6352,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     };
     assert_eq!(
         client
-            .commit_pull_cursor(&mut reopened, "ws", &pending, &NoFaults)
+            .commit_pull_cursor(&mut reopened, "ws", &pending, 2_000, &NoFaults)
             .expect("commit"),
         TxnOutcome::Committed(())
     );
@@ -7197,6 +7197,365 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
     assert_eq!(
         conflicts, 0,
         "a matching head fast-forwards without a conflict"
+    );
+}
+
+/// #548 scaffolding: a workspace that replicates with a relay (identity plus
+/// a durable relay position) and one local-only lineage holding durable rows
+/// at `path` — the exact state an origination declined inside the KNOWN
+/// WINDOW leaves behind.
+fn seed_owed_lineage(
+    engine: &mut EngineStore,
+    object_id: &str,
+    path: &str,
+    text: &str,
+    regime: dohc_engine_collab::Regime,
+) -> dohc_engine_collab::DocKey {
+    VersionedTextStore::new(engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_identity(engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws', ?1, 1_400)",
+                [object_id],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
+                 VALUES ('ws', 'main', ?1, ?2)",
+                params![path, object_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("key");
+    let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, text);
+    dohc_engine_collab::record_local_update_creating_marker(
+        &mut *engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        regime,
+        &update,
+        None,
+        &NoFaults,
+        1_500,
+    )
+    .expect("local edit");
+    key
+}
+
+fn journaled_ydoc_base_ops(engine: &EngineStore) -> Vec<(String, bool)> {
+    engine
+        .read_with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='ydoc.update' AND imported=0 \
+                     ORDER BY origin_seq",
+                )
+                .map_err(SyncError::corrupt)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(SyncError::corrupt)?;
+            let mut out = Vec::new();
+            for row in rows {
+                let payload: serde_json::Value =
+                    serde_json::from_str(&row.map_err(SyncError::corrupt)?)
+                        .expect("journaled payload");
+                out.push((
+                    payload["updateBlobSha256"]
+                        .as_str()
+                        .expect("sha")
+                        .to_owned(),
+                    payload["isBaseState"].as_bool().expect("flag"),
+                ));
+            }
+            Ok::<_, SyncError>(out)
+        })
+        .expect("journal scan")
+}
+
+#[test]
+fn first_relay_cursor_commit_originates_owed_lineages() {
+    // #548 trigger 2: an edit inside the freshly-enrolled window declines to
+    // originate (no relay position yet). The workspace's FIRST cursor commit
+    // must originate every owed lineage in the same transaction. Mutation
+    // check: drop the `originate_owed_ydoc_lineages_in_tx` call in
+    // `commit_relay_cursor` — the base assertion below fails.
+    let (_scratch, _path, mut engine) = store();
+    let key = seed_owed_lineage(
+        &mut engine,
+        "object-window",
+        "notes/window.md",
+        "window edit",
+        dohc_engine_collab::Regime::LocalOnly,
+    );
+    assert!(
+        journaled_ydoc_base_ops(&engine).is_empty(),
+        "nothing originates before the first relay position"
+    );
+
+    let commit = |engine: &mut EngineStore, cursor: i64| {
+        commit_relay_cursor(
+            engine,
+            "ws",
+            &RelayCursor {
+                cursor,
+                replication_epoch: "epoch-1".to_owned(),
+                stream_identity: "stream-1".to_owned(),
+                refusal_report_id: None,
+            },
+            2_000,
+            &NoFaults,
+        )
+        .expect("cursor commit")
+    };
+    assert!(matches!(
+        commit(&mut engine, 1),
+        dohc_engine_storage::TxnOutcome::Committed(())
+    ));
+
+    let ops = journaled_ydoc_base_ops(&engine);
+    assert_eq!(ops.len(), 1, "the first cursor commit originates the base");
+    assert!(ops[0].1, "the journaled op is the base state");
+    let marker = dohc_engine_collab::read_marker(&engine, &key)
+        .expect("marker read")
+        .expect("marker");
+    assert_eq!(marker.regime, dohc_engine_collab::Regime::Replicated);
+    assert!(marker.base_claimed);
+    let base_bytes = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                [&ops[0].0],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("base blob");
+    let clean_peer = dohc_engine_collab::Ydoc::wire();
+    clean_peer.apply(&base_bytes).expect("peer base");
+    assert_eq!(
+        clean_peer.plaintext_string(),
+        "window edit",
+        "the base carries everything typed inside the window"
+    );
+
+    // Base-once: a later cursor commit originates nothing further.
+    assert!(matches!(
+        commit(&mut engine, 2),
+        dohc_engine_storage::TxnOutcome::Committed(())
+    ));
+    assert_eq!(journaled_ydoc_base_ops(&engine).len(), 1);
+}
+
+#[test]
+fn resolving_a_missing_dependency_originates_the_owed_lineage() {
+    // #548 trigger 1, direct-apply flavour (the third acceptance scenario in
+    // ydoc-replicated-lineage.md): a dependent remote update parks, so
+    // origination declines; delivering the predecessor must ask again in the
+    // same admission transaction, and a clean peer must then read the full
+    // text from the journaled base alone. Mutation check: drop the
+    // origination call in the non-base apply closure — the base assertion
+    // fails.
+    let (_scratch, _path, mut engine) = store();
+    // Replicated but UNCLAIMED (the shape a ydoc.apply-created lineage has):
+    // the direct apply path only admits remote updates on replicated
+    // lineages, and an unclaimed one is exactly what an origination declined
+    // over a pending dependency leaves behind.
+    let _key = seed_owed_lineage(
+        &mut engine,
+        "object-dep",
+        "notes/dep.md",
+        "local text ",
+        dohc_engine_collab::Regime::Replicated,
+    );
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_cursors \
+                 (workspace_id, cursor, replication_epoch, stream_identity) \
+                 VALUES ('ws','0','epoch-1','stream-1')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("relay position");
+
+    let remote_doc = dohc_engine_collab::Ydoc::wire();
+    let predecessor = remote_doc.plaintext_insert(0, "remote base");
+    let dependent = remote_doc.plaintext_insert(0, "more ");
+    let dependent_sha = engine.put_binary_blob(&dependent).expect("dependent blob");
+    let predecessor_sha = engine
+        .put_binary_blob(&predecessor)
+        .expect("predecessor blob");
+    let update_op = |seq: i64, sha: &str| {
+        envelope(
+            "peer",
+            seq,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-dep",
+                "path": "notes/dep.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": sha,
+                "isBaseState": false
+            }),
+        )
+    };
+
+    // The dependent update arrives FIRST: it parks, and origination declines
+    // because a full-state encode would drop the pending row.
+    apply_ydoc_envelope(
+        &mut engine,
+        &update_op(0, &dependent_sha),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("dependent applies");
+    assert!(
+        journaled_ydoc_base_ops(&engine).is_empty(),
+        "a lineage with a pending dependency must not originate"
+    );
+
+    // The predecessor resolves the dependency: THAT apply originates.
+    apply_ydoc_envelope(
+        &mut engine,
+        &update_op(1, &predecessor_sha),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("predecessor applies");
+    let ops = journaled_ydoc_base_ops(&engine);
+    assert_eq!(ops.len(), 1, "resolving the dependency originates the base");
+    assert!(ops[0].1, "the journaled op is the base state");
+    let base_bytes = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                [&ops[0].0],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("base blob");
+    let clean_peer = dohc_engine_collab::Ydoc::wire();
+    clean_peer.apply(&base_bytes).expect("peer base");
+    let peer_text = clean_peer.plaintext_string();
+    assert!(
+        peer_text.contains("local text") && peer_text.contains("more remote base"),
+        "a clean peer reads the full merged text from the base alone, got {peer_text:?}"
+    );
+}
+
+#[test]
+fn the_deferred_drain_originates_once_the_lineage_is_complete() {
+    // #548 trigger 1, drain flavour: rows parked behind a live lease drain
+    // later, and the transaction that clears the deferred markers must ask
+    // origination again. Mutation check: drop the origination call in
+    // `drain_deferred_ydoc_for_key`'s clear transaction — the base assertion
+    // fails.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-drain-owed',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO sync_relay_cursors \
+                 (workspace_id, cursor, replication_epoch, stream_identity) \
+                 VALUES ('ws','0','epoch-1','stream-1')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    // An UNCLAIMED replicated lineage with durable local rows (the shape a
+    // `ydoc.apply`-created lineage has before any base exists).
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-drain-owed").expect("key");
+    let local = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local text ");
+    dohc_engine_collab::record_local_update_creating_marker(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::Replicated,
+        &local,
+        None,
+        &NoFaults,
+        1_500,
+    )
+    .expect("local edit");
+
+    // A remote update parks behind a live lease, acked and deferred.
+    let remote = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "remote text");
+    let remote_sha = engine.put_binary_blob(&remote).expect("remote blob");
+    let parked = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-drain-owed",
+            "path": "notes/drain-owed.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": remote_sha,
+            "isBaseState": false
+        }),
+    );
+    assert_eq!(
+        apply_ydoc_envelope(&mut engine, &parked, &NoFaults, &AlwaysLive).expect("defers"),
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            reason: Some("ydoc-session-live"),
+            conflicts_opened: 0,
+        })
+    );
+    assert!(
+        journaled_ydoc_base_ops(&engine).is_empty(),
+        "nothing originates while the row is parked"
+    );
+
+    // The lease ends; the drain lands the row and originates in the same
+    // transaction that clears the deferred marker.
+    let drained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain");
+    assert_eq!(drained.drained, 1);
+    let ops = journaled_ydoc_base_ops(&engine);
+    assert_eq!(ops.len(), 1, "the drain originates the completed lineage");
+    assert!(ops[0].1, "the journaled op is the base state");
+    let marker = dohc_engine_collab::read_marker(&engine, &key)
+        .expect("marker read")
+        .expect("marker");
+    assert!(marker.base_claimed);
+    let base_bytes = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                [&ops[0].0],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("base blob");
+    let clean_peer = dohc_engine_collab::Ydoc::wire();
+    clean_peer.apply(&base_bytes).expect("peer base");
+    let peer_text = clean_peer.plaintext_string();
+    assert!(
+        peer_text.contains("local text") && peer_text.contains("remote text"),
+        "the base carries local and drained remote content, got {peer_text:?}"
     );
 }
 
@@ -12600,7 +12959,7 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
         [(0, crate::model::MAX_PULL_OPS_PER_PASS)]
     );
     client
-        .commit_pull_cursor(&mut engine, "ws", &pending, &NoFaults)
+        .commit_pull_cursor(&mut engine, "ws", &pending, 2_000, &NoFaults)
         .expect("commit bounded prefix");
 
     let second = client
@@ -15385,11 +15744,11 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
         refusal_report_id: None,
     };
     assert!(matches!(
-        commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults),
+        commit_relay_cursor(&mut engine, "ws", &relay(10), 2_000, &NoFaults),
         Ok(TxnOutcome::Committed(()))
     ));
     assert!(matches!(
-        commit_relay_cursor(&mut engine, "ws", &relay(4), &NoFaults),
+        commit_relay_cursor(&mut engine, "ws", &relay(4), 2_000, &NoFaults),
         Ok(TxnOutcome::Committed(()))
     ));
     assert_eq!(
@@ -15848,7 +16207,7 @@ fn committed_pull_cursor_clears_persisted_pending_resolves() {
     assert_eq!(persisted(&engine), 1, "the deferred decision is persisted");
 
     client
-        .commit_pull_cursor(&mut engine, "ws", &pending_cursor, &NoFaults)
+        .commit_pull_cursor(&mut engine, "ws", &pending_cursor, 2_000, &NoFaults)
         .expect("commit cursor");
     assert_eq!(
         persisted(&engine),
@@ -15906,7 +16265,7 @@ fn committed_pull_cursor_clears_persisted_refusals() {
     assert_eq!(persisted(&engine), 1, "the refusal is persisted");
 
     client
-        .commit_pull_cursor(&mut engine, "ws", &pending_cursor, &NoFaults)
+        .commit_pull_cursor(&mut engine, "ws", &pending_cursor, 2_000, &NoFaults)
         .expect("commit cursor");
     assert_eq!(
         persisted(&engine),
@@ -16019,7 +16378,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     );
 
     first_client
-        .commit_pull_cursor(&mut engine, "ws", &first_cursor, &NoFaults)
+        .commit_pull_cursor(&mut engine, "ws", &first_cursor, 2_000, &NoFaults)
         .expect("commit first cursor");
     let survivors: Vec<(String, Option<String>)> = engine
         .read_with(|conn| {
@@ -16070,7 +16429,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         "the next pull is the explicit reader for non-pull drain refusals"
     );
     second_client
-        .commit_pull_cursor(&mut engine, "ws", &second_cursor, &NoFaults)
+        .commit_pull_cursor(&mut engine, "ws", &second_cursor, 2_000, &NoFaults)
         .expect("commit second cursor");
     let remaining: i64 = engine
         .read_with(|conn| {
@@ -16110,7 +16469,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
         stream_identity: "stream".to_owned(),
         refusal_report_id: report_id,
     };
-    commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults).expect("cursor commit");
+    commit_relay_cursor(&mut engine, "ws", &cursor, 2_000, &NoFaults).expect("cursor commit");
     let replayed = read_replayed_refusal(&engine, &direct)
         .expect("read direct refusal")
         .expect("direct refusal survives");
@@ -16132,7 +16491,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
         refusal_report_id: None,
     };
     assert!(matches!(
-        commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults),
+        commit_relay_cursor(&mut engine, "ws", &cursor, 2_000, &NoFaults),
         Ok(TxnOutcome::Committed(()))
     ));
     let stored = engine

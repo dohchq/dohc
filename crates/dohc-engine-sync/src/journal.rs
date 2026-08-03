@@ -70,17 +70,15 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// `MAX_IDENTIFIER_BYTES`. Re-checking it would add a rejection path that runs
 /// inside an append transaction and can only fire on input the type forbids.
 ///
-/// KNOWN WINDOW, and a known LATCH. This reads past contact, not current
+/// A closed WINDOW, and a known LATCH. This reads past contact, not current
 /// enrolment.
 ///
 /// The window: a freshly enrolled workspace answers `false` until its first
 /// push or pull commits, so an edit inside that window does not originate.
-/// Nothing here retries, and #548 owns the retrigger. It costs at most one
-/// edit — origination is asked again on the next append, the base is a full
-/// state that carries everything typed inside the window, and a local-only
-/// close refuses until the markdown artifact is durable (`close_session` raises
-/// `UnsettledClose`), so a reopened document seeds from that markdown and
-/// originates then.
+/// #548 closed it: the workspace's first relay-cursor commit originates every
+/// owed lineage in the same transaction
+/// (`originate_owed_ydoc_lineages_in_tx`, called from `commit_relay_cursor`),
+/// and the drain/apply that resolves a missing dependency asks again too.
 ///
 /// The latch: nothing deletes a position row, so this keeps answering `true`
 /// after the user signs out or unbinds the workspace. #558 owns that. Both come

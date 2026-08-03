@@ -752,9 +752,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         store: &mut EngineStore,
         workspace_id: &str,
         cursor: &RelayCursor,
+        now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<TxnOutcome<()>, RelayError> {
-        commit_relay_cursor(store, workspace_id, cursor, faults).map_err(local)
+        commit_relay_cursor(store, workspace_id, cursor, now_ms, faults).map_err(local)
     }
 
     pub fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError> {

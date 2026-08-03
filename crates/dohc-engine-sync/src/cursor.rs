@@ -71,6 +71,7 @@ pub fn commit_relay_cursor(
     store: &mut EngineStore,
     workspace_id: &str,
     cursor: &RelayCursor,
+    now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<()>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
@@ -89,6 +90,18 @@ pub fn commit_relay_cursor(
     )?;
     store
         .write_with(faults, |tx| {
+            // The workspace's FIRST cursor commit ends the freshly-enrolled
+            // KNOWN WINDOW (`workspace_replicates_with_relay_in_tx`): edits
+            // made before any relay position exists decline to originate,
+            // and nothing on the append path retries them (#548). Detect the
+            // transition BEFORE the row lands and originate every owed
+            // lineage in the SAME transaction, so a crash cannot separate
+            // the position from the bases it makes possible. Push state can
+            // land earlier in the same pass, but every enrolled workspace
+            // reaches a first cursor commit, so hooking it alone closes the
+            // window.
+            let first_cursor =
+                crate::ydoc_originate::is_first_relay_cursor_in_tx(tx, workspace_id)?;
             tx.execute(
                 "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) \
                  VALUES (?1,?2,?3,?4) ON CONFLICT(workspace_id) DO UPDATE SET \
@@ -125,6 +138,13 @@ pub fn commit_relay_cursor(
                     params![workspace_id, report_id],
                 )
                 .map_err(SyncError::persist)?;
+            }
+            if first_cursor {
+                crate::ydoc_originate::originate_owed_ydoc_lineages_in_tx(
+                    tx,
+                    workspace_id,
+                    now_ms,
+                )?;
             }
             Ok::<(), SyncError>(())
     })

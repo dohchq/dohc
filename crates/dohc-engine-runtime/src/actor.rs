@@ -279,6 +279,7 @@ pub enum RelayOperation {
     CommitCursor {
         workspace_id: String,
         cursor: RelayCursor,
+        now_ms: i64,
     },
     Probe {
         workspace_id: String,
@@ -6346,7 +6347,8 @@ fn execute_relay_operation(
         RelayOperation::CommitCursor {
             workspace_id,
             cursor,
-        } => match client.commit_pull_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+            now_ms,
+        } => match client.commit_pull_cursor(store, &workspace_id, &cursor, now_ms, &NoFaults)? {
             TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
@@ -9028,29 +9030,21 @@ fn ydoc_record_update_on_store(
         now_ms,
         move |tx, outcome| {
             // Origination is asked FIRST and owns the base-once decision: it
-            // returns a sha only for a lineage that has no base yet. The base
-            // is a full state, so it already carries this append and every row
-            // the lineage held before it — a delta beside it would be
-            // redundant. Everything else journals its delta.
-            if let Some(base_sha) = ydoc_originate_base_in_tx(tx, &journal_key, now_ms)? {
-                dohc_engine_sync::journal_local_op_in_tx(
-                    tx,
-                    &journal_key.workspace_id,
-                    "ydoc.update",
-                    &serde_json::json!({
-                        "versionId": journal_key.version_id,
-                        "objectId": journal_key.object_id,
-                        "path": journal_path,
-                        "contentKind": journal_kind.as_str(),
-                        "updateBlobSha256": base_sha,
-                        "isBaseState": true,
-                    }),
-                    now_ms,
-                )
-                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                    reason: format!("outbound ydoc.update base journal append failed: {error}"),
-                })?;
-            } else if outcome.emit_outbound {
+            // journals the single base op itself, and only for a lineage that
+            // has no base yet. The base is a full state, so it already carries
+            // this append and every row the lineage held before it — a delta
+            // beside it would be redundant. Everything else journals its
+            // delta.
+            let originated = dohc_engine_sync::originate_ydoc_base_in_tx(
+                tx,
+                &journal_key,
+                &journal_path,
+                now_ms,
+            )
+            .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                reason: format!("outbound ydoc.update base journal append failed: {error}"),
+            })?;
+            if originated.is_none() && outcome.emit_outbound {
                 dohc_engine_sync::journal_local_op_in_tx(
                     tx,
                     &journal_key.workspace_id,
@@ -9082,82 +9076,6 @@ fn ydoc_record_update_on_store(
     )? {
         TxnOutcome::Committed(outcome) => Ok(outcome),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
-    }
-}
-
-/// Claim the base that ORIGINATES `key`'s replicated lineage, inside the
-/// append transaction that triggered it. Returns the base blob sha to journal,
-/// or `None` when this lineage must not originate.
-///
-/// Encoding inside the claim transaction is what makes the claim race-free.
-/// SQLite serializes writers, so no append can land between the encode and the
-/// claim, and the marker read here is that same transaction's view. A design
-/// that pre-read the marker on another connection would need the legacy
-/// driver's `onBeforeBaseClaimForTest` seam to prove the window closed; this
-/// one has no window.
-fn ydoc_originate_base_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    key: &DocKey,
-    now_ms: i64,
-) -> Result<Option<String>, dohc_engine_collab::CollabError> {
-    let Some(marker) = dohc_engine_collab::read_marker_in_tx(tx, key)? else {
-        return Ok(None);
-    };
-    // Base-once. A claimed lineage journals deltas, never a second base.
-    if marker.base_claimed {
-        return Ok(None);
-    }
-    // This workspace does not replicate with a relay, so nothing here has a
-    // peer: the lineage stays local-only, keeps markdown as its artifact, and
-    // prunes on close. A private document must never be promoted to a shared
-    // lineage — promotion is irreversible in the log it starts writing.
-    //
-    // Checked BEFORE the claim because `journal_local_op_in_tx` refuses
-    // without an identity, and that refusal would roll back the user's edit.
-    if !dohc_engine_sync::workspace_replicates_with_relay_in_tx(tx, &key.workspace_id).map_err(
-        |error| dohc_engine_collab::CollabError::Corrupt {
-            reason: format!("relay replication probe failed: {error}"),
-        },
-    )? {
-        return Ok(None);
-    }
-    let Some(encoded) = dohc_engine_collab::encode_origination_base_in_tx(tx, key)? else {
-        // An unresolved dependency: a full-state encode would drop the pending
-        // row. A later append retries once the predecessor lands.
-        return Ok(None);
-    };
-    // `claim_base_in_tx` measures the base against MAX_YDOC_UPDATE_BYTES, a cap
-    // written for ONE update. A base is a full state, so a lineage that grew
-    // local-only past 5 MiB and then reached a synced workspace would fail its
-    // promoting edit — and the claim runs inside the append transaction, so the
-    // refusal would roll that valid edit back, and every later one with it.
-    //
-    // Decline to originate instead. The edit commits, the lineage stays
-    // local-only, and markdown remains its artifact. #549 owns the measured
-    // base-specific bound that replaces this check.
-    if encoded.base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
-        return Ok(None);
-    }
-    // The marker's OWN kind, never the caller's: the kind belongs to the
-    // lineage, and `claim_base_in_tx` upserts whatever it is handed. The append
-    // this rides already refused a caller whose kind disagreed, so the two
-    // always match here — reading it from the marker keeps that true even if
-    // the append's guard ever moves.
-    match dohc_engine_collab::claim_base_in_tx(
-        tx,
-        key,
-        marker.content_kind,
-        &encoded.base,
-        &encoded.state_vector,
-        now_ms,
-    )? {
-        dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha } => {
-            Ok(Some(base_snapshot_sha))
-        }
-        // Unreachable: `base_claimed` was false in this same transaction and
-        // no other writer can interleave. Harmless if it ever is — the lineage
-        // has its base, and base-once forbids a second.
-        dohc_engine_collab::ClaimOutcome::Resumed => Ok(None),
     }
 }
 

@@ -526,9 +526,13 @@ daemons cannot share a relay workspace yet (#356).
   the path — was rejected: deterministic path-derived ids are what let the
   file lane converge object identity across machines without coordination,
   and forking id derivation per lane would split one file into two objects.
-- **#548 — origination is not retried when a missing dependency resolves.** The
-  encoder declines while a pending row would be dropped, and only a later local
-  append asks again. The drain that resolves the dependency must ask too.
+- **#548 — origination is not retried when a precondition later becomes true.
+  Built.** Origination moved into `dohc-engine-sync` (`ydoc_originate.rs`) and
+  is now asked by every path that ends a precondition: the local append (as
+  before), the deferred drain and the direct remote apply when they resolve a
+  missing dependency, and the workspace's FIRST relay-cursor commit, which
+  ends the freshly-enrolled window by originating every owed lineage in the
+  same transaction that lands the cursor row.
 
 One size question is open too. #549 — the base inherits `MAX_YDOC_UPDATE_BYTES`,
 a cap written for a single update, so a document past 5 MiB of Y.Doc state

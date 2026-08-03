@@ -354,11 +354,13 @@ pub fn drain_deferred_ydoc_for_key(
         Some((origin, seq)) => (origin.as_str(), *seq),
         None => ("deferred-drain", payload_recorded_at),
     };
+    let mut originate_path = None;
     if let Some(payload) = last_payload
         && let Some(persisted) =
             dohc_engine_collab::load_persisted(store, key).map_err(map_collab_hard_error)?
         && !persisted.doc.has_pending_dependencies()
     {
+        originate_path = Some(payload.path.clone());
         let projected = store.write_with(faults, |tx| {
             project_and_write_in_tx(
                 tx,
@@ -402,6 +404,14 @@ pub fn drain_deferred_ydoc_for_key(
                 params![key.workspace_id, origin_id, origin_seq],
             )
             .map_err(SyncError::persist)?;
+        }
+        // This drain may have just resolved the dependency that made an
+        // earlier origination decline (#548): ask again in the SAME
+        // transaction that clears the markers. The base-claimed and
+        // workspace-replication gates live inside, so a claimed or private
+        // lineage is a cheap no-op.
+        if let Some(path) = &originate_path {
+            crate::ydoc_originate::originate_ydoc_base_in_tx(tx, key, path, payload_recorded_at)?;
         }
         Ok::<_, SyncError>(())
     })?;
@@ -1600,6 +1610,16 @@ pub fn apply_ydoc_envelope(
             if projected_doc.doc.has_pending_dependencies() {
                 return Ok(crate::apply::MutationOutcome::Applied(applied));
             }
+            // This apply may have just resolved the dependency that made an
+            // earlier origination decline (#548): ask again in the same
+            // admission transaction. Claimed lineages and non-replicating
+            // workspaces no-op inside.
+            crate::ydoc_originate::originate_ydoc_base_in_tx(
+                tx,
+                &key,
+                &update_path,
+                op.recorded_at_ms,
+            )?;
             tx.execute_batch("SAVEPOINT dohc_ydoc_projection")
                 .map_err(SyncError::persist)?;
             match project_and_write_in_tx(
