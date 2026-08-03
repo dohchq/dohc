@@ -135,10 +135,22 @@ describe("runPlaywright", () => {
     expect(child.kill).not.toHaveBeenCalled();
   });
 
-  it("names the missing CLI on a spawn failure and still cleans up", async () => {
-    const { error, cacheDir } = await drive({ fail: new Error("spawn ENOENT") });
+  it("gives an ENOENT spawn failure the install remedy and still cleans up", async () => {
+    const enoent: NodeJS.ErrnoException = new Error("spawn ENOENT");
+    enoent.code = "ENOENT";
+    const { error, cacheDir } = await drive({ fail: enoent });
     expect(error?.message).toContain("Could not launch the Playwright CLI at ");
     expect(error?.message).toContain("run pnpm install");
+    expect(existsSync(cacheDir ?? "")).toBe(false);
+  });
+
+  it("surfaces a permission failure's own code — pnpm install cannot fix EACCES", async () => {
+    const eacces: NodeJS.ErrnoException = new Error("spawn EACCES");
+    eacces.code = "EACCES";
+    const { error, cacheDir } = await drive({ fail: eacces });
+    expect(error?.message).toContain("EACCES");
+    expect(error?.message).toContain("spawn EACCES");
+    expect(error?.message).not.toContain("pnpm install");
     expect(existsSync(cacheDir ?? "")).toBe(false);
   });
 

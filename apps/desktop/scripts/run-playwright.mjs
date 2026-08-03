@@ -110,8 +110,23 @@ export async function runPlaywright(args, {
     const signalNumber = osConstants.signals[signal];
     return signalNumber ? 128 + signalNumber : 1;
   } catch (error) {
+    // Only ENOENT means the CLI entry vanished — the missing-install case
+    // the pnpm-install remedy can fix. EACCES, EMFILE, EAGAIN and friends
+    // are permission or resource failures: name the code and keep the
+    // original message, so the entry point (which prints only message)
+    // still shows the OS error.
+    const code =
+      error instanceof Error
+        ? /** @type {NodeJS.ErrnoException} */ (error).code
+        : undefined;
+    if (code === "ENOENT") {
+      throw new Error(
+        `Could not launch the Playwright CLI at ${cli}. The e2e scripts need the playwright package installed; run pnpm install.`,
+        { cause: error },
+      );
+    }
     throw new Error(
-      `Could not launch the Playwright CLI at ${cli}. The e2e scripts need the playwright package installed; run pnpm install.`,
+      `Could not launch the Playwright CLI at ${cli}: ${code ?? "spawn failed"} — ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   } finally {
