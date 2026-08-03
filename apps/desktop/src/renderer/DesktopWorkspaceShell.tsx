@@ -76,6 +76,7 @@ import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { remapOrphanedDraftPaths, useOrphanedDrafts } from "./orphanedDrafts";
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
 // chunk resolved, and every character typed in that gap went to whatever the
@@ -1246,6 +1247,13 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
+  // Set-aside recovery for the ACTIVE tab (#567): it marks the tab's dirty
+  // dot — the edit is not saved — but is deliberately NOT part of
+  // activeTabDirty, which drives save-first machinery that cannot save it
+  // (#579 review, P2). The store outlives tabs and version switches, so no
+  // save-first prompt is owed.
+  const activeTabRecovery =
+    useOrphanedDrafts(workspaceId, wb.activeTab ?? "").length > 0;
   // Every workbench destination change invalidates an in-flight canonical DM
   // lookup. Kept beside the central mutateWb seam so file/graph/history/tab
   // navigation cannot be missed by a one-off opener.
@@ -2557,6 +2565,12 @@ export function DesktopWorkspaceShell(props: {
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
+      // Set-aside drafts key by path, so recovery follows the same projection
+      // as tabs and pins (#579 review, P1) — a rename must not strand the
+      // notice on the old path while the tab remaps to the new one.
+      remapOrphanedDraftPaths(workspaceId, (path) =>
+        projectTreePath(path, changes),
+      );
       const current = wbRef.current;
       const next = remapWorkbenchPaths(current, (path) =>
         projectTreePath(path, changes),
@@ -2568,7 +2582,7 @@ export function DesktopWorkspaceShell(props: {
         remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
       );
     },
-    [mutateWb],
+    [mutateWb, workspaceId],
   );
 
   // Share mounts: the registry is loaded once at boot, so the shell owns a
@@ -3241,7 +3255,7 @@ export function DesktopWorkspaceShell(props: {
         folders={folders}
         activeTab={wb.activeTab}
         openTabs={wb.tabs}
-        dirtyTab={activeTabDirty ? wb.activeTab : null}
+        dirtyTab={activeTabDirty || activeTabRecovery ? wb.activeTab : null}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
@@ -3563,7 +3577,7 @@ export function DesktopWorkspaceShell(props: {
                 <EditorTabs
                   tabs={wb.tabs}
                   activeTab={wb.activeTab}
-                  activeTabDirty={activeTabDirty}
+                  activeTabDirty={activeTabDirty || activeTabRecovery}
                   onActivate={activateEditorTab}
                   onClose={closeFileTab}
                   onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
@@ -3598,7 +3612,7 @@ export function DesktopWorkspaceShell(props: {
             <EditorTabs
               tabs={wb.tabs}
               activeTab={wb.activeTab}
-              activeTabDirty={activeTabDirty}
+              activeTabDirty={activeTabDirty || activeTabRecovery}
               onActivate={activateEditorTab}
               onClose={closeFileTab}
               onContextMenu={(path) => void showWorkbenchMenu("tab", path)}

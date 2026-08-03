@@ -65,6 +65,31 @@ export function dismissOrphanedDraft(
   scheduleNotify();
 }
 
+// A rename or move re-keys the document, and the recovery must follow it —
+// otherwise the notice dies with the old path while the tab remaps to the new
+// one (#579 review, P1). The caller supplies the same projection the shell
+// applies to tabs and pins. A null projection (a delete) keeps the drafts
+// under their old key: destroying recovery text is never this store's call,
+// and a restored or recreated file shows the notice again.
+export function remapOrphanedDraftPaths(
+  workspaceId: string,
+  project: (path: string) => string | null,
+): void {
+  let changed = false;
+  for (const [key, kept] of [...drafts]) {
+    const [keyWorkspaceId, path] = JSON.parse(key) as [string, string];
+    if (keyWorkspaceId !== workspaceId) continue;
+    const next = project(path);
+    if (next === null || next === path) continue;
+    drafts.delete(key);
+    const nextKey = keyFor(workspaceId, next);
+    // Merge, never overwrite: the target path may hold drafts of its own.
+    drafts.set(nextKey, [...(drafts.get(nextKey) ?? EMPTY), ...kept]);
+    changed = true;
+  }
+  if (changed) scheduleNotify();
+}
+
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);

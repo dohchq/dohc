@@ -1667,12 +1667,16 @@ describe("markdown document opening state", () => {
       ),
     );
 
-    // The failed-save chip shows BESIDE "Opening…", not underneath it: the
-    // header slot used to be either/or, hiding any failure in this window.
+    // The chip shows BESIDE "Opening…", not underneath it: the header slot
+    // used to be either/or, hiding any state in this window. Recovery has its
+    // OWN chip state — "Couldn't save" would invite a retry that cannot help.
     expect(screen.queryByTestId("markdown-open-state")).not.toBeNull();
     expect(
       screen.getByTestId("markdown-save-state").getAttribute("data-state"),
-    ).toBe("error");
+    ).toBe("recovery");
+    expect(screen.getByTestId("markdown-save-state").textContent).toBe(
+      "Edit set aside",
+    );
   });
 
   it("hands the surface back to the document after the reopen — the set-aside draft cannot re-arm a save", async () => {
@@ -1812,10 +1816,11 @@ describe("markdown document opening state", () => {
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
   });
 
-  // #579 review P2: Dismiss retires the whole signal — the chip and the
-  // shell's tab dot must not keep claiming an unsaved edit that no longer
-  // exists.
-  it("settles the chip and the tab dot when the set-aside draft is dismissed", async () => {
+  // #579 review P2, both halves. The chip carries recovery with its own state
+  // and settles on Dismiss — but the LIFTED save state never carries it: the
+  // shell's save-first machinery keys off that lift, and a prompt promising
+  // to save a draft the flush cannot write would be a false promise.
+  it("keeps recovery out of the lifted save state and settles the chip on dismiss", async () => {
     const user = userEvent.setup();
     const bridge = makeHeldOpenBridge();
     vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
@@ -1826,17 +1831,55 @@ describe("markdown document opening state", () => {
     await screen.findByTestId("orphaned-draft-notice");
     expect(
       screen.getByTestId("markdown-save-state").getAttribute("data-state"),
-    ).toBe("error");
-    await waitFor(() => expect(states.at(-1)).toBe("error"));
+    ).toBe("recovery");
+    // MUTATION (lift): report the recovery-derived state through
+    // onSaveStateChange (the round-1 behavior). The shell then marks the tab
+    // savable-dirty and the version switch prompts to save a draft that no
+    // longer exists in the pipeline.
+    await waitFor(() => expect(states.at(-1)).toBe("saved"));
+    expect(states).not.toContain("error");
 
-    // MUTATION (derived signal): set a plain `saveState = "error"` at capture
-    // instead of deriving from the store. Dismiss then strands the chip and
-    // the tab dot on an edit that no longer exists.
+    // MUTATION (chip): collapse chipState to the plain saveState. The chip
+    // then reads nothing while the notice says an edit is not saved.
     await user.click(screen.getByTestId("orphaned-draft-dismiss"));
     await waitFor(() =>
       expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
     );
     expect(screen.queryByTestId("markdown-save-state")).toBeNull();
-    await waitFor(() => expect(states.at(-1)).toBe("saved"));
+    expect(states.at(-1)).toBe("saved");
+  });
+
+  // #579 review P2 (engine half): a bound engine session's settled "Saved"
+  // must not outrank an unresolved set-aside edit — the edit is NOT in the
+  // document the engine settled.
+  it("shows recovery over a settled engine document until the draft is resolved", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    await armDraftThenReopen(user, bridge);
+
+    // The reopen resolves BOUND: the engine branch renders with the notice.
+    bridge.bind();
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("orphaned-draft-notice");
+
+    // MUTATION (engine chip): read `engine.saveState` directly instead of
+    // the recovery-aware state. The chip then says "Saved" while the notice
+    // says the set-aside edit is not in this document.
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe("recovery");
+    expect(screen.getByTestId("markdown-save-state").textContent).toBe(
+      "Edit set aside",
+    );
+
+    await user.click(screen.getByTestId("orphaned-draft-dismiss"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe("saved");
+    expect(screen.getByTestId("markdown-save-state").textContent).toBe("Saved");
   });
 });

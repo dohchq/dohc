@@ -66,6 +66,7 @@ import {
   OPEN_EDITORS_MIN_HEIGHT,
   versionCompareTabPath,
 } from "./workbench/workbenchState";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 
 const WORKSPACE: Workspace = {
   workspaceId: "ws-shell-test",
@@ -461,6 +462,9 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+  // The set-aside drafts (#567) live in a module store on purpose; tests
+  // that seed it must not leak into each other.
+  resetOrphanedDrafts();
 });
 
 describe("targeted chat navigation", () => {
@@ -6157,5 +6161,102 @@ describe("unreadable workspace settings", () => {
     expect(await screen.findByTestId("notice-center")).toBeTruthy();
     expect(screen.queryByTestId("notice-workspace-settings-unreadable")).toBeNull();
     expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
+  });
+});
+
+// #567 / #579 review: set-aside draft recovery at the shell seams. The drafts
+// live in a module store keyed by workspace + path; the shell owns the two
+// integrations under test — path remapping on explorer renames, and the
+// distinction between recovery (dot, no save promise) and savable-dirty
+// (dot AND the version-switch save-first prompt).
+describe("set-aside draft recovery", () => {
+  it("keeps the notice reachable when the open file is renamed mid-notice", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    Object.assign(bridge, {
+      moveWorkspacePath: vi.fn(async () => undefined),
+    });
+    captureOrphanedDraft(WORKSPACE.workspaceId, "a.md", "Kept!");
+    renderShell(bridge);
+
+    // The notice is up on the open document.
+    await screen.findByTestId("view-markdown");
+    await screen.findByTestId("orphaned-draft-notice");
+
+    // Rename a.md through the explorer (F2 flow — the same seam every rename
+    // takes). The tab remaps to the new path.
+    const row = (await screen.findAllByTestId("tree-row")).find((candidate) =>
+      candidate.textContent?.includes("a.md"),
+    );
+    expect(row).toBeTruthy();
+    await user.click(row!);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed.md{Enter}");
+    await screen.findByTestId("tab-renamed.md");
+
+    // MUTATION (remap wiring): drop the remapOrphanedDraftPaths call from
+    // onExplorerPathsChanged. The store still keys by a.md, the tab is
+    // renamed.md, and the recovery text is unreachable from the UI.
+    expect(await screen.findByTestId("orphaned-draft-notice")).toBeTruthy();
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Kept!"),
+    );
+  });
+
+  it("marks the tab with recovery but lets a version switch proceed without a save promise", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "v2",
+          name: "Draft two",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: "main",
+    }));
+    captureOrphanedDraft(WORKSPACE.workspaceId, "a.md", "Kept!");
+    renderShell(bridge);
+
+    // The recovery marks the tab: an unsaved edit exists, and hiding that
+    // would be the engine-Saved lie one level up.
+    // MUTATION (dot): drop `|| activeTabRecovery` from the EditorTabs prop.
+    await screen.findByTestId("view-markdown");
+    await screen.findByTestId("tab-dirty");
+
+    // But it is NOT savable-dirty: switching versions must not prompt
+    // "dohc will save them" about a draft the flush cannot write — the store
+    // outlives the switch, so the switch just proceeds.
+    // MUTATION (lift): lift the recovery-derived state from MarkdownView's
+    // onSaveStateChange (the round-1 behavior). The save-first dialog then
+    // appears and the switch below never runs.
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+    await waitFor(() =>
+      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
+    );
+    expect(screen.queryByTestId("version-switch-save-confirm")).toBeNull();
+    // The notice survives the switch — recovery needed no save.
+    expect(screen.getByTestId("orphaned-draft-notice")).toBeTruthy();
   });
 });

@@ -847,15 +847,25 @@ function MarkdownView(props: {
     }
   }
   openingRef.current = opening;
-  // What the chip and the shell's tab dot show: a real pending/failed save
-  // wins; otherwise an unresolved set-aside draft reads as "error" — the
-  // edit is not in the file — until the user copies or dismisses it.
-  const effectiveSaveState =
+  // What the header chip shows: a real pending/failed save wins; otherwise an
+  // unresolved set-aside draft gets its OWN state (#579 review, P2). The
+  // set-aside edit is not in the file, but it is not savable-dirty either —
+  // only the real save state is lifted to the shell, so the version-switch
+  // save-first prompt never promises to save a draft the pipeline cannot
+  // write. The shell reads the store itself for the tab dot.
+  const chipState =
     saveState !== "saved"
       ? saveState
       : orphanedDrafts.length > 0
-        ? "error"
+        ? ("recovery" as const)
         : "saved";
+  // The engine branch has its own authoritative save state; the set-aside
+  // draft still is not in the document it shows, so a settled engine must
+  // not read "Saved" over an unresolved notice.
+  const engineChipState =
+    engine.saveState === "saved" && orphanedDrafts.length > 0
+      ? ("recovery" as const)
+      : engine.saveState;
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -1138,9 +1148,11 @@ function MarkdownView(props: {
   // engine Y.Doc is still settling.
   useEffect(() => {
     if (!engine.available) {
-      // The derived state, so dismissing a set-aside draft also settles the
-      // tab dot (#579 review, P2).
-      onSaveStateChange?.(effectiveSaveState);
+      // The REAL save state only — a set-aside draft is deliberately not
+      // lifted here (#579 review, P2). Lifting it as "error" made the shell's
+      // save-first machinery promise a save the flush cannot deliver; the
+      // shell reads the store itself for the tab dot instead.
+      onSaveStateChange?.(saveState);
       return;
     }
     // The shell's dot has three states; a read-only or changed-on-disk refusal
@@ -1150,7 +1162,7 @@ function MarkdownView(props: {
         ? "error"
         : engine.saveState,
     );
-  }, [effectiveSaveState, engine.available, engine.saveState, onSaveStateChange]);
+  }, [saveState, engine.available, engine.saveState, onSaveStateChange]);
 
   useEffect(() => {
     if (!readOnly) return;
@@ -1401,33 +1413,35 @@ function MarkdownView(props: {
             <>
               <span
                 data-testid="markdown-save-state"
-                data-state={engine.saveState}
+                data-state={engineChipState}
                 title={
-                  engine.saveState === "error"
+                  engineChipState === "error"
                     ? "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit."
-                    : engine.saveState === "read-only"
+                    : engineChipState === "read-only"
                       ? "This document is shared with you to read. Your changes stay on screen but are not saved."
-                      : engine.saveState === "changed-on-disk"
+                      : engineChipState === "changed-on-disk"
                         ? "This file changed outside dohc while it was open. Open History to restore your text."
-                        : undefined
+                        : engineChipState === "recovery"
+                          ? "A set-aside edit is not saved. Copy or dismiss it in the notice below."
+                          : undefined
                 }
                 className={`font-mono text-[11px] ${
-                  engine.saveState === "error" ||
-                  engine.saveState === "read-only" ||
-                  engine.saveState === "changed-on-disk"
-                    ? "text-danger"
-                    : "text-subtle"
+                  engineChipState === "saved" || engineChipState === "saving"
+                    ? "text-subtle"
+                    : "text-danger"
                 }`}
               >
-                {engine.saveState === "saved"
+                {engineChipState === "saved"
                   ? "Saved"
-                  : engine.saveState === "saving"
+                  : engineChipState === "saving"
                     ? "Saving…"
-                    : engine.saveState === "read-only"
+                    : engineChipState === "read-only"
                       ? "Read-only"
-                      : engine.saveState === "changed-on-disk"
+                      : engineChipState === "changed-on-disk"
                         ? "Changed on disk"
-                        : "Couldn't save"}
+                        : engineChipState === "recovery"
+                          ? "Edit set aside"
+                          : "Couldn't save"}
               </span>
               <button
                 type="button"
@@ -1586,17 +1600,28 @@ function MarkdownView(props: {
                 that fails inside the opening window must still surface. While
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
-            {editing || effectiveSaveState !== "saved" ? (
+            {editing || chipState !== "saved" ? (
               <span
                 data-testid="markdown-save-state"
-                data-state={effectiveSaveState}
-                className={`font-mono text-[11px] ${effectiveSaveState === "error" ? "text-danger" : "text-subtle"}`}
+                data-state={chipState}
+                title={
+                  chipState === "recovery"
+                    ? "A set-aside edit is not saved. Copy or dismiss it in the notice below."
+                    : undefined
+                }
+                className={`font-mono text-[11px] ${
+                  chipState === "error" || chipState === "recovery"
+                    ? "text-danger"
+                    : "text-subtle"
+                }`}
               >
-                {effectiveSaveState === "saved"
+                {chipState === "saved"
                   ? "Saved"
-                  : effectiveSaveState === "saving"
+                  : chipState === "saving"
                     ? "Saving…"
-                    : "Couldn't save"}
+                    : chipState === "recovery"
+                      ? "Edit set aside"
+                      : "Couldn't save"}
               </span>
             ) : null}
             <button
