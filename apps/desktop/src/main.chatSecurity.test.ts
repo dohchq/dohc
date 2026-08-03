@@ -213,9 +213,13 @@ describe("main-process chat authorization", () => {
     ).toContain("engineOffRefusal(");
     // The dispatch prepare seam: cause before release, recovery from the
     // actual close — both live inside the helper, so the wiring must use it.
-    expect(
-      slice("prepareRunWorkspace: async (workspace)", "authorizeServiceNote:"),
-    ).toContain("releaseAndRefuseWithoutCapture({");
+    const prepare = slice(
+      "prepareRunWorkspace: async (workspace)",
+      "authorizeServiceNote:",
+    );
+    expect(prepare).toContain("releaseAndRefuseWithoutCapture({");
+    // Round 5: the kept-entry path answers from the LIVE capture re-read.
+    expect(prepare).toContain("currentCapture:");
     // And the release itself derives its answer from the post-close
     // retention state (round 4) — through the behavior-tested factory.
     expect(

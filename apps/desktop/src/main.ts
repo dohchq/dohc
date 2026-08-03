@@ -2206,6 +2206,7 @@ const chatDispatchService = createChatDispatchService({
     // recovery derived from what the release actually did.
     await releaseAndRefuseWithoutCapture({
       capture: activity.engineCaptureFor(workspace.workspaceId),
+      currentCapture: () => activity.engineCaptureFor(workspace.workspaceId),
       status: () => activity.getStatus(workspace.workspaceId),
       release,
       notEnabled: "Chats are not enabled for this workspace.",

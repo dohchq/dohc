@@ -263,6 +263,7 @@ describe("releaseAndRefuseWithoutCapture", () => {
     await expect(
       releaseAndRefuseWithoutCapture({
         capture: null,
+        currentCapture: () => null,
         // The live entry knows the build failed; the closed entry's
         // defaults would claim nobody-chose-this never happened.
         status: () =>
@@ -284,27 +285,54 @@ describe("releaseAndRefuseWithoutCapture", () => {
     expect(released).toBe(true);
   });
 
-  // Codex P2 on #583 (round 3): the recovery derives from what the release
-  // ACTUALLY did. A workspace retained between open and release keeps its
-  // failed decision — the release closes nothing, and "Try again" would
-  // retry into the same kept failure forever.
-  it("says restart when the release kept the entry (retained race)", async () => {
+  // Codex P2 rounds 3–5 on #583: when the release KEEPS an entry, the
+  // post-state itself answers. A retention that landed during the close may
+  // have REOPENED the workspace with a WORKING capture — refusing then would
+  // be the last false message standing.
+  it("proceeds when the retention's reopen built a working capture", async () => {
+    const reopenedCapture = {};
     await expect(
       releaseAndRefuseWithoutCapture({
         capture: null,
+        currentCapture: () => reopenedCapture,
         status: () => ({ historyRecordingUnavailable: true }),
         release: async () => false,
         notEnabled: NOT_ENABLED,
       }),
-    ).rejects.toThrow(
-      "dohc could not start the workspace engine for this workspace. Restart dohc to try again.",
-    );
+    ).resolves.toBeUndefined();
+  });
+
+  it("says restart from the KEPT entry's own cause when its capture is still null", async () => {
+    // Our transient entry blamed a build failure; the entry the release kept
+    // (the reopened one) has ITS own cause — an unreadable settings file.
+    // The refusal must state the live entry's cause, not our stale snapshot.
+    let released = false;
+    await expect(
+      releaseAndRefuseWithoutCapture({
+        capture: null,
+        currentCapture: () => null,
+        status: () =>
+          released
+            ? {
+                settingsWarning:
+                  "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.",
+                historyRecordingUnavailable: false,
+              }
+            : { historyRecordingUnavailable: true },
+        release: async () => {
+          released = true;
+          return false;
+        },
+        notEnabled: NOT_ENABLED,
+      }),
+    ).rejects.toThrow("Fix /ws/.dohc/settings.local.json. Then restart dohc.");
   });
 
   it("names the file and says try again for an unreadable-settings transient open", async () => {
     await expect(
       releaseAndRefuseWithoutCapture({
         capture: null,
+        currentCapture: () => null,
         status: () => ({
           settingsWarning:
             "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.",
@@ -322,6 +350,7 @@ describe("releaseAndRefuseWithoutCapture", () => {
     let released = false;
     await releaseAndRefuseWithoutCapture({
       capture: {},
+      currentCapture: () => null,
       status: () => ({ historyRecordingUnavailable: false }),
       release: async () => {
         released = true;

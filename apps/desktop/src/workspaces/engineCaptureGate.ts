@@ -121,17 +121,22 @@ export function createDispatchRunRelease(input: {
   };
 }
 
-// The dispatch-run seam of the same refusal (#541, codex P2s on #583). Two
-// facts have to be read at the only moment each is true:
-// - the CAUSE comes from the status BEFORE the release — releasing a
-//   transient open deletes the entry, and its defaults read as the opt-out;
-// - the RECOVERY comes from what the release ACTUALLY did, not a pre-open
-//   snapshot — a workspace retained between open and release keeps its
-//   failed decision, and "try again" would be false there.
-// So: read the status, release, then build the message from whether the
-// release closed the entry. A caller with a capture attached gets a no-op.
+// The dispatch-run seam of the same refusal (#541, codex P2s on #583). Every
+// fact is read at the only moment it is true:
+// - the transient CAUSE comes from the status BEFORE the release — releasing
+//   a transient open deletes the entry, and its defaults read as the opt-out;
+// - after a release that closed the entry, the next attempt rebuilds the
+//   capture: retry;
+// - after a release that KEPT an entry (already open, retained, or reopened
+//   by a retention that landed during the close), the post-state itself
+//   answers. A reopened capture that BUILT means the workspace works right
+//   now — proceed instead of refusing — and a still-null capture persists
+//   until restart, with the KEPT entry's own status as the cause.
+// A caller with a capture attached gets a no-op.
 export async function releaseAndRefuseWithoutCapture(input: {
   capture: object | null;
+  // Live re-read of the workspace's current capture, for the kept-entry path.
+  currentCapture: () => object | null;
   status: () => {
     settingsWarning?: string;
     historyRecordingUnavailable: boolean;
@@ -142,11 +147,13 @@ export async function releaseAndRefuseWithoutCapture(input: {
   notEnabled: string;
 }): Promise<void> {
   if (input.capture) return;
-  const status = input.status();
+  const closedStatus = input.status();
   const retryable = await input.release();
-  throw new Error(
-    engineOffRefusal(status, input.notEnabled, retryable ? "retry" : "restart"),
-  );
+  if (retryable) {
+    throw new Error(engineOffRefusal(closedStatus, input.notEnabled, "retry"));
+  }
+  if (input.currentCapture()) return;
+  throw new Error(engineOffRefusal(input.status(), input.notEnabled, "restart"));
 }
 
 // The gate's predicate on its own, for callers that must honor the opt-out
