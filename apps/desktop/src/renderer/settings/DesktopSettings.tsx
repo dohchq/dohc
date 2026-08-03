@@ -4,6 +4,12 @@ import type { SettingsSectionId } from "./settingsRegistry";
 export function DesktopSettings(props: {
   workspaceId: string;
   workspacePath: string;
+  /**
+   * True when this workspace is a shared view (#589). It is fed by the
+   * share's pull and gets no capture, so the workspace-engine row states
+   * that capability instead of offering a toggle that records nothing.
+   */
+  sharedView?: boolean;
   initialSection?: SettingsSectionId;
   onClose: () => void;
   onAgentActiveChange?: (update: {

@@ -1666,9 +1666,9 @@ export function DesktopWorkspaceShell(props: {
   // (#540): it materializes no settings file, so the default flag reads ON —
   // but the share's open deliberately installed no capture, and every
   // engine-moments call could only error. Capability identity comes from
-  // main's registry summary. This gates the HISTORY surface only: Chats has
-  // its own share-aware gating, and the versions surface still keys on the
-  // settings read alone (pre-existing, tracked separately).
+  // main's registry summary. This gates the HISTORY surface and, below, the
+  // VERSIONS surface (#589), for the same reason and from the same fact.
+  // Chats keep their own share-aware gating.
   const isShareView = Boolean(props.workspace.shareView);
   // Engine history page state (flagged workspaces): newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
@@ -2010,23 +2010,31 @@ export function DesktopWorkspaceShell(props: {
 
   // Named versions (PR 0M-4): the surface exists only for workspaces with the
   // workspace-engine alpha flag on — unflagged workspaces render nothing.
-  const versionsEnabled = engineEnabled;
-  const setVersionsEnabled = setEngineEnabled;
+  //
+  // A shared view is off too (#589), and not because of that flag: it
+  // materializes no settings file, so the read below returns the default ON,
+  // while its open deliberately installed no capture. Every version call
+  // there is refused, so the selector retried five times and then raised a
+  // danger banner about a Settings toggle nobody touched — again on each
+  // share refresh, which re-keys the selector. Same branch as the history
+  // surface above: capability identity comes from main's registry summary.
+  const versionsEnabled = engineEnabled && !isShareView;
   // Bumped after a version switch/merge/conflict resolution so open editors
   // re-read their file content immediately (FileInspector refreshKey).
   const [versionEpoch, setVersionEpoch] = useState(0);
   // An unreadable settings file reads as opted out, so the workspace records
   // nothing. That must never be silent — but the notice says so from MAIN's
   // open-time read (syncStatus.settingsWarning), the read that decided
-  // whether anything is recorded. This read only drives the versions surface.
+  // whether anything is recorded. This read only drives which engine
+  // surfaces the shell offers (versions and chats).
   useEffect(() => {
     let cancelled = false;
-    setVersionsEnabled(false);
+    setEngineEnabled(false);
     void bridge()
       .getWorkspaceSettings({ workspaceId })
       .then((result) => {
         if (cancelled) return;
-        setVersionsEnabled(result.settings.experimental.workspaceEngineAlpha);
+        setEngineEnabled(result.settings.experimental.workspaceEngineAlpha);
       })
       .catch(() => {
         // Settings unavailable reads as flag off — never a broken shell.
@@ -2911,7 +2919,7 @@ export function DesktopWorkspaceShell(props: {
       } else if (event.key === "b" && event.altKey) {
         // Ctrl+Alt+B mirrors VS Code's secondary-sidebar toggle. No-op for
         // unflagged workspaces (they have no Chats panel to show).
-        if (versionsEnabled) {
+        if (engineEnabled) {
           event.preventDefault();
           mutateWb(toggleChats);
         }
@@ -2927,7 +2935,7 @@ export function DesktopWorkspaceShell(props: {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeActiveTab, mutateWb, openSettings, reportShellError, versionsEnabled]);
+  }, [closeActiveTab, engineEnabled, mutateWb, openSettings, reportShellError]);
 
   const openWorkspaceFolder = useCallback(async () => {
     try {
@@ -3000,7 +3008,7 @@ export function DesktopWorkspaceShell(props: {
         : []),
       // The Chats panel exists only for workspace-engine-flagged workspaces —
       // no flag, no command.
-      ...(versionsEnabled
+      ...(engineEnabled
         ? [
             {
               id: "toggle-chats",
@@ -3059,9 +3067,9 @@ export function DesktopWorkspaceShell(props: {
       requestExplorerCreate,
       checkForDesktopUpdates,
       installDesktopUpdate,
+      engineEnabled,
       openSettings,
       reportShellError,
-      versionsEnabled,
       workspaceId,
     ],
   );
@@ -3294,7 +3302,7 @@ export function DesktopWorkspaceShell(props: {
           visible: wb.sidebarVisible,
           onToggle: () => mutateWb(toggleSidebar),
         }}
-        {...(versionsEnabled
+        {...(engineEnabled
           ? {
               chatsSidebar: {
                 visible: wb.chatsVisible,
@@ -3440,7 +3448,7 @@ export function DesktopWorkspaceShell(props: {
                   refreshKey={graphKey}
                   onOpenPath={openPathWithHeading}
                   onOpenChatThread={openGraphChatThread}
-                  chatMentionsAvailable={versionsEnabled}
+                  chatMentionsAvailable={engineEnabled}
                   variant="panel"
                 />
               </Suspense>
@@ -3557,7 +3565,7 @@ export function DesktopWorkspaceShell(props: {
                   refreshKey={graphKey}
                   onOpenPath={openPathWithHeading}
                   onOpenChatThread={openGraphChatThread}
-                  chatMentionsAvailable={versionsEnabled}
+                  chatMentionsAvailable={engineEnabled}
                   variant="page"
                 />
               </Suspense>
@@ -3589,15 +3597,29 @@ export function DesktopWorkspaceShell(props: {
                 no longer available. Current history lives in the History rail.
               </div>
             ) : isVersionCompareTabPath(wb.activeTab) ? (
-              <VersionComparePage
-                // Remount per version AND per state change so the diff always
-                // reflects the latest disk/engine state.
-                key={`${wb.activeTab}:${versionEpoch}`}
-                workspaceId={workspaceId}
-                versionId={parseVersionCompareTabPath(wb.activeTab) ?? "main"}
-              />
+              isShareView ? (
+                // A persisted compare tab on a shared view (#589). The page
+                // asks main for the versions, and a shared view has none —
+                // the same refusal the selector used to raise as a danger
+                // banner. The tab stays closeable and states the capability.
+                <div
+                  data-testid="version-compare-share-view"
+                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle"
+                >
+                  A shared view has no versions to compare. Close this tab to
+                  go back to the shared files.
+                </div>
+              ) : (
+                <VersionComparePage
+                  // Remount per version AND per state change so the diff
+                  // always reflects the latest disk/engine state.
+                  key={`${wb.activeTab}:${versionEpoch}`}
+                  workspaceId={workspaceId}
+                  versionId={parseVersionCompareTabPath(wb.activeTab) ?? "main"}
+                />
+              )
             ) : isChatsTabPath(wb.activeTab) ? (
-              versionsEnabled ? (
+              engineEnabled ? (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
                   <LazyChatsView
                     key={`${workspaceId}:${chatsPageRevision}`}
@@ -3702,7 +3724,7 @@ export function DesktopWorkspaceShell(props: {
             titlebar Chats button, Ctrl+Alt+B, or the toggle-chats
             command bring it back. History lives in the left History view
             and the history tab — never here. */}
-        {versionsEnabled && wb.chatsVisible ? (
+        {engineEnabled && wb.chatsVisible ? (
           <ChatsPanel
             width={wb.chatsWidth}
             onWidthChange={(width) => mutateWb((state) => setChatsWidth(state, width))}
@@ -3858,6 +3880,7 @@ export function DesktopWorkspaceShell(props: {
           <DesktopSettings
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
+            sharedView={isShareView}
             initialSection={settingsSection}
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}

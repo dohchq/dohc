@@ -1078,6 +1078,52 @@ describe("DesktopSettings", () => {
     ).toBe("global-folder");
   });
 
+  // #589: a shared view is fed by the share's pull and gets no capture, so it
+  // records nothing. It also materializes no settings file, so this read
+  // returns the schema default — ON. The toggle would assert both a choice
+  // nobody made and a recording that never happens.
+  it("states the capability for a shared view instead of the engine toggle", async () => {
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        sharedView
+        initialSection="advanced"
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-workspace-engine-alpha");
+    expect(row.textContent).toContain("This workspace is a shared view.");
+    expect(row.textContent).toContain("dohc records nothing here.");
+    expect(
+      screen.getByTestId("settings-workspace-engine-share-view").textContent,
+    ).toContain("no recording");
+    expect(
+      screen.queryByRole("switch", {
+        name: "Use the workspace engine (default on)",
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps the engine toggle for a workspace that is not a shared view", async () => {
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("switch", {
+        name: "Use the workspace engine (default on)",
+      }),
+    ).toBeTruthy();
+    expect(screen.queryByTestId("settings-workspace-engine-share-view")).toBeNull();
+  });
+
   it("persists an edited attachment folder name", async () => {
     const user = userEvent.setup();
     render(

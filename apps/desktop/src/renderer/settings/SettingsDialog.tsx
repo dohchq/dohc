@@ -77,6 +77,12 @@ function StatusPill(props: { state: SaveState }) {
 export function SettingsDialog(props: {
   workspaceId: string;
   workspacePath: string;
+  /**
+   * True when this workspace is a shared view (#589). See the Advanced
+   * section: the engine toggle asserts a choice and a recording that a
+   * shared view never has.
+   */
+  sharedView?: boolean;
   initialSection?: SettingsSectionId;
   onClose: () => void;
   onAgentActiveChange?: (update: {
@@ -779,31 +785,51 @@ export function SettingsDialog(props: {
       case "advanced":
         return (
           <div data-testid="settings-section-advanced">
-            <SettingRow
-              title="Use the workspace engine (default on)"
-              description="The workspace engine records this workspace's history, versions, and chats. Turning it off is an escape hatch: no history is recorded while it is off. Takes effect the next time the workspace is opened."
-              modified={isModified(
-                workspaceSettings.experimental.workspaceEngineAlpha,
-                DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
-              )}
-              onReset={() =>
-                void saveWorkspaceSettings({
-                  experimental: {
-                    workspaceEngineAlpha:
-                      DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
-                  },
-                })
-              }
-              testId="settings-row-workspace-engine-alpha"
-            >
-              <SwitchControl
-                label="Use the workspace engine (default on)"
-                checked={workspaceSettings.experimental.workspaceEngineAlpha}
-                onChange={(workspaceEngineAlpha) =>
-                  void saveWorkspaceSettings({ experimental: { workspaceEngineAlpha } })
+            {props.sharedView ? (
+              // #589: a shared view materializes no settings file, so this
+              // read returns the schema default — ON — for a workspace whose
+              // open deliberately installed no capture. Rendering the toggle
+              // there asserts both a choice nobody made and a recording that
+              // never happens. State the capability instead.
+              <SettingRow
+                title="Workspace engine"
+                description="This workspace is a shared view. Its files come from the share, so dohc records nothing here."
+                testId="settings-row-workspace-engine-alpha"
+              >
+                <span
+                  data-testid="settings-workspace-engine-share-view"
+                  className="text-[11px] text-muted"
+                >
+                  Shared view — no recording
+                </span>
+              </SettingRow>
+            ) : (
+              <SettingRow
+                title="Use the workspace engine (default on)"
+                description="The workspace engine records this workspace's history, versions, and chats. Turning it off is an escape hatch: no history is recorded while it is off. Takes effect the next time the workspace is opened."
+                modified={isModified(
+                  workspaceSettings.experimental.workspaceEngineAlpha,
+                  DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
+                )}
+                onReset={() =>
+                  void saveWorkspaceSettings({
+                    experimental: {
+                      workspaceEngineAlpha:
+                        DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
+                    },
+                  })
                 }
-              />
-            </SettingRow>
+                testId="settings-row-workspace-engine-alpha"
+              >
+                <SwitchControl
+                  label="Use the workspace engine (default on)"
+                  checked={workspaceSettings.experimental.workspaceEngineAlpha}
+                  onChange={(workspaceEngineAlpha) =>
+                    void saveWorkspaceSettings({ experimental: { workspaceEngineAlpha } })
+                  }
+                />
+              </SettingRow>
+            )}
             <SettingRow
               title="Reset user settings"
               description="Restore local user settings for this desktop install to defaults."
