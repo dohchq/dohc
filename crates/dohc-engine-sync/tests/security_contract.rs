@@ -1,6 +1,8 @@
 use dohc_engine_domain::{AGENT_CHANNEL_WIRE_ID, GENERAL_CHANNEL_WIRE_ID};
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path};
-use dohc_engine_sync::{PathClass, classify_share_path};
+use dohc_engine_sync::{
+    MAX_SHARE_VERSION_ID_CHARS, PathClass, classify_share_path, is_valid_share_version_id,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -8,6 +10,22 @@ use serde::Deserialize;
 struct Fixture {
     wire_ids: WireIds,
     vectors: Vec<Vector>,
+    share_version_ids: ShareVersionIds,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareVersionIds {
+    max_chars: usize,
+    vectors: Vec<ShareVersionIdVector>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareVersionIdVector {
+    value: String,
+    valid: bool,
+    utf16_length: usize,
 }
 
 #[derive(Deserialize)]
@@ -129,5 +147,39 @@ fn generated_ts_security_contract_matches_claimed_rust_floor() {
                 vector.path
             );
         }
+    }
+}
+
+/// The share boundary refuses a served `moment.append` whose claimed
+/// `versionId` is not one the relay could have issued, and "could have issued"
+/// is the selector rule the relay itself applies —
+/// `isValidShareVersionId` in `packages/security-contract/src/shareSelector.ts`.
+/// One rule, one place, two processes: this holds the Rust twin to the live
+/// TypeScript oracle vector by vector, so widening or narrowing the rule on
+/// either side moves a vector and fails here.
+#[test]
+fn generated_ts_share_version_id_rule_matches_the_rust_twin() {
+    let fixture = fixture();
+    assert_eq!(
+        fixture.share_version_ids.max_chars, MAX_SHARE_VERSION_ID_CHARS,
+        "the version-id budget must be the same number on both sides"
+    );
+    for vector in fixture.share_version_ids.vectors {
+        assert_eq!(
+            is_valid_share_version_id(&vector.value),
+            vector.valid,
+            "the share version-id rule disagrees with the TypeScript oracle for {:?}",
+            vector.value
+        );
+        // The verdict alone would let the two sides agree while measuring
+        // different things. The unit the budget counts is UTF-16 code units —
+        // `String.length` in the oracle — and the boundary reports that number
+        // when it refuses, so the twin must agree on the NUMBER too.
+        assert_eq!(
+            vector.value.encode_utf16().count(),
+            vector.utf16_length,
+            "the version-id length unit disagrees with the TypeScript oracle for {:?}",
+            vector.value
+        );
     }
 }

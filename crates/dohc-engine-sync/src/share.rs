@@ -9,6 +9,54 @@ use crate::{
     read_shared_peer_position,
 };
 
+/// The version a share follows when its selector names none, mirroring the
+/// relay's `MAIN_VERSION_ID` (`services/sync-relay/src/shareFilter.ts`).
+const MAIN_VERSION_ID: &str = "main";
+
+/// Budget for a share's version id, in UTF-16 code units — the unit
+/// `MAX_SHARE_VERSION_ID_CHARS` counts in
+/// `packages/security-contract/src/shareSelector.ts`.
+pub const MAX_SHARE_VERSION_ID_CHARS: usize = 128;
+
+/// The deliberate Rust twin of `isValidShareVersionId`
+/// (`packages/security-contract/src/shareSelector.ts`): whether `value` is a
+/// version id the relay could have issued.
+///
+/// The selector's version dimension is ONE rule. The relay applies it when it
+/// creates a selector, every surface that reads a selector back applies it,
+/// and this surface applies it to the version a served moment claims — a
+/// version id the relay would never have issued must not be read as one here
+/// either. `crates/dohc-engine-sync/tests/security_contract.rs` holds this
+/// twin to the TypeScript oracle vector by vector.
+///
+/// The trimmable set is JavaScript's `String.prototype.trim` set, not Rust's
+/// `char::is_whitespace`. They differ at both ends — U+FEFF trims in
+/// JavaScript only, U+0085 in Rust only — and a twin that disagrees about a
+/// padded id is not a twin.
+pub fn is_valid_share_version_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.encode_utf16().count() <= MAX_SHARE_VERSION_ID_CHARS
+        && !value.starts_with(js_trimmable)
+        && !value.ends_with(js_trimmable)
+}
+
+fn js_trimmable(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'..='\u{000D}'
+            | '\u{0020}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+            | '\u{FEFF}'
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareSurface {
     SharedChannel,
@@ -221,25 +269,74 @@ fn enforce_share_view_boundary(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
+    // Every refusal below is classified by ONE question, because the reader's
+    // copy reads the answer: is this a SCOPE decision — the share does not
+    // cover this op, which its granter could change — or a payload this
+    // boundary cannot place, which nobody but the relay can fix?
+    //
+    // Scope: no pinned grant (nothing is covered), an op kind a share never
+    // carries, a create for a version this share did not grant, a path
+    // outside the grant, and a path this surface never replays (secret,
+    // unsafe, ignored) — a share covers none of those, ever.
+    // Malformed: a create naming no readable version, a snapshot list that is
+    // not a list, a snapshot row with no path, a moment with no path at all,
+    // and a version id the relay could not have issued.
+    //
     // No pinned grant, no containment to enforce — so nothing is admitted.
     let granted = boundary
         .granted
         .as_ref()
         .ok_or(SyncError::ShareBoundaryViolation)?;
     if !matches!(op.op_kind.as_str(), "moment.append" | "version.create") {
-        return Err(SyncError::ShareBoundaryViolation);
+        // A KNOWN kind a share does not carry is a scope decision — a chat op
+        // or a secret op is outside what any file share covers. A kind this
+        // engine cannot interpret is not: no grant admits it, widening the
+        // share changes nothing, and only the sender can fix it.
+        return Err(if crate::router::is_owned_op_kind(&op.op_kind) {
+            SyncError::ShareBoundaryViolation
+        } else {
+            SyncError::UnsupportedOperation
+        });
     }
-    // The version dimension, mirroring the relay: only a VERSION share is
-    // entitled to a `version.create`, and only to the version it was granted.
-    // This is the ONLY op the recipient can check that way — the relay
-    // minimizes a served `moment.append` down to paths, blob and operation,
-    // so an inbound moment carries no version identity at all.
+    // The version dimension, mirroring the relay's `targetVersionId`: a served
+    // op names EXACTLY the version this share granted. A `version.create` is
+    // entitled only to a VERSION share, and only to the version it granted.
+    //
+    // The two failures are NOT the same class, and the reader's copy reads
+    // them apart: a create this share does not cover is a scope decision, and
+    // a create that names no readable version is a payload this boundary
+    // cannot place — the grant may well cover it.
     if op.op_kind == "version.create" {
-        let claimed = op.payload.get("versionId").and_then(Value::as_str);
-        match (granted.version_id.as_deref(), claimed) {
-            (Some(entitled), Some(claimed)) if entitled == claimed => {}
-            _ => return Err(SyncError::ShareBoundaryViolation),
+        // Validity BEFORE the comparison. An unusable version id is not a
+        // version this share failed to grant — it is one the relay could
+        // never have issued, and comparing it first would report the malformed
+        // field as a scope decision and throw its measurements away.
+        let claimed = usable_version_id(
+            op.payload.get("versionId").and_then(Value::as_str),
+            &op.op_kind,
+        )?;
+        match granted.version_id.as_deref() {
+            Some(entitled) if entitled == claimed => {}
+            // Both versions named, like the moment path: the reader has to see
+            // WHICH lineage was offered against the one the share granted.
+            Some(entitled) => {
+                return Err(SyncError::ShareVersionMismatch {
+                    op_kind: op.op_kind.clone(),
+                    granted: entitled.to_owned(),
+                    offered: claimed.to_owned(),
+                });
+            }
+            // A share that grants no version is entitled to no create at all,
+            // and there is no granted version to name. The moment path reads
+            // an absent grant as the main version because that is what the
+            // relay serves it moments from; a create has no such reading, and
+            // reporting "granted main, offered main" for a create naming main
+            // would be a sentence that refutes itself.
+            None => return Err(SyncError::ShareBoundaryViolation),
         }
+    }
+    if op.op_kind == "moment.append" {
+        enforce_granted_version(granted, op)?;
     }
     let mut paths = Vec::new();
     for field in [
@@ -253,22 +350,40 @@ fn enforce_share_view_boundary(
         }
     }
     if op.op_kind == "version.create" {
-        for snapshot in op
+        // The list must BE a list. An explicit `[]` is a healthy served op
+        // (see the empty-list note below); a missing, null, or non-array
+        // field is a payload this boundary cannot read, and admitting it
+        // would replay a version with no files and commit the cursor past it
+        // — the same silent loss, with no refusal recorded.
+        let snapshots = op
             .payload
             .get("forkSnapshots")
             .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let path = snapshot
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or(SyncError::ShareBoundaryViolation)?;
+            .ok_or(SyncError::InvalidInput {
+                reason: "share-view version.create forkSnapshots must be an array",
+            })?;
+        for snapshot in snapshots {
+            let path =
+                snapshot
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or(SyncError::InvalidInput {
+                        reason: "share-view version.create fork snapshot must carry a path string",
+                    })?;
             paths.push(path);
         }
     }
-    if paths.is_empty() {
-        return Err(SyncError::ShareBoundaryViolation);
+    // A `moment.append` that references no path is malformed, not out of
+    // scope — there is nothing to place. A `version.create` is different: it is scoped by the
+    // VERSION checked above, and its snapshot list is legitimately empty when
+    // the granted version forked with no files, or when none of the source
+    // version's files sit inside the granted paths. The relay serves that op
+    // (`shareFilter.ts` redacts the list and keeps the op), so refusing it
+    // would report damage on a healthy share.
+    if paths.is_empty() && op.op_kind != "version.create" {
+        return Err(SyncError::InvalidInput {
+            reason: "share-view moment.append must reference at least one path",
+        });
     }
     for path in paths {
         if classify_share_path(path) != PathClass::Tracked || !path_within_grant(path, granted) {
@@ -296,6 +411,68 @@ fn path_within_grant(path: &str, grant: &ShareGrant) -> bool {
                 .strip_prefix(selected.as_str())
                 .is_some_and(|tail| tail.starts_with('/'))
     })
+}
+
+/// The version a served op names, or a MEASURED refusal saying why it is not
+/// one the relay could have issued. Both share-view op kinds read their
+/// version through this, so neither can compare a value it should have
+/// refused, and both report the same limit, unit and observed usage.
+fn usable_version_id<'a>(claimed: Option<&'a str>, op_kind: &str) -> Result<&'a str, SyncError> {
+    claimed
+        .filter(|claimed| is_valid_share_version_id(claimed))
+        .ok_or_else(|| SyncError::ShareVersionUnusable {
+            // The kind the boundary already admitted, so the persisted detail
+            // names the operation that was actually refused.
+            op_kind: op_kind.to_owned(),
+            limit: MAX_SHARE_VERSION_ID_CHARS,
+            // The unit the shared rule measures, so an oversized astral id
+            // reports the length that broke the limit, not half of it.
+            observed: claimed.map(|claimed| claimed.encode_utf16().count()),
+        })
+}
+
+/// The version rule, stated identically on the serving side by
+/// `services/sync-relay/src/shareFilter.ts` (`filterOpForShare` +
+/// `targetVersionId`): a served `moment.append` names EXACTLY the version this
+/// share granted — the pinned selector's `versionId`, or `main` when the
+/// selector names none. No descendant and no fork is admitted, because the
+/// relay serves exactly one version per share, ever.
+///
+/// What this catches, stated honestly: a relay whose selection diverges from
+/// the selector the recipient pinned — a later widened or swapped selector, or
+/// a bug in the relay's own filter — cannot land another lineage's moments in
+/// the shared view. What it does NOT do is prove authorship. The served
+/// payload is constructed by the relay and carries no signature, so a relay
+/// that means to lie can restate this field as easily as any other. Pinning
+/// plus this check bounds what a diverging relay can DELIVER; it is not
+/// forgery resistance, and #506 records the same limit for the path dimension.
+///
+/// Fail closed on shape as well as value: a moment whose `versionId` is not
+/// one the relay could have issued is refused. It cannot be version-checked at
+/// all, and accepting it would let a relay disarm this rule by dropping one
+/// field. `is_valid_share_version_id` decides "could have issued", which is
+/// the selector rule the relay applies at creation — one rule, one place.
+fn enforce_granted_version(
+    granted: &ShareGrant,
+    op: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    let offered = usable_version_id(
+        op.payload.get("versionId").and_then(Value::as_str),
+        &op.op_kind,
+    )?;
+    // A grant with no version follows the workspace's main version, which is
+    // the version the relay serves moments from for that share — NOT "compare
+    // nothing". `version.create` above reads the same field raw, because only
+    // a version share is entitled to one at all.
+    let entitled = granted.version_id.as_deref().unwrap_or(MAIN_VERSION_ID);
+    if entitled != offered {
+        return Err(SyncError::ShareVersionMismatch {
+            op_kind: op.op_kind.clone(),
+            granted: entitled.to_owned(),
+            offered: offered.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

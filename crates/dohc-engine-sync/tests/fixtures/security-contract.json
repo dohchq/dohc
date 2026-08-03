@@ -178,5 +178,80 @@
       "write": "secret",
       "read": "secret"
     }
-  ]
+  ],
+  "shareVersionIds": {
+    "maxChars": 128,
+    "vectors": [
+      {
+        "value": "main",
+        "valid": true,
+        "utf16Length": 4
+      },
+      {
+        "value": "version-1",
+        "valid": true,
+        "utf16Length": 9
+      },
+      {
+        "value": "",
+        "valid": false,
+        "utf16Length": 0
+      },
+      {
+        "value": " padded",
+        "valid": false,
+        "utf16Length": 7
+      },
+      {
+        "value": "padded ",
+        "valid": false,
+        "utf16Length": 7
+      },
+      {
+        "value": "\tpadded",
+        "valid": false,
+        "utf16Length": 7
+      },
+      {
+        "value": "padded\n",
+        "valid": false,
+        "utf16Length": 7
+      },
+      {
+        "value": " padded",
+        "valid": false,
+        "utf16Length": 7
+      },
+      {
+        "value": "﻿padded",
+        "valid": false,
+        "utf16Length": 7
+      },
+      {
+        "value": "kept",
+        "valid": true,
+        "utf16Length": 5
+      },
+      {
+        "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "valid": true,
+        "utf16Length": 128
+      },
+      {
+        "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "valid": false,
+        "utf16Length": 129
+      },
+      {
+        "value": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "valid": true,
+        "utf16Length": 128
+      },
+      {
+        "value": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "valid": false,
+        "utf16Length": 130
+      }
+    ]
+  }
 }

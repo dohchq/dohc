@@ -102,6 +102,30 @@ describe("share selector validation", () => {
     ).toMatchObject({ ok: true });
   });
 
+  // An oversized id has to say HOW oversized. The limit alone reads the same
+  // for 129 code units and for 10,000, and the caller cannot tell whether it
+  // is one character over or sending the wrong field entirely. The engine's
+  // twin refusal already names the observed length; this is the same rule
+  // answering on the same terms.
+  it("names the observed length when a version id is too long", () => {
+    const barelyOver = validateShareSelector({
+      versionId: "v".repeat(MAX_SHARE_VERSION_ID_CHARS + 1),
+    });
+    const wildlyOver = validateShareSelector({
+      versionId: "v".repeat(10_000),
+    });
+    if (barelyOver.ok || wildlyOver.ok) throw new Error("both must be refused");
+
+    expect(
+      barelyOver.message,
+      "MUTATION: a limit with no observed length reads the same at 129 and at 10,000",
+    ).toContain(`${MAX_SHARE_VERSION_ID_CHARS + 1}`);
+    expect(wildlyOver.message).toContain("10000");
+    expect(barelyOver.message).not.toBe(wildlyOver.message);
+    // The unit stays the one the rule measures.
+    expect(barelyOver.message).toContain("UTF-16 code units");
+  });
+
   it("round-trips through selector JSON and rejects malformed persisted selectors", () => {
     const validated = validateShareSelector({ paths: ["docs"], versionId: "v-1" });
     expect(validated.ok).toBe(true);
@@ -171,6 +195,10 @@ describe("share op filter", () => {
     // fields survive.
     expect(decision.payload).toEqual({
       operation: "write",
+      // Kept on purpose: the recipient's share boundary version-checks an
+      // inbound moment against the grant, and refuses one that carries no
+      // version identity.
+      versionId: "main",
       metadata: { origin: "sync" },
       path: "docs/a.md",
       payloadAfterPath: "docs/a.md",
@@ -219,6 +247,29 @@ describe("share op filter", () => {
       "LEAK-snap-summary",
     ]) {
       expect(serialized, leak).not.toContain(leak);
+    }
+  });
+
+  // The recipient re-runs the SAME equality this filter runs
+  // (`crates/dohc-engine-sync/src/share.rs`, `enforce_share_view_boundary`),
+  // which it can only do when the served moment says which version it is on.
+  it("serves the granted version on every moment, for a main share and a version share", () => {
+    const main = filterOpForShare(pathShare, "moment.append", momentPayload());
+    expect(main.allowed).toBe(true);
+    if (main.allowed) {
+      expect(
+        (main.payload as { versionId?: unknown }).versionId,
+        "MUTATION: a served moment with no version identity leaves the recipient unable to version-check it",
+      ).toBe("main");
+    }
+    const versioned = filterOpForShare(
+      { paths: ["docs"], versionId: "version-1" },
+      "moment.append",
+      momentPayload({ versionId: "version-1" }),
+    );
+    expect(versioned.allowed).toBe(true);
+    if (versioned.allowed) {
+      expect((versioned.payload as { versionId?: unknown }).versionId).toBe("version-1");
     }
   });
 

@@ -58,9 +58,13 @@ describe("share mounts real daemon", () => {
             // A REAL pinned selector: no paths and no version selects
             // nothing at all, which the engine refuses.
             pinnedSelector: { paths: ["docs"], versionId: null },
+            recordRefusals: async () => undefined,
             pull: async () => ({
               fetched: 0,
               applied: 0,
+              skipped: 0,
+              refusals: [],
+              refusalCount: 0,
               changedPaths: [],
               nextCursor: 0,
               commitCursor: async () => undefined,
@@ -68,7 +72,12 @@ describe("share mounts real daemon", () => {
             openStore: (workspace) =>
               createCaptureLiveStores(workspace, activeSessions).store,
           }),
-        ).resolves.toEqual({ status: "unchanged", changedPaths: 0 });
+        ).resolves.toEqual({
+      status: "unchanged",
+      changedPaths: 0,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
 
         expect(
           existsSync(join(mountRoot, ".dohc", "engine", "engine.db")),

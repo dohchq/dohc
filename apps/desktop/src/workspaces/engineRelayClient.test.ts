@@ -8,6 +8,7 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
+  MAX_REPORTED_REFUSALS,
   RelayOriginDivergedError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
@@ -133,6 +134,8 @@ class MockDaemon implements EngineDaemonClient {
             fetched: 2,
             applied: 0,
             skipped: 2,
+            refusals: [],
+            refusalCount: 0,
             hasMore: false,
             nextCursor: 13,
             changedPaths: [],
@@ -414,6 +417,7 @@ describe("EngineRelayClient", () => {
       shareId: "share-view",
       store,
       pinnedSelector: PINNED_SELECTOR,
+      recordRefusals: async () => undefined,
       pull: async (input) =>
         await client.pullShareView({
           shareId: input.shareId,
@@ -421,7 +425,12 @@ describe("EngineRelayClient", () => {
         }),
     });
 
-    expect(outcome).toEqual({ status: "unchanged", changedPaths: 0 });
+    expect(outcome).toEqual({
+      status: "unchanged",
+      changedPaths: 0,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
     expect(daemon.requests.map((request) => request.method)).toEqual([
       "workspace.open",
       "share.view.pull",
@@ -463,6 +472,7 @@ describe("EngineRelayClient", () => {
       shareId: "share-view",
       store,
       pinnedSelector: { paths: ["docs"], versionId: "v1" },
+      recordRefusals: async () => undefined,
       pull: async (input) =>
         await client.pullShareView({
           shareId: input.shareId,
@@ -483,6 +493,155 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  // The engine SKIPS an op it refuses and keeps pulling, so the refusal is the
+  // only signal that the share stopped carrying part of what the granter
+  // shares. It must survive the wire, and it must survive PAGING: a refusal on
+  // an early page is exactly the one a caller would otherwise never see.
+  it("carries every page's share-view refusals through to the caller", async () => {
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.view.pull") return undefined;
+      pulls += 1;
+      const first = pulls === 1;
+      return {
+        fetched: 1,
+        applied: 0,
+        skipped: 1,
+        refusals: [
+          {
+            originId: "origin-granter",
+            originSeq: first ? 4 : 9,
+            opKind: "moment.append",
+            code: "share-boundary-violation",
+            detail: first
+              ? "replicated moment is outside the share boundary: the share granted version main, the relay offered version version-other"
+              : "replicated moment is outside the share boundary: its versionId is not one the relay could have issued: a version id is non-empty, unpadded, and at most 128 UTF-16 code units; the relay offered 130 UTF-16 code units",
+          },
+        ],
+        hasMore: first,
+        nextCursor: pulls,
+        changedPaths: [],
+        pendingCursor: { kind: "shareView", token: `share-cursor-${pulls}` },
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    const pull = await client.pullShareView({
+      shareId: "share-view",
+      grantedSelector: { paths: ["docs"], versionId: null },
+    });
+
+    expect(
+      pull.refusals.map((refusal) => refusal.originSeq),
+      "MUTATION: keeping only the last page's refusals loses the earlier ones entirely",
+    ).toEqual([4, 9]);
+    expect(pull.skipped).toBe(2);
+    expect(pull.refusals[0].detail).toContain("version-other");
+    expect(pull.refusals[1].detail).toContain("130 UTF-16 code units");
+    await sessions.closeAll();
+  });
+
+  // The durable record holds every reason — each page reaches the recorder
+  // before its cursor commits — so the in-memory aggregate only has to carry
+  // enough to log and to show. A relay that refuses on every page must not be
+  // able to grow it with its log; the paging loop has no page limit of its own.
+  it("bounds the refusals it accumulates in memory while counting them all", async () => {
+    const pages = MAX_REPORTED_REFUSALS + 5;
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.view.pull") return undefined;
+      pulls += 1;
+      return {
+        fetched: 1,
+        applied: 0,
+        skipped: 1,
+        refusals: [
+          {
+            originId: "origin-granter",
+            originSeq: pulls,
+            opKind: "moment.append",
+            code: "share-boundary-violation",
+            detail: `refused ${pulls}`,
+          },
+        ],
+        hasMore: pulls < pages,
+        nextCursor: pulls,
+        changedPaths: [],
+        pendingCursor: { kind: "shareView", token: `share-cursor-${pulls}` },
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+    let recorded = 0;
+
+    const pull = await client.pullShareView({
+      shareId: "share-view",
+      grantedSelector: { paths: ["docs"], versionId: null },
+      recordRefusals: async (refusals) => {
+        recorded += refusals.length;
+      },
+    });
+
+    expect(
+      pull.refusals.length,
+      "MUTATION: an unbounded aggregate lets a relay grow memory in proportion to its log",
+    ).toBe(MAX_REPORTED_REFUSALS);
+    // The count is still the truth, and every page still reached the record.
+    expect(pull.refusalCount).toBe(pages);
+    expect(recorded).toBe(pages);
+    await sessions.closeAll();
+  });
+
+  // The pull commits each intermediate page's cursor as it goes. So an early
+  // page's refusals must be RECORDED BEFORE that commit: if a later page
+  // fails, the retry starts past the refused op and the only remaining record
+  // of why that content is missing is the one written here.
+  it("records a page's refusals before committing its cursor, even when a later page fails", async () => {
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.view.pull") return undefined;
+      pulls += 1;
+      if (pulls > 1) throw new Error("relay went away mid-page");
+      return {
+        fetched: 1,
+        applied: 0,
+        skipped: 1,
+        refusals: [
+          {
+            originId: "origin-granter",
+            originSeq: 4,
+            opKind: "moment.append",
+            code: "share-boundary-violation",
+            detail: "the share granted version main, the relay offered version version-other",
+          },
+        ],
+        hasMore: true,
+        nextCursor: 1,
+        changedPaths: [],
+        pendingCursor: { kind: "shareView", token: "share-cursor-1" },
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+    const recorded: string[] = [];
+
+    await expect(
+      client.pullShareView({
+        shareId: "share-view",
+        grantedSelector: { paths: ["docs"], versionId: null },
+        recordRefusals: async (refusals) => {
+          recorded.push(...refusals.map((refusal) => refusal.detail));
+        },
+      }),
+    ).rejects.toThrow();
+
+    expect(
+      recorded,
+      "MUTATION: recording after the commit loses the reason while the cursor stays past the op",
+    ).toEqual([
+      "the share granted version main, the relay offered version version-other",
+    ]);
+    await sessions.closeAll();
+  });
+
   it("materializes a share view through the injected daemon store", async () => {
     const body = "read from daemon";
     const daemon = new MockDaemon((request) => {
@@ -491,6 +650,8 @@ describe("EngineRelayClient", () => {
           fetched: 1,
           applied: 1,
           skipped: 0,
+          refusals: [],
+          refusalCount: 0,
           hasMore: false,
           nextCursor: 14,
           changedPaths: [
@@ -542,13 +703,19 @@ describe("EngineRelayClient", () => {
         shareId: "share-view",
         store,
         pinnedSelector: PINNED_SELECTOR,
+        recordRefusals: async () => undefined,
         pull: async (input) =>
           await client.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
           }),
       }),
-    ).resolves.toEqual({ status: "updated", changedPaths: 1 });
+    ).resolves.toEqual({
+      status: "updated",
+      changedPaths: 1,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
 
     expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(body);
     expect(daemon.requests.map((request) => request.method)).toContain(
@@ -573,13 +740,19 @@ describe("EngineRelayClient", () => {
         openStore: (workspace) =>
           createCaptureLiveStores(workspace, sessions).store,
         pinnedSelector: PINNED_SELECTOR,
+        recordRefusals: async () => undefined,
         pull: async (input) =>
           await mountRelay.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
           }),
       }),
-    ).resolves.toEqual({ status: "unchanged", changedPaths: 0 });
+    ).resolves.toEqual({
+      status: "unchanged",
+      changedPaths: 0,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
 
     expect(routes.modeFor(target.workspaceId)).toBe("daemon");
     expect(
@@ -646,13 +819,19 @@ describe("EngineRelayClient", () => {
         shareId: "share-revoked",
         store,
         pinnedSelector: PINNED_SELECTOR,
+        recordRefusals: async () => undefined,
         pull: async (input) =>
           await client.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
           }),
       }),
-    ).resolves.toEqual({ status: "ended", changedPaths: 0 });
+    ).resolves.toEqual({
+      status: "ended",
+      changedPaths: 0,
+      refusedOps: 0,
+      refusedDetail: null,
+    });
     await expect(
       syncJoinedSharedChannels({
         rootDir: rootPath,
@@ -805,6 +984,8 @@ describe("EngineRelayClient", () => {
           hasMore: first,
           applied: 1,
           skipped: 0,
+          refusals: [],
+          refusalCount: 0,
           nextCursor: viewPulls,
           changedPaths: [
             {

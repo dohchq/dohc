@@ -53,6 +53,8 @@ import {
 //    the log; it does not re-check `grantedSelector`. Containment is the Rust
 //    share boundary's job (`crates/dohc-engine-sync/src/share.rs`) and is
 //    tested there. Do not read a passing test here as proof a scope holds.
+//    For the same reason its pull answers with NO refusals: it refuses
+//    nothing, because it checks nothing.
 //  - NOT REAL: durability. Cursors and file state live in this object, so they
 //    survive a `workspace.close` (as the daemon's SQLite would) but not the
 //    process. Anything that must be proven ON DISK needs a real daemon.
@@ -418,6 +420,11 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
       fetched: page.ops.length,
       applied,
       skipped: page.ops.length - applied,
+      // Always empty, and honestly so: this double does not enforce the grant
+      // (see the header), so it never refuses an op. The field is present
+      // because the daemon's response shape carries it and the client decodes
+      // it strictly.
+      refusals: [],
       hasMore: page.hasMore,
       nextCursor: page.nextCursor,
       changedPaths: [...changed.values()],

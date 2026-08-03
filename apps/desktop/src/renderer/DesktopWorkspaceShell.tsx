@@ -41,6 +41,10 @@ import type {
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
 import { DohcMark } from "@dohc/brand";
+import {
+  hasUnacknowledgedShareSkips,
+  shareSkipNoticeLines,
+} from "./shareSkipNotice";
 import { buildChatCollaboration } from "./collab/chatCollaboration";
 import type { SearchResultsEventEntry } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -3081,6 +3085,33 @@ export function DesktopWorkspaceShell(props: {
   const shareView = props.workspace.shareView ?? null;
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
   const [shareRefreshing, setShareRefreshing] = useState(false);
+  // Ops this share's pulls skipped, read from the RECORD, not from the last
+  // refresh. The skip is durable — the cursor committed past those ops — so a
+  // later quiet refresh must not clear the warning while the content is still
+  // missing, and a restart must not either.
+  //
+  // The record is re-read after every refresh rather than taken from the boot
+  // snapshot in props: the recorder writes DURING the pull, so a refusal that
+  // happens while this shell is mounted would otherwise wait for a remount.
+  // Latest-wins token, the same guard reloadShareMounts uses.
+  const bootSkipped = props.workspace.shareView?.skippedOps ?? null;
+  const [shareSkipped, setShareSkipped] = useState(
+    hasUnacknowledgedShareSkips(bootSkipped) ? bootSkipped : null,
+  );
+  const shareSkippedToken = useRef(0);
+  const reloadShareSkipped = useCallback(async () => {
+    const token = ++shareSkippedToken.current;
+    const registry = await bridge().getWorkspaceRegistry();
+    if (token !== shareSkippedToken.current) return;
+    const entry = registry.workspaces.find(
+      (candidate) => candidate.workspaceId === workspaceId,
+    );
+    const skipped = entry?.shareView?.skippedOps ?? null;
+    // Only what the user has not seen. Acknowledging hides the warning
+    // without deleting the record, so this reads the marker rather than the
+    // record's presence.
+    setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
+  }, [workspaceId]);
   const refreshShareView = useCallback(async () => {
     if (!shareView || shareViewEnded) return;
     setShareRefreshing(true);
@@ -3098,10 +3129,17 @@ export function DesktopWorkspaceShell(props: {
     } catch (error) {
       reportShellError("Couldn't refresh the shared view.", error);
     } finally {
+      // AFTER the listing and after a FAILURE, deliberately. Refusals are
+      // recorded page by page before each cursor commit, so a refresh that
+      // died on a later page still left durable evidence behind — reading it
+      // only on the success path would keep that invisible until a lucky
+      // refresh or a remount. It runs after the listing because a stale file
+      // list is what the user is looking at, and this read must not delay it.
+      await reloadShareSkipped().catch(() => undefined);
       setShareRefreshing(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shareView?.shareId, shareViewEnded, workspaceId]);
+  }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
     if (shareView && !shareViewEnded) void refreshShareView();
@@ -3349,6 +3387,48 @@ export function DesktopWorkspaceShell(props: {
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
               : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
+          {shareSkipped
+            ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
+                (line) => (
+                  <span
+                    key={line.kind}
+                    data-testid="shared-view-refused"
+                    data-kind={line.kind}
+                    title={line.detail}
+                    className="flex shrink-0 items-center gap-1.5 rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
+                  >
+                    {line.text}
+                    <button
+                      type="button"
+                      data-testid="shared-view-refused-dismiss"
+                      onClick={() => {
+                        const shown = shareSkipped;
+                        setShareSkipped(null);
+                        void bridge()
+                          .dismissShareSkips({
+                            workspaceId,
+                            // The generation on screen. A refusal recorded
+                            // since this render is NOT acknowledged by this
+                            // click.
+                            generation: shown.generation,
+                          })
+                          // Re-read either way: a stale acknowledgement
+                          // clears nothing, and the newer warning must come
+                          // back.
+                          .then(async () => await reloadShareSkipped())
+                          .catch((error: unknown) => {
+                            setShareSkipped(shown);
+                            reportShellError("Couldn't dismiss that notice.", error);
+                          });
+                      }}
+                      className="shrink-0 rounded border border-warning/40 px-1 text-[10px] text-warning hover:bg-warning/20"
+                    >
+                      Dismiss
+                    </button>
+                  </span>
+                ),
+              )
+            : null}
           {!shareViewEnded ? (
             <button
               type="button"

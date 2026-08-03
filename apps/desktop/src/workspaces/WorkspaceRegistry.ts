@@ -69,11 +69,27 @@ export function completeWorkspaceJoinBootstrap(workspaceId: string): void {
   store().completeJoinBootstrap(workspaceId);
 }
 
+// The user has seen a share's skipped ops: hide the warning, keep the
+// evidence. See registryStore.acknowledgeShareSkips.
+export function acknowledgeWorkspaceShareSkips(
+  workspaceId: string,
+  shareId: string | undefined,
+  generation: number,
+): void {
+  store().acknowledgeShareSkips(workspaceId, shareId, generation);
+}
+
 export function setWorkspaceShareView(
   workspaceId: string,
   shareView: ShareViewIdentity,
 ): void {
   store().setShareView(workspaceId, shareView);
+}
+
+// A shared view ended: merged into the record as it stands, never written
+// back from a caller's pre-pull snapshot. See registryStore.markShareViewEnded.
+export function endWorkspaceShareView(workspaceId: string): void {
+  store().markShareViewEnded(workspaceId);
 }
 
 // MU-C4: the workspace's joined shared channels (replace-the-set write).

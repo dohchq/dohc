@@ -73,6 +73,7 @@ import {
   RefreshShareMountsPayload,
   RefreshShareMountsResult,
   RefreshSharedViewPayload,
+  DismissShareSkipsPayload,
   RefreshSharedViewResult,
   UnmountSharePayload,
   UnmountShareResult,
@@ -297,6 +298,8 @@ import {
   registerWorkspace,
   removeWorkspace,
   setWorkspaceRemote,
+  acknowledgeWorkspaceShareSkips,
+  endWorkspaceShareView,
   setWorkspaceShareMounts,
   setWorkspaceShareView,
   setWorkspaceSharedChannels,
@@ -379,12 +382,14 @@ import {
   refreshShareMountOnce,
   removeMountFolder,
 } from "./workspaces/shareMounts";
+import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import {
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   type RelayWorkspaceBootstrapResult,
+  type ShareViewRefusal,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
@@ -4423,6 +4428,75 @@ function registerIpcHandlers(
     return undefined;
   });
 
+  // Record that the user has seen a share's skipped ops.
+  //
+  // It does NOT delete them. The cursor has already committed past those ops,
+  // so this record is the only remaining evidence of what is missing —
+  // deleting it behind a one-click control would be an irreversible change
+  // with no reverse path and no warning. Acknowledging hides the warning,
+  // keeps the coordinates for diagnosis, and lets a later refusal (a higher
+  // generation) raise it again on its own.
+  ipcMain.handle(CHANNELS.dismissShareSkips, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = DismissShareSkipsPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    if (input.shareId === undefined && !workspace.shareView) {
+      throw new Error("This workspace is not a shared view.");
+    }
+    if (
+      input.shareId !== undefined &&
+      !(workspace.shareMounts ?? []).some(
+        (mount) => mount.shareId === input.shareId,
+      )
+    ) {
+      throw new Error("That share is not mounted in this workspace.");
+    }
+    acknowledgeWorkspaceShareSkips(
+      workspace.workspaceId,
+      input.shareId,
+      input.generation,
+    );
+    notifyRenderer();
+  });
+
+  // Where a share pull's refusals become durable. Called before the cursor
+  // that skips past them is committed, so a later page that fails cannot take
+  // an earlier page's reason with it, and a restart still shows it. Merging is
+  // idempotent by origin coordinate, because a re-fetched page repeats
+  // refusals the record already holds.
+  //
+  // Persist per PAGE, notify per PULL: see createShareSkipRecorder, which
+  // holds no notifier at all. Each pull site below broadcasts once, when it
+  // settles.
+  function recordShareViewRefusals(
+    workspaceId: string,
+  ): (refusals: readonly ShareViewRefusal[]) => Promise<void> {
+    return createShareSkipRecorder({
+      current: () => findWorkspace(workspaceId)?.shareView,
+      persist: (next) => setWorkspaceShareView(workspaceId, next),
+    });
+  }
+
+  // The same durable record for a MOUNTED share, on the mount's own row.
+  function recordShareMountRefusals(
+    workspaceId: string,
+    shareId: string,
+  ): (refusals: readonly ShareViewRefusal[]) => Promise<void> {
+    return createShareSkipRecorder({
+      current: () =>
+        findWorkspace(workspaceId)?.shareMounts?.find(
+          (mount) => mount.shareId === shareId,
+        ),
+      persist: (next) =>
+        setWorkspaceShareMounts(
+          workspaceId,
+          (findWorkspace(workspaceId)?.shareMounts ?? []).map((mount) =>
+            mount.shareId === shareId ? next : mount,
+          ),
+        ),
+    });
+  }
+
   // Receive side: open a pasted share code as a READ-ONLY shared view.
   // Mirrors the join flow's ordering guarantees: everything is validated
   // BEFORE local state exists, the token only ever goes to the signed-in
@@ -4515,10 +4589,12 @@ function registerIpcHandlers(
         // Just pinned on the record above; the refresh reads it back through
         // the same defensive parse every later refresh uses.
         pinnedSelector: info.selector,
+        recordRefusals: recordShareViewRefusals(created.workspaceId),
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
+            recordRefusals: input.recordRefusals,
           }),
       });
       if (outcome.status === "ended") {
@@ -4556,7 +4632,12 @@ function registerIpcHandlers(
     const shareView = workspace.shareView;
     if (!shareView) throw new Error("This workspace is not a shared view.");
     if (shareView.ended) {
-      return RefreshSharedViewResult.parse({ status: "ended", changedPaths: 0 });
+      return RefreshSharedViewResult.parse({
+        status: "ended",
+        changedPaths: 0,
+        refusedOps: 0,
+        refusedDetail: null,
+      });
     }
     await warmCredentialCache();
     if (!cachedCredentials?.relayUrl) throw new Error("Sign in to dohc Cloud first.");
@@ -4567,7 +4648,12 @@ function registerIpcHandlers(
       shareView.relayUrl &&
       !relayUrlsMatch(cachedCredentials.relayUrl, shareView.relayUrl)
     ) {
-      return RefreshSharedViewResult.parse({ status: "unchanged", changedPaths: 0 });
+      return RefreshSharedViewResult.parse({
+        status: "unchanged",
+        changedPaths: 0,
+        refusedOps: 0,
+        refusedDetail: null,
+      });
     }
     const relay = {
       baseUrl: cachedCredentials.relayUrl,
@@ -4587,13 +4673,18 @@ function registerIpcHandlers(
         shareId: shareView.shareId,
         store: sharedViewStoreFor(workspace),
         pinnedSelector: shareView.grantedSelector,
+        recordRefusals: recordShareViewRefusals(workspace.workspaceId),
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
+            recordRefusals: input.recordRefusals,
           }),
       });
     } catch (error) {
+      // A pull that failed on a later page still persisted the refusals its
+      // earlier pages recorded, so the renderer is told once here too.
+      notifyRenderer();
       // A damaged pin does not heal on the next try, and re-asking the relay
       // for one would let it restate a wider scope. Say so instead of
       // reporting "refreshed, nothing new" forever.
@@ -4608,7 +4699,11 @@ function registerIpcHandlers(
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
       // refreshing; the notice survives restarts.
-      setWorkspaceShareView(workspace.workspaceId, { ...shareView, ended: true });
+      //
+      // Merged into the CURRENT record, never the pre-pull snapshot above:
+      // the pull that ended may have recorded refusals on its way, and
+      // writing the snapshot back would drop them.
+      endWorkspaceShareView(workspace.workspaceId);
       refreshNativeWorkspaceSurfaces();
     }
     notifyRenderer();
@@ -4733,10 +4828,15 @@ function registerIpcHandlers(
         // Just pinned on the record above; read back through the same
         // defensive parse every later refresh uses.
         pinnedSelector: info.selector,
+        recordRefusals: recordShareMountRefusals(
+          workspace.workspaceId,
+          parsed.shareId,
+        ),
         pull: async (input) =>
           await daemonRelay.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
+            recordRefusals: input.recordRefusals,
           }),
       });
       if (outcome.status === "ended") throw new ShareUnavailableError();
@@ -4799,6 +4899,10 @@ function registerIpcHandlers(
     // an awaited refresh runs must never pair the old relay URL with a new
     // account's token (gpt-5.6-sol P1).
     const credentials = cachedCredentials;
+    // One notification for the whole pass, in a finally: mounts whose pulls
+    // persisted refusals before a later mount threw must still reach the UI,
+    // and the per-page recorders deliberately broadcast nothing.
+    try {
     for (const mount of mounts) {
       if (mount.ended) {
         results.push({ shareId: mount.shareId, label: mount.label, status: "ended", changedPaths: 0 });
@@ -4839,10 +4943,15 @@ function registerIpcHandlers(
           relay,
           openStore: sharedViewStoreFor,
           pinnedSelector: mount.grantedSelector,
+          recordRefusals: recordShareMountRefusals(
+            workspace.workspaceId,
+            mount.shareId,
+          ),
           pull: async (input) =>
             await daemonRelay.pullShareView({
               shareId: input.shareId,
               grantedSelector: input.grantedSelector,
+              recordRefusals: input.recordRefusals,
             }),
         });
         if (outcome.status === "ended") {
@@ -4885,8 +4994,10 @@ function registerIpcHandlers(
         results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
       }
     }
-    notifyRenderer();
     return RefreshShareMountsResult.parse({ results });
+    } finally {
+      notifyRenderer();
+    }
     });
   });
 

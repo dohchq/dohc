@@ -128,6 +128,36 @@ const MODE_ENUM = z.enum(WORKSPACE_MODES);
 export const PickWorkspaceRootResult = PATH_STRING.nullable();
 export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 
+// Ops a share pull skipped, and why. Durable state, not a status: the pull
+// commits its cursor past a refused op, so that content never arrives again
+// unless the granter writes the same path a second time.
+export const ShareSkippedOpsSummary = z.object({
+  ops: z
+    .array(
+      z.object({
+        originId: z.string().min(1).max(512),
+        originSeq: z.number().int().nonnegative(),
+        opKind: z.string().min(1).max(128),
+        code: z.string().min(1).max(128),
+        detail: z.string().min(1).max(2048),
+        atMs: z.number().int().nonnegative(),
+      }),
+    )
+    .max(20),
+  more: z.number().int().nonnegative(),
+  // Bumped whenever a pull adds a skipped op. A dismissal names the
+  // generation the user saw, so a refusal recorded between the render and the
+  // click survives it.
+  generation: z.number().int().nonnegative(),
+  // The generation the user has seen. Dismissing raises this and deletes
+  // nothing, so the warning is hidden while the evidence stays.
+  acknowledgedGeneration: z.number().int().nonnegative().optional(),
+  // `more` may over-report past the tracked-origin bound; the copy says "at
+  // least" rather than a number it cannot stand behind.
+  inexact: z.boolean().optional(),
+});
+export type ShareSkippedOpsSummary = z.infer<typeof ShareSkippedOpsSummary>;
+
 export const WorkspaceSummary = z.object({
   workspaceId: WORKSPACE_ID,
   rootPath: PATH_STRING,
@@ -141,6 +171,7 @@ export const WorkspaceSummary = z.object({
       shareId: z.string().min(1).max(200),
       granterEmail: z.string().min(3).max(320).nullable(),
       ended: z.boolean().optional(),
+      skippedOps: ShareSkippedOpsSummary.optional(),
     })
     .optional(),
   // Share mounts: received shares materialized into this workspace's
@@ -153,6 +184,7 @@ export const WorkspaceSummary = z.object({
         label: z.string().min(1).max(64),
         granterEmail: z.string().min(3).max(320).nullable(),
         ended: z.boolean().optional(),
+        skippedOps: ShareSkippedOpsSummary.optional(),
       }),
     )
     .max(200)
@@ -2515,11 +2547,31 @@ export const RefreshSharedViewPayload = z.object({
 });
 export type RefreshSharedViewPayload = z.infer<typeof RefreshSharedViewPayload>;
 
+// Clearing a share's durable skip record. The content those ops carried is
+// still missing — this says the user has seen the warning, which is the only
+// honest recovery this surface can offer.
+export const DismissShareSkipsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  // Absent clears the workspace's own shared view; a shareId clears one
+  // mounted share's record.
+  shareId: SHARE_ID.optional(),
+  // The generation the user saw. A refusal recorded after that render has a
+  // higher generation, so it stays unacknowledged and speaks up again.
+  generation: z.number().int().nonnegative(),
+});
+export type DismissShareSkipsPayload = z.infer<typeof DismissShareSkipsPayload>;
+
 export const RefreshSharedViewResult = z.object({
   // "ended" means the granter revoked the share: the local view stays
   // readable but stops refreshing, and the UI says so honestly.
   status: z.enum(["updated", "unchanged", "ended"]),
   changedPaths: z.number().int().nonnegative(),
+  // Ops the pull refused. It skips them and keeps going, so a view that
+  // quietly stopped carrying part of the share is invisible without this.
+  refusedOps: z.number().int().nonnegative(),
+  // The first refusal's engine message, for the banner's title attribute and
+  // the log. Null when nothing was refused.
+  refusedDetail: z.string().nullable(),
 });
 export type RefreshSharedViewResult = z.infer<typeof RefreshSharedViewResult>;
 
@@ -3152,6 +3204,7 @@ export interface DohcDesktopBridge {
   // Relay shares (PR 18): receive side — read-only shared views.
   openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
   refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;
+  dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
   // Share mounts: a received share materialized into a host workspace's
   // shared-with-me/<label>/ as ordinary read-only files.
   mountShare(payload: MountSharePayload): Promise<MountShareResult>;
