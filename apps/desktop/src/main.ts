@@ -1628,9 +1628,11 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   // arc-gate QA harness so the harness asserts against the REAL gate).
   // Shared views (PR 18) never get capture: they are fed exclusively by the
   // share's filtered pull, and a watcher would re-journal materialized files.
+  // The decision carries that cause (#540) so the null capture never wears
+  // the Settings opt-out's copy.
   captureFor: async (workspace, hooks) =>
     findWorkspace(workspace.workspaceId)?.shareView
-      ? { capture: null }
+      ? { capture: null, shareView: true }
       : captureForFlaggedWorkspace(workspace, hooks, requireEngineSessions()),
 });
 const panelAgentRunSlots = new Map<string, string>();

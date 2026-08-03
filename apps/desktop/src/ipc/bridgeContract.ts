@@ -702,6 +702,14 @@ export const SyncStatusResult = z.object({
   // it asserts the user chose this, which is the false cause #505 is about. A
   // producer that cannot say which cause it means must not compile.
   historyRecordingUnavailable: z.boolean(),
+  // #540: true when this workspace is a shared view — fed by the share's
+  // pull, never a recorder of its own. A capability, not an opt-out and not
+  // a failure, so the notice must not blame the Settings toggle.
+  //
+  // REQUIRED for the same reason as its neighbour: an omitted boolean reads
+  // as false, and false asserts "not a shared view", which routes the notice
+  // to the opt-out's copy — a cause nobody chose.
+  historyShareView: z.boolean(),
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),

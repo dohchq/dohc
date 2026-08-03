@@ -175,6 +175,7 @@ describe("sync status surface", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
       },
     });
     const status = screen.getByTestId("sync-status");
@@ -194,6 +195,7 @@ describe("sync status surface", () => {
         pendingChangeCount: 2,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
         conflictCount: 2,
       },
     });
@@ -211,6 +213,7 @@ describe("notice center", () => {
         pendingChangeCount: 2,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
         conflictCount: 2,
       },
       agentActive: true,
@@ -265,6 +268,7 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
         conflictCount: 1,
       },
     });
@@ -288,6 +292,7 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
         historyRecordingOff: true,
         // #483: the cause rides main's open-time read, on the same status
         // that decided history is off. One read answers both.
@@ -312,6 +317,7 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
         historyRecordingOff: true,
       },
     });
@@ -333,6 +339,7 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingOff: true,
         historyRecordingUnavailable: true,
+        historyShareView: false,
       },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -349,6 +356,31 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
   });
 
+  // #540: a shared view records no history BY DESIGN — a capability, not an
+  // opt-out and not a failure. Every history-off notice states a cause that
+  // is false for a shared view, so the share banner speaks and this surface
+  // stays quiet.
+  it("raises no history-off notice for a shared view", async () => {
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingOff: true,
+        historyRecordingUnavailable: false,
+        historyShareView: true,
+      },
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    // The panel opened, so a missing notice means no notice — not a missed
+    // render.
+    expect(screen.getByTestId("notice-center")).toBeTruthy();
+    // The opt-out's copy would blame a Settings toggle nobody touched.
+    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
+    expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
+    expect(screen.queryByTestId("notice-workspace-settings-unreadable")).toBeNull();
+  });
+
   it("surfaces an unmatched remote conflict resolution as a review notice (0P-C)", async () => {
     const onOpenHistory = vi.fn();
     renderBar({
@@ -357,6 +389,7 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
         unmatchedRemoteResolves: 1,
       },
       onOpenHistory,
@@ -378,6 +411,7 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
         unmatchedRemoteResolves: 1,
       },
       onDismissSyncReview,
@@ -396,6 +430,7 @@ describe("notice center", () => {
           pendingChangeCount: 0,
           lastSyncedAtMs: null,
           historyRecordingUnavailable: false,
+          historyShareView: false,
           unmatchedRemoteResolves: 0,
         }}
         agentActive={false}
@@ -419,6 +454,7 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
       },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -433,6 +469,7 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
         historyCaptureFailed: true,
       },
       onOpenHistory,
@@ -458,6 +495,7 @@ describe("notice center", () => {
       pendingChangeCount: 0,
       lastSyncedAtMs: null,
       historyRecordingUnavailable: false,
+      historyShareView: false,
       historyCaptureFailed: true,
     };
     const { rerender } = renderBar({ syncStatus: failedStatus });
@@ -638,6 +676,7 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
       },
     });
 

@@ -38,6 +38,10 @@ interface WatchedWorkspace {
   // choice — the notice states which, so a real failure never wears the
   // opt-out's copy.
   historyRecordingUnavailable: boolean;
+  // True when this workspace is a shared view (#540): no recorder by design.
+  // Same rule as above — the cause travels with the decision so no consumer
+  // has to guess it.
+  historyShareView: boolean;
   // True while the engine capture (this workspace's SOLE history recorder)
   // is failing. Drives the persistent history-capture notice: set on the
   // first failed capture pass, cleared when a later pass succeeds, notify()
@@ -85,6 +89,11 @@ export interface WorkspaceActivityOptions {
 export interface WorkspaceCaptureDecision {
   capture: WorkspaceEngineCapture | null;
   warning?: string;
+  // True for a shared view (#540): it is fed by the share's pull and never
+  // gets a recorder of its own. A capability, not an opt-out and not a
+  // failure — without this cause the null capture wears the opt-out's copy,
+  // blaming a Settings toggle nobody touched.
+  shareView?: boolean;
 }
 
 export interface WorkspaceCaptureHooks {
@@ -142,6 +151,7 @@ export function createWorkspaceActivity(
       historyRecordingOff: w?.historyRecordingOff ?? false,
       ...(w?.settingsWarning ? { settingsWarning: w.settingsWarning } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
+      historyShareView: w?.historyShareView ?? false,
       syncFailing: snap?.syncFailing ?? false,
     };
   }
@@ -158,6 +168,7 @@ export function createWorkspaceActivity(
         historyRecordingOff: false,
         settingsWarning: null,
         historyRecordingUnavailable: false,
+        historyShareView: false,
         captureFailed: false,
         agentRun: null,
       };
@@ -193,6 +204,7 @@ export function createWorkspaceActivity(
           }
           entry.capture = decision.capture;
           entry.settingsWarning = decision.warning ?? null;
+          entry.historyShareView = decision.shareView === true;
         } catch (error) {
           console.error(
             `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,

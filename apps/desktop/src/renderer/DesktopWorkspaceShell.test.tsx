@@ -77,11 +77,12 @@ const SYNC_STATUS = {
   state: "synced" as const,
   pendingChangeCount: 0,
   lastSyncedAtMs: null,
-  // Required on the contract (#505): every status states whether the recorder
-  // failed to build. This fake is not type-checked against SyncStatusResult,
-  // so it declares the cause by hand rather than shipping a payload main
-  // could never produce.
+  // Required on the contract (#505, #540): every status states whether the
+  // recorder failed to build and whether the workspace is a shared view. This
+  // fake is not type-checked against SyncStatusResult, so it declares the
+  // causes by hand rather than shipping a payload main could never produce.
   historyRecordingUnavailable: false,
+  historyShareView: false,
 };
 
 const IDLE_UPDATE_STATE: UpdateStateEvent = {

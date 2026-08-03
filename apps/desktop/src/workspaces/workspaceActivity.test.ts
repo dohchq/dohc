@@ -127,10 +127,28 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     const status = await activity.open(workspace());
     expect(status.historyRecordingOff).toBe(true);
     expect(activity.getStatus("activity-test").historyRecordingOff).toBe(true);
-    // A decision, not a failure: the notice may name Settings for this one.
+    // A decision, not a failure and not a shared view: the notice may name
+    // Settings for this one and only this one.
     expect(status.historyRecordingUnavailable).toBe(false);
+    expect(status.historyShareView).toBe(false);
     // No capture also means no versions surface.
     expect(activity.engineCaptureFor("activity-test")).toBeNull();
+    await activity.stopAll();
+  });
+
+  // #540: a shared view's null capture is a capability — the view is fed by
+  // the share's pull and never records here. Without this cause on the
+  // status, the notice blames a Settings toggle nobody touched.
+  it("separates a shared view's null capture from the engine opt-out", async () => {
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => ({ capture: null, shareView: true }),
+    });
+    const status = await activity.open(workspace());
+    expect(status.historyRecordingOff).toBe(true);
+    expect(status.historyShareView).toBe(true);
+    expect(activity.getStatus("activity-test").historyShareView).toBe(true);
+    // A capability, not a failure.
+    expect(status.historyRecordingUnavailable).toBe(false);
     await activity.stopAll();
   });
 
