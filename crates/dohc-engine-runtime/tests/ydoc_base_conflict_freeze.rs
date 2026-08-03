@@ -1,0 +1,318 @@
+//! The base-divergence conflict is LOAD-BEARING (#546 review round 2).
+//!
+//! Opening the conflict is not enough. Two paths could still cancel the
+//! user's review: a routine open+settle of the document would materialize
+//! the sender's projection over the preserved head, and a resolution that
+//! kept the current text never reached the durable Y.Doc, so the next
+//! inbound delta silently reversed it. The invariant under test:
+//!
+//! - an OPEN sync conflict on a Y.Doc object freezes the settle
+//!   (`ydoc-conflict-open`), and
+//! - RESOLUTION folds the chosen text into the lineage in the same
+//!   transaction that closes the row, so later deltas merge with the choice.
+
+use dohc_engine_collab::{ContentKind, DocKey};
+use dohc_engine_domain::{ResolveConflictKind, ResolveTextConflict, VersionedTextStore, WriteText};
+use dohc_engine_runtime::{
+    CancellationToken, NoFaults, RuntimeError, SelfWriteRecorder, WorkspaceSupervisor,
+};
+use dohc_engine_storage::EngineStore;
+use dohc_engine_sync::{NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_testkit::ScratchDir;
+use std::sync::Arc;
+
+struct NoRecorder;
+
+impl SelfWriteRecorder for NoRecorder {
+    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+}
+
+const WS: &str = "ws-base-conflict";
+const PATH: &str = "notes/plan.md";
+
+/// Seed a local plain-file head, then apply a peer's divergent base so the
+/// #546 conflict opens. Returns (doc key, winner base bytes, winner doc).
+fn seed_divergent_base(
+    store: &mut EngineStore,
+) -> (DocKey, Vec<u8>, dohc_engine_collab::Ydoc, String) {
+    let mut versions = VersionedTextStore::new(&mut *store);
+    versions
+        .ensure_main_version(WS, "main", 1, &NoFaults)
+        .expect("main version");
+    versions
+        .write_text(
+            &WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "object-plan".to_owned(),
+                path: PATH.to_owned(),
+                text: "local truth".to_owned(),
+                moment_id: "m-local-1".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("seed local head");
+    let key = DocKey::new(WS, "main", "object-plan").expect("key");
+    let winner_doc = dohc_engine_collab::Ydoc::wire();
+    winner_doc.plaintext_insert(0, "remote truth");
+    let winner_base = winner_doc.encode_full_state();
+    let winner_sha = store.put_binary_blob(&winner_base).expect("winner blob");
+    let base_op = ReplicationEnvelope {
+        workspace_id: WS.to_owned(),
+        origin_id: "winner-origin".to_owned(),
+        origin_seq: 0,
+        op_kind: "ydoc.update".to_owned(),
+        payload: serde_json::json!({
+            "versionId": "main",
+            "objectId": "object-plan",
+            "path": PATH,
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_sha,
+            "isBaseState": true
+        }),
+        recorded_at_ms: 3,
+    };
+    apply_ydoc_envelope(store, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    let conflict_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT conflict_id FROM conflicts WHERE workspace_id=?1 AND status='open'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("the divergent base opens a conflict");
+    (key, winner_base, winner_doc, conflict_id)
+}
+
+fn head_text(db: &std::path::Path) -> String {
+    let store = EngineStore::open(db, 9_000).expect("open");
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id=?1 AND s.version_id='main' AND s.object_id='object-plan'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("head")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_base_conflict_freezes_the_settle() {
+    // MUTATION: drop the open-conflict check in `ydoc_settle_on_store` — the
+    // settle succeeds and the head assertion below fails with the sender's
+    // projection.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let (key, _winner_base, _winner_doc, _conflict_id) = {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        seed_divergent_base(&mut store)
+    };
+    std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
+    std::fs::write(scratch.path().join(PATH), "local truth").expect("seed disk");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 5).expect("open actor").actor;
+    let refused = handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            None,
+            "freeze-session".to_owned(),
+            Arc::new(NoRecorder),
+            6,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an open base conflict must freeze the settle");
+    assert!(
+        matches!(
+            refused,
+            RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+                reason: "ydoc-conflict-open"
+            })
+        ),
+        "unexpected settle outcome: {refused:?}"
+    );
+    supervisor.close(&db).expect("close actor");
+    assert_eq!(head_text(&db), "local truth", "the head stays under review");
+    let store = EngineStore::open(&db, 7).expect("inspect");
+    let open_conflicts: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE workspace_id=?1 AND status='open'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("count");
+    assert_eq!(open_conflicts, 1, "the conflict is still awaiting review");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resolving_keep_current_folds_the_choice_into_the_lineage() {
+    // MUTATION: drop the fold call in `conflict_resolve_on_store`'s hook —
+    // the delta below projects the sender-only lineage and the "local truth"
+    // assertions fail.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let (key, winner_base, winner_doc, conflict_id) = {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        let seeded = seed_divergent_base(&mut store);
+        // The workspace replicates (identity + a relay position), so the
+        // fold must journal its delta for the peer.
+        dohc_engine_sync::journal_local_replication_op(
+            &mut store,
+            WS,
+            "local",
+            "epoch-1",
+            "stream-1",
+            "probe.local",
+            &serde_json::json!({}),
+            4,
+            &NoFaults,
+        )
+        .expect("sync identity");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_relay_cursors \
+                     (workspace_id, cursor, replication_epoch, stream_identity) \
+                     VALUES (?1,'0','epoch-1','stream-1')",
+                    [WS],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("relay position");
+        seeded
+    };
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 10).expect("open actor").actor;
+    let resolved = handle
+        .conflict_resolve(
+            ResolveTextConflict {
+                workspace_id: WS.to_owned(),
+                conflict_id,
+                resolution: ResolveConflictKind::KeepCurrent,
+                object_id: "resolution-fresh-object".to_owned(),
+                write_moment_id: "m-resolve-write".to_owned(),
+                delete_moment_id: "m-resolve-delete".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 11,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("keep-current resolves");
+    assert!(resolved.write.is_none(), "keep-current writes no new head");
+    supervisor.close(&db).expect("close actor");
+
+    // The choice is durable in the lineage, and journaled for the peer.
+    let store = EngineStore::open(&db, 12).expect("inspect");
+    let persisted = dohc_engine_collab::load_persisted(&store, &key)
+        .expect("load")
+        .expect("lineage");
+    let folded = persisted
+        .doc
+        .project(ContentKind::Plaintext)
+        .expect("projection");
+    assert_eq!(
+        folded.markdown, "local truth",
+        "resolution must rewrite the lineage to the chosen text"
+    );
+    let fold_deltas: Vec<String> = store
+        .read_with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id=?1 AND op_kind='ydoc.update' AND imported=0",
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+            let rows = stmt
+                .query_map([WS], |row| row.get::<_, String>(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("journal");
+    assert_eq!(fold_deltas.len(), 1, "the fold journals exactly one delta");
+    let fold_payload: serde_json::Value =
+        serde_json::from_str(&fold_deltas[0]).expect("fold payload");
+    assert_eq!(fold_payload["isBaseState"], serde_json::json!(false));
+    let fold_sha = fold_payload["updateBlobSha256"]
+        .as_str()
+        .expect("fold sha")
+        .to_owned();
+
+    // A later inbound delta MERGES with the choice instead of reversing it.
+    drop(store);
+    let mut store = EngineStore::open(&db, 13).expect("reopen");
+    let delta = winner_doc.plaintext_insert(0, "more ");
+    let delta_sha = store.put_binary_blob(&delta).expect("delta blob");
+    let delta_op = ReplicationEnvelope {
+        workspace_id: WS.to_owned(),
+        origin_id: "winner-origin".to_owned(),
+        origin_seq: 1,
+        op_kind: "ydoc.update".to_owned(),
+        payload: serde_json::json!({
+            "versionId": "main",
+            "objectId": "object-plan",
+            "path": PATH,
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "isBaseState": false
+        }),
+        recorded_at_ms: 14,
+    };
+    apply_ydoc_envelope(&mut store, &delta_op, &NoFaults, &NoLiveLeases).expect("delta applies");
+    let head = head_text(&db);
+    assert!(
+        head.contains("local truth"),
+        "the resolved choice survives the next delta, got {head:?}"
+    );
+
+    // A clean peer converges to the same content from the winner's base plus
+    // the journaled fold delta plus the later delta.
+    let fold_bytes = EngineStore::open(&db, 15)
+        .expect("open")
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                [&fold_sha],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("fold blob");
+    let peer = dohc_engine_collab::Ydoc::wire();
+    peer.apply(&winner_base).expect("peer base");
+    peer.apply(&fold_bytes).expect("peer fold");
+    peer.apply(&delta).expect("peer delta");
+    assert_eq!(
+        peer.plaintext_string(),
+        head,
+        "the peer reads the same resolved content"
+    );
+}

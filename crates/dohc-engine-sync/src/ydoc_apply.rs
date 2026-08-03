@@ -431,21 +431,128 @@ fn ydoc_apply_moment_id(key: &DocKey, path: &str, origin_id: &str, origin_seq: i
     )
 }
 
-/// The open sync conflict currently anchored on this object, if any.
-fn open_sync_conflict_id(
+/// The open sync conflict currently anchored on this object, if any. The
+/// daemon's settle freeze reads the same probe the projection guard uses, so
+/// the two cannot disagree about whether the head is under review.
+pub fn open_sync_conflict_for_object(
     conn: &rusqlite::Connection,
-    key: &DocKey,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
 ) -> Result<Option<String>, SyncError> {
     conn.query_row(
         "SELECT conflict_id FROM conflicts \
          WHERE workspace_id=?1 AND status='open' AND metadata_origin='sync' \
            AND target_version_id=?2 AND incoming_object_id=?3 \
          ORDER BY created_at_ms, conflict_id LIMIT 1",
-        params![key.workspace_id, key.version_id, key.object_id],
+        params![workspace_id, version_id, object_id],
         |row| row.get(0),
     )
     .optional()
     .map_err(SyncError::corrupt)
+}
+
+fn open_sync_conflict_id(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+) -> Result<Option<String>, SyncError> {
+    open_sync_conflict_for_object(conn, &key.workspace_id, &key.version_id, &key.object_id)
+}
+
+/// Fold a conflict resolution's chosen text into the object's canonical
+/// Y.Doc, inside the resolution's own transaction.
+///
+/// The invariant, stated once: an OPEN sync conflict on a Y.Doc object
+/// freezes the visible head (`project_and_write_in_tx` coalesces the
+/// conflict's incoming side instead of writing) and the settle (the daemon
+/// refuses with `ydoc-conflict-open`, the same shape as #338's refusal of
+/// the clobbering settle). RESOLUTION lifts the freeze by making the choice
+/// durable here — one update that rewrites the lineage's projection to the
+/// chosen bytes, journaled when the workspace replicates — in the SAME
+/// transaction that closes the row, so the next inbound delta merges with
+/// the choice instead of silently reversing it.
+///
+/// A non-Y.Doc object, an unclaimed lineage (local-only cache; the file is
+/// canonical and reseeds it), and a projection that already equals the
+/// choice are all no-ops.
+pub fn fold_resolution_into_ydoc_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+    chosen_text: &str,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let key =
+        DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
+            reason: "conflict resolution coordinates are invalid",
+        })?;
+    let Some(marker) =
+        dohc_engine_collab::read_marker_in_tx(tx, &key).map_err(map_collab_hard_error)?
+    else {
+        return Ok(());
+    };
+    if !marker.base_claimed {
+        return Ok(());
+    }
+    let doc = dohc_engine_collab::load_doc_in_tx(tx, &key).map_err(map_collab_hard_error)?;
+    let projection = doc
+        .project(marker.content_kind)
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "ydoc projection exceeds materialization cap",
+        })?;
+    if projection.markdown != chosen_text {
+        let update = doc.rewrite_content_to_markdown(marker.content_kind, chosen_text);
+        if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
+            return Err(SyncError::InvalidInput {
+                reason: "conflict resolution fold exceeds MAX_YDOC_UPDATE_BYTES (5 MiB per update)",
+            });
+        }
+        let outcome = dohc_engine_collab::record_update_in_tx(tx, &key, &update, now_ms).map_err(
+            |error| {
+                map_collab_payload_error(error, "conflict resolution fold could not be appended")
+            },
+        )?;
+        // Journal only when this workspace actually replicates: a receiver
+        // that never enrolled has no sync identity, and its choice needs no
+        // peer. `emit_outbound` alone cannot gate this — a claimed lineage
+        // exists on identity-less receivers too.
+        if !outcome.deduped
+            && crate::journal::workspace_replicates_with_relay_in_tx(tx, workspace_id)?
+        {
+            crate::journal::journal_local_op_in_tx(
+                tx,
+                workspace_id,
+                "ydoc.update",
+                &serde_json::json!({
+                    "versionId": key.version_id,
+                    "objectId": key.object_id,
+                    "path": path,
+                    "contentKind": marker.content_kind.as_str(),
+                    "updateBlobSha256": dohc_engine_storage::hex_sha256(&update),
+                    "isBaseState": false,
+                }),
+                now_ms,
+            )?;
+        }
+    }
+    // The resolution's head IS the settled artifact now: align the settle
+    // expectation so the next session does not refuse ConflictStaleTarget
+    // over the very state the user just chose.
+    tx.execute(
+        "UPDATE ydoc_docs SET last_settled_sha=?4, updated_at_ms=?5 \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            dohc_engine_storage::hex_sha256(chosen_text.as_bytes()),
+            now_ms,
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
 }
 
 /// Store the projected markdown as a text blob so a conflict side can

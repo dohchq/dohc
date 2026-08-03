@@ -9168,6 +9168,28 @@ fn ydoc_settle_on_store(
             if !ydoc_marker_has_durable_state(&marker) {
                 return Err(dohc_engine_collab::CollabError::NoMarker.into());
             }
+            // An open sync conflict on this object FREEZES the settle: the
+            // lineage may hold a peer's base the user has not reviewed, and
+            // settling would materialize it over the preserved head — the
+            // clobbering settle #338 refuses. Resolution folds the choice
+            // into the lineage (`fold_resolution_into_ydoc_in_tx`) and lifts
+            // the freeze.
+            if store
+                .read_with(|conn| {
+                    dohc_engine_sync::open_sync_conflict_for_object(
+                        conn,
+                        &key.workspace_id,
+                        &key.version_id,
+                        &key.object_id,
+                    )
+                })?
+                .is_some()
+            {
+                return Err(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-conflict-open",
+                }
+                .into());
+            }
             // Acked-but-deferred remote envelopes must land BEFORE the
             // projection — but if any actually apply, the CLIENT's doc has
             // not seen them: settling would materialize content the user
@@ -10640,9 +10662,61 @@ fn conflict_resolve_on_store(
             // READER drops any candidate whose live head is binary
             // (`search::query::live_head_is_binary`), which is the same
             // freeze-then-filter contract every other binary overwrite uses.
+            //
+            // A TEXT resolution on a Y.Doc-backed object must also become
+            // canonical in the lineage, in this same transaction, or the
+            // next inbound delta silently reverses the user's choice.
+            // Keep-current writes nothing, so its chosen text is the
+            // conflict's own current side. A delete resolution is not
+            // folded: deleting a replicated Y.Doc path is its own machinery,
+            // and the projection guard plus the settle freeze already keep
+            // an open conflict's head safe.
+            if let Some(write) = result.write.as_ref() {
+                dohc_engine_sync::fold_resolution_into_ydoc_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &write.snapshot.version_id,
+                    &write.snapshot.object_id,
+                    &write.snapshot.path,
+                    &write.snapshot.text,
+                    input.now_ms,
+                )
+                .map_err(map_fold_error)?;
+            } else if matches!(
+                result.conflict.resolution,
+                Some(dohc_engine_domain::ConflictResolution::KeptCurrent)
+            ) && let Some(snapshot) = result.conflict.current.snapshot.as_ref()
+            {
+                dohc_engine_sync::fold_resolution_into_ydoc_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &result.conflict.target_version_id,
+                    &snapshot.object_id,
+                    &snapshot.path,
+                    &snapshot.text,
+                    input.now_ms,
+                )
+                .map_err(map_fold_error)?;
+            }
             Ok(())
         })
         .map_err(RuntimeError::from)
+}
+
+/// Map a resolution-fold failure into the resolving transaction's error
+/// domain: payload-shaped refusals stay refusals, storage stays storage.
+fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::DomainError {
+    match error {
+        dohc_engine_sync::SyncError::InvalidInput { reason } => {
+            dohc_engine_domain::DomainError::InvalidInput { reason }
+        }
+        dohc_engine_sync::SyncError::Storage(storage) => {
+            dohc_engine_domain::DomainError::Storage(storage)
+        }
+        other => dohc_engine_domain::DomainError::Storage(
+            dohc_engine_storage::StorageError::corrupt_public(other),
+        ),
+    }
 }
 
 /// Execute a run of bounded units, checking `token` BETWEEN units. Each unit is

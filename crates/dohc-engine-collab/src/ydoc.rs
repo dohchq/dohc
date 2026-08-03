@@ -432,6 +432,55 @@ impl Ydoc {
         })
     }
 
+    /// Rewrite the document's projected content to `markdown` and return one
+    /// encoded v1 update — the conflict-resolution fold. The user chose these
+    /// exact bytes over the lineage's current projection, so the update
+    /// deletes the current content and writes the choice in the lineage's own
+    /// kind, keeping CRDT convergence while making the choice durable.
+    ///
+    /// Plaintext replaces the [`ROOT_PLAINTEXT`] text. Richdoc clears
+    /// [`ROOT_FRONTMATTER`] and [`ROOT_BODY`] and appends one plain paragraph
+    /// per blank-line-separated block: the chosen bytes are markdown SOURCE,
+    /// so re-emitting them as paragraph text preserves the content, and the
+    /// rich node structure the user rejected is not reconstructed.
+    pub fn rewrite_content_to_markdown(
+        &self,
+        content_kind: ContentKind,
+        markdown: &str,
+    ) -> Vec<u8> {
+        match content_kind {
+            ContentKind::Plaintext => {
+                let t = self.doc.get_or_insert_text(ROOT_PLAINTEXT);
+                self.with_delta(|txn| {
+                    let len = t.len(txn);
+                    if len > 0 {
+                        t.remove_range(txn, 0, len);
+                    }
+                    t.insert(txn, 0, markdown);
+                })
+            }
+            ContentKind::Richdoc => {
+                let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+                let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+                self.with_delta(|txn| {
+                    let keys: Vec<String> = map.iter(txn).map(|(key, _)| key.to_string()).collect();
+                    for key in keys {
+                        map.remove(txn, &key);
+                    }
+                    let len = frag.len(txn);
+                    if len > 0 {
+                        frag.remove_range(txn, 0, len);
+                    }
+                    for (index, block) in markdown.split("\n\n").enumerate() {
+                        let el =
+                            frag.insert(txn, index as u32, XmlElementPrelim::empty("paragraph"));
+                        el.insert(txn, 0, XmlTextPrelim::new(block));
+                    }
+                })
+            }
+        }
+    }
+
     /// Set a top-level [`ROOT_FRONTMATTER`] scalar and return the encoded delta.
     pub fn frontmatter_set(&self, key: &str, value: &str) -> Vec<u8> {
         let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);

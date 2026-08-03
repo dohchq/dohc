@@ -853,6 +853,29 @@ pub fn read_marker_in_tx(
     query_marker(tx, key)
 }
 
+/// Reconstruct the persisted doc inside the caller's transaction (marker
+/// required). The conflict-resolution fold reads, rewrites, and appends under
+/// ONE transaction so the folded update extends exactly the lineage it read.
+pub fn load_doc_in_tx(tx: &Transaction<'_>, key: &DocKey) -> Result<Ydoc, CollabError> {
+    load_for_replay_gate(tx, key)
+}
+
+/// Append one locally-produced update inside the caller's transaction — the
+/// transaction-composable core of [`record_local_update`]. Validates the
+/// bytes, runs the replay-parity gate, content-dedupes, and advances the
+/// head.
+pub fn record_update_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    update: &[u8],
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
+    validate_update_bytes(update)?;
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let sha = crate::hex_sha256(update);
+    append_local_update(tx, key, &marker, update, &sha, None, now_ms)
+}
+
 /// Encode the base bytes (and their state vector) that ORIGINATE `key`'s
 /// replicated lineage, from the state persisted inside the caller's
 /// transaction.
