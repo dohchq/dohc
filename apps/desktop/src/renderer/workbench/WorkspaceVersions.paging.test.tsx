@@ -3,7 +3,7 @@
 // surfaces' ends of that contract: the loaded window paints, "Show more
 // files" fetches the NEXT page with the continuation, and the count copy
 // never states a number that could be under the truth.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
 import {
@@ -163,11 +163,14 @@ describe("ConflictReviewDialog paging", () => {
       conflicts: [conflict("c-3")],
       nextAfterConflictId: null,
     });
+    // Let the stale answer's whole continuation run before asserting — a
+    // waitFor here would pass on the first paint and never see the append.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
     // MUTATION: drop the window-generation guard -> c-3 (a row of the
     // replaced window) appends to the remaining page.
-    await waitFor(() => {
-      expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
-    });
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
   });
 
   it("says what failed when the next page does not load, and keeps the retry", async () => {
@@ -320,12 +323,15 @@ describe("VersionComparePage paging", () => {
     await screen.findByTestId("version-compare-file");
 
     resolveStalePage!({ files: [compareRow("b.md")], nextAfterPath: null });
+    // Let the stale answer's whole continuation run before asserting — a
+    // waitFor here would pass on the first paint and never see the append.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
     // MUTATION: drop the window-generation guard -> the old generation's page
     // appends to the refreshed window (the cursor matches, so a cursor check
     // alone cannot reject it).
-    await waitFor(() => {
-      expect(screen.getAllByTestId("version-compare-file")).toHaveLength(1);
-    });
+    expect(screen.getAllByTestId("version-compare-file")).toHaveLength(1);
     expect(screen.getByTestId("version-compare-show-more")).toBeTruthy();
   });
 
