@@ -98,6 +98,29 @@ export function engineOffRefusal(
   return notEnabled;
 }
 
+// The dispatch release (#541, codex P2 round 4 on #583). It resolves to
+// whether a fresh attempt would REBUILD the capture — the fact the refusal's
+// recovery derives from — and that is decided from the POST-close state, not
+// from having performed a close: the close's own await is a window, and a
+// renderer/CLI open can retain the workspace during it, then build a fresh
+// retained activity whose failed capture decision persists until restart.
+export function createDispatchRunRelease(input: {
+  alreadyOpen: boolean;
+  isRetained: () => boolean;
+  close: () => Promise<void>;
+}): () => Promise<boolean> {
+  let released = false;
+  let retryable = false;
+  return async () => {
+    if (released) return retryable;
+    released = true;
+    if (input.alreadyOpen || input.isRetained()) return retryable;
+    await input.close();
+    retryable = !input.isRetained();
+    return retryable;
+  };
+}
+
 // The dispatch-run seam of the same refusal (#541, codex P2s on #583). Two
 // facts have to be read at the only moment each is true:
 // - the CAUSE comes from the status BEFORE the release — releasing a
@@ -113,15 +136,16 @@ export async function releaseAndRefuseWithoutCapture(input: {
     settingsWarning?: string;
     historyRecordingUnavailable: boolean;
   };
-  // Resolves to whether it CLOSED the workspace's activity entry.
+  // Resolves to whether a fresh attempt would rebuild the capture (see
+  // createDispatchRunRelease).
   release: () => Promise<boolean>;
   notEnabled: string;
 }): Promise<void> {
   if (input.capture) return;
   const status = input.status();
-  const closed = await input.release();
+  const retryable = await input.release();
   throw new Error(
-    engineOffRefusal(status, input.notEnabled, closed ? "retry" : "restart"),
+    engineOffRefusal(status, input.notEnabled, retryable ? "retry" : "restart"),
   );
 }
 

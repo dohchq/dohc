@@ -216,6 +216,14 @@ describe("main-process chat authorization", () => {
     expect(
       slice("prepareRunWorkspace: async (workspace)", "authorizeServiceNote:"),
     ).toContain("releaseAndRefuseWithoutCapture({");
+    // And the release itself derives its answer from the post-close
+    // retention state (round 4) — through the behavior-tested factory.
+    expect(
+      slice(
+        "async function acquireDispatchRunActivity(",
+        "function openDispatchWorkspaces(",
+      ),
+    ).toContain("createDispatchRunRelease({");
     // The two manual sites outside requireEngineCapture.
     expect(
       slice("operationsFor: async (workspaceId)", "startRun: async"),

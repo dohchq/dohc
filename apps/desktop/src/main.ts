@@ -436,6 +436,7 @@ import {
 import {
   captureForFlaggedWorkspace,
   dispatchScanEligible,
+  createDispatchRunRelease,
   engineOffRefusal,
   releaseAndRefuseWithoutCapture,
 } from "./workspaces/engineCaptureGate";
@@ -2099,24 +2100,16 @@ async function acquireDispatchRunActivity(
     workspace,
     () => ensureWorkspaceActivityOpen(workspace),
   );
-  let released = false;
-  let closed = false;
-  // The release resolves to whether it CLOSED the activity entry, decided at
-  // release time — not from a pre-open snapshot, because a retention that
-  // lands between open and release keeps the entry (and its failed capture
-  // decision) alive. The refusal's recovery instruction derives from this
-  // fact (#541): a closed entry is rebuilt by the next attempt; a kept one
-  // holds its decision until restart.
-  return async () => {
-    if (released) return closed;
-    released = true;
-    if (alreadyOpen || retainedWorkspaceActivities.has(workspace.workspaceId)) {
-      return closed;
-    }
-    await closeDispatchRunActivity(workspace.workspaceId);
-    closed = true;
-    return closed;
-  };
+  // The release resolves to whether a fresh attempt would rebuild the
+  // capture, decided from the POST-close retention state (#541) — the
+  // close's own await is a window a renderer/CLI open can retain through.
+  // The refusal's recovery instruction derives from this fact.
+  return createDispatchRunRelease({
+    alreadyOpen,
+    isRetained: () =>
+      retainedWorkspaceActivities.has(workspace.workspaceId),
+    close: () => closeDispatchRunActivity(workspace.workspaceId),
+  });
 }
 
 function openDispatchWorkspaces(): ChatDispatchWorkspace[] {

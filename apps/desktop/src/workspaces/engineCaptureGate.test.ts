@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   captureForFlaggedWorkspace,
+  createDispatchRunRelease,
   dispatchScanEligible,
   engineOffRefusal,
   releaseAndRefuseWithoutCapture,
@@ -201,6 +202,52 @@ describe("engineOffRefusal", () => {
     expect(refusal).toBe(
       "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then try again.",
     );
+  });
+});
+
+// Codex P2 round 4 on #583: the release's answer is the POST-close state.
+// The close's own await is a window — a renderer/CLI open can retain the
+// workspace during it and build a fresh retained activity whose failed
+// capture decision persists until restart. "Try again" would be false there.
+describe("createDispatchRunRelease", () => {
+  it("says retryable after a clean transient close", async () => {
+    let closedCalls = 0;
+    const release = createDispatchRunRelease({
+      alreadyOpen: false,
+      isRetained: () => false,
+      close: async () => {
+        closedCalls += 1;
+      },
+    });
+    await expect(release()).resolves.toBe(true);
+    // Idempotent: the second call answers the same without closing again.
+    await expect(release()).resolves.toBe(true);
+    expect(closedCalls).toBe(1);
+  });
+
+  it("says restart when a retention lands during the close", async () => {
+    let retained = false;
+    const release = createDispatchRunRelease({
+      alreadyOpen: false,
+      isRetained: () => retained,
+      close: async () => {
+        // The open that raced us: it waits for this close, then builds a
+        // fresh RETAINED activity — whose capture decision persists.
+        retained = true;
+      },
+    });
+    await expect(release()).resolves.toBe(false);
+  });
+
+  it("closes nothing and says restart for an already-open workspace", async () => {
+    const release = createDispatchRunRelease({
+      alreadyOpen: true,
+      isRetained: () => false,
+      close: async () => {
+        throw new Error("must not close an entry this open does not own");
+      },
+    });
+    await expect(release()).resolves.toBe(false);
   });
 });
 
