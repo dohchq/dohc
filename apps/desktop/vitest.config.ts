@@ -11,6 +11,9 @@ const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4
 export default defineConfig({
   test: {
     include: ["src/**/*.test.{ts,tsx}"],
+    // Fills jsdom's missing hit-testing APIs. See the file for why an absent
+    // document.elementFromPoint failed whole runs rather than single tests.
+    setupFiles: ["./vitest.setup.ts"],
     maxWorkers: WORKER_CAP,
     minWorkers: 1,
     // Without this vitest stubs every *.css import to "" — including the
