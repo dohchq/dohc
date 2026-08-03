@@ -2033,6 +2033,83 @@ describe("ui-state merge-on-load", () => {
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
   }, 20_000);
 
+  // #591: the in-thread reply-parent jump. It is the one command in the page
+  // that writes NO navigation — it only scrolls — so every other seam here
+  // (the destination write, the remount, the nav report) sees nothing move.
+  // A DM lookup that answers afterwards would still replace the page with the
+  // conversation the user left, taking away the message they just jumped to.
+  it("discards an in-flight DM navigation when a reply-parent jump scrolls in place", async () => {
+    const user = userEvent.setup();
+    const bridge = chatsPageBridge(CHATS_PAGE_STATE);
+    // A nested reply is what renders the parent backlink: the opening message,
+    // a comment on it, and a reply to that comment.
+    bridge.listChatMessages = vi.fn(async () => ({
+      messages: [
+        {
+          id: "message-feed",
+          threadId: "thread-team",
+          authorKind: "human" as const,
+          authorDisplayName: "You",
+          body: "Feed update worth revisiting",
+          createdAtMs: 1,
+        },
+        {
+          id: "message-comment",
+          threadId: "thread-team",
+          parentMessageId: "message-feed",
+          authorKind: "human" as const,
+          authorDisplayName: "You",
+          body: "A comment on it",
+          createdAtMs: 2,
+        },
+        {
+          id: "message-reply",
+          threadId: "thread-team",
+          parentMessageId: "message-comment",
+          authorKind: "human" as const,
+          authorDisplayName: "You",
+          body: "A reply to the comment",
+          createdAtMs: 3,
+        },
+      ],
+    }));
+    renderShell(bridge);
+
+    // Land in the thread via the feed.
+    await user.click(await screen.findByTestId("chats-feed-link"));
+    const post = await screen.findByText("Feed update worth revisiting");
+    await user.click(post.closest("button")!);
+    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
+    const backlink = await screen.findByTestId("chats-reply-context");
+
+    // Start a canonical DM navigation from the graph and leave it in flight.
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    const dmCallsBefore = bridge.syncDms.mock.calls.length;
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() =>
+      expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1),
+    );
+    await user.click(screen.getByTestId("activity-graph"));
+
+    // The DM answers in the same tick the user jumps to the parent.
+    const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
+    await act(async () => {
+      bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
+      backlink.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("chats-thread-view")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
+    // The proof, as in the feed-click race: a DM answer that wins remounts the
+    // page and loads the overview again. The cancel won only if it did not.
+    expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
+  }, 20_000);
+
   // The surviving mutant from #552's review: openFile's heading-target
   // invalidation. A heading jump into the ALREADY-ACTIVE file moves no tab,
   // so mutateWb's transition check cannot see it — only openFile's own
