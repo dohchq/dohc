@@ -342,6 +342,9 @@ export function EngineHistoryView(props: {
     [groups, normalizedQuery],
   );
 
+  // A KNOWN page with no moments. The caller renders this view only when it
+  // HAS a page (#593): "No changes yet" states something about the workspace,
+  // and a read still in flight or a read that failed may not state it.
   if (props.moments.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
