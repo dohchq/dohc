@@ -1,7 +1,16 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Every test here spawns real node children, honest work a busy machine
+// stretches (#568). Measured 2026-08-03 on a 24-process load (12 runs):
+// individual tests passed at up to 2.3s against vitest's 5s default test
+// deadline, and the dev-server cancel completed in up to 3.3s against its
+// old 2s promptness ceiling — limits inside the loaded-healthy range. The
+// test deadline goes to 15s (~6x measured); the cancel ceilings and their
+// widened timeout bands are documented at the tests.
+vi.setConfig({ testTimeout: 15_000 });
 import { nativeTmpdir } from "./testTemp";
 import {
   assertLoopbackOnlyDevServerCommand,
@@ -252,18 +261,23 @@ describe("startSiteDevServer", () => {
     await mkdir(join(root, "site"), { recursive: true });
     const controller = new AbortController();
     const startedAt = Date.now();
+    // The ceiling proves the abort drove the rejection, not the ready
+    // timeout. Honest cancels measured up to 3.3s on a 24-process load
+    // (#568), so the old 5000/2000 band held no room for both margins:
+    // 30_000/10_000 keeps 3x above the measured cancel and 3x below the
+    // ready timeout.
     const starting = startSiteDevServer({
       workspaceRoot: root,
       siteRoot: "site",
       command: process.execPath,
       args: ["-e", "setInterval(() => {}, 1000)"],
-      readyTimeoutMs: 5000,
+      readyTimeoutMs: 30_000,
       signal: controller.signal,
     });
     setTimeout(() => controller.abort(), 50);
 
     await expect(starting).rejects.toThrow(/cancelled/);
-    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
   });
 });
 
@@ -305,12 +319,16 @@ describe("buildSite", () => {
     await mkdir(join(root, "site"), { recursive: true });
     const controller = new AbortController();
     const startedAt = Date.now();
+    // Same band as the dev-server cancel above (#568): the ceiling proves
+    // the abort ended the build, not the build timeout, with 3x margin to
+    // the measured loaded cancel on one side and to the timeout on the
+    // other.
     const building = buildSite({
       workspaceRoot: root,
       siteRoot: "site",
       command: process.execPath,
       args: ["-e", "setInterval(() => {}, 1000)"],
-      timeoutMs: 10000,
+      timeoutMs: 30_000,
       signal: controller.signal,
     });
     setTimeout(() => controller.abort(), 50);
@@ -320,7 +338,7 @@ describe("buildSite", () => {
     expect(result.logs.some((entry) => entry.text.includes("Build cancelled"))).toBe(
       true,
     );
-    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
   });
 
   it("reports build timeouts with the resolved timeout", async () => {

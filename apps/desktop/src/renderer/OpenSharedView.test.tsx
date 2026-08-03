@@ -1,8 +1,18 @@
 // @vitest-environment jsdom
+import { configure } from "@testing-library/dom";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenSharedView } from "./OpenSharedView";
+
+// Same deadline discipline as FileInspector.test.tsx (#568). These tests type
+// 40-character share codes keystroke by keystroke through jsdom, honest work
+// a busy machine stretches: measured 2026-08-03 on a 24-process load (12 runs)
+// the slowest test ran 1.73s against RTL's 1s default assertion window and
+// vitest's 5s default test deadline — both inside the loaded-healthy range on
+// a heavier box. 5s/15s sit ~3x/8x above the measured range.
+configure({ asyncUtilTimeout: 5_000 });
+vi.setConfig({ testTimeout: 15_000 });
 
 const bridgeMock = {
   cloudStatus: vi.fn(),

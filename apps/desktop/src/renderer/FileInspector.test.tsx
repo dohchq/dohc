@@ -14,6 +14,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // here — an error shape that reads like a product regression rather than a flake.
 configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });
+// Pre-warm the views FileInspector loads lazily, so no findBy* window has to
+// transform and execute CodeMirror or the properties panel on first use — the
+// #539 mechanism: a module load inside an assertion window turns machine load
+// into a missed deadline. The component keeps loading them lazily; only the
+// test collection pays the cost.
+import "./editor/MarkdownEditor";
+import "./PropertiesPanel";
+import "./DatabaseStudioView";
+import "./SourceCodeEditor";
 import * as Y from "yjs";
 import {
   markdownToYDoc,
@@ -455,7 +464,18 @@ describe("markdown editor unmount flush", () => {
     const bigBody = `---\ntitle: Plan\n---\n\n${"# Section\n\nbody paragraph.\n\n".repeat(3000)}`;
     expect(bigBody.length).toBeGreaterThan(64 * 1024);
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({ text: bigBody, truncated: false });
-    bridgeMock.writeWorkspaceText.mockRejectedValueOnce(new Error("disk full"));
+    // Arm a promise on the failing write so the test awaits the real call
+    // (#539): the 800ms autosave debounce plus load must never race a
+    // wall-clock window — the old 3s bound was measured at 3.1s under a
+    // 24-process load (#568).
+    let writeAttempted!: () => void;
+    const writeAttempt = new Promise<void>((resolveAttempt) => {
+      writeAttempted = resolveAttempt;
+    });
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => {
+      writeAttempted();
+      return Promise.reject(new Error("disk full"));
+    });
 
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="plan.md" />);
@@ -470,16 +490,16 @@ describe("markdown editor unmount flush", () => {
     await user.click(title);
     await user.type(title, "!");
 
-    // The autosave (800ms debounce) fails; the failure must become visible even
-    // though we never left read mode.
-    await waitFor(
-      () => {
-        const chip = screen.getByTestId("markdown-save-state");
-        expect(chip.textContent).toBe("Couldn't save");
-        expect(chip.getAttribute("data-state")).toBe("error");
-      },
-      { timeout: 3_000 },
-    );
+    // The autosave (800ms debounce) fails; the failure must become visible
+    // even though we never left read mode. The debounce and the write are
+    // awaited through the armed promise, so the remaining wait covers only
+    // the chip render.
+    await writeAttempt;
+    await waitFor(() => {
+      const chip = screen.getByTestId("markdown-save-state");
+      expect(chip.textContent).toBe("Couldn't save");
+      expect(chip.getAttribute("data-state")).toBe("error");
+    });
     // The optimistic title edit is still displayed alongside the failure.
     expect(title.value).toContain("!");
     view.unmount();

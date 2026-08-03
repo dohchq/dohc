@@ -1,7 +1,14 @@
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// These tests write real markdown trees and scan them, honest fs work a busy
+// machine stretches (#568). Measured 2026-08-03 on a 24-process load (12
+// runs): the budget-bound scan passed at up to 6.4s against vitest's 5s
+// default test deadline — a limit inside the loaded-healthy range. 15s is
+// ~2.3x the measured maximum.
+vi.setConfig({ testTimeout: 15_000 });
 import {
   buildMarkdownGraph,
   computeBacklinks,
