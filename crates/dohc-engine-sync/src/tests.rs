@@ -7681,6 +7681,64 @@ fn a_live_lease_leaves_a_divergent_inbound_base_unacked() {
     );
 }
 
+#[test]
+fn a_live_lease_detects_divergence_from_the_obligation_after_compaction() {
+    // Codex #597 round 3: the lease guard read only the seq-0 snapshot, so a
+    // COMPACTED loser with an open session acked-and-parked the winner's
+    // base — the drain then unioned raw bytes and the refused journal row
+    // was never rewritten, parking pushes forever. The guard now reads the
+    // same detector pair the adoption branch reads: stored seq-0 base OR the
+    // unpushed refused-base obligation. Mutation check: drop the obligation
+    // arm from the lease guard — the divergent base defers (acked) and both
+    // assertions fail.
+    let (_scratch, _path, mut engine) = store();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-lease-compact").expect("key");
+    let loser_doc = dohc_engine_collab::Ydoc::wire();
+    loser_doc.plaintext_insert(0, "loser text");
+    let loser_base = loser_doc.encode_full_state();
+    seed_losing_origination(
+        &mut engine,
+        &key,
+        "notes/lease-compact.md",
+        &loser_base,
+        dohc_engine_collab::ContentKind::Plaintext,
+    );
+    let edit = loser_doc.plaintext_insert(0, "compacted ");
+    dohc_engine_collab::record_local_update(&mut engine, &key, &edit, &NoFaults, 1_700)
+        .expect("local edit");
+    dohc_engine_collab::maybe_compact(&mut engine, &key, 0, &NoFaults, 1_800).expect("compact");
+
+    let winner_doc = dohc_engine_collab::Ydoc::wire();
+    winner_doc.plaintext_insert(0, "winner text");
+    let winner_sha = engine
+        .put_binary_blob(&winner_doc.encode_full_state())
+        .expect("winner blob");
+    let divergent = envelope(
+        "winner-origin",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-lease-compact",
+            "path": "notes/lease-compact.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_sha,
+            "isBaseState": true
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &divergent, &NoFaults, &AlwaysLive),
+        Err(SyncError::RetryableState {
+            reason: "live Y.Doc session over a divergent inbound base"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "winner-origin").expect("ack"),
+        -1,
+        "the compacted loser's live session must not ack-and-park the winner"
+    );
+}
+
 struct BaseClaimedRelay {
     pushes: Mutex<usize>,
 }

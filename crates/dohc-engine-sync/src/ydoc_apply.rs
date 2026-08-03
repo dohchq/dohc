@@ -637,10 +637,10 @@ fn stored_seq0_base_sha(
 /// compaction: the seq-0 snapshot can legitimately fold away, but the
 /// journal row the relay refused cannot leave the outbox on its own.
 fn own_unpushed_base_row(
-    tx: &rusqlite::Transaction<'_>,
+    conn: &rusqlite::Connection,
     key: &DocKey,
 ) -> Result<Option<(String, i64, String)>, SyncError> {
-    let origin: Option<String> = tx
+    let origin: Option<String> = conn
         .query_row(
             "SELECT origin_id FROM sync_identity WHERE workspace_id = ?1",
             [key.workspace_id.as_str()],
@@ -651,7 +651,7 @@ fn own_unpushed_base_row(
     let Some(origin) = origin else {
         return Ok(None);
     };
-    let row: Option<(i64, String)> = tx
+    let row: Option<(i64, String)> = conn
         .query_row(
             "SELECT origin_seq, json_extract(payload_json,'$.updateBlobSha256') \
              FROM replication_log \
@@ -1167,15 +1167,25 @@ pub fn apply_ydoc_envelope(
         // replays raw bytes and cannot run the base branch's adoption, so a
         // parked divergent base would silently union while this machine's
         // own refused base wedges the push lane forever. Leave it unacked;
-        // the retry adopts once the live session settles or closes.
-        if payload.is_base_state
-            && store
-                .read_with(|conn| stored_seq0_base_sha(conn, &key))?
-                .is_some_and(|stored| stored != payload.update_blob_sha256)
-        {
-            return Err(SyncError::RetryableState {
-                reason: "live Y.Doc session over a divergent inbound base",
-            });
+        // the retry adopts once the live session settles or closes. The
+        // detector is the SAME pair the adoption branch uses — the stored
+        // seq-0 base while it survives, and after compaction folds it away,
+        // the obligation: our own refused base row still unpushed in the
+        // journal. One detector, every path.
+        if payload.is_base_state {
+            let divergent = store.read_with(|conn| {
+                Ok::<_, SyncError>(
+                    stored_seq0_base_sha(conn, &key)?
+                        .is_some_and(|stored| stored != payload.update_blob_sha256)
+                        || own_unpushed_base_row(conn, &key)?
+                            .is_some_and(|(_, _, sha)| sha != payload.update_blob_sha256),
+                )
+            })?;
+            if divergent {
+                return Err(SyncError::RetryableState {
+                    reason: "live Y.Doc session over a divergent inbound base",
+                });
+            }
         }
         let deferred_key = key.clone();
         return crate::apply_envelope_with(store, envelope, faults, move |tx, op| {

@@ -508,9 +508,20 @@ daemons cannot share a relay workspace yet (#356).
   (`ydoc_base_claimed`, first-claim-wins — the same pattern as workspace
   identity). The loser's push parks at its refused base row; its pull then
   receives the winner's base, and the inbound base branch ADOPTS instead of
-  wedging: swap the durable lineage onto the winner's base, re-encode all
-  local content as one delta against the winner's state vector, rewrite the
-  refused journal row into that delta in place, and project the merged doc.
+  wedging, under one invariant: a refused base is a durable OBLIGATION, and
+  adoption either fulfils it or leaves the coordinate unacked. Divergence is
+  detected from the stored seq-0 base while it survives and, after
+  compaction folds it away, from the obligation itself (the unpushed
+  `isBaseState` journal row). Adoption swaps the winner's base in at seq 0
+  and re-appends the losing lineage's persisted pieces VERBATIM — its latest
+  snapshot plus every update row, including rows still parked on a missing
+  dependency — republishing each piece as a delta: the refused journal row
+  is rewritten in place into the first piece and the rest append. A
+  cross-kind race keeps the winner's (arbitrated) kind and freezes the
+  loser's head behind the #546 review conflict. The pull surfaces
+  `pendingPush` so the desktop schedules the follow-up push. The one
+  residual — a compacted snapshot over `MAX_YDOC_UPDATE_BYTES` — refuses
+  UNACKED and names #549, which owns the measured bound.
   The alternative — deriving object ids from creation provenance instead of
   the path — was rejected: deterministic path-derived ids are what let the
   file lane converge object identity across machines without coordination,
