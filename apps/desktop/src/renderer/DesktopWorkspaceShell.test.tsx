@@ -2529,6 +2529,11 @@ describe("graph view", () => {
 describe("history page", () => {
   it("opens history as a full editor tab showing the history-off placeholder for an opted-out workspace", async () => {
     const bridge = makeBridge(Promise.resolve(null));
+    // Main's status says the opt-out happened (#542): the placeholder's
+    // Settings copy is earned by that status, not by the renderer's own read.
+    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
+    bridge.openWorkspace = vi.fn(async () => offStatus);
+    bridge.getSyncStatus = vi.fn(async () => offStatus);
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -2540,9 +2545,97 @@ describe("history page", () => {
     const page = await screen.findByTestId("history-page");
     // Retirement Phase C: an opted-out workspace has no history source; the
     // page says so instead of rendering an empty timeline.
-    expect(
-      within(page).getByTestId("history-off-placeholder").textContent,
-    ).toContain("History is off for this workspace");
+    const placeholder = within(page).getByTestId("history-off-placeholder");
+    await waitFor(() => {
+      expect(placeholder.textContent).toContain("History is off for this workspace");
+      expect(placeholder.textContent).toContain("turned off in Settings");
+    });
+  });
+
+  // #542: the renderer's own settings read failed, and main has NOT said
+  // recording is off — it may be recording right now. The placeholder must
+  // not blame Settings, and must not promise "not recorded": either would be
+  // a cause the renderer's silently-caught read invented.
+  it("claims neither a Settings cause nor 'not recorded' when its own read failed", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getWorkspaceSettings = vi.fn(async () => {
+      throw new Error("transient read failure");
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    expect(placeholder.textContent).toContain("History is unavailable");
+    expect(placeholder.textContent).toContain(
+      "dohc could not confirm whether this workspace records history.",
+    );
+    // The false cause and the false privacy assurance this pins against.
+    expect(placeholder.textContent).not.toContain("Settings");
+    expect(placeholder.textContent).not.toContain("not being recorded");
+  });
+
+  // #505 on this surface: the recorder failed to build. Nothing records, but
+  // the cause is a failure — the opt-out's Settings copy would be false.
+  it("names the failure, not Settings, when main says the recorder could not be built", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const failedStatus = {
+      ...SYNC_STATUS,
+      historyRecordingOff: true,
+      historyRecordingUnavailable: true,
+    };
+    bridge.openWorkspace = vi.fn(async () => failedStatus);
+    bridge.getSyncStatus = vi.fn(async () => failedStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    await waitFor(() =>
+      expect(placeholder.textContent).toContain(
+        "dohc could not start recording history for this workspace.",
+      ),
+    );
+    expect(placeholder.textContent).not.toContain("turned off in Settings");
+  });
+
+  // #483 on this surface: an unreadable settings file is the cause main
+  // established, and its warning already names the file and the fix.
+  it("names the unreadable settings file when that read is the cause", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const warnedStatus = {
+      ...SYNC_STATUS,
+      historyRecordingOff: true,
+      settingsWarning:
+        "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.",
+    };
+    bridge.openWorkspace = vi.fn(async () => warnedStatus);
+    bridge.getSyncStatus = vi.fn(async () => warnedStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    await waitFor(() =>
+      expect(placeholder.textContent).toContain("/ws/.dohc/settings.local.json"),
+    );
+    expect(placeholder.textContent).not.toContain("turned off in Settings");
+  });
+
+  // #540's class on this surface: a shared view records no history BY
+  // DESIGN — a capability, not an opt-out, so no Settings blame.
+  it("states the shared-view capability instead of blaming Settings", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+    });
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    expect(placeholder.textContent).toContain("A shared view records no history");
+    expect(placeholder.textContent).not.toContain("Settings");
   });
 
   // #540 on the History surface itself: a shared view materializes no

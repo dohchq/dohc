@@ -215,6 +215,45 @@ function commitSnapshotLane(
   apply();
 }
 
+// What the history-off placeholder may claim (#542). The placeholder renders
+// whenever the renderer's own capability read says the surface does not
+// exist, but that read must not SPEAK: whether changes are recorded is
+// main's answer (syncStatus, from the one open-time read that decided the
+// recorder), and a cause is named only when that status established it. The
+// renderer's read failing — or not having answered yet — proves nothing:
+// main's read may have started the recorder, and "not being recorded" would
+// then be a false privacy assurance (#483's second failure mode).
+// Each cause is ONE line, per the empty-state recipe (copy.md): what is
+// missing, then the next step its surface really has.
+function historyOffPlaceholderCopy(
+  syncStatus: SyncStatusResult | null,
+  share: { ended: boolean; granterEmail: string | null } | null,
+): string {
+  if (share) {
+    // A capability, not an opt-out and not a failure: a shared view is fed
+    // by the share's pull and records no history here. The next step matches
+    // the surface — Refresh exists only while the share is live, so an ended
+    // share must not name it — and the ended line names who acted, as the
+    // banner does.
+    return share.ended
+      ? `A shared view records no history. ${share.granterEmail ?? "The person who shared it"} ended this share. You can still open the files it shared.`
+      : "A shared view records no history. Refresh the shared view to get the latest shared changes.";
+  }
+  // #483: the warning already names the unreadable file and the fix.
+  if (syncStatus?.settingsWarning) return syncStatus.settingsWarning;
+  if (syncStatus?.historyRecordingUnavailable) {
+    // #505: a failure, not a decision — same copy as the notice center.
+    return "dohc could not start recording history for this workspace. Your files still save normally. Restart dohc to try again.";
+  }
+  if (syncStatus?.historyRecordingOff) {
+    // The real opt-out: main read the file and the flag is off.
+    return "History is off for this workspace. The workspace engine is turned off in Settings → Advanced, so changes are not being recorded. Turn it on and reopen the workspace to record history again.";
+  }
+  // Main has not said recording is off. It may be recording right now, so
+  // no cause and no "not recorded" — only what dohc could not do.
+  return "History is unavailable. dohc could not confirm whether this workspace records history.";
+}
+
 export function chatsNavigationRequiresRemount(
   current: ChatsNav | null,
   next: ChatsNav,
@@ -1903,6 +1942,9 @@ export function DesktopWorkspaceShell(props: {
       })
       .catch(() => {
         // Settings unavailable reads as flag off — never a broken shell.
+        // Capability only, fail-closed (#329): the surface hides, but what
+        // the placeholder then SAYS comes from main's status. This failure
+        // must never be translated into an asserted opt-out (#542).
       });
     return () => {
       cancelled = true;
@@ -2986,9 +3028,17 @@ export function DesktopWorkspaceShell(props: {
 
   // ONE history timeline element, rendered by the side panel's History view
   // and the history tab — the engine page state is root-owned (never a
-  // second subscription). An opted-out workspace has NO
-  // history source (retirement Phase C removed the legacy recorder), so the
-  // timeline honestly says history is off instead of showing an empty list.
+  // second subscription). A workspace with no history source (retirement
+  // Phase C removed the legacy recorder) gets a placeholder instead of an
+  // empty list, and what that placeholder CLAIMS comes from main's status —
+  // or, for a shared view, the registry capability and the share's live
+  // state — never from the renderer's own capability read (#542).
+  const historyOffCopy = historyOffPlaceholderCopy(
+    syncStatus,
+    shareView
+      ? { ended: shareViewEnded, granterEmail: shareView.granterEmail }
+      : null,
+  );
   const historyTimeline = engineEnabled && !isShareView ? (
     <EngineHistoryView
       moments={engineHistory?.moments ?? []}
@@ -2997,35 +3047,14 @@ export function DesktopWorkspaceShell(props: {
       onLoadMore={() => void loadMoreEngineHistory()}
       onOpenMoment={openMomentDiffTab}
     />
-  ) : isShareView ? (
-    // #540: a capability, not an opt-out. The Settings copy below would
-    // blame a toggle nobody touched, in a settings file a shared view does
-    // not even have. One line, per the empty-state recipe (copy.md): what is
-    // missing plus the next step — and the next step matches the surface,
-    // because Refresh exists only while the share is live.
+  ) : (
+    // One line, per the empty-state recipe (copy.md): what is missing plus
+    // the next step this surface really has, chosen by the established cause.
     <div
       data-testid="history-off-placeholder"
       className="flex flex-1 items-center justify-center px-4 text-center"
     >
-      <span className="text-sm text-muted">
-        {shareViewEnded
-          ? // Active voice, named actor (copy.md): the banner already names
-            // who ended the share, so this line does too.
-            `A shared view records no history. ${shareView?.granterEmail ?? "The person who shared it"} ended this share. You can still open the files it shared.`
-          : "A shared view records no history. Refresh the shared view to get the latest shared changes."}
-      </span>
-    </div>
-  ) : (
-    <div
-      data-testid="history-off-placeholder"
-      className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
-    >
-      <span className="text-xs text-muted">History is off for this workspace</span>
-      <span className="text-[11px] text-subtle">
-        The workspace engine is turned off in Settings → Advanced, so changes
-        are not being recorded. Turn it on and reopen the workspace to record
-        history again.
-      </span>
+      <span className="text-sm text-muted">{historyOffCopy}</span>
     </div>
   );
   // Open-file refresh: history growth re-reads the active file. The floor
