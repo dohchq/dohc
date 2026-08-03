@@ -728,6 +728,9 @@ describe("Rust engine daemon lifecycle", () => {
     let now = 0;
     const clients: SelfExitingClient[] = [];
     const terminalFailures: Error[] = [];
+    // Driven arrival time of every probe, per generation, for the cadence
+    // assertion below.
+    const probeArrivals: number[][] = [];
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
       initialBackoffMs: 0,
@@ -736,7 +739,12 @@ describe("Rust engine daemon lifecycle", () => {
       monotonicNowMs: () => now,
       wallNowMs: () => now,
       launch: async (options) => {
-        const client = new SelfExitingClient(silentPing);
+        const arrivals: number[] = [];
+        probeArrivals.push(arrivals);
+        const client = new SelfExitingClient((request) => {
+          if (request.method === "engine.ping") arrivals.push(now);
+          return silentPing(request);
+        });
         client.exit = options.onExit;
         clients.push(client);
         return client;
@@ -775,16 +783,33 @@ describe("Rust engine daemon lifecycle", () => {
       // terminal verdict failed to stop the restart it ordered.
       expect(clients).toHaveLength(2);
       expect(clients.every((client) => client.closed)).toBe(true);
-      // The driven-time ceiling pins the wedge budget's SPEED, which the
-      // terminal message alone cannot: a tripled probe cadence would still
-      // produce the same message, minutes later. Measured honest end under
-      // a 24-process load: 650s of driven time (the old 600s bound sat
-      // inside that range — each relaunch smoke needs real event-loop turns
-      // the driven clock cannot buy). 900s covers the measurement with
-      // margin and stays below the ~1080s that two wedge cycles would need
-      // if DEFAULT_PING_INTERVAL_MS merely tripled (3 intervals + 3
-      // expiries per cycle: 3*135s + 3*45s = 540s each).
-      expect(now).toBeLessThan(900_000);
+      // The cadence check pins the wedge budget's SPEED, which the terminal
+      // message alone cannot: a slower probe cadence would produce the same
+      // message, minutes later. It must NOT be an elapsed-driven-time
+      // ceiling: the driven clock advances one step per real event-loop
+      // turn, and the relaunch smoke's real I/O consumes turns, so driven
+      // milliseconds measure machine load — honest runs measured 650s to
+      // 965s of driven time under a 24-process load, overlapping any bound
+      // a tripled interval (830s measured) could fail (#568/#580). Probe
+      // ARRIVAL SPACING inside one wedged generation is load-invariant:
+      // it is pure fake-timer arithmetic, one expiry plus one interval
+      // after the previous probe, 45s + 30s = 75s at the production
+      // constants (the expiry half is already pinned by the message
+      // above). A tripled interval spaces probes 135s apart and fails
+      // here on any box; the tolerance covers only the driven loop's 5s
+      // step quantization.
+      const spacings: number[] = [];
+      for (const arrivals of probeArrivals) {
+        for (let i = 1; i < arrivals.length; i += 1) {
+          spacings.push((arrivals[i] ?? 0) - (arrivals[i - 1] ?? 0));
+        }
+      }
+      // Two generations, three probes each: at least four spacings.
+      expect(spacings.length).toBeGreaterThanOrEqual(4);
+      for (const spacing of spacings) {
+        expect(spacing).toBeGreaterThanOrEqual(75_000);
+        expect(spacing).toBeLessThanOrEqual(80_000);
+      }
     } finally {
       vi.useRealTimers();
       await lifecycle.stop();
