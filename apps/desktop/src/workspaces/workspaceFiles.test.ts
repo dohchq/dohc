@@ -391,11 +391,27 @@ describe("deletePath", () => {
     await symlink(outside, join(root, ".dohc", "trash"), "dir");
     await writeFile(join(root, "secret-notes.md"), "private");
     await expect(deletePath(root, "secret-notes.md", rejectingTrash)).rejects.toThrow(
-      /\.dohc\/trash must be a real directory/,
+      /A link is at \.dohc\/trash, which must be a real folder/,
     );
     // The file stayed put; nothing landed in the attacker directory.
     expect(await readFile(join(root, "secret-notes.md"), "utf8")).toBe("private");
     expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("names the squatter when a FILE sits at .dohc/trash — never a raw errno", async () => {
+    // A plain file at .dohc/trash made mkdir{recursive} throw raw
+    // "EEXIST: file already exists, mkdir …" (#544): no constraint, no next
+    // step, on the very path dohc advertises as the recovery location. The
+    // refusal must name .dohc/trash, what squats it, and the way out.
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await writeFile(join(root, ".dohc", "trash"), "squatting");
+    await writeFile(join(root, "junk.md"), "keep me");
+    await expect(deletePath(root, "junk.md", rejectingTrash)).rejects.toThrow(
+      "dohc could not move this to the workspace trash. A file is at .dohc/trash, which must be a real folder. Remove or rename that file, then retry.",
+    );
+    // The target stayed put and the squatter was not touched.
+    expect(await readFile(join(root, "junk.md"), "utf8")).toBe("keep me");
+    expect(await readFile(join(root, ".dohc", "trash"), "utf8")).toBe("squatting");
   });
 
   it("rejects traversal, reserved paths, the root, and symlinked-ancestor escapes", async () => {
