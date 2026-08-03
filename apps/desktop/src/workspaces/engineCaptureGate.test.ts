@@ -137,13 +137,14 @@ describe("captureForFlaggedWorkspace decision", () => {
 // build — or an unreadable settings file — that assertion is false, so the
 // refusal must name the established cause instead.
 describe("engineOffRefusal", () => {
+  const FEATURE = "Versions" as const;
   const NOT_ENABLED = "Versions are not enabled for this workspace.";
 
   it("keeps the caller's opt-out copy only for the real opt-out", () => {
     expect(
       engineOffRefusal(
         { historyRecordingUnavailable: false },
-        NOT_ENABLED,
+        FEATURE,
         "restart",
       ),
     ).toBe(NOT_ENABLED);
@@ -152,11 +153,11 @@ describe("engineOffRefusal", () => {
   it("names the failure when the capture build failed, never a setting", () => {
     const refusal = engineOffRefusal(
       { historyRecordingUnavailable: true },
-      NOT_ENABLED,
+      FEATURE,
       "restart",
     );
     expect(refusal).toBe(
-      "dohc could not start the workspace engine for this workspace. Restart dohc to try again.",
+      "dohc could not start Versions for this workspace. Restart dohc to try again.",
     );
     // The false cause this guards against: asserting a decision nobody made.
     expect(refusal).not.toContain("not enabled");
@@ -169,9 +170,35 @@ describe("engineOffRefusal", () => {
   // pinned exactly — swapping the recoveries fails both tests.
   it("tells a transient open to try again, not to restart", () => {
     expect(
-      engineOffRefusal({ historyRecordingUnavailable: true }, NOT_ENABLED, "retry"),
+      engineOffRefusal({ historyRecordingUnavailable: true }, FEATURE, "retry"),
     ).toBe(
-      "dohc could not start the workspace engine for this workspace. Try again.",
+      "dohc could not start Versions for this workspace. Try again.",
+    );
+  });
+
+  // Codex P2 on #583 (round 6): the noun is the FEATURE the user invoked —
+  // the word their surface shows — never an internal implementation noun.
+  // Pinned per caller, so swapping or hard-wiring a noun fails.
+  it("names each caller's own feature, with its own opt-out grammar", () => {
+    const failed = { historyRecordingUnavailable: true };
+    expect(engineOffRefusal(failed, "Versions", "restart")).toBe(
+      "dohc could not start Versions for this workspace. Restart dohc to try again.",
+    );
+    expect(engineOffRefusal(failed, "Chats", "restart")).toBe(
+      "dohc could not start Chats for this workspace. Restart dohc to try again.",
+    );
+    expect(engineOffRefusal(failed, "Engine history", "restart")).toBe(
+      "dohc could not start Engine history for this workspace. Restart dohc to try again.",
+    );
+    expect(engineOffRefusal(failed, "Chat mentions", "restart")).toBe(
+      "dohc could not start Chat mentions for this workspace. Restart dohc to try again.",
+    );
+    const optedOut = { historyRecordingUnavailable: false };
+    expect(engineOffRefusal(optedOut, "Chats", "restart")).toBe(
+      "Chats are not enabled for this workspace.",
+    );
+    expect(engineOffRefusal(optedOut, "Engine history", "restart")).toBe(
+      "Engine history is not enabled for this workspace.",
     );
   });
 
@@ -180,7 +207,7 @@ describe("engineOffRefusal", () => {
       "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
     const refusal = engineOffRefusal(
       { settingsWarning: warning, historyRecordingUnavailable: false },
-      NOT_ENABLED,
+      FEATURE,
       "restart",
     );
     expect(refusal).toBe(warning);
@@ -196,7 +223,7 @@ describe("engineOffRefusal", () => {
       "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
     const refusal = engineOffRefusal(
       { settingsWarning: warning, historyRecordingUnavailable: false },
-      NOT_ENABLED,
+      FEATURE,
       "retry",
     );
     expect(refusal).toBe(
@@ -274,12 +301,13 @@ describe("releaseAndRefuseWithoutCapture", () => {
           released = true;
           return true;
         },
-        notEnabled: NOT_ENABLED,
+        feature: "Chats",
+        settleKeptOpen: async () => undefined,
       }),
     ).rejects.toThrow(
       // The release CLOSED the entry, so the next attempt rebuilds the
       // capture — no restart needed.
-      "dohc could not start the workspace engine for this workspace. Try again.",
+      "dohc could not start Chats for this workspace. Try again.",
     );
     // The hold is still released — the refusal never leaks the open.
     expect(released).toBe(true);
@@ -297,7 +325,32 @@ describe("releaseAndRefuseWithoutCapture", () => {
         currentCapture: () => reopenedCapture,
         status: () => ({ historyRecordingUnavailable: true }),
         release: async () => false,
-        notEnabled: NOT_ENABLED,
+        feature: "Chats",
+        settleKeptOpen: async () => undefined,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  // Codex P2 on #583 (round 6): the reopener's capture builds AFTER the
+  // release resolves — an immediate read sees a state still forming and
+  // refuses a workspace that works moments later. The judgment must settle
+  // behind the kept open first.
+  it("waits for the kept open to settle before judging its capture", async () => {
+    let capture: object | null = null;
+    await expect(
+      releaseAndRefuseWithoutCapture({
+        capture: null,
+        // The reopen finishes building DURING the settle, not before it —
+        // and only after a real async hop, so a fire-and-forget call
+        // (mutating the await away) cannot satisfy this pin.
+        settleKeptOpen: async () => {
+          await Promise.resolve();
+          capture = {};
+        },
+        currentCapture: () => capture,
+        status: () => ({ historyRecordingUnavailable: true }),
+        release: async () => false,
+        feature: "Chats",
       }),
     ).resolves.toBeUndefined();
   });
@@ -323,7 +376,8 @@ describe("releaseAndRefuseWithoutCapture", () => {
           released = true;
           return false;
         },
-        notEnabled: NOT_ENABLED,
+        feature: "Chats",
+        settleKeptOpen: async () => undefined,
       }),
     ).rejects.toThrow("Fix /ws/.dohc/settings.local.json. Then restart dohc.");
   });
@@ -339,7 +393,8 @@ describe("releaseAndRefuseWithoutCapture", () => {
           historyRecordingUnavailable: false,
         }),
         release: async () => true,
-        notEnabled: NOT_ENABLED,
+        feature: "Chats",
+        settleKeptOpen: async () => undefined,
       }),
     ).rejects.toThrow(
       "Fix /ws/.dohc/settings.local.json. Then try again.",
@@ -356,7 +411,8 @@ describe("releaseAndRefuseWithoutCapture", () => {
         released = true;
         return true;
       },
-      notEnabled: NOT_ENABLED,
+      feature: "Chats",
+      settleKeptOpen: async () => undefined,
     });
     expect(released).toBe(false);
   });

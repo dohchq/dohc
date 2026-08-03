@@ -435,8 +435,9 @@ import {
 } from "./workspaces/liveLinkedChatStore";
 import {
   captureForFlaggedWorkspace,
-  dispatchScanEligible,
   createDispatchRunRelease,
+  dispatchScanEligible,
+  type EngineFeature,
   engineOffRefusal,
   releaseAndRefuseWithoutCapture,
 } from "./workspaces/engineCaptureGate";
@@ -1693,7 +1694,7 @@ const tryInVersionSessions = createTryInVersionSessions({
       throw new Error(
         engineOffRefusal(
           activity.getStatus(workspace.workspaceId),
-          "Versions are not enabled for this workspace.",
+          "Versions",
           // openWorkspaceActivity retained this session: only a restart
           // re-runs the capture decision.
           "restart",
@@ -2206,10 +2207,19 @@ const chatDispatchService = createChatDispatchService({
     // recovery derived from what the release actually did.
     await releaseAndRefuseWithoutCapture({
       capture: activity.engineCaptureFor(workspace.workspaceId),
+      // A retention that landed during our close reopens the workspace; its
+      // capture builds after the release resolves. Settling joins (or, for
+      // an already-retained workspace, starts — the retainer will reuse it)
+      // that open, so the capture read judges a formed state.
+      settleKeptOpen: () =>
+        ensureWorkspaceActivityOpen(registered).then(
+          () => undefined,
+          () => undefined,
+        ),
       currentCapture: () => activity.engineCaptureFor(workspace.workspaceId),
       status: () => activity.getStatus(workspace.workspaceId),
       release,
-      notEnabled: "Chats are not enabled for this workspace.",
+      feature: "Chats",
     });
     return async () => {
       await release();
@@ -2332,7 +2342,7 @@ async function openCliWorkspace(
     throw new Error(
       engineOffRefusal(
         activity.getStatus(workspace.workspaceId),
-        "Chats are not enabled for this workspace.",
+        "Chats",
         // openWorkspaceActivity retained this session: only a restart
         // re-runs the capture decision.
         "restart",
@@ -3643,7 +3653,7 @@ function registerIpcHandlers(
     if (!input.includeChatMentions) return WorkspaceGraphResult.parse(graph);
     const { workspace: engineWorkspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chat mentions are not enabled for this workspace.",
+      "Chat mentions",
     );
     await syncWorkspaceSharedChannels(engineWorkspace.workspaceId);
     const store = linkedChatStoreFor(engineWorkspace);
@@ -4180,7 +4190,7 @@ function registerIpcHandlers(
     const input = ShareChatChannelPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     assertWritableWorkspace(workspace);
     const store = linkedChatStoreFor(workspace);
@@ -4305,7 +4315,7 @@ function registerIpcHandlers(
     const input = JoinSharedChannelPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     const entry = requireWorkspace(input.workspaceId);
     if (entry.shareView) {
@@ -5071,17 +5081,17 @@ function registerIpcHandlers(
   // requireWorkspace (renderer identity is never trusted) and is gated on the
   // workspace-engine alpha capture being attached — for unflagged workspaces
   // the calls reject.
-  async function requireEngineCapture(workspaceId: string, notEnabled: string) {
+  async function requireEngineCapture(workspaceId: string, feature: EngineFeature) {
     const workspace = requireWorkspace(workspaceId);
     // Idempotent: guarantees the watcher + capture are live before any
     // engine operation touches the chain.
     await openWorkspaceActivity(workspace);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (!capture) {
-      // #541: the caller's "not enabled" copy holds only for the real
+      // #541: the feature's "not enabled" copy holds only for the real
       // opt-out — after a failed capture build the refusal names the failure.
       throw new Error(
-        engineOffRefusal(activity.getStatus(workspace.workspaceId), notEnabled, "restart"),
+        engineOffRefusal(activity.getStatus(workspace.workspaceId), feature, "restart"),
       );
     }
     return { workspace, capture };
@@ -5090,7 +5100,7 @@ function registerIpcHandlers(
   async function requireVersionOperations(workspaceId: string) {
     const { capture } = await requireEngineCapture(
       workspaceId,
-      "Versions are not enabled for this workspace.",
+      "Versions",
     );
     return capture;
   }
@@ -5550,7 +5560,7 @@ function registerIpcHandlers(
     const input = ListEngineMomentsPayload.parse(payload);
     const { capture } = await requireEngineCapture(
       input.workspaceId,
-      "Engine history is not enabled for this workspace.",
+      "Engine history",
     );
     const page = await capture.listMoments({
       ...(input.limit !== undefined ? { limit: input.limit } : {}),
@@ -5573,7 +5583,7 @@ function registerIpcHandlers(
     const input = ReadEngineMomentPayload.parse(payload);
     const { capture } = await requireEngineCapture(
       input.workspaceId,
-      "Engine history is not enabled for this workspace.",
+      "Engine history",
     );
     const moment = await capture.readMoment(input.momentId);
     return ReadEngineMomentResult.parse({
@@ -5586,7 +5596,7 @@ function registerIpcHandlers(
     const input = RestoreEngineMomentFilePayload.parse(payload);
     const { capture } = await requireEngineCapture(
       input.workspaceId,
-      "Engine history is not enabled for this workspace.",
+      "Engine history",
     );
     const result = await capture.restoreFileToBeforeMoment(input.momentId);
     notifyRenderer();
@@ -5598,7 +5608,7 @@ function registerIpcHandlers(
     const input = ListFileChatsPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     const fileObjectId = await capture.fileObjectIdForPath(input.path);
     const threads = fileObjectId
@@ -5618,7 +5628,7 @@ function registerIpcHandlers(
     const input = ListChatFileMentionsPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     await syncWorkspaceSharedChannels(workspace.workspaceId);
     const objectId = await capture.fileObjectIdForPath(input.path);
@@ -5681,7 +5691,7 @@ function registerIpcHandlers(
     const input = ListChatBookmarksPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     await warmCredentialCache();
     const bookmarks = await linkedChatStoreFor(workspace).listBookmarks({
@@ -5698,7 +5708,7 @@ function registerIpcHandlers(
     const input = SaveChatBookmarkPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     assertWritableWorkspace(workspace);
     await warmCredentialCache();
@@ -5738,7 +5748,7 @@ function registerIpcHandlers(
     const input = ArchiveChatBookmarkPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     assertWritableWorkspace(workspace);
     await warmCredentialCache();
@@ -5773,7 +5783,7 @@ function registerIpcHandlers(
     const input = CreateFileChatPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     assertWritableWorkspace(workspace);
     // The chat links to the file's STABLE engine object id (never the path),
@@ -5797,7 +5807,7 @@ function registerIpcHandlers(
     const input = ListChatMessagesPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     const messages = await linkedChatStoreFor(workspace).listMessages({
       workspaceId: workspace.workspaceId,
@@ -5813,7 +5823,7 @@ function registerIpcHandlers(
     const input = SendChatMessagePayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     // Shared-channel access is narrower than workspace access. Enforce the
     // workspace's server-owned read-only boundary first; renderer UI state is
@@ -5873,7 +5883,7 @@ function registerIpcHandlers(
     const input = ListChatThreadDecisionsPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     const decisions = await linkedChatStoreFor(workspace).listThreadDecisions(
       workspace.workspaceId,
@@ -5897,7 +5907,7 @@ function registerIpcHandlers(
     const input = ResolveChatDecisionPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     assertWritableWorkspace(workspace);
     const store = linkedChatStoreFor(workspace);
@@ -5933,7 +5943,7 @@ function registerIpcHandlers(
     const input = ListChatThreadAttachmentsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     const attachments = await linkedChatStoreFor(workspace).listThreadAttachments(
       workspace.workspaceId,
@@ -5947,7 +5957,7 @@ function registerIpcHandlers(
     const input = ChatRunRecordsForThreadPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     const linkedChatStore = linkedChatStoreFor(workspace);
     await linkedChatStore.ensureOpen();
@@ -6031,7 +6041,7 @@ function registerIpcHandlers(
     const input = ListChatChannelsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     // MU-C4: refresh joined shared channels BEFORE reading, so opening Chats
     // shows other members' latest messages. Never throws; offline it returns
@@ -6111,7 +6121,7 @@ function registerIpcHandlers(
     const input = ListChatFollowsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     await warmCredentialCache();
     const store = linkedChatStoreFor(workspace);
@@ -6135,7 +6145,7 @@ function registerIpcHandlers(
     const input = SetChatFollowPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     assertWritableWorkspace(workspace);
     await warmCredentialCache();
@@ -6189,7 +6199,7 @@ function registerIpcHandlers(
     const input = ListPersonalChatFeedPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     await warmCredentialCache();
     await syncWorkspaceSharedChannels(workspace.workspaceId);
@@ -6265,7 +6275,7 @@ function registerIpcHandlers(
       assertTrustedSender,
       parsePayload: (payload) => MarkPersonalChatFeedSeenPayload.parse(payload),
       requireContext: (workspaceId) =>
-        requireEngineCapture(workspaceId, "Chats are not enabled for this workspace."),
+        requireEngineCapture(workspaceId, "Chats"),
       isReadOnly: (workspace) => Boolean(sharedViewOf(workspace.workspaceId)),
       run: async ({ workspace }, input, readOnly) => {
         await markPersonalFeedSeenReadOnlySafe({
@@ -6296,7 +6306,7 @@ function registerIpcHandlers(
       assertTrustedSender,
       parsePayload: (payload) => CreateChatChannelPayload.parse(payload),
       requireContext: (workspaceId) =>
-        requireEngineCapture(workspaceId, "Chats are not enabled for this workspace."),
+        requireEngineCapture(workspaceId, "Chats"),
       assertWritableWorkspace,
       run: async ({ workspace }, input) => {
         const channel = await linkedChatStoreFor(workspace).createChannel({
@@ -6321,7 +6331,7 @@ function registerIpcHandlers(
     const input = ListChannelThreadsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     const localFallbackAuthorId = localReactorFallbackId();
     const viewerAuthorId = await chatViewerAuthorId({
@@ -6353,7 +6363,7 @@ function registerIpcHandlers(
     const input = StartChannelThreadPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     assertWritableWorkspace(workspace);
     // MU-C4 (CodeRabbit security): read-only shared channels reject the
@@ -6413,7 +6423,7 @@ function registerIpcHandlers(
       assertTrustedSender,
       parsePayload: (payload) => MarkChatThreadReadPayload.parse(payload),
       requireContext: (workspaceId) =>
-        requireEngineCapture(workspaceId, "Chats are not enabled for this workspace."),
+        requireEngineCapture(workspaceId, "Chats"),
       assertWritableWorkspace,
       assertSharedChannelWritable: async ({ workspace }, input) => {
         await assertSharedChannelWritable({
@@ -6458,7 +6468,7 @@ function registerIpcHandlers(
     const input = ListChatReactionsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     const viewerAuthorId = await chatViewerAuthorId({
       localFallbackAuthorId: localReactorFallbackId(),
@@ -6488,7 +6498,7 @@ function registerIpcHandlers(
       assertTrustedSender,
       parsePayload: (payload) => SetChatReactionPayload.parse(payload),
       requireContext: (workspaceId) =>
-        requireEngineCapture(workspaceId, "Chats are not enabled for this workspace."),
+        requireEngineCapture(workspaceId, "Chats"),
       assertWritableWorkspace,
       run: async ({ workspace }, input) => {
         await warmCredentialCache();
@@ -6704,7 +6714,7 @@ function registerIpcHandlers(
       assertTrustedSender,
       parsePayload: (payload) => SyncDmsPayload.parse(payload),
       requireContext: (workspaceId) =>
-        requireEngineCapture(workspaceId, "Chats are not enabled for this workspace."),
+        requireEngineCapture(workspaceId, "Chats"),
       isReadOnly: (workspace) => Boolean(sharedViewOf(workspace.workspaceId)),
       run: async ({ workspace }, _input, readOnly) => {
         await warmCredentialCache();
@@ -6773,7 +6783,7 @@ function registerIpcHandlers(
     }
     const { capture } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     const authorUserId = resolveWorkspaceRelayAuthorId(
       workspace,
@@ -7152,7 +7162,7 @@ function registerIpcHandlers(
     const input = ChatDispatchStateForThreadPayload.parse(payload);
     await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     return ChatDispatchStateForThreadResult.parse(
       await chatDispatchService.dispatchStateForThread(
@@ -7167,7 +7177,7 @@ function registerIpcHandlers(
     const input = ResumeThreadDispatchPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
-      "Chats are not enabled for this workspace.",
+      "Chats",
     );
     assertWritableWorkspace(workspace);
     await chatDispatchService.resumeThreadDispatch(

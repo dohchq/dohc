@@ -87,9 +87,8 @@ describe("main-process chat authorization", () => {
     for (const [channel, call] of gated) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain("requireEngineCapture(");
-      expect(handler, channel).toContain(
-        '"Chats are not enabled for this workspace."',
-      );
+      // #541 round 6: callers pass the FEATURE noun; the gate owns the copy.
+      expect(handler, channel).toContain('"Chats"');
       expect(handler.indexOf("requireEngineCapture("), channel).toBeLessThan(
         handler.indexOf(call),
       );
@@ -220,6 +219,9 @@ describe("main-process chat authorization", () => {
     expect(prepare).toContain("releaseAndRefuseWithoutCapture({");
     // Round 5: the kept-entry path answers from the LIVE capture re-read.
     expect(prepare).toContain("currentCapture:");
+    // Round 6: judged only after the kept open has settled.
+    expect(prepare).toContain("settleKeptOpen:");
+    expect(prepare).toContain("ensureWorkspaceActivityOpen(registered)");
     // And the release itself derives its answer from the post-close
     // retention state (round 4) — through the behavior-tested factory.
     expect(

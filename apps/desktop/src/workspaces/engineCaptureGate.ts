@@ -65,18 +65,37 @@ export async function captureForFlaggedWorkspace(
 // next attempt rebuilds the capture: retry is the instruction that works.
 export type EngineOffRecovery = "restart" | "retry";
 
+// The noun rule for every capture refusal: name the FEATURE the user
+// invoked — the word their surface already shows (Versions, Chats, Engine
+// history, Chat mentions) — never an internal implementation noun. The
+// history-off notice follows the same rule on its own surface ("recording
+// history" is the feature there).
+export type EngineFeature =
+  | "Versions"
+  | "Chats"
+  | "Engine history"
+  | "Chat mentions";
+
+// The real opt-out's copy, one sentence per feature so the verb agrees.
+const NOT_ENABLED_COPY: Record<EngineFeature, string> = {
+  Versions: "Versions are not enabled for this workspace.",
+  Chats: "Chats are not enabled for this workspace.",
+  "Engine history": "Engine history is not enabled for this workspace.",
+  "Chat mentions": "Chat mentions are not enabled for this workspace.",
+};
+
 // What a refusal may SAY when the gate produced no capture (#541). "Not
 // enabled" asserts a decision, and after a failed capture build — or an
 // unreadable settings file — the truth is a failure, not a setting the user
 // touched. The refusal names the cause the open-time decision established,
 // from the same status that drives the history-off notice, and falls back to
-// the caller's opt-out copy only when the opt-out is what happened.
+// the feature's opt-out copy only when the opt-out is what happened.
 export function engineOffRefusal(
   status: {
     settingsWarning?: string;
     historyRecordingUnavailable: boolean;
   },
-  notEnabled: string,
+  feature: EngineFeature,
   recovery: EngineOffRecovery,
 ): string {
   // #483: the warning already names the unreadable file and the fix. Its
@@ -92,10 +111,10 @@ export function engineOffRefusal(
   }
   if (status.historyRecordingUnavailable) {
     return recovery === "retry"
-      ? "dohc could not start the workspace engine for this workspace. Try again."
-      : "dohc could not start the workspace engine for this workspace. Restart dohc to try again.";
+      ? `dohc could not start ${feature} for this workspace. Try again.`
+      : `dohc could not start ${feature} for this workspace. Restart dohc to try again.`;
   }
-  return notEnabled;
+  return NOT_ENABLED_COPY[feature];
 }
 
 // The dispatch release (#541, codex P2 round 4 on #583). It resolves to
@@ -135,6 +154,10 @@ export function createDispatchRunRelease(input: {
 // A caller with a capture attached gets a no-op.
 export async function releaseAndRefuseWithoutCapture(input: {
   capture: object | null;
+  // Settles behind the kept entry's (re)open, so the capture read below
+  // judges a state that has finished forming — the reopener's capture
+  // builds AFTER our release resolves.
+  settleKeptOpen: () => Promise<void>;
   // Live re-read of the workspace's current capture, for the kept-entry path.
   currentCapture: () => object | null;
   status: () => {
@@ -144,16 +167,17 @@ export async function releaseAndRefuseWithoutCapture(input: {
   // Resolves to whether a fresh attempt would rebuild the capture (see
   // createDispatchRunRelease).
   release: () => Promise<boolean>;
-  notEnabled: string;
+  feature: EngineFeature;
 }): Promise<void> {
   if (input.capture) return;
   const closedStatus = input.status();
   const retryable = await input.release();
   if (retryable) {
-    throw new Error(engineOffRefusal(closedStatus, input.notEnabled, "retry"));
+    throw new Error(engineOffRefusal(closedStatus, input.feature, "retry"));
   }
+  await input.settleKeptOpen();
   if (input.currentCapture()) return;
-  throw new Error(engineOffRefusal(input.status(), input.notEnabled, "restart"));
+  throw new Error(engineOffRefusal(input.status(), input.feature, "restart"));
 }
 
 // The gate's predicate on its own, for callers that must honor the opt-out
