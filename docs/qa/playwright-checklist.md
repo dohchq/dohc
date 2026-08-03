@@ -4,7 +4,7 @@ Run the desktop E2E suite or a focused Playwright spec:
 
 ```bash
 pnpm test:desktop:e2e
-pnpm --filter @dohc/desktop exec playwright test \
+pnpm --filter @dohc/desktop exec node scripts/run-playwright.mjs \
   --config playwright.config.ts e2e/sites-preview.spec.ts
 ```
 

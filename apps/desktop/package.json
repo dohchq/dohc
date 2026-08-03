@@ -12,11 +12,11 @@
     "build:engine": "node scripts/build-workspace-engine.mjs",
     "package": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && pnpm run build:engine && node scripts/build-cli-bin.mjs && electron-vite build && electron-builder --publish never",
     "smoke:package": "node scripts/package-smoke.mjs",
-    "smoke:settings": "playwright test --config playwright.config.ts --grep @settings-smoke",
+    "smoke:settings": "node scripts/run-playwright.mjs --config playwright.config.ts --grep @settings-smoke",
     "smoke:fuses": "node scripts/ensure-electron-installed.mjs && node scripts/fuse-smoke.mjs",
     "test": "vitest run",
-    "test:e2e": "pnpm run build && node scripts/require-e2e-engine.mjs && playwright test --config playwright.config.ts",
-    "test:sites:e2e": "pnpm run build && playwright test --config playwright.config.ts --grep @sites",
+    "test:e2e": "pnpm run build && node scripts/require-e2e-engine.mjs && node scripts/run-playwright.mjs --config playwright.config.ts",
+    "test:sites:e2e": "pnpm run build && node scripts/run-playwright.mjs --config playwright.config.ts --grep @sites",
     "typecheck": "tsc --noEmit"
   },
   "dependencyNotes": {
