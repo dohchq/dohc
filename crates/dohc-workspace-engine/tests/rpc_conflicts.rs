@@ -1300,3 +1300,75 @@ async fn escape_heavy_conflict_that_fits_the_control_frame_is_returned() {
         "the regression row must exceed the old shared 700 KiB cap"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_frame_conflict_row_degrades_to_hydratable_metadata_instead_of_refusing() {
+    // Three ~3 MB sides serialize past CONFLICT_ROW_HARD_CAP_BYTES (the 8 MiB
+    // control frame minus 64 KiB envelope headroom), so this row can never
+    // carry its bodies in band. MUTATION: skip the withholding pass in
+    // `conflicts_list` and this listing refuses with
+    // `conflict-row-exceeds-wire-limit`, taking the healthy neighbor with it.
+    let (_scratch, service, transport, handle, workspace_id) =
+        fixture_with_service("over-frame-row").await;
+    let oversized = "x".repeat(3_000_000);
+    let oversized_sha256 = dohc_engine_storage::hex_sha256(oversized.as_bytes());
+    seed_conflicts(&transport, &handle, &workspace_id, 1, &oversized).await;
+    open_conflict(&transport, &handle, &workspace_id, 1, "small neighbor").await;
+
+    let response = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "conflicts.list",
+                Some(handle.clone()),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("one over-frame row must not refuse the listing");
+    let rows = response.result["conflicts"]
+        .as_array()
+        .expect("conflict rows");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the healthy neighbor ships beside the degraded row"
+    );
+
+    // The degraded row keeps every side's address and loses only the bodies.
+    assert_eq!(rows[0]["id"], "conflict-000");
+    for side in ["base", "current", "incoming"] {
+        let snapshot = &rows[0][side]["snapshot"];
+        assert_eq!(snapshot["text"], Value::Null);
+        assert_eq!(snapshot["inbandLimitBytes"], json!(128 * 1024));
+        assert_eq!(snapshot["blobSha256"], json!(oversized_sha256));
+        assert_eq!(snapshot["byteLength"], json!(oversized.len()));
+    }
+    assert_eq!(
+        rows[1]["current"]["snapshot"]["text"],
+        json!("small neighbor"),
+        "a row under the cap still carries its bodies in band"
+    );
+    assert_eq!(response.result["nextAfterConflictId"], Value::Null);
+    encode_control(&Envelope::Response(response), &WireLimits::default())
+        .expect("the degraded page fits the negotiated control frame");
+
+    // The withheld body hydrates through the blob route `versionedText.read`
+    // already uses; the conflict-side reference alone authorizes it.
+    let hydrated = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            11,
+            "versionedText.readBlob",
+            Some(handle),
+            json!({ "workspaceId": workspace_id, "sha256": oversized_sha256 }),
+        ),
+    )
+    .await
+    .expect("hydrate a withheld conflict side");
+    assert_eq!(hydrated.response.result["bytesBase64"], Value::Null);
+    let egress = hydrated.blob_egress.expect("over-cap side body egress");
+    assert_eq!(egress.bytes, oversized.as_bytes());
+}

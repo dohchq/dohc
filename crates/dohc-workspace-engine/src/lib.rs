@@ -292,9 +292,11 @@ const GRANULAR_CHAT_RESPONSE_BYTE_BUDGET: usize = 256 * 1024;
 const CONFLICTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 const CONFLICTS_RESPONSE_ROW_LIMIT: usize =
     dohc_engine_domain::TEXT_CONFLICT_QUERY_LIMIT as usize - 1;
-/// Conflict rows are the only hydration surface for the three full-text
-/// sides. Let any row that fits the negotiated 8 MiB control frame progress,
-/// retaining explicit envelope and continuation headroom.
+/// The most one serialized conflict row may carry in band: the negotiated
+/// 8 MiB control frame, retaining explicit envelope and continuation
+/// headroom. A row past it is degraded, not refused — `conflicts_list`
+/// withholds its over-cap side bodies, and the caller hydrates them through
+/// `versionedText.readBlob`.
 const CONFLICT_ROW_HARD_CAP_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
 /// What a hand-combined resolution is bounded by: the control frame that has
@@ -7568,16 +7570,41 @@ impl EngineService {
         // The domain query returns sixteen candidates plus one lookahead, with
         // LIMIT applied before its blob joins hydrate the three text sides.
         let candidates = conflicts.len().min(CONFLICTS_RESPONSE_ROW_LIMIT);
-        let rows: Vec<Value> = conflicts[..candidates].iter().map(conflict_json).collect();
+        let mut rows: Vec<Value> = conflicts[..candidates].iter().map(conflict_json).collect();
+        // A row past the hard cap can never ship in band, and refusing it
+        // would refuse its healthy neighbors AND dead-end the cursor: an
+        // over-cap row that is not first ends the page, the cursor advances
+        // to it, and the next request makes it the leading row. Degrade THAT
+        // row instead: withhold each over-cap side body, so the `blobSha256`
+        // and `inbandLimitBytes` beside it route the caller to
+        // `versionedText.readBlob` — the hydration `versionedText.read`
+        // already uses.
+        for row in &mut rows {
+            if serde_json::to_string(row).map_or(0, |s| s.len()) > CONFLICT_ROW_HARD_CAP_BYTES {
+                withhold_conflict_side_texts(row);
+            }
+        }
         let included = byte_budget_cut_serialized_with_row_cap(
             &rows,
             CONFLICTS_PAGE_BYTE_BUDGET,
             CONFLICT_ROW_HARD_CAP_BYTES,
         );
         if included == 0 && !conflicts.is_empty() {
-            return Err(wire(
+            // Unreachable while withholding covers every side body — a
+            // degraded row carries only bounded metadata. Kept so a row that
+            // somehow still overruns becomes a named refusal, never an
+            // over-frame response the daemon's writer treats as fatal.
+            let observed = rows
+                .first()
+                .and_then(|row| serde_json::to_string(row).ok())
+                .map_or(0, |serialized| serialized.len());
+            return Err(WireError::new(
                 ErrorCode::LimitExceeded,
-                "conflict-row-exceeds-wire-limit",
+                format!(
+                    "conflict-row-exceeds-wire-limit: a conflicts.list row is capped at \
+                     CONFLICT_ROW_HARD_CAP_BYTES = {CONFLICT_ROW_HARD_CAP_BYTES} serialized \
+                     bytes; observed {observed} bytes after withholding"
+                ),
             ));
         }
         let next_after_conflict_id = (included < conflicts.len())
@@ -10382,10 +10409,19 @@ fn settled_snapshot_json(snapshot: &TextSnapshot) -> Value {
 /// writer treats an oversized answer as a fatal transport error AFTER the
 /// resolution has committed.
 ///
-/// The conflict LISTING is untouched: it bounds its own answer by cutting
-/// rows, and its readers paint the bodies it returns.
+/// The conflict LISTING shares the withholding, not the trigger: it carries
+/// bodies in band up to `CONFLICT_ROW_HARD_CAP_BYTES` per row, and degrades
+/// only a row past that (`conflicts_list`).
 fn settled_conflict_json(conflict: &TextConflict) -> Value {
     let mut value = conflict_json(conflict);
+    withhold_conflict_side_texts(&mut value);
+    value
+}
+
+/// Withhold every over-cap side body of one serialized conflict, in place.
+/// Each side keeps its digest, byte length and `inbandLimitBytes`, so the
+/// caller hydrates through `versionedText.readBlob`.
+fn withhold_conflict_side_texts(value: &mut Value) {
     for side in ["base", "current", "incoming"] {
         if let Some(snapshot) = value[side].get_mut("snapshot")
             && !snapshot.is_null()
@@ -10393,7 +10429,6 @@ fn settled_conflict_json(conflict: &TextConflict) -> Value {
             withhold_over_cap_text(snapshot);
         }
     }
-    value
 }
 
 fn file_object_json(object: &dohc_engine_domain::FileObjectRecord) -> Value {

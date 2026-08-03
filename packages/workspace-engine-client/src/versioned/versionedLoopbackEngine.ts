@@ -9,7 +9,10 @@ import type { Response } from "../ydoc/generated/Response";
 import type { WireError } from "../ydoc/generated/WireError";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
-import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
+import {
+  CONFLICT_ROW_HARD_CAP_BYTES,
+  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
+} from "./engineTextLimits";
 import {
   VERSIONED_METHOD,
   type MomentRecord,
@@ -50,6 +53,7 @@ const INBAND_LIMIT_BYTES = 48 * 1024;
 // The limits live in a leaf module (no imports) so a renderer can read them
 // without pulling this fixture's `node:crypto` into a browser bundle.
 export {
+  CONFLICT_ROW_HARD_CAP_BYTES,
   MAX_DESKTOP_CAPTURE_TEXT_BYTES,
   RESOLVE_REQUEST_FRAME_BYTES,
   jsonStringEncodedLength,
@@ -73,6 +77,18 @@ export function settledSnapshotForWire(snapshot: JsonObject): JsonObject {
     return snapshot;
   }
   return { ...snapshot, text: null, inbandLimitBytes: MAX_DESKTOP_CAPTURE_TEXT_BYTES };
+}
+
+/**
+ * The daemon's conflict-listing degrade (`conflicts_list`, lib.rs): a row
+ * whose serialized size passes the conflict row frame cap ships as metadata —
+ * every over-cap side body withheld — instead of refusing the page. A row
+ * under the cap carries its bodies in band, exactly as served.
+ */
+export function conflictListRowForWire(conflict: JsonObject): JsonObject {
+  return utf8Length(JSON.stringify(conflict)) > CONFLICT_ROW_HARD_CAP_BYTES
+    ? settledConflictForWire(conflict)
+    : conflict;
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   WORKSPACE_METHOD,
   decodeWorkspaceResult,
   type CaptureFlushResult,
+  type ConflictFileState,
   type ConflictListParams,
   type ConflictOpenParams,
   type ConflictOpenResult,
@@ -597,10 +598,56 @@ export class VersionedLiveAdapter {
       WORKSPACE_METHOD.conflictsList,
       params,
     );
-    return {
-      conflicts: page.conflicts,
-      nextAfterConflictId: page.nextAfterConflictId,
-    };
+    // A row past the daemon's conflict row frame cap arrives with its side
+    // bodies withheld. Hydrate them here — the branch `readTextFile` already
+    // has — so every caller still receives full sides. Bounded over ONE page,
+    // because this adapter passes the daemon's continuation through (#562)
+    // instead of draining every page.
+    const conflicts = await mapWithConcurrency(
+      page.conflicts,
+      LIST_TEXT_FILE_HYDRATION_CONCURRENCY,
+      async (conflict) => {
+        // Sides in sequence, so the concurrency bound counts blob reads —
+        // three parallel sides per row would triple it.
+        const base = await this.hydrateConflictSide(
+          input.workspaceId,
+          conflict.base,
+        );
+        const current = await this.hydrateConflictSide(
+          input.workspaceId,
+          conflict.current,
+        );
+        const incoming = await this.hydrateConflictSide(
+          input.workspaceId,
+          conflict.incoming,
+        );
+        return base === conflict.base &&
+          current === conflict.current &&
+          incoming === conflict.incoming
+          ? conflict
+          : { ...conflict, base, current, incoming };
+      },
+    );
+    return { conflicts, nextAfterConflictId: page.nextAfterConflictId };
+  }
+
+  private async hydrateConflictSide(
+    workspaceId: string,
+    state: ConflictFileState,
+  ): Promise<ConflictFileState> {
+    const snapshot = state.snapshot;
+    if (snapshot === null || snapshot.text !== null) return state;
+    const text = await this.readTextBlob({
+      workspaceId,
+      sha256: snapshot.blobSha256,
+    });
+    if (text === null) {
+      throw new DaemonProtocolError(
+        "The daemon could not hydrate a withheld conflict side's text blob.",
+      );
+    }
+    const { inbandLimitBytes: _inbandLimitBytes, ...metadata } = snapshot;
+    return { ...state, snapshot: { ...metadata, text } };
   }
 
   async openTextConflict(

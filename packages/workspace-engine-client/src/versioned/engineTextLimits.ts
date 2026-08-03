@@ -29,6 +29,15 @@ export const MAX_DESKTOP_CAPTURE_TEXT_BYTES = 128 * 1024;
 export const RESOLVE_REQUEST_FRAME_BYTES = 8 * 1024 * 1024;
 
 /**
+ * `CONFLICT_ROW_HARD_CAP_BYTES`: the most one serialized `conflicts.list` row
+ * may occupy — the negotiated 8 MiB control frame minus 64 KiB of envelope
+ * headroom. A row past it is degraded, not refused: the daemon withholds each
+ * over-cap side body (`text: null` beside `inbandLimitBytes` and
+ * `blobSha256`), and the adapter hydrates through `versionedText.readBlob`.
+ */
+export const CONFLICT_ROW_HARD_CAP_BYTES = 8 * 1024 * 1024 - 64 * 1024;
+
+/**
  * How many bytes a string occupies once JSON-encoded, quotes included — the
  * daemon's `json_string_encoded_len` (lib.rs), and the only count
  * `RESOLVE_REQUEST_FRAME_BYTES` is spent in.

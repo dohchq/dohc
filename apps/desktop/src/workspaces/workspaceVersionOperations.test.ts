@@ -9,6 +9,7 @@ import {
   RESOLVE_REQUEST_FRAME_BYTES,
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
+  conflictListRowForWire,
   jsonStringEncodedLength,
   settledConflictForWire,
   settledSnapshotForWire,
@@ -300,7 +301,15 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
       // in crates/dohc-workspace-engine/tests/rpc_conflicts.rs.
       return {
         id: request.id,
-        result: { conflicts, nextAfterConflictId: null },
+        result: {
+          // The daemon degrades a row past the conflict row frame cap to
+          // withheld metadata; modeling that here is what lets these tests
+          // prove the adapter hydrates it back.
+          conflicts: conflicts.map(
+            (conflict) => conflictListRowForWire(conflict) as ConflictRecord,
+          ),
+          nextAfterConflictId: null,
+        },
       };
     }
 
@@ -431,9 +440,9 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         };
       }
 
-      // The LEDGER holds the bodies the listing carried; only an ANSWER
-      // withholds one. A withheld side here would mean the fixture lost the
-      // body it is being asked to apply.
+      // The LEDGER holds full bodies; withholding happens at serve time
+      // (`settledConflictForWire`, `conflictListRowForWire`). A withheld side
+      // here would mean the fixture lost the body it is being asked to apply.
       const incomingText = existing.incoming.snapshot?.text ?? null;
       if (resolution === "apply-incoming" && incomingText === null) {
         throw new Error("state-corrupt");
@@ -1070,6 +1079,55 @@ describe("mergeVersionIntoMain", () => {
     expect(conflict.incoming.text).toBe("draft line\n");
     // Main's disk state is untouched while the conflict is open.
     expect(await readText(root, "plan.md")).toBe("main line\n");
+    await engine.stop();
+  });
+
+  it("lists a conflict whose row passes the wire frame cap with hydrated sides", async () => {
+    // An ~8.4 MB incoming side pushes the serialized row past the daemon's
+    // conflict row frame cap (8 MiB minus 64 KiB), so the modeled daemon
+    // degrades the listing row to withheld metadata and the adapter hydrates
+    // the side back through `versionedText.readBlob`. Before #537 this
+    // listing refused outright, and one oversized conflict hid every open
+    // conflict in the workspace.
+    const incomingBody = `draft ${"x".repeat(8_400_000)}\n`;
+    const root = await tempRoot();
+    await write(root, "plan.md", "base line\n");
+    const loopback = new ConflictLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback, requests);
+    engine.start();
+    await engine.flush();
+    await engine.createVersion("Draft");
+    const draftId = await versionIdByName(engine, "Draft");
+    await engine.switchVersion("main");
+    await write(root, "plan.md", "current line\n");
+    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    await engine.flush();
+    // Settled directly in the store: the capture path caps its own writes at
+    // the in-band limit, and this body has to be past the ROW cap.
+    loopback.seedSettledText(WORKSPACE_ID, draftId, "plan.md", incomingBody);
+
+    const merge = await engine.mergeVersionIntoMain(draftId);
+    expect(merge.conflicts).toHaveLength(1);
+
+    // Isolate the listing lane: the merge above also read this body for its
+    // compare, and those reads must not vouch for this one.
+    requests.length = 0;
+    const open = await engine.listOpenConflicts();
+    expect(open).toHaveLength(1);
+    const conflict = open[0]!;
+    // The under-cap sides ride in band even on a degraded row.
+    expect(conflict.base.text).toBe("base line\n");
+    expect(conflict.current.text).toBe("current line\n");
+    // MUTATION: drop the adapter's hydration branch and this text is gone.
+    expect(conflict.incoming.text).toBe(incomingBody);
+    // The body crossed as a blob, not in the listing row. MUTATION: stop
+    // degrading the row in `conflictListRowForWire` and the fixture serves
+    // what the daemon cannot, with no blob read to show for it.
+    const hydrationReads = requests
+      .filter((request) => request.method === VERSIONED_METHOD.textReadBlob)
+      .map((request) => String((request.params as JsonObject).sha256));
+    expect(hydrationReads).toContain(sha256Utf8(incomingBody));
     await engine.stop();
   });
 
