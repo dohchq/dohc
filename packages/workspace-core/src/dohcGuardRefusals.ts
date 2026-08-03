@@ -1,18 +1,17 @@
 // The words every guard on a workspace's own .dohc paths refuses with.
 //
-// Three surfaces guard the same two paths: the desktop main process, the MCP
-// server, and the engine client's session preparation. The first two used to
-// answer with a raw errno ("EEXIST: file already exists, mkdir …") or with
-// developer prose ("workspace trash directory is a symlink"). Neither names
-// the constraint or the way out (#544, #585), and the refusals that did name
-// it disagreed on whether the thing at the path is a "folder" or a
-// "directory" (#586). The copy lives here once so it cannot drift: one noun,
-// one shape.
+// Three surfaces guard a workspace's internal paths: the desktop main
+// process, the MCP server, and the engine client's session preparation. They
+// answered in four different ways. Two returned a raw errno ("EEXIST: file
+// already exists, mkdir …"); one wrote developer prose ("workspace trash
+// directory is a symlink"); the engine client said "must not be a symlink"
+// about a plain file and printed the absolute host path. None names the
+// constraint and the way out (#544, #585, #612), and the refusals that did
+// name a constraint disagreed on whether the thing at the path is a "folder"
+// or a "directory" (#586).
 //
-// The third surface still has its own words:
-// engineWorkspaceSessions.ts's ensureRealDirectory refuses ".dohc" with
-// "Rust engine directory must not be a symlink", which is wrong for a file
-// squat and uses the retired noun. It is tracked as #612, not changed here.
+// The copy lives here once so it cannot drift: one noun, one shape, every
+// surface.
 //
 // The shape, per docs/brand/copy.md: what dohc could not do, what is at the
 // path and what it must be, one instruction, then retry.
@@ -40,6 +39,11 @@ export const DOHC_METADATA_GUARD: DohcPathGuard = {
 export const DOHC_TRASH_GUARD: DohcPathGuard = {
   path: ".dohc/trash",
   lead: "dohc could not move this to the workspace trash.",
+};
+
+export const DOHC_ENGINE_GUARD: DohcPathGuard = {
+  path: ".dohc/engine",
+  lead: "dohc could not start the engine for this workspace.",
 };
 
 // Name the squatter by what the user can see at the path, so the instruction

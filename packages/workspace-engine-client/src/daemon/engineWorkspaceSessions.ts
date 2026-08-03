@@ -9,6 +9,13 @@ import {
   decodeWorkspaceResult,
 } from "../workspace/workspaceWireContract";
 import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import {
+  DOHC_ENGINE_GUARD,
+  DOHC_METADATA_GUARD,
+  notARealFolderRefusal,
+  outsideWorkspaceRefusal,
+  type DohcPathGuard,
+} from "@dohc/workspace-core";
 import { randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -442,8 +449,8 @@ export class EngineWorkspaceSessions {
         const dohcDirectory = join(workspaceRoot, ".dohc");
         const markerDirectory = join(dohcDirectory, "engine");
         const markerPath = join(markerDirectory, "SHADOW_CLONE");
-        await this.ensureRealDirectory(dohcDirectory, realRoot);
-        await this.ensureRealDirectory(markerDirectory, realRoot);
+        await this.ensureRealDirectory(dohcDirectory, realRoot, DOHC_METADATA_GUARD);
+        await this.ensureRealDirectory(markerDirectory, realRoot, DOHC_ENGINE_GUARD);
         try {
           await writeFile(markerPath, randomBytes(32).toString("hex"), {
             encoding: "utf8",
@@ -477,20 +484,28 @@ export class EngineWorkspaceSessions {
     await preparation;
   }
 
+  // Refuses through the shared .dohc guard copy, so this surface says what
+  // the desktop and the MCP server say (#612). It used to answer "must not be
+  // a symlink" for a plain file, and print the absolute host path back at the
+  // user.
+  //
+  // Presence-keyed, not errno-keyed: EEXIST is what a file squat raises, but a
+  // DANGLING symlink squat raises ENOENT, which the old isAlreadyExists
+  // allowlist rethrew as a bare errno. When something is at the path, the
+  // checks below name it; when nothing is, the mkdir itself failed.
   private async ensureRealDirectory(
     directory: string,
     realRoot: string,
+    guard: DohcPathGuard,
   ): Promise<void> {
     try {
       await mkdir(directory);
     } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
+      if (!(await lstat(directory).catch(() => null))) throw error;
     }
     const info = await lstat(directory);
     if (!info.isDirectory() || info.isSymbolicLink()) {
-      throw new Error(
-        `Rust engine directory must not be a symlink: ${directory}.`,
-      );
+      throw new Error(notARealFolderRefusal(guard, info));
     }
     const resolvedDirectory = await realpath(directory);
     const escape = relative(realRoot, resolvedDirectory);
@@ -499,9 +514,7 @@ export class EngineWorkspaceSessions {
       escape.startsWith(`..${sep}`) ||
       isAbsolute(escape)
     ) {
-      throw new Error(
-        `Rust engine directory escapes the workspace: ${directory}.`,
-      );
+      throw new Error(outsideWorkspaceRefusal(guard));
     }
   }
 

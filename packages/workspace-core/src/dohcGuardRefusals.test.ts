@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DOHC_ENGINE_GUARD,
   DOHC_METADATA_GUARD,
   DOHC_TRASH_GUARD,
   notARealFolderRefusal,
@@ -28,6 +29,9 @@ describe("dohc guard refusals", () => {
     expect(notARealFolderRefusal(DOHC_METADATA_GUARD, asLink)).toBe(
       "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.",
     );
+    expect(notARealFolderRefusal(DOHC_ENGINE_GUARD, asFile)).toBe(
+      "dohc could not start the engine for this workspace. A file is at .dohc/engine, which must be a real folder. Remove or rename that file. Then retry.",
+    );
   });
 
   // A socket or a device node is neither a file nor a link. The article has to
@@ -45,6 +49,9 @@ describe("dohc guard refusals", () => {
     expect(outsideWorkspaceRefusal(DOHC_METADATA_GUARD)).toBe(
       "dohc could not open this workspace's .dohc folder. The .dohc folder points outside this workspace, and it must stay inside. Remove or rename it. Then retry.",
     );
+    expect(outsideWorkspaceRefusal(DOHC_ENGINE_GUARD)).toBe(
+      "dohc could not start the engine for this workspace. The .dohc/engine folder points outside this workspace, and it must stay inside. Remove or rename it. Then retry.",
+    );
   });
 
   // The register test: no refusal may carry developer vocabulary, and none may
@@ -55,6 +62,8 @@ describe("dohc guard refusals", () => {
       notARealFolderRefusal(DOHC_METADATA_GUARD, asLink),
       outsideWorkspaceRefusal(DOHC_TRASH_GUARD),
       outsideWorkspaceRefusal(DOHC_METADATA_GUARD),
+      notARealFolderRefusal(DOHC_ENGINE_GUARD, asFile),
+      outsideWorkspaceRefusal(DOHC_ENGINE_GUARD),
     ];
     for (const message of all) {
       expect(message).toMatch(/ Then retry\.$/);
