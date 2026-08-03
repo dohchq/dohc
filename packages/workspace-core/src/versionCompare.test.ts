@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { TextFileSnapshot } from "@dohc/workspace-contracts/engine";
 import {
   COMPARE_PAGE_TEXT_BYTE_BUDGET,
+  compareEnginePaths,
   compareVersionFilesPage,
 } from "./versionCompare";
 
@@ -158,6 +159,40 @@ describe("compareVersionFilesPage", () => {
     expect(page.nextAfterPath).toBe("a.md");
   });
 
+  it("walks through an all-identical window instead of returning an empty page", async () => {
+    // The listing may answer a window in which nothing differed: empty
+    // entries WITH a continuation. An empty page with a continuation would
+    // read as "no differences" on the surface and hide everything past it.
+    const calls: Array<string | undefined> = [];
+    const store = {
+      compareVersionFilesPage: async (input: { afterPath?: string }) => {
+        calls.push(input.afterPath);
+        return input.afterPath === undefined
+          ? { entries: [], nextAfterPath: "m.md" }
+          : {
+              entries: [{ path: "z.md", status: "modified" as const }],
+              nextAfterPath: null,
+            };
+      },
+      readTextFile: async (input: { versionId: string; path: string }) =>
+        ({
+          objectId: "object-z",
+          versionId: input.versionId,
+          path: input.path,
+          text: input.versionId === "main" ? "left" : "right",
+          updatedAtMs: 1,
+          latestMomentId: "moment-z",
+          metadata: { origin: "local-file" as const },
+        }) satisfies TextFileSnapshot,
+    };
+    const page = await compareVersionFilesPage(store, INPUT);
+    // MUTATION: return the empty first window -> files [] with a
+    // continuation, and z.md is unreachable from the surface.
+    expect(page.files.map((file) => file.path)).toEqual(["z.md"]);
+    expect(page.nextAfterPath).toBeNull();
+    expect(calls).toEqual([undefined, "m.md"]);
+  });
+
   it("fits a representative healthy comparison in one page (measured)", async () => {
     // Measured evidence for COMPARE_PAGE_TEXT_BYTE_BUDGET (AGENTS.md:
     // "Measure limits that reject work"): the budget never rejects — it
@@ -177,5 +212,22 @@ describe("compareVersionFilesPage", () => {
     const page = await compareVersionFilesPage(storeOf(files), INPUT);
     expect(page.files).toHaveLength(40);
     expect(page.nextAfterPath).toBeNull();
+  });
+});
+
+describe("compareEnginePaths", () => {
+  it("orders paths the way the engine does: code points, not UTF-16 units", () => {
+    // U+E000 is one UTF-16 unit (0xE000); U+10000 is a surrogate pair
+    // starting 0xD800. UTF-16 comparison puts the pair FIRST; the engine
+    // (SQLite BINARY = UTF-8 bytes = code points) puts it LAST. A cursor
+    // comparison made the UTF-16 way drops or duplicates the row at a page
+    // boundary.
+    const bmp = ".env";
+    const astral = "\u{10000}.env";
+    expect(astral < bmp).toBe(true); // the UTF-16 lie this exists to avoid
+    expect(compareEnginePaths(bmp, astral)).toBeLessThan(0);
+    expect(compareEnginePaths(astral, bmp)).toBeGreaterThan(0);
+    expect(compareEnginePaths("a.md", "a.md")).toBe(0);
+    expect(compareEnginePaths("a", "a.md")).toBeLessThan(0);
   });
 });

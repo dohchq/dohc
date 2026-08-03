@@ -1956,6 +1956,13 @@ export interface SecretFileCompareEntry {
   status: VersionFileChangeStatus;
 }
 
+export interface SecretFileComparePage {
+  entries: SecretFileCompareEntry[];
+  // Pass back as afterPath to fetch the next page; null when this page
+  // reached the end of the comparison.
+  nextAfterPath: string | null;
+}
+
 export interface SecretFileWriteOutcome {
   // False when the write matched the current tip exactly (no new moment).
   changed: boolean;
@@ -2022,12 +2029,15 @@ export interface SecretFileStore {
     toVersionId: VersionId;
   }): Promise<void>;
   // Metadata-only comparison of two versions' secret files (statuses are
-  // relative to the target).
+  // relative to the target). Page-shaped like every other listing (#562): the
+  // engine pages this on the wire, and a drain here is what put every
+  // remaining protected row on one compare page.
   compareSecretFileVersions(input: {
     workspaceId: WorkspaceId;
     targetVersionId: VersionId;
     sourceVersionId: VersionId;
-  }): Promise<SecretFileCompareEntry[]>;
+    afterPath?: string;
+  }): Promise<SecretFileComparePage>;
   // Whole-file merge of one secret path from source into target. Secrets
   // never produce conflict records (conflict records carry side texts, which
   // protected contents must never ride): when the source changed relative to

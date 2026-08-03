@@ -3,7 +3,7 @@
 // surfaces' ends of that contract: the loaded window paints, "Show more
 // files" fetches the NEXT page with the continuation, and the count copy
 // never states a number that could be under the truth.
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
 import {
@@ -116,6 +116,58 @@ describe("ConflictReviewDialog paging", () => {
     );
     await screen.findByText("One file has two copies.", { exact: false });
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
+  });
+
+  it("drops a page answered after a resolution replaced the window", async () => {
+    // Show more is in flight when a resolution replaces the window with the
+    // first page of what remains. The old window's rows were repositioned —
+    // appending the stale page would duplicate or resurrect them.
+    let resolveStalePage:
+      | ((page: {
+          conflicts: WorkspaceVersionConflict[];
+          nextAfterConflictId: string | null;
+        }) => void)
+      | null = null;
+    bridgeMock.listWorkspaceVersionConflicts.mockImplementation(
+      async (payload: { afterConflictId?: string }) => {
+        if (payload.afterConflictId === undefined) {
+          return {
+            conflicts: [conflict("c-1"), conflict("c-2")],
+            nextAfterConflictId: "c-2",
+          };
+        }
+        return new Promise((resolve) => {
+          resolveStalePage = resolve;
+        });
+      },
+    );
+    bridgeMock.resolveWorkspaceVersionConflict.mockResolvedValue({
+      conflicts: [conflict("c-2")],
+      nextAfterConflictId: null,
+    });
+    render(
+      <ConflictReviewDialog
+        workspaceId="ws-1"
+        onWorkspaceStateChanged={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findAllByTestId("version-conflict");
+    fireEvent.click(screen.getByTestId("conflict-list-show-more"));
+    fireEvent.click(
+      screen.getAllByTestId("version-conflict-keep-current")[0]!,
+    );
+    await screen.findByText("One file has two copies.", { exact: false });
+
+    resolveStalePage!({
+      conflicts: [conflict("c-3")],
+      nextAfterConflictId: null,
+    });
+    // MUTATION: drop the window-generation guard -> c-3 (a row of the
+    // replaced window) appends to the remaining page.
+    await waitFor(() => {
+      expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
+    });
   });
 
   it("says what failed when the next page does not load, and keeps the retry", async () => {
@@ -240,6 +292,41 @@ describe("VersionComparePage paging", () => {
       [{ workspaceId: "ws-1", versionId: "v-1" }],
       [{ workspaceId: "ws-1", versionId: "v-1", afterPath: "a.md" }],
     ]);
+  });
+
+  it("drops a page answered after a refresh replaced the comparison", async () => {
+    // A refreshed comparison can hand out the SAME cursor again, so only the
+    // window generation can tell the stale answer from a current one.
+    let resolveStalePage:
+      | ((page: {
+          files: Array<ReturnType<typeof compareRow>>;
+          nextAfterPath: string | null;
+        }) => void)
+      | null = null;
+    bridgeMock.compareWorkspaceVersions.mockImplementation(
+      async (payload: { afterPath?: string }) => {
+        if (payload.afterPath === undefined) {
+          return { files: [compareRow("a.md")], nextAfterPath: "a.md" };
+        }
+        return new Promise((resolve) => {
+          resolveStalePage = resolve;
+        });
+      },
+    );
+    render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
+    await screen.findByTestId("version-compare-file");
+    fireEvent.click(screen.getByTestId("version-compare-show-more"));
+    fireEvent.click(screen.getByTestId("version-compare-refresh"));
+    await screen.findByTestId("version-compare-file");
+
+    resolveStalePage!({ files: [compareRow("b.md")], nextAfterPath: null });
+    // MUTATION: drop the window-generation guard -> the old generation's page
+    // appends to the refreshed window (the cursor matches, so a cursor check
+    // alone cannot reject it).
+    await waitFor(() => {
+      expect(screen.getAllByTestId("version-compare-file")).toHaveLength(1);
+    });
+    expect(screen.getByTestId("version-compare-show-more")).toBeTruthy();
   });
 
   it("keeps the loaded window and the retry when the next page fails", async () => {

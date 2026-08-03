@@ -4,6 +4,7 @@ import {
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import {
+  compareEnginePaths,
   compareVersionFilesPage,
   type VersionFileChange,
 } from "@dohc/workspace-core/versionCompare";
@@ -16,6 +17,7 @@ import {
   MAX_VERSIONED_BINARY_FILE_BYTES,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
+  type SecretFileComparePage,
   type SecretFileMoment,
   type SecretFileStore,
   type VersionRecord,
@@ -1713,6 +1715,29 @@ export function createWorkspaceEngineCapture(
     return secretStore;
   }
 
+  // One page of protected-file changes, with the same guarantee as the text
+  // pager (#562): a returned page is empty only when the comparison is
+  // exhausted — an all-identical window is walked through, never returned as
+  // an empty page a surface would misread.
+  async function secretComparePage(
+    targetVersionId: string,
+    sourceVersionId: string,
+    afterPath: string | undefined,
+  ): Promise<SecretFileComparePage> {
+    const secrets = secretStoreFor();
+    let cursor = afterPath;
+    for (;;) {
+      const page = await secrets.compareSecretFileVersions({
+        workspaceId,
+        targetVersionId,
+        sourceVersionId,
+        ...(cursor !== undefined ? { afterPath: cursor } : {}),
+      });
+      if (page.entries.length > 0 || page.nextAfterPath === null) return page;
+      cursor = page.nextAfterPath;
+    }
+  }
+
   // Reconciliation-tolerant listing (WS-H1 gate fix): an unreadable or racy
   // path is skipped and reported as a failed path instead of aborting the
   // whole scan, so one bad directory can never stop every OTHER existing
@@ -3227,34 +3252,42 @@ export function createWorkspaceEngineCapture(
           ...(afterPath !== undefined ? { afterPath } : {}),
         });
         // Protected rows (PR 08): secret files report path + status ONLY —
-        // "Protected file changed", never contents, never diffs. The listing
-        // is metadata-only and small, so it is read whole and windowed onto
-        // this page: rows past the text continuation belong to later pages.
-        const secretChanges = await secretStoreFor().compareSecretFileVersions({
-          workspaceId,
+        // "Protected file changed", never contents, never diffs. ONE engine
+        // page of them (#562): both sources page by path, and the merged page
+        // ends at the SMALLER of the two continuations, so one cursor resumes
+        // both. Rows past that boundary are re-fetched by the next page —
+        // dropped here, never lost.
+        const secretPage = await secretComparePage(
           targetVersionId,
           sourceVersionId,
-        });
-        const windowedSecrets = secretChanges.filter(
-          (change) =>
-            (afterPath === undefined || change.path > afterPath) &&
-            (textPage.nextAfterPath === null ||
-              change.path <= textPage.nextAfterPath),
+          afterPath,
         );
+        const textNext = textPage.nextAfterPath;
+        const secretNext = secretPage.nextAfterPath;
+        const boundary =
+          textNext !== null && secretNext !== null
+            ? compareEnginePaths(textNext, secretNext) <= 0
+              ? textNext
+              : secretNext
+            : (textNext ?? secretNext);
+        // Every boundary comparison is in the ENGINE's path order (UTF-8
+        // bytes = code points). A UTF-16 `<` here can drop a non-BMP path at
+        // the boundary — or emit it twice, once per page.
+        const inWindow = (path: string): boolean =>
+          boundary === null || compareEnginePaths(path, boundary) <= 0;
         const files = [
-          ...textPage.files,
-          ...windowedSecrets.map(
-            (change): VersionFileChange => ({
-              path: change.path,
-              status: change.status,
-              protected: true,
-            }),
-          ),
-          // The same code-unit order the continuation cursor pages in — a
-          // locale collation here could sort a row past the cursor and lose
-          // it between pages.
-        ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-        return { files, nextAfterPath: textPage.nextAfterPath };
+          ...textPage.files.filter((change) => inWindow(change.path)),
+          ...secretPage.entries
+            .filter((change) => inWindow(change.path))
+            .map(
+              (change): VersionFileChange => ({
+                path: change.path,
+                status: change.status,
+                protected: true,
+              }),
+            ),
+        ].sort((a, b) => compareEnginePaths(a.path, b.path));
+        return { files, nextAfterPath: boundary };
       });
     },
 
@@ -3276,12 +3309,20 @@ export function createWorkspaceEngineCapture(
           count += page.entries.length;
           afterPath = page.nextAfterPath ?? undefined;
         } while (afterPath !== undefined);
-        const secretChanges = await secretStoreFor().compareSecretFileVersions({
-          workspaceId,
-          targetVersionId: ENGINE_MAIN_VERSION_ID,
-          sourceVersionId,
-        });
-        return count + secretChanges.length;
+        let secretAfterPath: string | undefined;
+        do {
+          const page = await secretStoreFor().compareSecretFileVersions({
+            workspaceId,
+            targetVersionId: ENGINE_MAIN_VERSION_ID,
+            sourceVersionId,
+            ...(secretAfterPath !== undefined
+              ? { afterPath: secretAfterPath }
+              : {}),
+          });
+          count += page.entries.length;
+          secretAfterPath = page.nextAfterPath ?? undefined;
+        } while (secretAfterPath !== undefined);
+        return count;
       });
     },
 
@@ -3408,11 +3449,22 @@ export function createWorkspaceEngineCapture(
         // and Main's previous state stays one protected moment back in
         // history — restorable, so nothing is lost.
         const secrets = secretStoreFor();
-        const secretChanges = await secrets.compareSecretFileVersions({
-          workspaceId,
-          targetVersionId: ENGINE_MAIN_VERSION_ID,
-          sourceVersionId,
-        });
+        const secretChanges: SecretFileComparePage["entries"] = [];
+        {
+          let secretAfterPath: string | undefined;
+          do {
+            const page = await secrets.compareSecretFileVersions({
+              workspaceId,
+              targetVersionId: ENGINE_MAIN_VERSION_ID,
+              sourceVersionId,
+              ...(secretAfterPath !== undefined
+                ? { afterPath: secretAfterPath }
+                : {}),
+            });
+            secretChanges.push(...page.entries);
+            secretAfterPath = page.nextAfterPath ?? undefined;
+          } while (secretAfterPath !== undefined);
+        }
         for (const change of secretChanges) {
           const applied = await secrets.applySecretFileFromVersion({
             workspaceId,

@@ -917,26 +917,27 @@ export class VersionedLiveAdapter {
     await this.request(VERSIONED_METHOD.secretsFork, input);
   }
 
+  // ONE `secrets.compare` page, passed through with the daemon's own
+  // continuation (#562) — the drain that put every remaining protected row on
+  // one compare page lived here.
   async compareSecretFileVersions(input: {
     workspaceId: string;
     targetVersionId: string;
     sourceVersionId: string;
-  }): Promise<SecretCompareEntry[]> {
+    afterPath?: string;
+  }): Promise<{
+    entries: SecretCompareEntry[];
+    nextAfterPath: string | null;
+  }> {
     this.assertWorkspace(input.workspaceId);
-    const rows: SecretCompareEntry[] = [];
-    let afterPath: string | undefined;
-    do {
-      const page = await this.request(VERSIONED_METHOD.secretsCompare, {
-        workspaceId: input.workspaceId,
-        targetVersionId: input.targetVersionId,
-        sourceVersionId: input.sourceVersionId,
-        limit: 500,
-        ...(afterPath !== undefined ? { afterPath } : {}),
-      });
-      rows.push(...page.entries);
-      afterPath = page.nextAfterPath ?? undefined;
-    } while (afterPath !== undefined);
-    return rows;
+    const page = await this.request(VERSIONED_METHOD.secretsCompare, {
+      workspaceId: input.workspaceId,
+      targetVersionId: input.targetVersionId,
+      sourceVersionId: input.sourceVersionId,
+      limit: 500,
+      ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
+    });
+    return { entries: page.entries, nextAfterPath: page.nextAfterPath };
   }
 
   async applySecretFileFromVersion(input: {

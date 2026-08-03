@@ -810,6 +810,12 @@ export function VersionMergeDialog(props: {
   const { workspaceId, source } = props;
   const [stage, setStage] = useState<MergeStage>({ stage: "confirm" });
   const liveToken = useRef(0);
+  // Which loaded conflict window a "Show more" answer belongs to. Every
+  // REPLACEMENT of the window (the merge result, each resolution's remaining
+  // page) advances it: a stale page for a replaced window would append rows
+  // the replacement already repositioned (the renderer async-state
+  // invariant).
+  const windowGeneration = useRef(0);
   useEffect(
     () => () => {
       liveToken.current += 1;
@@ -833,6 +839,7 @@ export function VersionMergeDialog(props: {
       // of ALL open conflicts, and a lingering sync conflict must not turn a
       // clean merge into a conflicted one.
       if (result.conflictCount > 0) {
+        windowGeneration.current += 1;
         setStage({
           stage: "conflicts",
           conflicts: result.conflicts,
@@ -853,6 +860,7 @@ export function VersionMergeDialog(props: {
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
       props.onWorkspaceStateChanged();
+      windowGeneration.current += 1;
       setStage(
         remaining.conflicts.length > 0 || remaining.nextAfterConflictId !== null
           ? {
@@ -869,11 +877,15 @@ export function VersionMergeDialog(props: {
   const loadMoreConflicts = useCallback(async () => {
     if (stage.stage !== "conflicts" || stage.nextAfterConflictId === null) return;
     const token = liveToken.current;
+    const generation = windowGeneration.current;
     const page = await bridge().listWorkspaceVersionConflicts({
       workspaceId,
       afterConflictId: stage.nextAfterConflictId,
     });
     if (token !== liveToken.current) return;
+    // A resolution replaced the window while this page was in flight; its
+    // rows belong to the window that asked, not the one that remains.
+    if (generation !== windowGeneration.current) return;
     setStage((current) =>
       current.stage === "conflicts"
         ? {
@@ -1660,9 +1672,16 @@ export function VersionComparePage(props: {
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  // Which loaded window a page answer belongs to. Every REPLACEMENT of the
+  // window (a refresh, a new version) advances it, and a "Show more" answer
+  // may only append to the window that asked — a cursor value alone cannot
+  // tell two generations apart, because a refreshed comparison can hand out
+  // the same cursor again (the renderer async-state invariant).
+  const windowGeneration = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
+    windowGeneration.current += 1;
     setState({ status: "loading" });
     setLoadMoreError(null);
     void (async () => {
@@ -1695,16 +1714,18 @@ export function VersionComparePage(props: {
   const loadMore = useCallback(() => {
     if (state.status !== "ready" || state.nextAfterPath === null) return;
     const afterPath = state.nextAfterPath;
+    const generation = windowGeneration.current;
     setLoadingMore(true);
     setLoadMoreError(null);
     void bridge()
       .compareWorkspaceVersions({ workspaceId, versionId, afterPath })
       .then((page) => {
+        // A refresh replaced the window while this page was in flight. The
+        // refreshed comparison can reuse the same cursor value, so only the
+        // generation can prove this answer still has a window to append to.
+        if (windowGeneration.current !== generation) return;
         setState((current) =>
-          // Guarded by the cursor: a refresh that replaced the window resets
-          // nextAfterPath, and a stale page for the old cursor must not
-          // append to the new window.
-          current.status === "ready" && current.nextAfterPath === afterPath
+          current.status === "ready"
             ? {
                 ...current,
                 files: [...current.files, ...page.files],
@@ -1714,6 +1735,7 @@ export function VersionComparePage(props: {
         );
       })
       .catch((error) => {
+        if (windowGeneration.current !== generation) return;
         setLoadMoreError(
           ipcErrorMessage(error, "Couldn't load more changed files."),
         );
@@ -1895,6 +1917,10 @@ export function ConflictReviewDialog(props: {
   >({ status: "loading" });
   const [versionNames, setVersionNames] = useState<Map<string, string>>(new Map());
   const liveToken = useRef(0);
+  // Same rule as the merge dialog: a "Show more" answer may only append to
+  // the window that asked, and every window replacement (the initial load,
+  // each resolution's remaining page) advances this.
+  const windowGeneration = useRef(0);
   useEffect(
     () => () => {
       liveToken.current += 1;
@@ -1920,6 +1946,7 @@ export function ConflictReviewDialog(props: {
             (versions?.versions ?? []).map((version) => [version.id, version.name]),
           ),
         );
+        windowGeneration.current += 1;
         setState({
           status: "ready",
           conflicts: result.conflicts,
@@ -1939,6 +1966,7 @@ export function ConflictReviewDialog(props: {
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
       props.onWorkspaceStateChanged();
+      windowGeneration.current += 1;
       setState({
         status: "ready",
         conflicts: remaining.conflicts,
@@ -1952,11 +1980,15 @@ export function ConflictReviewDialog(props: {
   const loadMoreConflicts = useCallback(async () => {
     if (state.status !== "ready" || state.nextAfterConflictId === null) return;
     const token = liveToken.current;
+    const generation = windowGeneration.current;
     const page = await bridge().listWorkspaceVersionConflicts({
       workspaceId,
       afterConflictId: state.nextAfterConflictId,
     });
     if (token !== liveToken.current) return;
+    // A resolution replaced the window while this page was in flight; its
+    // rows belong to the window that asked, not the one that remains.
+    if (generation !== windowGeneration.current) return;
     setState((current) =>
       current.status === "ready"
         ? {

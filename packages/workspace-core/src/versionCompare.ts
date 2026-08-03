@@ -43,8 +43,33 @@ export const COMPARE_PAGE_TEXT_BYTE_BUDGET = 256 * 1024;
 export interface VersionComparePage {
   files: VersionFileChange[];
   // Pass back as afterPath to fetch the next page; null when this page
-  // reached the end of the comparison.
+  // reached the end of the comparison. A page with a continuation always
+  // carries at least one row — an all-identical window is walked through
+  // here, never returned as an empty page the surface would misread as "no
+  // differences".
   nextAfterPath: string | null;
+}
+
+/**
+ * Path order as the ENGINE orders paths: SQLite's BINARY collation compares
+ * UTF-8 bytes, and UTF-8 byte order is code-point order. JavaScript's `<`
+ * compares UTF-16 code units, which disagrees for any path holding a
+ * character above U+FFFF (surrogates sort below U+E000..U+FFFF) — a cursor
+ * comparison made that way can drop or duplicate a row at a page boundary.
+ */
+export function compareEnginePaths(a: string, b: string): number {
+  const aIterator = a[Symbol.iterator]();
+  const bIterator = b[Symbol.iterator]();
+  for (;;) {
+    const aNext = aIterator.next();
+    const bNext = bIterator.next();
+    if (aNext.done && bNext.done) return 0;
+    if (aNext.done) return -1;
+    if (bNext.done) return 1;
+    const aCode = aNext.value.codePointAt(0)!;
+    const bCode = bNext.value.codePointAt(0)!;
+    if (aCode !== bCode) return aCode < bCode ? -1 : 1;
+  }
 }
 
 // UTF-8 length without building the encoded copy: the budget is spent on
@@ -82,12 +107,23 @@ export async function compareVersionFilesPage(
   },
 ): Promise<VersionComparePage> {
   const budget = input.byteBudget ?? COMPARE_PAGE_TEXT_BYTE_BUDGET;
-  const delta = await store.compareVersionFilesPage({
-    workspaceId: input.workspaceId,
-    sourceVersionId: input.sourceVersionId,
-    targetVersionId: input.targetVersionId,
-    ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
-  });
+  // The listing may answer a window in which nothing differed: an empty
+  // entries array WITH a continuation. Walk through those here — cheap, no
+  // text rides them — so a returned page is empty only when the comparison
+  // is exhausted. Surfaces read an empty page as "no differences", and an
+  // empty page with a continuation would hide every difference past it.
+  let afterPath = input.afterPath;
+  let delta: Awaited<ReturnType<(typeof store)["compareVersionFilesPage"]>>;
+  for (;;) {
+    delta = await store.compareVersionFilesPage({
+      workspaceId: input.workspaceId,
+      sourceVersionId: input.sourceVersionId,
+      targetVersionId: input.targetVersionId,
+      ...(afterPath !== undefined ? { afterPath } : {}),
+    });
+    if (delta.entries.length > 0 || delta.nextAfterPath === null) break;
+    afterPath = delta.nextAfterPath;
+  }
 
   const files: VersionFileChange[] = [];
   let spentBytes = 0;
