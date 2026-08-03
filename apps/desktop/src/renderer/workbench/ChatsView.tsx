@@ -789,10 +789,12 @@ function ComposerNotice(props: { testId: string; children: React.ReactNode }) {
 // waiting on the user for (asks + needs-input). It reuses the agent
 // notification model rather than a heavy new surface, and stays hidden when
 // there's nothing to answer.
-function AddressedToMe(props: {
-  notifications: readonly AgentNotification[];
-  onOpen?: (notification: AgentNotification) => void;
-}) {
+//
+// The rows are informational, and a notification is why: it carries a
+// workspace, a run, and copy — never a conversation or a message. The user
+// acts where the run does: a blocked run raises its own permission card, and
+// the History rail says what it did.
+function AddressedToMe(props: { notifications: readonly AgentNotification[] }) {
   const waiting = props.notifications.filter(
     (notification) => notification.kind === "asked" || notification.kind === "needs-input",
   );
@@ -807,9 +809,12 @@ function AddressedToMe(props: {
         Addressed to me
       </p>
       <ul className="m-0 list-none p-0">
-        {waiting.map((notification) => {
-          const row = (
-            <>
+        {waiting.map((notification) => (
+          <li key={notification.id}>
+            <div
+              data-testid="chats-addressed-item"
+              className="flex w-full items-start gap-1.5 px-3 py-2 text-left"
+            >
               <Bot size={13} aria-hidden className="mt-0.5 shrink-0 text-accent" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-[12px] font-medium text-ink">
@@ -817,32 +822,9 @@ function AddressedToMe(props: {
                 </span>
                 <span className="block truncate text-[11px] text-muted">{notification.body}</span>
               </span>
-            </>
-          );
-          return (
-            <li key={notification.id}>
-              {/* Without a destination the row is informational — never a
-                  button whose click goes nowhere. */}
-              {props.onOpen ? (
-                <button
-                  type="button"
-                  data-testid="chats-addressed-item"
-                  onClick={() => props.onOpen?.(notification)}
-                  className="flex w-full cursor-pointer items-start gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
-                >
-                  {row}
-                </button>
-              ) : (
-                <div
-                  data-testid="chats-addressed-item"
-                  className="flex w-full items-start gap-1.5 px-3 py-2 text-left"
-                >
-                  {row}
-                </div>
-              )}
-            </li>
-          );
-        })}
+            </div>
+          </li>
+        ))}
       </ul>
     </section>
   );
@@ -862,7 +844,6 @@ export function ChatsView(props: {
   workspaceFiles?: readonly WorkspaceFileEntry[];
   // "Addressed to me" inbox: agent asks / requests waiting on the user.
   addressedToMe?: readonly AgentNotification[];
-  onOpenAddressed?: (notification: AgentNotification) => void;
   // Main-derived settings/status summary. The CTA only navigates to settings;
   // Chats never configures executables or grants capabilities itself.
   agentSetup?: AgentSetupSummary | null;
@@ -3546,7 +3527,15 @@ export function ChatsView(props: {
             <button
               type="button"
               data-testid="chats-reply-context"
-              onClick={() => scrollToMessage(parent.id)}
+              // The jump writes no navigation, so nothing else here cancels
+              // the pending cross-surface DM lookup — and a jump is still the
+              // user commanding this conversation. Report it as one, before
+              // the scroll, or the DM answers late and replaces the message
+              // they just jumped to.
+              onClick={() => {
+                props.onNavCommand?.(nav);
+                scrollToMessage(parent.id);
+              }}
               className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             >
               ↳ replying to {chatAuthorLabel(parent)}
@@ -4367,10 +4356,7 @@ export function ChatsView(props: {
       onKeyDownCapture={onKeyDownCapture}
     >
       <div className={`min-h-0 flex-1 overflow-y-auto ${pageColumn}`}>
-        <AddressedToMe
-          notifications={props.addressedToMe ?? []}
-          onOpen={props.onOpenAddressed}
-        />
+        <AddressedToMe notifications={props.addressedToMe ?? []} />
         <section className="border-b border-line" aria-label="Feed">
           <button
             type="button"
