@@ -1226,9 +1226,19 @@ export function createWorkspaceEngineCapture(
   // — the write landed, the path is provably gone, or another owner took it.
   // An operation merely ATTEMPTING is not proof: a payment that met the lock
   // again, a delete that failed, a release that failed all keep the debt.
+  // THE PROOF RULE, sharply (#595 round 10): the proof must be that THIS
+  // write landed — never that some adjacent operation returned Ok. A
+  // settle handed to another session, a close that raced a newer update,
+  // a delete that removed the path: each says something true about
+  // ITSELF and nothing about the write this debt owes.
   interface DetachedLockedDebt {
     pay: () => Promise<void>;
     arm: () => void;
+    // Release anything the debt still holds when it is discarded without
+    // being paid. A retained retry session is a DAEMON LEASE: dropping
+    // the reference strands it, and every later open of that path is
+    // refused ydoc-session-busy until the daemon restarts.
+    discard: () => Promise<void>;
   }
   const detachedLockedDebts = new Map<string, DetachedLockedDebt>();
 
@@ -1256,7 +1266,15 @@ export function createWorkspaceEngineCapture(
     suspended: Array<[string, DetachedLockedDebt]>,
     reason: string,
   ): void {
-    for (const [path] of suspended) {
+    for (const [path, debt] of suspended) {
+      // The debt may hold a retry session whose release the daemon
+      // REFUSED — the only session that can free that path's lease
+      // (#595 round 10). Discarding the debt without closing it strands
+      // the lease, and restoring or recreating the path then answers
+      // ydoc-session-busy until the daemon restarts.
+      void debt.discard().catch((error: unknown) => {
+        onError(`ydoc close retry of ${path}`, error);
+      });
       onError(
         `ydoc close retry of ${path}`,
         new Error(
@@ -3120,15 +3138,21 @@ export function createWorkspaceEngineCapture(
             detachedLockedDebts.delete(input.path);
             return;
           }
-          const live = liveYDocSessions.get(input.path);
-          if (live) {
-            void live.session
-              .settleNow({ summary: "session close" })
-              .catch(() => undefined);
-            detachedLockedDebts.delete(input.path);
-            return;
-          }
           try {
+            const live = liveYDocSessions.get(input.path);
+            if (live) {
+              // A HANDOFF, not a hand-wave (#595 round 10). Firing this
+              // settle and dropping the debt took "a live session exists"
+              // as proof the write would land: that settle can exhaust its
+              // own reconnect retry, and the receiving generation never saw
+              // the original lock refusal, so nothing there re-arms. Await
+              // it — success IS this write landing, and a failure keeps the
+              // debt (a still-held lock re-arms; anything else reports and
+              // re-arms like every other unproven attempt).
+              await live.session.settleNow({ summary: "session close" });
+              detachedLockedDebts.delete(input.path);
+              return;
+            }
             // The active-version read lives INSIDE the guarded block (#595
             // round 9): it can reject (the reconnect ladder exhausted, the
             // engine refusing the read), and rejecting outside left the debt
@@ -3165,6 +3189,9 @@ export function createWorkspaceEngineCapture(
               armDetachedLockedRetry();
               return;
             }
+            let settled = false;
+            let settleIssued = false;
+            let updateOutranSettle = false;
             const { session: retrySession } =
               await openRestartSafeRustYDocSession({
                 versionId,
@@ -3174,13 +3201,27 @@ export function createWorkspaceEngineCapture(
                   : {}),
                 onDead: () => undefined,
                 onAlive: () => undefined,
-                onRemoteUpdate: () => undefined,
+                onRemoteUpdate: () => {
+                  // An update the settle did not carry is not covered by
+                  // it (#595 round 10). The close below cancels this
+                  // update's debounce and sends settle: false, and a
+                  // REPLICATED lineage compacts and releases without the
+                  // local-only unsettled guard (durable.rs) — so the close
+                  // succeeds over a projection that never reached Markdown.
+                  //
+                  // The window opens when the settle is ISSUED, because
+                  // the projection is taken INSIDE that call: an update
+                  // delivered while it is in flight is already outside
+                  // what it carries. Erring wide costs one extra settle;
+                  // erring narrow loses the update entirely.
+                  if (settleIssued) updateOutranSettle = true;
+                },
                 onSettleStart: () => undefined,
                 onSettleError: () => undefined,
                 onSettled: () => undefined,
               });
-            let settled = false;
             try {
+              settleIssued = true;
               await retrySession.settleNow({ summary: "session close" });
               settled = true;
             } finally {
@@ -3198,6 +3239,14 @@ export function createWorkspaceEngineCapture(
                 pendingRelease = { session: retrySession, settled };
                 throw closeError;
               }
+            }
+            if (updateOutranSettle) {
+              // The close returned Ok, but about a projection this settle
+              // never carried. That is proof of the RELEASE, not of the
+              // write — the debt stands and the next attempt settles the
+              // newer state.
+              armDetachedLockedRetry();
+              return;
             }
             // PROOF: the write landed and the session released.
             detachedLockedDebts.delete(input.path);
@@ -3236,11 +3285,23 @@ export function createWorkspaceEngineCapture(
             enqueue(`ydoc close retry of ${input.path}`, payDetachedLockedDebt);
           }, delay);
         };
+        // Discarding a debt still has to release what it holds: a retained
+        // retry session is a live daemon lease on this path.
+        const discardDetachedLockedDebt = async (): Promise<void> => {
+          if (pendingRetryTimer !== null) {
+            clearTimeout(pendingRetryTimer);
+            pendingRetryTimer = null;
+          }
+          const held = pendingRelease;
+          pendingRelease = null;
+          if (held !== null) await held.session.close({ settle: false });
+        };
         const scheduleDetachedLockedSettle = (): void => {
           if (stopped) return;
           detachedLockedDebts.set(input.path, {
             pay: payDetachedLockedDebt,
             arm: armDetachedLockedRetry,
+            discard: discardDetachedLockedDebt,
           });
           armDetachedLockedRetry();
         };

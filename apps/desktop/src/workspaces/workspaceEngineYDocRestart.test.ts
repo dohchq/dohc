@@ -2410,6 +2410,12 @@ async function lockedRebindCapture(prefix: string) {
     replicated: false,
     closeFailure: null as Error | null,
     closeSettleFailure: null as Error | null,
+    // #595 round 10: a settle that fails for a NON-lock reason (the live
+    // session's reconnect retry exhausted), and a remote update delivered
+    // after a settle resolves.
+    settleFailure: null as Error | null,
+    emitUpdateAfterSettle: false,
+    closesWithSettleFalse: 0,
     journal: [] as Uint8Array[],
     settleCalls: [] as number[],
     closeCalls: [] as number[],
@@ -2440,6 +2446,11 @@ async function lockedRebindCapture(prefix: string) {
       async settleNow() {
         state.settleCalls.push(gen);
         const token = ++tokens;
+        if (state.settleFailure) {
+          const failure = state.settleFailure;
+          options.onSettleError?.(failure, token);
+          throw failure;
+        }
         if (state.locked) {
           const refusal = new DaemonRefusalError(
             { code: "OVERLOADED", message: "file-locked", retry: "afterBackoff" },
@@ -2463,6 +2474,16 @@ async function lockedRebindCapture(prefix: string) {
         };
         await options.onSettled?.(result, token);
         state.settledMarkdowns.push(markdown);
+        if (state.emitUpdateAfterSettle) {
+          // A peer's update lands after this settle resolved: the close
+          // that follows cannot vouch for it. It must be a REAL update —
+          // an undecodable one throws inside the settle instead, which
+          // re-arms the ladder on its own and proves nothing.
+          state.emitUpdateAfterSettle = false;
+          const peer = new Y.Doc();
+          peer.getText("plainText").insert(0, "peer edit");
+          options.onRemoteUpdate(Y.encodeStateAsUpdate(peer));
+        }
         return result;
       },
       async applyExternalMarkdownEdit(markdown) {
@@ -2471,7 +2492,10 @@ async function lockedRebindCapture(prefix: string) {
       async close(closeOptions) {
         state.closeCalls.push(gen);
         if (state.closeFailure) throw state.closeFailure;
-        if (closeOptions?.settle === false) return;
+        if (closeOptions?.settle === false) {
+          state.closesWithSettleFalse += 1;
+          return;
+        }
         // The pre-close settle, same contract as settleNow: refuses while
         // locked, records the settled markdown when it lands.
         state.settleCalls.push(gen);
@@ -3196,5 +3220,141 @@ it("a failing active-version read re-arms instead of stranding the debt", async 
   await expect
     .poll(() => state.settledMarkdowns, { timeout: 15_000 })
     .toEqual(["survives a failed read"]);
+  await capture.stop();
+}, 30_000);
+
+
+it("a handoff to a live session keeps the debt when that settle fails", async () => {
+  // #595 round 10: the transfer was fire-and-forget — it dropped the debt on
+  // the mere EXISTENCE of a live session. That settle can exhaust its own
+  // reconnect retry, and the receiving generation never saw the original
+  // lock refusal, so nothing there re-arms: the durable Y.Doc holds the edit
+  // while the artifact stays stale until an unrelated action or a restart.
+  // The handoff is awaited, and a failure keeps the debt.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-handoff-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "handed off");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The user reopens the document, and the handoff settle FAILS for a
+  // non-lock reason.
+  state.locked = false;
+  state.settleFailure = new Error("workspace unavailable");
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await expect
+    .poll(
+      () => state.errors.filter((context) => context.includes("close retry")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // The debt was NOT dropped on the failed handoff: once settles work, the
+  // write lands without any new edit.
+  state.settleFailure = null;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["handed off"]);
+  await reopened.close({ settle: false });
+  await capture.stop();
+}, 30_000);
+
+it("cancelling a debt releases the session whose close was refused", async () => {
+  // #595 round 10: a retained retry session is a live daemon LEASE. Deleting
+  // a debt that holds one strands it, and restoring or recreating that path
+  // then answers ydoc-session-busy until the daemon restarts. Cancelling
+  // closes what it discards.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-discard-lease-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "leased edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The retry opens a session and its RELEASE is refused: the debt now holds
+  // the only session that can free the lease.
+  state.locked = false;
+  state.closeFailure = new Error("ydoc-unsettled-close");
+  // Wait for the RETRY's own release to be refused — generation 2's close,
+  // not the original session's, which already ran above.
+  await expect
+    .poll(
+      () => state.closeCalls.filter((generation) => generation === 2).length,
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(0);
+  const releasesBeforeCancel = state.closesWithSettleFalse;
+
+  // The user deletes the path: the debt is cancelled — and must release.
+  state.closeFailure = null;
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+  finishDelete(true);
+  await expect
+    .poll(() => state.closesWithSettleFalse, { timeout: 15_000 })
+    .toBeGreaterThan(releasesBeforeCancel);
+  await capture.stop();
+}, 30_000);
+
+it("a close that raced a newer update is not proof the write landed", async () => {
+  // #595 round 10: an update arriving after settleNow resolves is not
+  // covered by that settle. The close cancels its debounce and sends
+  // settle: false, and a REPLICATED lineage compacts and releases without
+  // the local-only unsettled guard — so the close succeeds over a
+  // projection that never reached Markdown. Ok from the close proves the
+  // RELEASE, not the write.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-raced-close-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "raced edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The retry's settle succeeds, then a peer update lands before its close.
+  state.locked = false;
+  state.emitUpdateAfterSettle = true;
+  await expect
+    .poll(() => state.settledMarkdowns.length, { timeout: 15_000 })
+    .toBeGreaterThan(0);
+
+  // The debt was NOT released by that close: another attempt follows and
+  // settles the newer state.
+  const settlesAfterRace = state.settleCalls.length;
+  await expect
+    .poll(() => state.settleCalls.length, { timeout: 15_000 })
+    .toBeGreaterThan(settlesAfterRace);
   await capture.stop();
 }, 30_000);
