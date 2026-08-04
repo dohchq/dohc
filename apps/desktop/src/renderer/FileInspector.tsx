@@ -1487,6 +1487,15 @@ function MarkdownView(props: {
       // branch above replaces this view in the very commit that flips
       // `opening` — and this cleanup is already willing to WRITE this exact
       // value, so keeping it can only be safer than losing it.
+      //
+      // DECLARED UNPINNED. No test enters this branch, and that is a property
+      // of the design rather than a coverage gap: the render-phase capture
+      // clears `unsavedDraft` first on every path a test can construct, so
+      // reaching here needs the engine open and the file read to land in the
+      // same batch. A mutation aimed at it survives against the neighbouring
+      // "no write happens" tests, because turning the capture back into a
+      // `return` still writes nothing — those tests pin the write, not the
+      // rescue. Kept as a backstop, not as covered code.
       if (writesBlocked() || openingRef.current) {
         captureOrphanedDraft(workspaceId, path, text);
         return;

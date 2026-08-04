@@ -6477,6 +6477,38 @@ describe("set-aside draft recovery", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull(),
     );
+
+    // ...and with nothing left, the surface says so rather than implying a
+    // draft that is not there. This is the same state a reload, quit,
+    // update-restart or renderer crash leaves behind, because the store is
+    // in-memory by design.
+    expect(screen.getByTestId("notice-center").textContent).toContain(
+      "All clear",
+    );
+  });
+
+  // #579 adversarial review: the store dies on reload, quit, update-restart
+  // and renderer crash. That is a deliberate scope decision (#600 owns
+  // persistence), which makes it honest ONLY if the surface offering recovery
+  // says so. Nothing pinned that sentence, so it could have been edited away
+  // and left the design silently lossy.
+  it("discloses that set-aside edits live only in this window", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    captureOrphanedDraft(WORKSPACE.workspaceId, "notes/a.md", "Kept!");
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    // MUTATION (lifetime disclosure): drop the second paragraph from
+    // NoticeCenter's set-aside section. Recovery then looks durable, and the
+    // next reload deletes the user's only copy without ever having said it
+    // could.
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const section = await screen.findByTestId("notice-set-aside-edits");
+    expect(section.textContent).toContain("They live only in this window");
+    // ...and it names both ways out, so the warning offers what it demands.
+    expect(section.textContent).toContain("Copy an edit to keep its text");
+    expect(section.textContent).toContain("Dismiss deletes it for good");
   });
 
   // #579 review r4: a failed save-first flush aborts the switch, the
