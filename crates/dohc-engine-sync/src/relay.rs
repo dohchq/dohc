@@ -330,6 +330,13 @@ pub struct ShareViewPullOutcome {
     /// so it is counted in `skipped` without a refusal.
     pub refusals: Vec<ShareViewRefusal>,
     pub changed_paths: Vec<ShareViewChangedPath>,
+    /// How far the share has been READ, not how much of it applied. It
+    /// advances past every op the page carried, including the skipped ones —
+    /// those are two different facts, and `applied`, `skipped` and `refusals`
+    /// carry the other one. A cursor that stalled on a refusal would re-fetch
+    /// the same refusal forever and hold every later op in the share behind
+    /// it; one that advanced silently would lose the skip. So it advances,
+    /// and the skip is recorded.
     pub pending_cursor: crate::ShareCursor,
 }
 
@@ -1342,7 +1349,28 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 applied: &mut applied,
                 changed: &mut changed,
             };
-            replay_share_view_op(&mut replay, &envelope)?;
+            if let Err(error) = replay_share_view_op(&mut replay, &envelope) {
+                // The replay's half of the rule the boundary applies above.
+                // Aborting here froze the whole share on one refused blob: the
+                // cursor never committed, the identical refusal came back on
+                // every later pull, and every op behind it never arrived.
+                //
+                // A skip can leave an op PARTLY applied — a `version.create`
+                // refused at its third snapshot keeps the first two. `applied`
+                // counts what landed and the refusal names the op, so neither
+                // number claims the other's fact.
+                let Some(code) = error.share_replay_refusal_code() else {
+                    return Err(error);
+                };
+                skipped += 1;
+                refusals.push(ShareViewRefusal::new(
+                    envelope.origin_id,
+                    envelope.origin_seq,
+                    &envelope.op_kind,
+                    code,
+                    error.to_string(),
+                ));
+            }
         }
         Ok(ShareViewPullOutcome {
             fetched,

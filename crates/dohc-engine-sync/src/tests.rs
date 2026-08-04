@@ -15188,6 +15188,10 @@ fn share_view_binary_pull(
 /// binary ceiling, so the only floor left was the generic 64 MiB blob store —
 /// a share could persist a binary an ordinary capture refuses.
 ///
+/// The refusal is a SKIP, not a failed pull — `a_refused_shared_blob_does_not
+/// _freeze_the_share` holds that half — so this one pins the ceiling and the
+/// measurements the skip carries.
+///
 /// MUTATION: delete the ceiling check in `replay_share_write` and the over-cap
 /// half lands the blob; narrow it to the text ceiling and the at-cap half stops
 /// refusing.
@@ -15199,14 +15203,30 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
 
     let over_cap = vec![7u8; limit_bytes + 1];
     let over_cap_sha = dohc_engine_storage::hex_sha256(&over_cap);
+    let refused = share_view_binary_pull(&mut engine, "docs/over-cap.bin", over_cap)
+        .expect("an over-cap shared binary is skipped, not fatal");
     assert_eq!(
-        share_view_binary_pull(&mut engine, "docs/over-cap.bin", over_cap)
-            .expect_err("an over-cap shared binary is refused"),
-        RelayError::BlobTooLarge {
-            constraint,
-            limit_bytes,
-            observed: ObservedBytes::Exact(limit_bytes + 1),
-        }
+        (refused.fetched, refused.applied, refused.skipped),
+        (1, 0, 1)
+    );
+    // The refusal keeps its measurements. The constraint, the limit and the
+    // observed usage are what tell a reader WHICH ceiling refused and by how
+    // much; a skip that flattened them to "something was skipped" would be
+    // unactionable.
+    assert_eq!(
+        refused
+            .refusals
+            .iter()
+            .map(|refusal| (refusal.code, refusal.detail.as_str()))
+            .collect::<Vec<_>>(),
+        [(
+            "invalid-input",
+            format!(
+                "relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
+                limit_bytes + 1
+            )
+            .as_str()
+        )]
     );
     assert!(
         !engine
@@ -15293,5 +15313,196 @@ fn binary_blob_over_the_binary_ceiling_is_refused_at_ingest() {
             .has_binary_blob(&refused.sha256)
             .expect("binary blob presence"),
         "an over-cap binary must not persist"
+    );
+}
+
+/// One op the recipient will never apply must not take the whole share with it.
+///
+/// A binary over the kind ceiling is refused deterministically — the same body
+/// comes back on every pull — so aborting there left the share cursor at 0,
+/// re-fetched the identical refusal forever, and held every later op in the
+/// share behind it with no recipient-side recovery. The cursor records how far
+/// the share was READ; the refusal records that this op never applied.
+///
+/// MUTATION: return `None` for `BlobTooLarge` in
+/// `RelayError::share_replay_refusal_code` and the pull aborts again — the
+/// later write never lands and the cursor never advances.
+#[test]
+fn a_refused_shared_blob_does_not_freeze_the_share() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    let over_cap = vec![9u8; limit_bytes + 1];
+    let over_cap_sha = dohc_engine_storage::hex_sha256(&over_cap);
+    let later = b"the update behind the refused one".to_vec();
+    let later_sha = dohc_engine_storage::hex_sha256(&later);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        share_view_binary_write_op(0, "docs/over-cap.bin", &over_cap_sha),
+                        share_view_write_op(1, "docs/later.md", &later_sha),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(over_cap_sha.clone(), over_cap), (later_sha, later)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("MUTATION: one refused blob aborts the pull and freezes the share");
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (2, 1, 1)
+    );
+    // The cursor advances PAST the refused op. Without this the same page is
+    // fetched forever and nothing later in this share can ever arrive.
+    assert_eq!(
+        outcome.pending_cursor.cursor, 2,
+        "MUTATION: the cursor stalls on the refused op and the share never moves"
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "docs/later.md")
+            .expect("share-view path read is answerable")
+            .map(|snapshot| snapshot.text),
+        Some("the update behind the refused one".to_owned()),
+        "MUTATION: the op behind the refused one never arrives"
+    );
+    assert!(
+        !engine
+            .has_binary_blob(&over_cap_sha)
+            .expect("binary blob presence"),
+        "the skipped blob must not persist"
+    );
+    // Advancing must not make the skip silent. The refusal names the op it
+    // dropped and keeps the constraint, the limit, the unit and the observed
+    // usage — the recipient is told what it will never receive.
+    assert_eq!(
+        outcome
+            .refusals
+            .iter()
+            .map(|refusal| (
+                refusal.origin_id.as_str(),
+                refusal.origin_seq,
+                refusal.op_kind.as_str(),
+                refusal.code,
+                refusal.detail.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [(
+            "peer",
+            0,
+            "moment.append",
+            "invalid-input",
+            format!(
+                "relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
+                limit_bytes + 1
+            )
+            .as_str()
+        )],
+        "MUTATION: the skip is counted but the reason never reaches the recipient"
+    );
+}
+
+/// `BlobInvalid`'s twin of the same freeze. A relay that serves a body which
+/// does not hash to the sha its own op claimed answers identically on every
+/// retry, so aborting wedged the share exactly as the ceiling did. This shape
+/// predates the ceiling refusal; it is the same bug and it takes the same
+/// path.
+///
+/// MUTATION: return `None` for `BlobInvalid` in
+/// `RelayError::share_replay_refusal_code` and the pull aborts again.
+#[test]
+fn a_shared_blob_that_fails_integrity_does_not_freeze_the_share() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+
+    let claimed = b"what the op says the blob is".to_vec();
+    let claimed_sha = dohc_engine_storage::hex_sha256(&claimed);
+    let served = b"what the relay actually served".to_vec();
+    assert_ne!(
+        dohc_engine_storage::hex_sha256(&served),
+        claimed_sha,
+        "the fixture only tests integrity if the served body hashes differently"
+    );
+    let later = b"the update behind the corrupt one".to_vec();
+    let later_sha = dohc_engine_storage::hex_sha256(&later);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        share_view_write_op(0, "docs/corrupt.md", &claimed_sha),
+                        share_view_write_op(1, "docs/later.md", &later_sha),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(claimed_sha, served), (later_sha, later)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("MUTATION: one corrupt blob aborts the pull and freezes the share");
+    assert_eq!(
+        (
+            outcome.fetched,
+            outcome.applied,
+            outcome.skipped,
+            outcome.pending_cursor.cursor
+        ),
+        (2, 1, 1, 2)
+    );
+    let text = VersionedTextStore::new(&mut engine);
+    assert_eq!(
+        text.read_text("ws", "main", "docs/corrupt.md")
+            .expect("share-view path read is answerable")
+            .map(|snapshot| snapshot.text),
+        None,
+        "a body that fails its integrity check must not land"
+    );
+    assert_eq!(
+        text.read_text("ws", "main", "docs/later.md")
+            .expect("share-view path read is answerable")
+            .map(|snapshot| snapshot.text),
+        Some("the update behind the corrupt one".to_owned()),
+        "MUTATION: the op behind the corrupt one never arrives"
+    );
+    assert_eq!(
+        outcome
+            .refusals
+            .iter()
+            .map(|refusal| (refusal.origin_seq, refusal.code, refusal.detail.as_str()))
+            .collect::<Vec<_>>(),
+        [(
+            0,
+            "invalid-input",
+            "relay blob content failed integrity validation"
+        )],
+        "MUTATION: the skip is counted but the reason never reaches the recipient"
     );
 }

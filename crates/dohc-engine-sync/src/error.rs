@@ -178,6 +178,78 @@ impl SyncError {
     }
 }
 
+impl RelayError {
+    /// The machine code a share-view pull records when it SKIPS an op because
+    /// of this failure, or `None` when the failure belongs to the pull itself
+    /// and the pull must abort.
+    ///
+    /// `SyncError::share_disposition` answers this question for the boundary,
+    /// which refuses an op before replay. This answers it for the REPLAY,
+    /// where the failures come back from the transport. The two halves must
+    /// agree: a served op the recipient will never apply wedges the share
+    /// exactly as hard whether the boundary or the blob fetch refuses it.
+    ///
+    /// The code travels with the decision instead of coming from a total
+    /// `RelayError::code`. `map_relay_code` in the runtime crate already owns
+    /// the wire code for every relay failure, and a second total mapping here
+    /// would be a second naming authority for the same thing.
+    ///
+    /// No wildcard arm, for the reason the boundary's twin has none: a new
+    /// variant must decide here rather than inherit "abort" and freeze a
+    /// share.
+    pub(crate) const fn share_replay_refusal_code(&self) -> Option<&'static str> {
+        match self {
+            // The relay served an op whose content this recipient will never
+            // accept, and asking again returns the same answer: the size is
+            // the body's own, and the hash is the relay's own record. Aborting
+            // re-fetches that identical refusal on every pull forever, and
+            // every later op in the share never arrives.
+            //
+            // The code is `SyncError::code`'s for the same two conditions —
+            // one name for one thing — and it is deliberately NOT the boundary
+            // code: the share may well cover this path, and no granter can
+            // repair a blob.
+            RelayError::BlobTooLarge { .. } | RelayError::BlobInvalid => Some("invalid-input"),
+            // Failures of the pull, not of the op. `BlobMissing` is the one
+            // worth naming: the relay does not have the blob YET, the sender
+            // can still upload it, and skipping past it would report a healthy
+            // share as damaged and drop content that was still coming.
+            RelayError::BlobMissing
+            | RelayError::BlobReferenceMissing
+            | RelayError::Unauthorized
+            | RelayError::BadRequest
+            | RelayError::Conflict
+            | RelayError::OriginDiverged
+            | RelayError::NoProgress
+            | RelayError::WorkspaceUnavailable
+            | RelayError::KeyEnvelopeMissing
+            | RelayError::ShareUnavailable
+            | RelayError::EpochSuperseded
+            | RelayError::IdentityNotRecognized
+            | RelayError::IdentityRequired
+            | RelayError::StreamIdentityMismatch
+            | RelayError::AuthorshipMismatch
+            | RelayError::UnknownChatOperation
+            | RelayError::ShareReadOnly
+            | RelayError::ShareOperationRejected
+            | RelayError::PayloadTooLarge
+            | RelayError::PresenceCapacity
+            | RelayError::QuotaExceeded
+            | RelayError::SelfShare
+            | RelayError::AmbiguousSelector
+            | RelayError::InvalidChannel
+            | RelayError::MethodNotAllowed
+            | RelayError::Forbidden
+            | RelayError::ServerInternal
+            | RelayError::UnknownServerCode(_)
+            | RelayError::HttpStatus(_)
+            | RelayError::Partitioned
+            | RelayError::InvalidResponse
+            | RelayError::Local(_) => None,
+        }
+    }
+}
+
 pub(crate) fn local_corruption(reason: &'static str) -> SyncError {
     SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(reason)))
 }
