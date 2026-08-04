@@ -44,9 +44,30 @@ impl Rng {
 }
 
 const WORDS: &[&str] = &[
-    "workspace", "agent", "document", "provenance", "lineage", "review", "decision", "sync",
-    "relay", "snapshot", "markdown", "structure", "inspectable", "durable", "boundary", "capture",
-    "session", "artifact", "primitive", "operator", "measure", "threshold", "evidence", "content",
+    "workspace",
+    "agent",
+    "document",
+    "provenance",
+    "lineage",
+    "review",
+    "decision",
+    "sync",
+    "relay",
+    "snapshot",
+    "markdown",
+    "structure",
+    "inspectable",
+    "durable",
+    "boundary",
+    "capture",
+    "session",
+    "artifact",
+    "primitive",
+    "operator",
+    "measure",
+    "threshold",
+    "evidence",
+    "content",
 ];
 
 /// A block of at least `target` bytes of prose.
@@ -93,7 +114,10 @@ fn grow_rich(target_markdown_bytes: usize, block_bytes: usize, seed: u64) -> Sam
     }
     let markdown = doc.project(ContentKind::Richdoc).expect("project").markdown;
     Sample {
-        label: format!("rich {} / {block_bytes} B blocks", human(target_markdown_bytes)),
+        label: format!(
+            "rich {} / {block_bytes} B blocks",
+            human(target_markdown_bytes)
+        ),
         markdown_bytes: markdown.len(),
         full_state_bytes: doc.encode_full_state().len(),
         blocks,

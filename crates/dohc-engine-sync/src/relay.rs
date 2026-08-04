@@ -1570,7 +1570,11 @@ fn collect_blob_refs(
                 // Its OWN kind, not `Binary`: a Y.Doc delta or full-state base
                 // rides the collab layer's measured payload cap, never the
                 // captured-file cap (#549).
-                insert_optional_ref(&mut refs, op.payload.get("updateBlobSha256"), BlobKind::Ydoc)?;
+                insert_optional_ref(
+                    &mut refs,
+                    op.payload.get("updateBlobSha256"),
+                    BlobKind::Ydoc,
+                )?;
             }
             "secret.file.put" => {
                 insert_optional_ref(
