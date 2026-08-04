@@ -882,6 +882,65 @@ describe("markdown editor unmount flush", () => {
     );
   });
 
+  // ...and the error path is the half that ordering cannot save. A reread that
+  // REJECTS selects the error branch in the same commit that lifts the
+  // refusal, so the view is unmounted before it can render again and act on
+  // the lift. The draft has to be taken on the way out.
+  it("sets a CSV draft aside when the switch reread fails and the view is torn down", async () => {
+    let rejectReread!: (reason: Error) => void;
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "date,amount\n2026-06-10,42",
+        truncated: false,
+      })
+      .mockReturnValueOnce(
+        new Promise((_resolve, reject) => {
+          rejectReread = reject;
+        }),
+      );
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+    await screen.findByTestId("view-csv");
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+
+    const cells = screen.getAllByTestId("csv-cell") as HTMLInputElement[];
+    await user.clear(cells[3]!);
+    await user.type(cells[3]!, "77");
+
+    // The reread fails: `setText(null)` selects the error branch and this view
+    // goes away in the same commit.
+    // MUTATION (F3): restore the early `return` when writes are blocked, so
+    // the cleanup drops the draft instead of setting it aside. The user's text
+    // vanishes with no notice and no recovery entry.
+    await act(async () => {
+      rejectReread(new Error("reread failed"));
+      await Promise.resolve();
+    });
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    const copies = await screen.findAllByTestId("orphaned-draft-copy");
+    await user.click(copies[copies.length - 1]!);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "date,amount\n2026-06-10,77",
+      ),
+    );
+  });
+
   it("can start editing an empty CSV as a table", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",

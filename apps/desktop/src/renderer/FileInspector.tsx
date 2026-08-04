@@ -719,8 +719,18 @@ function useAutosavedTextDraft(props: {
   useEffect(() => {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      if (!unsavedDraft.current || writesBlocked()) return;
+      if (!unsavedDraft.current) return;
+      // A pending draft that cannot be written is SET ASIDE, never dropped
+      // (#579 adversarial review, F3). A reread that REJECTS selects the error
+      // branch in the same commit that lifts the refusal, so this view is gone
+      // before it can render again and act on the lift — waiting to observe it
+      // loses the user's text with no notice. Capturing here needs nothing to
+      // survive: it is the last moment this draft exists.
       unsavedDraft.current = false;
+      if (writesBlocked()) {
+        captureOrphanedDraft(workspaceId, path, latestDraft.current);
+        return;
+      }
       void bridge()
         .writeWorkspaceText({
           workspaceId,
@@ -1468,9 +1478,19 @@ function MarkdownView(props: {
       if (saveTimer.current) clearTimeout(saveTimer.current);
       // `opening` too (#567): unmounting mid-reopen must not land the
       // previous version's draft on the tree the reopen is binding.
-      if (!unsavedDraft.current || writesBlocked() || openingRef.current) return;
+      if (!unsavedDraft.current) return;
       unsavedDraft.current = false;
       const text = serializeDraftRef.current();
+      // Same invariant as the plain-text hook (#579 adversarial review, F3):
+      // a draft this unmount may not write is set aside rather than dropped.
+      // The render-phase capture normally runs first, but it cannot when the
+      // branch above replaces this view in the very commit that flips
+      // `opening` — and this cleanup is already willing to WRITE this exact
+      // value, so keeping it can only be safer than losing it.
+      if (writesBlocked() || openingRef.current) {
+        captureOrphanedDraft(workspaceId, path, text);
+        return;
+      }
       void bridge()
         .writeWorkspaceText({
           workspaceId,
