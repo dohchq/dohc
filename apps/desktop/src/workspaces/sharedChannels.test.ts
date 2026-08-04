@@ -15,7 +15,6 @@ import {
   joinedSharedChannelForTarget,
   joinedSharedChannelLimitRefusal,
   mergeJoinedChannel,
-  releaseJoinedSharedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
 } from "./sharedChannels";
@@ -436,42 +435,42 @@ describe("mergeJoinedChannel", () => {
   });
 });
 
-// The other half of the reservation (#617 codex P1): both join paths write the
-// row BEFORE they pull, so a pull that fails has to hand the slot back.
-describe("releaseJoinedSharedChannel", () => {
-  it("removes the reserved row entirely, leaving no tombstone", () => {
-    const existing = [
-      joined({ shareId: "share-keep", channelWireId: "wire-keep" }),
-      joined({ shareId: "share-reserved", channelWireId: "wire-reserved" }),
-    ];
-    const released = releaseJoinedSharedChannel(existing, "share-reserved");
-    expect(released.map((row) => row.shareId)).toEqual(["share-keep"]);
-    // A leave keeps a tombstone because a channel was really joined. This
-    // never was, so a tombstone here would gate writes into a channel the
-    // workspace does not have — and hold capacity nobody can reclaim.
-    expect(released.some((row) => row.shareId === "share-reserved")).toBe(false);
+// #617 codex round 3: there is deliberately NO release helper. A pull is
+// multi-page and durable, so a failure proves nothing about what landed, and a
+// row removed under landed data is a channel that reads as locally owned. The
+// reservation stays; syncJoinedSharedChannels finishes it or ends it.
+describe("a failed join keeps its reservation", () => {
+  it("leaves the row in place so the write gate still covers the channel", () => {
+    const reserved = mergeJoinedChannel(
+      [joined({ shareId: "share-old", channelWireId: "wire-old" })],
+      joined({ shareId: "share-new", channelWireId: "wire-new", access: "read-only" }),
+    );
+    // The row a failed pull leaves behind is still a row: read-only, so
+    // assertSharedChannelWritable refuses writes into it.
+    const row = reserved.find((entry) => entry.shareId === "share-new");
+    expect(row?.access).toBe("read-only");
+    expect(row?.ended).toBeUndefined();
+    // And it is live, so the next sync pass pulls it again rather than
+    // stranding it.
+    expect(reserved.filter((entry) => entry.ended !== true)).toHaveLength(2);
   });
 
-  it("frees the capacity the reservation took", () => {
-    const full = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS }, (_, index) =>
-      joined({ shareId: `share-${index}`, channelWireId: `wire-${index}` }),
+  // The case codex named: a rejoin whose merge displaced an ended tombstone.
+  // Removing the new row would erase that tombstone too and leave the wire
+  // ungated — strictly worse than never having touched it.
+  it("never leaves a wire that had a tombstone with no row at all", () => {
+    const tombstone = joined({
+      shareId: "share-revoked",
+      channelWireId: "wire-1",
+      ended: true,
+    });
+    const rejoined = mergeJoinedChannel(
+      [tombstone],
+      joined({ shareId: "share-regranted", channelWireId: "wire-1" }),
     );
-    const reserved = mergeJoinedChannel(
-      releaseJoinedSharedChannel(full, "share-0"),
-      joined({ shareId: "share-new", channelWireId: "wire-new" }),
-    );
-    expect(
-      joinedSharedChannelLimitRefusal(reserved, {
-        shareId: "share-another",
-        channelWireId: "wire-another",
-      }),
-    ).not.toBeNull();
-    expect(
-      joinedSharedChannelLimitRefusal(
-        releaseJoinedSharedChannel(reserved, "share-new"),
-        { shareId: "share-another", channelWireId: "wire-another" },
-      ),
-    ).toBeNull();
+    expect(rejoined).toHaveLength(1);
+    // Whatever happens to the pull, SOME row still answers for wire-1.
+    expect(rejoined.filter((entry) => entry.channelWireId === "wire-1")).toHaveLength(1);
   });
 });
 

@@ -313,7 +313,6 @@ import {
   JoinedSharedChannelLimitError,
   joinedSharedChannelLimitRefusal,
   mergeJoinedChannel,
-  releaseJoinedSharedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
 } from "./workspaces/sharedChannels";
@@ -4443,15 +4442,24 @@ function registerIpcHandlers(
         await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
       }
     } catch (error) {
-      // The join did not happen, so the slot it reserved goes back. Leaving it
-      // would hold capacity for a channel this workspace never imported.
-      setWorkspaceSharedChannels(
-        input.workspaceId,
-        releaseJoinedSharedChannel(
-          findWorkspace(input.workspaceId)?.sharedChannels ?? [],
-          joined.shareId,
-        ),
-      );
+      // The reservation STAYS. A pull is multi-page and durable, so a failure
+      // proves nothing about what already landed: an earlier page can be
+      // applied before a later one times out, and a rejoin's merge may already
+      // have displaced an ended or read-only row. Removing the row in either
+      // case leaves channel data with no registry row — and no row is what
+      // joinedSharedChannelForTarget answers null for, so the channel reads as
+      // locally owned and writable. That is the defect the reservation exists
+      // to prevent, arriving through the cleanup path.
+      //
+      // The row is the write gate; it must never be absent while channel data
+      // exists locally. A leaked reservation costs capacity, which the user
+      // can recover by leaving a channel. A released one costs authority,
+      // which nobody can recover.
+      //
+      // It is not really leaked either: syncJoinedSharedChannels pulls every
+      // LIVE row on each pass, so this one either completes on a later pass or
+      // — if the share is genuinely gone — is marked ended and becomes the
+      // tombstone that gates it.
       if (error instanceof ShareUnavailableError) {
         throw new Error("That shared channel isn't available anymore.");
       }
@@ -6894,28 +6902,21 @@ function registerIpcHandlers(
             joined,
           ),
         );
-        try {
-          const daemonRelay = relayClientForWorkspace({
-            workspaceId: workspace.workspaceId,
-            rootPath: workspace.rootPath,
-            relay,
-          });
-          const pulled = await daemonRelay.pullSharedChannel({
-            shareId: info.shareId,
-            channelWireId: info.channelWireId,
-          });
-          if (pulled.applied > 0) {
-            await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
-          }
-        } catch (error) {
-          setWorkspaceSharedChannels(
-            workspace.workspaceId,
-            releaseJoinedSharedChannel(
-              findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
-              joined.shareId,
-            ),
-          );
-          throw error;
+        // No rollback on failure, for the reason joinSharedChannel states: a
+        // multi-page pull can land data before it fails, and a row removed
+        // under landed data is a channel that reads as locally owned. The
+        // reservation stays and the next pass finishes or ends it.
+        const daemonRelay = relayClientForWorkspace({
+          workspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath,
+          relay,
+        });
+        const pulled = await daemonRelay.pullSharedChannel({
+          shareId: info.shareId,
+          channelWireId: info.channelWireId,
+        });
+        if (pulled.applied > 0) {
+          await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
         }
       } catch (error) {
         // A share revoked between the listing and the fetch surfaces as

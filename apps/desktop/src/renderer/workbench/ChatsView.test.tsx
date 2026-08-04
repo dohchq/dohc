@@ -799,6 +799,42 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(notice.textContent).not.toContain("could not read");
   });
 
+  // #618 codex round 3. The failure is account-scoped, and unlike a stale row
+  // it is a PERSISTENT claim: an over-limit answer names the previous
+  // account's share counts. Leaving it up shows account A's numbers under
+  // account B for as long as B's listing takes — or for good, if it stalls.
+  it("drops an over-limit failure when the account changes, even while the next listing stalls", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: "session-a",
+      relay: {
+        state: "over-limit" as const,
+        lanes: [{ lane: "granted" as const, rows: 4097 }],
+        limit: 4096,
+      },
+    });
+    render(navigator(0));
+    expect(
+      (await screen.findByTestId("chats-shares-unreadable")).textContent,
+    ).toContain("You share 4097 channels");
+
+    // The user switches accounts, and the new account's listing never
+    // arrives — the window in which a retained failure lies loudest.
+    bridgeMock.listChatChannelShares.mockReturnValue(new Promise(() => {}));
+    await act(async () => {
+      emitCloudSessionChanged("session-b");
+    });
+
+    // Account A's counts leave with account A's rows.
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-shares-unreadable")).toBeNull();
+    });
+  });
+
   // Over-limit is non-authoritative for the same reason unreachable is: dohc
   // has no listing it can stand behind, so the cached rows are still the best
   // thing it knows. Without this the new state could quietly become

@@ -267,11 +267,19 @@ describe("main-process chat authorization", () => {
       expect(reserveAt, label).toBeGreaterThan(-1);
       expect(pullAt, label).toBeGreaterThan(-1);
       expect(reserveAt, label).toBeLessThan(pullAt);
-      // And a pull that fails hands the slot back: a reservation held for a
-      // channel this workspace never imported is capacity nobody can reclaim.
-      expect(source, label).toContain("releaseJoinedSharedChannel(");
-      expect(source.indexOf("releaseJoinedSharedChannel("), label).toBeGreaterThan(pullAt);
+      // And NOTHING removes the row when the pull fails. A pull is multi-page
+      // and durable, so a failure proves nothing about what landed; a row
+      // removed under landed data is a channel that reads as locally owned
+      // and writable — the reservation's own defect, through the cleanup
+      // path. The row is the write gate: it may never be absent while channel
+      // data exists locally. syncJoinedSharedChannels finishes or ends the
+      // row on a later pass, so the held slot is temporary.
+      const afterPull = source.slice(pullAt);
+      expect(afterPull, label).not.toContain("releaseJoinedSharedChannel(");
+      expect(afterPull, label).not.toContain("sharedChannels.filter(");
     }
+    // The helper itself is gone, so no caller can reintroduce it by name.
+    expect(mainSource).not.toContain("releaseJoinedSharedChannel");
 
     // The cheap early-out still runs ahead of the DM home claim: a claim left
     // behind for a join that never happened pins the share to a workspace that

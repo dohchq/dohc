@@ -3000,6 +3000,12 @@ export function ChatsView(props: {
             ? state
             : { ...state, granted: [], received: [], sessionKey },
         );
+        // The failure is account-scoped too, and it is a PERSISTENT claim
+        // rather than a transient one: an over-limit answer names the previous
+        // account's share counts, and leaving it up would show them under the
+        // new account for as long as its own listing takes to arrive — or for
+        // good, if that listing stalls. It goes with the rows it explains.
+        setShareReadFailure(null);
         void refreshShares();
         return;
       }
