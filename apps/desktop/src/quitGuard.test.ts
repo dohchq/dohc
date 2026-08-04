@@ -136,6 +136,23 @@ describe("quit guard", () => {
     expect(forceQuit).not.toHaveBeenCalled();
   });
 
+  // #579 review r19: an update install pre-approves the quit BEFORE the
+  // renderer can veto its unload. If the user then goes back, the approval
+  // must not outlive the quit it was granted for — otherwise the next Cmd+Q
+  // proceeds without asking, reaches beforeunload with no pending intent, and
+  // the warning is labelled a close.
+  it("drops a pre-approval when the quit it was granted for is held", () => {
+    const { guard, askRenderer } = makeGuard();
+    guard.approve();
+    // MUTATION (hold revokes): leave `approved` set in hold(). The next quit
+    // proceeds unasked and the renderer never gets to name the action.
+    guard.hold();
+    const next = quitEvent();
+    expect(guard.beforeQuit(next)).toBe("asked");
+    expect(next.prevented).toBe(true);
+    expect(askRenderer).toHaveBeenCalledTimes(1);
+  });
+
   it("pre-approves an update's own quit, and a refused install revokes it", () => {
     const { guard, askRenderer } = makeGuard();
     guard.approve();

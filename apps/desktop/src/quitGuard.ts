@@ -195,6 +195,12 @@ export function createQuitGuard(options: {
     },
     hold() {
       clearAskTimer();
+      // An approval is for the quit it was granted for. If that quit was
+      // vetoed — the renderer blocked its unload and the user went back — the
+      // approval must not outlive it (#579 review, r19), or the NEXT quit
+      // proceeds without asking, reaches beforeunload with no pending intent,
+      // and gets labelled a close.
+      approved = false;
     },
     resume() {
       clearAskTimer();

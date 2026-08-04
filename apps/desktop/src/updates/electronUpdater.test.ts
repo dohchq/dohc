@@ -55,7 +55,6 @@ async function startWith(updater: ReturnType<typeof fakeUpdater>, options: {
   isPackaged?: boolean;
   env?: NodeJS.ProcessEnv;
   currentVersion?: string;
-  onBeforeQuitForUpdate?: () => void;
   quitForStagedRestart?: () => void;
 } = {}): Promise<AutoUpdateController | null> {
   return startAutoUpdates({
@@ -64,7 +63,6 @@ async function startWith(updater: ReturnType<typeof fakeUpdater>, options: {
     currentVersion: options.currentVersion ?? "1.2.3",
     startupDelayMs: 60 * 60_000,
     pollIntervalMs: 60 * 60_000,
-    onBeforeQuitForUpdate: options.onBeforeQuitForUpdate,
     quitForStagedRestart: options.quitForStagedRestart,
     importUpdater: async () => ({ autoUpdater: updater }),
   });
@@ -219,20 +217,6 @@ describe("electron updater actions", () => {
     });
   });
 
-  it("runs bounded quit cleanup when the updater begins installing", async () => {
-    const updater = fakeUpdater();
-    const onBeforeQuitForUpdate = vi.fn();
-    const controller = await startWith(updater, { onBeforeQuitForUpdate });
-    expect(controller).not.toBeNull();
-
-    updater.emit("checking-for-update");
-    updater.emit("update-downloaded", { version: "1.2.4" });
-    await controller!.installUpdate();
-
-    expect(onBeforeQuitForUpdate).toHaveBeenCalledTimes(1);
-    expect(updater.quitAndInstall).toHaveBeenCalledTimes(1);
-  });
-
   it("reports quitAndInstall failures as rejected restart requests", async () => {
     const updater = fakeUpdater();
     updater.quitAndInstall.mockImplementationOnce(() => {
@@ -273,16 +257,6 @@ describe("electron updater actions", () => {
         message: "Could not restart into the update.",
       },
     });
-  });
-
-  it("runs bounded quit cleanup for updater before-quit-for-update events", async () => {
-    const updater = fakeUpdater();
-    const onBeforeQuitForUpdate = vi.fn();
-    await startWith(updater, { onBeforeQuitForUpdate });
-
-    updater.emit("before-quit-for-update");
-
-    expect(onBeforeQuitForUpdate).toHaveBeenCalledTimes(1);
   });
 
   it("stops scheduled checks when the controller is stopped", async () => {

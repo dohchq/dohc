@@ -56,7 +56,6 @@ type AutoUpdaterLike = {
   on(eventName: "update-not-available", listener: () => void): void;
   on(eventName: "download-progress", listener: (progress: { percent: number }) => void): void;
   on(eventName: "update-downloaded", listener: (info: { version: string }) => void): void;
-  on(eventName: "before-quit-for-update", listener: () => void): void;
   on(eventName: "error", listener: (error: Error) => void): void;
 };
 
@@ -142,7 +141,6 @@ export async function startAutoUpdates(options: {
   startupDelayMs?: number;
   pollIntervalMs?: number;
   onState?: (state: UpdateState, publicState: PublicUpdateState) => void;
-  onBeforeQuitForUpdate?: () => void;
   // Completes a restart that was already staged. quitAndInstall starts its
   // own quit on the first call and has none left to start on a second, so
   // main makes it (#579 review, r18).
@@ -215,9 +213,6 @@ export async function startAutoUpdates(options: {
     dispatch({ type: "downloaded", version: info.version });
     checkInFlight = false;
     options.onState?.(state, publicState());
-  });
-  autoUpdater.on("before-quit-for-update", () => {
-    options.onBeforeQuitForUpdate?.();
   });
   autoUpdater.on("error", (error) => {
     if (restartStaged && state.status === "ready") {

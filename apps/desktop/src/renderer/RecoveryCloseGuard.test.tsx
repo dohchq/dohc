@@ -648,6 +648,29 @@ describe("RecoveryCloseGuard", () => {
     closeSpy.mockRestore();
   });
 
+  // #579 review r19: the veto is the moment main's approval stops being true.
+  // An update install pre-approves the quit before this veto is possible, and
+  // an approval that outlives its quit makes the next Cmd+Q skip the ask.
+  it("tells main the exit is off when it vetoes an unload", async () => {
+    const holdQuit = vi.fn(async () => undefined);
+    stubBridge({ holdQuit });
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+
+    // MUTATION (tell main): drop the holdQuit call from the veto path. Main
+    // keeps an approval for a quit that never happened.
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() => expect(holdQuit).toHaveBeenCalledTimes(1));
+  });
+
   // #579 review r18: the renderer no longer holds "a restart is staged" — a
   // reload reset that flag while main's latch stayed set, stranding the
   // update for the rest of the run. Main owns it now, so the renderer just

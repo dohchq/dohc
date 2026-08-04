@@ -209,6 +209,13 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // full list (#579 review, r13).
       rearmGuard();
       event.preventDefault();
+      // Tell main the exit it approved is not happening (#579 review, r19).
+      // An update install pre-approves the quit BEFORE this veto is possible,
+      // and an approval that outlives its quit makes the next Cmd+Q skip the
+      // ask entirely — arriving here with no pending intent and warning about
+      // a "close". Confirming that would call window.close(), which does not
+      // quit on macOS.
+      void bridge().holdQuit();
       setCloseWarning({
         kind: pending?.kind ?? "close",
         resume: pending?.resume ?? null,

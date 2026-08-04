@@ -761,8 +761,12 @@ async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Pro
 }
 
 function stopSitePreviewsForQuit(): void {
-  // Idempotent by design: explicit update installs and Electron's own
-  // before-quit-for-update event can both ask for the same cleanup.
+  // Called once, from the will-quit teardown — the first moment a quit can no
+  // longer be cancelled (#579 review, r19). It used to run at
+  // before-quit AND on electron-updater's before-quit-for-update, both of
+  // which happen BEFORE the renderer's beforeunload can veto the exit. A user
+  // who clicked "Go back" to keep working got their site previews revoked and
+  // their servers stopped anyway. Idempotent regardless.
   sitePreviewSdkAuthorities.revokeAll();
   for (const [key, handle] of [...sitePreviewHandles]) {
     sitePreviewOriginReleases.get(key)?.();
@@ -2899,6 +2903,11 @@ app.on("will-quit", (event) => {
   quitting = true;
   event.preventDefault();
   searchRegistry.killAll();
+  // Here, not at before-quit: every window has closed, so every beforeunload
+  // has had its chance to veto and this quit is now certain (#579 review,
+  // r19). Fire-and-forget — skip locks and do not await async stops so
+  // termination stays quick; child.unref() and the OS finish the cleanup.
+  stopSitePreviewsForQuit();
   const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
   const chatDispatchStop = chatDispatchService.stop().catch(() => undefined);
   const cliServerStop = chatDispatchStop.then(() =>
@@ -8208,15 +8217,6 @@ if (!app.requestSingleInstanceLock()) {
     quitGuard.beforeQuit(event);
   });
 
-  app.on("before-quit", (event) => {
-    // The ask above may have vetoed this quit; tearing down site previews on
-    // a quit that is not happening would kill live surfaces under the user.
-    if (event.defaultPrevented) return;
-    // Fire-and-forget on quit: skip locks and do not await async stops so
-    // termination stays quick; child.unref() and the OS finish process cleanup.
-    stopSitePreviewsForQuit();
-  });
-
   void app.whenReady().then(async () => {
     if (!(await startRustEngineDaemon())) return;
     // BrowserWindow and Dock APIs are only safe after Electron is ready.
@@ -8328,7 +8328,6 @@ if (!app.requestSingleInstanceLock()) {
     void startAutoUpdates({
       isPackaged: app.isPackaged,
       currentVersion: app.getVersion(),
-      onBeforeQuitForUpdate: stopSitePreviewsForQuit,
       // A restart already staged has no install left to make — quitAndInstall
       // started its own quit on the first call and has none left to start.
       // Main makes it, so the fact lives HERE and not in a renderer module a
