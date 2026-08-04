@@ -768,7 +768,11 @@ describe("EngineWorkspaceSessions", () => {
       // unit, and the observed wait (AGENTS.md: show agents the limits they
       // hit).
       expect(message).toContain("retryDeadlineMs limit of 6000ms");
-      expect(message).toContain("waited 7500ms across 3 attempts");
+      // A per-run deadline IS timed from the start of the run, so both
+      // durations are the same interval — and both are still stated, so the
+      // message has one shape whichever limit fired.
+      expect(message).toContain("7500ms since the run started");
+      expect(message).toContain("waited 7500ms in total, across 3 attempts");
       expect((outcome as Error).cause).toMatchObject({
         code: "transport-error",
       });
@@ -1258,6 +1262,56 @@ describe("EngineWorkspaceSessions", () => {
       expect((outcome as Error).message).toContain(
         "withRetryBudget budgetMs limit of 4000ms",
       );
+      // The budget's clock starts at the first failure (t=2,000) and the
+      // region started at t=0, so the two durations differ by that first
+      // attempt: 4,000ms of budget spent, 6,000ms of chain actually held.
+      const deadline = outcome as EngineWorkspaceRetryDeadlineError;
+      expect(deadline.measuredMs).toBe(4_000);
+      expect(deadline.totalWaitedMs).toBe(6_000);
+    });
+
+    it("reports the recovery window and the total wait as different numbers", async () => {
+      // codex on the round-10 head: the budget's clock starts at the first
+      // FAILURE, but the message reported that interval as the time waited
+      // "across" an attempt count that INCLUDES the first failure. One number
+      // was being asked to mean two things, and an agent diagnosing a capture
+      // chain held for 8s read 6s and looked in the wrong place.
+      const workspace = await tempWorkspace("workspace-two-durations");
+      const client = new MockClient("handle-two-durations");
+      // A clock that does NOT start at zero. `performance.now()` never does in
+      // a running app, and with a zero origin `startedAtMs: this.now()` and
+      // `startedAtMs: 0` are indistinguishable — the region-entry timestamp
+      // would be unpinned.
+      let nowMs = 5_000;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .withRetryBudget(6_000, async () =>
+          await sessions.run(
+            workspace,
+            async () => {
+              // A slow FIRST attempt (2s) the budget must not charge, then
+              // failures that spend it.
+              nowMs += 2_000;
+              throw { code: "transport-error" };
+            },
+            { retryTransportErrors: true },
+          ),
+        )
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      const deadline = outcome as EngineWorkspaceRetryDeadlineError;
+      // The chain was held for 8s; the recovery window that the limit bounds
+      // opened 2s in. MUTATION: report `measuredMs` as the total wait -> the
+      // message says 6000ms for an 8000ms hold.
+      expect(deadline.measuredMs).toBe(6_000);
+      expect(deadline.totalWaitedMs).toBe(8_000);
+      expect(deadline.message).toContain("6000ms since the first failure");
+      expect(deadline.message).toContain("waited 8000ms in total");
     });
 
     it("does not spend the budget on a slow attempt that was succeeding", async () => {

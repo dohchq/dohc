@@ -138,23 +138,38 @@ export class EngineWorkspaceSessionsClosedError extends Error {
 // different limits reach here and an agent has to be able to find the one that
 // fired. Naming `retryDeadlineMs` for a region budget pointed readers at an
 // option with no production caller (#564, codex).
+// TWO durations, because they are two different facts and one number cannot
+// carry both (#564, codex). `measuredMs` is the interval the LIMIT is measured
+// over — for a region budget that starts at the first failure, so a slow but
+// healthy attempt is not charged against a retry allowance. `totalWaitedMs` is
+// what the CALLER actually waited, first attempt included. They differ, and
+// reporting the first as if it were the second sent an agent diagnosing a
+// capture chain held for 8s looking for a 6s hold.
 export class EngineWorkspaceRetryDeadlineError extends Error {
   readonly workspaceId: string;
   readonly constraint: string;
   readonly limitMs: number;
+  readonly measuredMs: number;
+  readonly totalWaitedMs: number;
+  readonly attempts: number;
 
   constructor(
     workspaceId: string,
     constraint: string,
     limitMs: number,
-    waitedMs: number,
+    // What the limit is timed from, in words: the reader has to know which
+    // interval the number above is, or the two durations look contradictory.
+    measuredFrom: string,
+    measuredMs: number,
+    totalWaitedMs: number,
     attempts: number,
     cause: unknown,
   ) {
     super(
-      `Rust engine stopped retrying for workspace ${workspaceId}: ` +
-        `the ${constraint} limit of ${limitMs}ms was reached ` +
-        `(waited ${waitedMs}ms across ${attempts} attempts). ` +
+      `Rust engine stopped retrying for workspace ${workspaceId}. ` +
+        `The ${constraint} limit of ${limitMs}ms was reached: ` +
+        `${measuredMs}ms ${measuredFrom}. ` +
+        `The caller waited ${totalWaitedMs}ms in total, across ${attempts} attempts. ` +
         `Retry the operation, or wait for the daemon to come back.`,
       { cause },
     );
@@ -162,6 +177,9 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
     this.workspaceId = workspaceId;
     this.constraint = constraint;
     this.limitMs = limitMs;
+    this.measuredMs = measuredMs;
+    this.totalWaitedMs = totalWaitedMs;
+    this.attempts = attempts;
   }
 }
 
@@ -285,6 +303,11 @@ export class EngineWorkspaceSessions {
     // derived from the transport contract it is built from
     // (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS).
     failedAtMs: number | null;
+    // Region entry. REPORTING ONLY — it bounds nothing, and must not, or the
+    // slow-healthy-attempt case comes straight back. It exists so the refusal
+    // can state what the caller actually waited, which is the observed usage
+    // AGENTS.md asks a rejection to name.
+    startedAtMs: number;
     // Failed attempts across every run the region made, because the region
     // is what the budget spans: a per-run counter resets on each `run` and
     // would report "across 1 attempts" for a wait that covered six.
@@ -434,7 +457,7 @@ export class EngineWorkspaceSessions {
     // by construction, and an opening document is read-only (#533).
     if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();
     return await this.retryBudgets.run(
-      { budgetMs, failedAtMs: null, attempts: 0 },
+      { budgetMs, failedAtMs: null, startedAtMs: this.now(), attempts: 0 },
       task,
     );
   }
@@ -471,7 +494,12 @@ export class EngineWorkspaceSessions {
           // not pass.
           "withRetryBudget budgetMs",
           budget.budgetMs,
+          "since the first failure",
           spentMs,
+          // The whole hold, first attempt included. `spentMs` deliberately
+          // excludes it — that is what stops a slow healthy open being
+          // charged — so it cannot also answer "how long was the chain held".
+          now - budget.startedAtMs,
           // The REGION's count, not this ladder's: the budget spans several
           // runs, each of which restarts `attempt` at 1.
           budget.attempts,
@@ -486,6 +514,11 @@ export class EngineWorkspaceSessions {
       workspaceId,
       "retryDeadlineMs",
       retryDeadlineMs,
+      // This limit IS timed from the start of the run, so the two durations
+      // are the same interval here. Both are still reported, so the message
+      // has one shape and a reader never has to guess which one is missing.
+      "since the run started",
+      waitedMs,
       waitedMs,
       attempt,
       cause,
