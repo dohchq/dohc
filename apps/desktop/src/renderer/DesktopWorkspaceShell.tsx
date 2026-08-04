@@ -2096,12 +2096,18 @@ export function DesktopWorkspaceShell(props: {
     !isShareView &&
     captureDecided &&
     !statusSaysNoRecorder(syncStatus);
-  // Chats key off the same capture (#615). A shared view gets no capture, so
-  // main refuses every Chats call — the panel, the tab, the graph's chat
+  // Chats gate on the SHARE FACT ONLY (#615). A shared view gets no capture,
+  // so main refuses every Chats call — the panel, the tab, the graph's chat
   // mentions and the linked-mentions panel under every open document all
-  // reached requireEngineCapture for a capability the share never had. Same
-  // fact, same branch, and THE chats capability: every chat entry point reads
-  // this one value.
+  // reached requireEngineCapture for a capability the share never had, and
+  // every one of them reads this single value now.
+  //
+  // Deliberately NOT the capture decision the versions gate above waits for.
+  // On a workspace that is not a shared view but whose capture build FAILED,
+  // every Chats surface is still offered and every Chats call still errors —
+  // the #620 symptom on these surfaces. That is pre-existing, and #628 owns
+  // it, because closing it needs a copy decision this gate does not: Chats is
+  // a persistent sidebar, so it cannot just become an empty state.
   const chatsEnabled = engineEnabled && !isShareView;
   // Bumped after a version switch/merge/conflict resolution so open editors
   // re-read their file content immediately (FileInspector refreshKey).

@@ -5772,10 +5772,12 @@ describe("version-compare off copy", () => {
   });
 });
 
-// #615: Chats key off the same capture every other engine surface does. A
-// shared view gets none, so main refuses listChatChannels, listFileChats and
-// syncDms — the panel, the tab and the titlebar button all offered a
-// capability the share never had, and showed the refusal as an error.
+// #615: a shared view gets no capture, so main refuses listChatChannels,
+// listFileChats, syncDms and listChatFileMentions — the panel, the tab and the
+// titlebar button all offered a capability the share never had, and showed the
+// refusal as an error. These pins cover the SHARE fact only, which is all the
+// chats gate reads; a failed capture build on a normal workspace still reaches
+// every one of these calls, and #628 owns that.
 describe("shared view chats surface", () => {
   it("offers no Chats on a shared view and never asks main for them", async () => {
     // The stored state opens with the Chats panel visible, so an ungated
