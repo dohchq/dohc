@@ -18,9 +18,16 @@ export const NAME_MAX_BYTES = 255;
 
 // TextEncoder/TextDecoder rather than Buffer, so this module carries no Node
 // dependency. The decoder replaces a split multibyte sequence with U+FFFD,
-// exactly as Buffer#toString does.
+// exactly as Buffer#toString does -- checked over every cut offset of 2-, 3-
+// and 4-byte sequences and a corpus of malformed input, not assumed.
+//
+// ignoreBOM is the one place they disagree, and its name is inverted: it means
+// "ignore the BOM-NESS of U+FEFF", so `true` KEEPS the character. The default
+// eats a leading U+FEFF, which for filename bytes is data loss -- a name that
+// legitimately starts with U+FEFF would come back a character short, silently,
+// with no error to notice.
 const utf8Encoder = new TextEncoder();
-const utf8Decoder = new TextDecoder();
+const utf8Decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 
 // Truncates a (decorative) name so that `${prefix}${result}` fits NAME_MAX.
 // Byte-accurate: a multibyte sequence split at the cut decodes to U+FFFD,

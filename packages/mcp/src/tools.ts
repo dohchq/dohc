@@ -270,34 +270,46 @@ function failureReason(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-// What happened to a path a tool was working on, once the work failed.
-// "unchanged" is a claim about ONE entry, so it needs the entry's identity,
-// not the presence of something at its name.
-type Aftermath = "unchanged" | "replaced" | "gone" | "unknown";
+// What a failed delete can say about the path afterwards.
+//
+// It cannot say "unchanged". Three rounds of review walked that claim from
+// presence to identity to identity-plus-reuse, and the answer is that no
+// comparison of two lstat results supports it: an entry can be deleted and
+// recreated with the SAME inode on the same device, and content can be
+// rewritten in place without touching identity at all. This is a probe on a
+// filesystem dohc holds no lock on, so every "same" reading is evidence, never
+// proof. Holding a handle across the operation does not rescue it either -- on
+// POSIX an open descriptor pins the inode but not the NAME, so a replacement
+// can still land at the path, and the Windows share-mode that would prevent it
+// means locking a user's file for the length of a delete, which dohc does not
+// do.
+//
+// What IS provable comes from rename, not from a probe: rename is atomic, so a
+// rename that failed moved nothing. That sentence is in every refusal below.
+// The probe is demoted to raising a WARNING when it has positive evidence of
+// change. A missed warning leaves a true message; there is no reading of the
+// probe that makes a false one.
+type Aftermath = "replaced" | "gone" | "undetermined";
 
-// Is this the same entry the tool looked at before? ino + dev identify an
-// entry on every filesystem dohc ships to: NTFS supplies the file index and
-// the volume serial number, ext4 and APFS the inode and device. A filesystem
-// that cannot supply an inode reports 0, and then the question has no answer
-// here -- "unknown" rather than a guess, because a wrong "unchanged" is what
-// this comparison exists to prevent.
-function entryIdentity(before: Stats, after: Stats): Aftermath {
-  if (before.ino === 0 || after.ino === 0) return "unknown";
-  return before.ino === after.ino && before.dev === after.dev ? "unchanged" : "replaced";
+// Positive evidence only. A different inode, or the same inode on a different
+// device, proves a different entry. Equal values prove nothing, and an inode
+// of 0 is a filesystem saying it has none to give -- neither raises a warning.
+function replacedSince(before: Stats, after: Stats): boolean {
+  if (before.ino === 0 || after.ino === 0) return false;
+  return before.ino !== after.ino || before.dev !== after.dev;
 }
 
-// The half of a delete refusal that says what is true of the path now. The
-// agent's question is "can I retry?", so each case answers it.
+// The half of a delete refusal that warns about the path. The agent's question
+// is "can I retry?", so each case answers that and nothing more.
 function deleteAftermath(path: string, aftermath: Aftermath): string {
   switch (aftermath) {
-    case "unchanged":
-      return ` ${path} is unchanged.`;
     case "replaced":
-      return ` Something else replaced ${path} while dohc worked. A retry deletes the replacement, not the entry you asked for.`;
+      return ` Something else replaced ${path} while dohc worked: a retry deletes the replacement, not the entry you asked for.`;
     case "gone":
       return ` ${path} is no longer in this workspace: something else moved or deleted it.`;
-    case "unknown":
-      // The look itself failed. Claim nothing about the path.
+    case "undetermined":
+      // Nothing about what ELSE touched the path is provable. The refusal
+      // already says what dohc did, which is what a retry decision needs.
       return "";
   }
 }
@@ -1040,7 +1052,7 @@ export async function deleteWorkspacePath(
       reason:
         source.code === "ENOENT"
           ? `dohc could not delete ${resolved.normalized}. Nothing is at that path in this workspace. List the folder to see what is there.`
-          : `dohc could not delete ${resolved.normalized}. The check on that path failed (${source.code}). ${resolved.normalized} is unchanged.`,
+          : `dohc could not delete ${resolved.normalized}. The check on that path failed (${source.code}). dohc did not move it.`,
     };
   }
   // The guard refusals name their own constraint (#585), so they pass through
@@ -1071,20 +1083,22 @@ export async function deleteWorkspacePath(
     // Name the outcome, not just the failure: an agent that cannot tell a
     // refused delete from a silent one cannot decide what to do next.
     //
-    // Look before claiming it, and compare IDENTITY, not presence. Nothing
-    // serializes these mutations, so between the check above and this rename
-    // the desktop, another MCP call, or any local process can move the path
-    // away or replace what is at it. "Something is here" does not support the
-    // sentence "note.md is unchanged" -- that is the same defect as the
-    // assertion it replaced, one level in.
+    // "dohc did not move it" is the rename contract, not a guess: rename is
+    // atomic, so a failed one moved nothing. That holds whatever else touched
+    // the path, and it is what an agent needs to decide whether to retry.
+    //
+    // The probe only ADDS a warning, and only on positive evidence that the
+    // path changed under the tool. Nothing serializes these mutations, so the
+    // desktop, another MCP call, or any local process can empty or replace the
+    // path between the check above and this rename.
     const after = await lstat(resolved.absolute).then(
-      (stats) => entryIdentity(source.stats, stats),
-      (probe: unknown) => (errorCode(probe) === "ENOENT" ? ("gone" as const) : ("unknown" as const)),
+      (stats) => (replacedSince(source.stats, stats) ? "replaced" : "undetermined"),
+      (probe: unknown) => (errorCode(probe) === "ENOENT" ? "gone" : "undetermined"),
     );
     return {
       ok: false as const,
       reason:
-        `dohc could not delete ${resolved.normalized}. The move to the workspace trash failed (${errorCode(error)}).` +
+        `dohc could not delete ${resolved.normalized}. The move to the workspace trash failed (${errorCode(error)}). dohc did not move it.` +
         deleteAftermath(resolved.normalized, after),
     };
   }

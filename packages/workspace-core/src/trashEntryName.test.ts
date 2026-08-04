@@ -65,3 +65,55 @@ describe("trash entry names", () => {
     expect(trashEntryName("anything", prefix)).toBe(prefix);
   });
 });
+
+// This rule replaced a Buffer implementation with a TextDecoder one, and the
+// two are equivalent everywhere EXCEPT a leading U+FEFF: the default decoder
+// eats it as a byte-order mark. For filename bytes that is data loss with no
+// error attached -- through the desktop's collisionVariant, importing a
+// colliding near-limit file would land under a name quietly missing its first
+// character.
+describe("truncation decodes filename bytes, not a text stream", () => {
+  it("keeps a leading U+FEFF instead of eating it as a byte-order mark", () => {
+    const budget = NAME_MAX_BYTES - byteLength(PREFIX);
+    // U+FEFF is 3 bytes, so the tail is sized to leave the name over budget
+    // and the truncation is what has to preserve the first character.
+    const name = `﻿${"a".repeat(budget)}`;
+    expect(byteLength(name)).toBeGreaterThan(budget);
+
+    const fitted = fitWithinNameMax(name, PREFIX);
+    expect(fitted.startsWith("﻿")).toBe(true);
+    expect(fitted).toBe(`﻿${"a".repeat(budget - 3)}`);
+  });
+
+  // The equivalence the swap assumed, checked rather than asserted: every cut
+  // offset of 2-, 3- and 4-byte sequences, plus malformed input where the two
+  // decoders could plausibly count replacement characters differently.
+  it("decodes a truncated prefix exactly as Buffer#toString does", () => {
+    const corpus = [
+      "﻿report.md",
+      "﻿",
+      "éé",
+      "中中",
+      "😀😀",
+      "éé",
+    ].map((text) => new TextEncoder().encode(text));
+    const malformed = [
+      [0x80, 0x61],
+      [0xc0, 0xaf],
+      [0xed, 0xa0, 0x80],
+      [0xf0, 0x9f, 0x61],
+      [0xff, 0x61],
+      [0xf4, 0x90, 0x80, 0x80],
+    ].map((bytes) => Uint8Array.from(bytes));
+
+    for (const bytes of [...corpus, ...malformed]) {
+      for (let cut = 1; cut <= bytes.length; cut += 1) {
+        const slice = bytes.subarray(0, cut);
+        expect(
+          new TextDecoder("utf-8", { ignoreBOM: true }).decode(slice),
+          `cut ${cut} of ${JSON.stringify(Array.from(bytes))}`,
+        ).toBe(Buffer.from(slice).toString("utf8"));
+      }
+    }
+  });
+});

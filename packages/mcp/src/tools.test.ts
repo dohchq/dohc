@@ -60,9 +60,13 @@ vi.mock("node:crypto", async (importOriginal) => {
 // fails -- and both looks must be able to fail on demand, on a host where a
 // real unreadable directory is not arrangeable. Each armed entry is consumed
 // by one matching call: null passes through, an error is thrown.
+// `inodes` substitutes the ino a matching call reports, likewise one entry per
+// call. NTFS always supplies a real file index, so a filesystem that has none
+// to give -- some network shares, FAT -- is not arrangeable on this host.
 const lstatOverride = vi.hoisted(() => ({
   path: null as string | null,
   results: [] as (NodeJS.ErrnoException | null)[],
+  inodes: [] as (number | null)[],
 }));
 // A path another process changes between the check and the rename. It happens
 // inside the rename call, which is the race itself. `replaceWith` names an
@@ -78,11 +82,20 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return {
     ...actual,
     lstat: async (path: Parameters<typeof actual.lstat>[0]) => {
-      if (lstatOverride.path === String(path) && lstatOverride.results.length > 0) {
+      const armed = lstatOverride.path === String(path);
+      if (armed && lstatOverride.results.length > 0) {
         const failure = lstatOverride.results.shift();
         if (failure) throw failure;
       }
-      return actual.lstat(path);
+      const stats = await actual.lstat(path);
+      if (armed && lstatOverride.inodes.length > 0) {
+        const ino = lstatOverride.inodes.shift();
+        // Copy through the prototype so the Stats methods survive.
+        if (ino !== null && ino !== undefined) {
+          return Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { ino });
+        }
+      }
+      return stats;
     },
     rename: async (
       from: Parameters<typeof actual.rename>[0],
@@ -512,9 +525,11 @@ describe("mcp tool path containment", () => {
   });
 
   // A failing rename must say what happened AND what did not. rename is
-  // atomic, so the file is exactly as it was -- and an agent that cannot tell
-  // a refused delete from a silent one cannot decide what to do next.
-  it("names the failure and says the path is unchanged when the move fails", async () => {
+  // atomic, so a failed one moved nothing -- and an agent that cannot tell a
+  // refused delete from a silent one cannot decide what to do next. Note what
+  // this does NOT say: that the file is unchanged. Two lstat readings cannot
+  // establish that, so the sentence stays inside the rename contract.
+  it("names the failure and says dohc moved nothing when the move fails", async () => {
     await withWorkspace(async (ctx) => {
       const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
       const now = 1785780488421;
@@ -531,13 +546,15 @@ describe("mcp tool path containment", () => {
         const result = await deleteWorkspacePath(ctx, { path: "note.md" });
         // The errno code varies by platform; everything around it does not.
         expect(refusalReason(result)).toMatch(
-          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. note\.md is unchanged\.$/,
+          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. dohc did not move it\.$/,
         );
         expect(result.ok).toBe(false);
         // The claim the message makes, checked.
         expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe(
           "still here",
         );
+        // And the claim it deliberately stops short of making.
+        expect(refusalReason(result)).not.toContain("is unchanged");
       } finally {
         clock.mockRestore();
         uuidOverride.value = null;
@@ -559,7 +576,7 @@ describe("mcp tool path containment", () => {
         expect(result).toMatchObject({
           ok: false,
           reason:
-            "dohc could not delete note.md. The check on that path failed (EACCES). note.md is unchanged.",
+            "dohc could not delete note.md. The check on that path failed (EACCES). dohc did not move it.",
         });
         expect(refusalReason(result)).not.toContain("Nothing is at that path");
       } finally {
@@ -584,7 +601,7 @@ describe("mcp tool path containment", () => {
         expect(result).toMatchObject({
           ok: false,
           reason:
-            "dohc could not delete note.md. The move to the workspace trash failed (ENOENT). note.md is no longer in this workspace: something else moved or deleted it.",
+            "dohc could not delete note.md. The move to the workspace trash failed (ENOENT). dohc did not move it. note.md is no longer in this workspace: something else moved or deleted it.",
         });
       } finally {
         renameRace.path = null;
@@ -593,11 +610,11 @@ describe("mcp tool path containment", () => {
     });
   });
 
-  // The look has to compare IDENTITY, not presence. A racing process can
-  // REPLACE the path rather than empty it, and then something is at the name
-  // while the entry the agent asked about is gone. Presence would answer "is
-  // unchanged" -- the same false reassurance, one level in.
-  it("does not call a replaced path unchanged", async () => {
+  // A racing process can REPLACE the path rather than empty it, and then
+  // something is at the name while the entry the agent asked about is gone.
+  // The probe's whole remaining job is to warn about that: a retry would
+  // delete the replacement.
+  it("warns that a replaced path is not the entry the agent asked about", async () => {
     await withWorkspace(async (ctx) => {
       const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
       const now = 1785780488421;
@@ -616,7 +633,7 @@ describe("mcp tool path containment", () => {
 
         const result = await deleteWorkspacePath(ctx, { path: "note.md" });
         expect(refusalReason(result)).toMatch(
-          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. Something else replaced note\.md while dohc worked\. A retry deletes the replacement, not the entry you asked for\.$/,
+          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. dohc did not move it\. Something else replaced note\.md while dohc worked: a retry deletes the replacement, not the entry you asked for\.$/,
         );
         // Something IS at the path -- which is exactly why presence could not
         // answer this -- and it is not what the agent asked to delete.
@@ -632,9 +649,9 @@ describe("mcp tool path containment", () => {
     });
   });
 
-  // And when the look itself fails, the state is unknown -- so the message
-  // claims nothing about it rather than guessing which claim to make.
-  it("claims nothing about the path when the look after a failed move fails", async () => {
+  // And when the look itself fails there is no evidence to warn on, so the
+  // refusal stops at the rename contract rather than guessing a claim.
+  it("warns about nothing when the look after a failed move fails", async () => {
     await withWorkspace(async (ctx) => {
       const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
       const now = 1785780488421;
@@ -651,13 +668,48 @@ describe("mcp tool path containment", () => {
 
         const result = await deleteWorkspacePath(ctx, { path: "note.md" });
         expect(refusalReason(result)).toMatch(
-          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\.$/,
+          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. dohc did not move it\.$/,
         );
       } finally {
         clock.mockRestore();
         uuidOverride.value = null;
         lstatOverride.path = null;
         lstatOverride.results = [];
+      }
+    });
+  });
+
+  // A filesystem with no inode to give reports 0, and 0 is not evidence of
+  // anything. Comparing it against a real inode would read as "replaced" and
+  // warn about a replacement that never happened -- the warning has to rest on
+  // positive evidence, in both directions.
+  it("does not warn about a replacement when the filesystem reports no inode", async () => {
+    await withWorkspace(async (ctx) => {
+      const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
+      const now = 1785780488421;
+      uuidOverride.value = uuid;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+      try {
+        await writeFile(join(ctx.root, "note.md"), "still here");
+        const trashDir = join(ctx.root, ".dohc", "trash");
+        await mkdir(trashDir, { recursive: true });
+        await mkdir(join(trashDir, `${now}-${uuid}-note.md`));
+        // Only the FIRST look answers 0; the second reports the real inode, so
+        // a comparison that treated 0 as a value would call this a
+        // replacement. NTFS always supplies one, hence the seam.
+        lstatOverride.path = join(ctx.root, "note.md");
+        lstatOverride.inodes = [0];
+
+        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
+        expect(refusalReason(result)).toMatch(
+          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. dohc did not move it\.$/,
+        );
+        expect(refusalReason(result)).not.toContain("replaced");
+      } finally {
+        clock.mockRestore();
+        uuidOverride.value = null;
+        lstatOverride.path = null;
+        lstatOverride.inodes = [];
       }
     });
   });
