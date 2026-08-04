@@ -38,8 +38,8 @@ import {
   share,
   testSite,
   writeWorkspaceFile,
-  isWorkspaceEngineFlagged,
   workspaceStatus,
+  isWorkspaceEngineFlagged,
   type ToolContext,
 } from "./tools";
 import { DEFAULT_WORKSPACE_SETTINGS } from "@dohc/workspace-contracts/workspace-settings";
@@ -2037,6 +2037,117 @@ describe("workspace engine flag", () => {
       await symlink(outside, join(ctx.root, ".dohc"), "dir");
 
       await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+    });
+  });
+});
+
+// Every mutating tool checks .dohc is a real folder BEFORE it touches a
+// visible file, and refuses without changing anything when it is not. One
+// pre-existing test covered that, through a symlinked .dohc, for two of the
+// eight tools; these cover all eight.
+//
+// The refusal needs no seam and no symlink privilege: a REGULAR FILE at
+// <root>/.dohc makes ensureGuardedDir's post-mkdir check refuse on every
+// platform, so this runs everywhere the gate does rather than only where
+// symlink creation is permitted.
+describe("a refused recordability boundary leaves the filesystem alone", () => {
+  async function withBlockedMetadataDir<T>(
+    fn: (ctx: ToolContext) => Promise<T>,
+  ): Promise<T> {
+    return withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, ".dohc"), "not a directory");
+      return fn(ctx);
+    });
+  }
+
+  // Every case below asserts THIS reason, so a tool refusing for some other
+  // reason cannot pass as evidence that the boundary held.
+  const BLOCKED =
+    "dohc could not open this workspace's .dohc folder. A file is at .dohc, which must be a real folder. Remove or rename that file. Then retry.";
+
+  // Delete is the one case with a second boundary behind this one:
+  // safeTrashDir checks .dohc again on its way to the trash folder, so
+  // removing the change-record boundary alone still leaves this passing. The
+  // other seven fail without it.
+  it("refuses the delete, and the file is still where it was", async () => {
+    await withBlockedMetadataDir(async (ctx) => {
+      await writeFile(join(ctx.root, "note.md"), "still here");
+
+      expect(await deleteWorkspacePath(ctx, { path: "note.md" })).toMatchObject({ ok: false, reason: BLOCKED });
+      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("still here");
+    });
+  });
+
+  it("refuses the write, and no file appears", async () => {
+    await withBlockedMetadataDir(async (ctx) => {
+      expect(
+        await writeWorkspaceFile(ctx, { path: "notes/new.md", content: "written" }),
+      ).toMatchObject({ ok: false, reason: BLOCKED });
+      await expect(stat(join(ctx.root, "notes", "new.md"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses an overwrite, and the existing bytes are untouched", async () => {
+    await withBlockedMetadataDir(async (ctx) => {
+      await writeFile(join(ctx.root, "note.md"), "original");
+
+      expect(
+        await writeWorkspaceFile(ctx, { path: "note.md", content: "replacement" }),
+      ).toMatchObject({ ok: false, reason: BLOCKED });
+      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("original");
+    });
+  });
+
+  it("refuses the site, and no site root appears", async () => {
+    await withBlockedMetadataDir(async (ctx) => {
+      expect(await createSite(ctx, { path: "sites/landing" })).toMatchObject({ ok: false, reason: BLOCKED });
+      await expect(stat(join(ctx.root, "sites", "landing"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses the move, and both paths are where they were", async () => {
+    await withBlockedMetadataDir(async (ctx) => {
+      await writeFile(join(ctx.root, "note.md"), "still here");
+
+      expect(
+        await moveWorkspacePath(ctx, { fromPath: "note.md", toPath: "notes/moved.md" }),
+      ).toMatchObject({ ok: false, reason: BLOCKED });
+      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("still here");
+      await expect(stat(join(ctx.root, "notes", "moved.md"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses the directory, and no directory appears", async () => {
+    await withBlockedMetadataDir(async (ctx) => {
+      expect(await createWorkspaceDirectory(ctx, { path: "notes/2026" })).toMatchObject({ ok: false, reason: BLOCKED });
+      await expect(stat(join(ctx.root, "notes", "2026"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses the import, and no database appears", async () => {
+    await withBlockedMetadataDir(async (ctx) => {
+      await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n");
+
+      expect(
+        await importData(ctx, {
+          sourcePath: "people.csv",
+          databasePath: "people.sqlite",
+          tableName: "people",
+        }),
+      ).toMatchObject({ ok: false, reason: BLOCKED });
+      await expect(stat(join(ctx.root, "people.sqlite"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses the sdk add, and package.json is untouched", async () => {
+    await withBlockedMetadataDir(async (ctx) => {
+      await mkdir(join(ctx.root, "sites", "landing"), { recursive: true });
+      await writeFile(join(ctx.root, "sites", "landing", "index.html"), "<h1>hi</h1>");
+
+      expect(await addSiteSdk(ctx, { siteRoot: "sites/landing" })).toMatchObject({ ok: false, reason: BLOCKED });
+      await expect(
+        stat(join(ctx.root, "sites", "landing", "package.json")),
+      ).rejects.toThrow();
     });
   });
 });
