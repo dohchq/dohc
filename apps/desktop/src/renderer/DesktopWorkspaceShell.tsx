@@ -260,6 +260,33 @@ function historyOffPlaceholderCopy(
   return "History is unavailable. dohc could not confirm whether this workspace records history. Restart dohc to try again.";
 }
 
+// What a persisted version-compare tab may claim when the version surface is
+// off and the workspace is not a shared view (#626). Same rule as
+// `historyOffPlaceholderCopy` above, and one rule of its own: **a capability
+// flag is not a count**. `historyRecordingUnavailable` says the recorder
+// could not be BUILT this session; versions created before it can still be on
+// disk and reachable after the restart this copy prescribes. "You have no
+// versions" is a claim about durable data, and dohc does not make one it has
+// not established. Every line here says what dohc cannot do now, and none of
+// them says what does not exist.
+export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): string {
+  // #483: the warning already names the unreadable file and the fix, and the
+  // opt-out line below would blame a Settings toggle nobody touched.
+  if (syncStatus?.settingsWarning) return syncStatus.settingsWarning;
+  if (syncStatus?.historyRecordingUnavailable) {
+    // #505: a failure, not a decision, and not an emptiness.
+    return "dohc could not open versions for this workspace. Your files still save normally. Restart dohc to try again.";
+  }
+  if (syncStatus?.historyRecordingOff) {
+    // The real opt-out. The engine is off, so versions cannot be opened here
+    // — which is not the same as there being none.
+    return "Versions are off for this workspace. The workspace engine is turned off in Settings → Advanced. Turn it on and reopen the workspace to compare versions.";
+  }
+  // Main has not said anything is wrong, so the renderer's own read failing
+  // is all this surface knows. No cause, and no claim about what exists.
+  return "Versions are unavailable. dohc could not confirm whether this workspace has versions. Close this tab to go back to your files.";
+}
+
 export function chatsNavigationRequiresRemount(
   current: ChatsNav | null,
   next: ChatsNav,
@@ -1142,18 +1169,29 @@ export function DesktopWorkspaceShell(props: {
   // whatever the renderer's own capability read said.
   const statusSaysNoRecorder = (status: SyncStatusResult | null) =>
     Boolean(status?.historyRecordingOff || status?.historyRecordingUnavailable);
-  // The same answer read the other way round, for the surfaces that CALL on
-  // mount. A null status is not a live recorder: `getWorkspaceSettings` is one
-  // file read while `openWorkspace` waits for the watcher's first scan, so
-  // engine-on lands first on every open and the null window is the normal
-  // case, not a race. History can read `statusSaysNoRecorder` because it
-  // issues nothing until the status lands and its placeholder must never
-  // claim an opt-out main has not established (#542). Versions cannot: the
-  // selector calls the moment it mounts, so an unanswered status put the
-  // whole #620 loop — refusal, five retries, danger banner — inside that
-  // window.
-  const statusConfirmsRecorder = (status: SyncStatusResult | null) =>
-    status !== null && !statusSaysNoRecorder(status);
+  // Whether main's capture decision for THIS workspace has landed. The
+  // surfaces that call on mount need it, and no reading of the status can
+  // supply it:
+  //
+  // - `statusSaysNoRecorder(null)` is false, so a MISSING status reads as a
+  //   recorder (#620's first fix attempt).
+  // - Main registers the workspace's activity entry before it awaits the
+  //   capture build, with the recorder fields at their "nothing is wrong"
+  //   defaults (`workspaceActivity.ts`). So a PRESENT status reads as a
+  //   recorder too, while the build is still running.
+  //
+  // Both are the same mistake: a default read as an answer. `openWorkspace`
+  // resolving is the answer, and it is the only one available here — main
+  // awaits the capture build before it returns, and `getSyncStatus` does not
+  // await anything at all (its handler reads the entry as it stands).
+  //
+  // This shell opens the workspace TWICE — the effect below re-runs when the
+  // settings read changes `refreshHistory`'s identity — and both calls answer
+  // after the decision because main hands a concurrent second open the first
+  // one's promise (`main.ts`, `ensureWorkspaceActivityOpen`). That invariant
+  // is what makes this fact a fact; the pins below drive it the way main
+  // behaves, with one promise answering every call.
+  const [captureDecidedFor, setCaptureDecidedFor] = useState<string | null>(null);
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
   const [cloudStatus, setCloudStatus] = useState<CloudStatusResult | null>(null);
@@ -2041,16 +2079,23 @@ export function DesktopWorkspaceShell(props: {
   // same way — the same retries and the same danger banner, from a different
   // cause (#620). Main's status is the single answer to "does anything record
   // here", so it overrides that read here exactly as it does for history —
-  // and it overrides it only once it has ANSWERED, which is why this reads
-  // `statusConfirmsRecorder` and not history's `!statusSaysNoRecorder`.
+  // and it can only override it once main has DECIDED, which is the third
+  // clause. History reads `!statusSaysNoRecorder` alone because it issues
+  // nothing until the open resolves and its placeholder must not claim an
+  // opt-out main has not established (#542). The version selector calls the
+  // moment it mounts, so it waits for the decision.
   //
   // THE version capability. Every version entry point reads this one value —
   // the selector, the Try-in-version banner and review card, and the
   // persisted compare tab below — so the fact is decided once. A surface that
   // re-derives it drifts, which is exactly how the compare tab kept mounting
   // after #614 gated the selector.
+  const captureDecided = captureDecidedFor === workspaceId;
   const versionsEnabled =
-    engineEnabled && !isShareView && statusConfirmsRecorder(syncStatus);
+    engineEnabled &&
+    !isShareView &&
+    captureDecided &&
+    !statusSaysNoRecorder(syncStatus);
   // Chats key off the same capture (#615). A shared view gets no capture, so
   // main refuses every Chats call — the panel, the tab, the graph's chat
   // mentions and the linked-mentions panel under every open document all
@@ -2127,11 +2172,12 @@ export function DesktopWorkspaceShell(props: {
         // refreshHistory uses it (#620): this callback also runs from the
         // conflict review dialog, which the notice center opens with no
         // version surface on screen. Not asking leaves the previous statement
-        // standing — what the catch below already does. Same three clauses as
+        // standing — what the catch below already does. Same four clauses as
         // `versionsEnabled`, so the fetch cannot outlive the render gate.
         engineEnabled &&
         !isShareView &&
-        statusConfirmsRecorder(syncStatusRef.current)
+        captureDecidedFor === workspaceId &&
+        !statusSaysNoRecorder(syncStatusRef.current)
       ) {
         // Nobody could name it: the operation changed no version, or it failed
         // and left an unknown one active. Ask. This read is the only remaining
@@ -2168,6 +2214,7 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [
+      captureDecidedFor,
       dropContradictedEngineHistory,
       engineEnabled,
       isShareView,
@@ -2909,7 +2956,18 @@ export function DesktopWorkspaceShell(props: {
     void (async () => {
       try {
         const status = await bridge().openWorkspace({ workspaceId });
-        if (!cancelled) setSyncStatus(status);
+        // Main awaits the capture build before it answers, so this is the
+        // moment the decision exists — and the status committed beside it is
+        // the first one that describes a decided workspace (#626). The two
+        // commit together, so "decided" never runs ahead of what it decided.
+        // Recorded per workspace, so a switch cannot inherit it, and never
+        // retracted: this effect re-runs whenever refreshHistory's identity
+        // changes, and retracting here would blink every version surface off
+        // and on when the settings read lands.
+        if (!cancelled) {
+          setSyncStatus(status);
+          setCaptureDecidedFor(workspaceId);
+        }
         await refreshFiles();
         await refreshHistory();
       } catch (error) {
@@ -3760,24 +3818,22 @@ export function DesktopWorkspaceShell(props: {
                     A shared view has no versions to compare. Close this tab to
                     go back to the shared files.
                   </div>
-                ) : syncStatus === null ? (
-                  // Nothing has answered yet. The tab must not mount the page
-                  // and must not state a capability either: the renderer's own
-                  // read proves nothing about what main recorded (#542), so
-                  // this window gets a load state, not a claim.
+                ) : !captureDecided ? (
+                  // Main has not decided yet. The tab must not mount the page
+                  // and must not state a capability either: neither read the
+                  // shell has done proves anything about what main recorded
+                  // (#542), so this window gets a load state, not a claim.
                   <PanelLoading label="versions" />
                 ) : (
-                  // Main answered, and the answer was no recorder — or the
+                  // Main decided, and the answer was no recorder — or the
                   // renderer's own read failed, which asserts nothing. One
-                  // line each, and the Next this surface really has: the tab
-                  // closes. Neither line names a cause main did not establish.
+                  // line, chosen by the cause main established, and never an
+                  // assertion about what is on disk.
                   <div
                     data-testid="version-compare-off"
                     className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
                   >
-                    {statusSaysNoRecorder(syncStatus)
-                      ? "This workspace has no versions to compare. Close this tab to go back to your files."
-                      : "Versions are unavailable. dohc could not confirm whether this workspace has versions. Close this tab to go back to your files."}
+                    {versionCompareOffCopy(syncStatus)}
                   </div>
                 )
               ) : (

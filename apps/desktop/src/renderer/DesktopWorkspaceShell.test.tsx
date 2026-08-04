@@ -58,6 +58,7 @@ import {
   pendingHeadingTargetForOpen,
   resolveCanonicalDm,
   runCanonicalDmNavigation,
+  versionCompareOffCopy,
   type Workspace,
 } from "./DesktopWorkspaceShell";
 import type { ChatsNav } from "./workbench/ChatsView";
@@ -5554,18 +5555,18 @@ describe("versions surface after a failed capture build", () => {
   // The window the test above cannot see. Its status fake answers in the same
   // microtask flush as the settings read, and PRODUCTION NEVER DOES:
   // `getWorkspaceSettings` is one file read, while `openWorkspace` waits for
-  // main's watcher to finish its first scan — and the capture build fails
-  // inside that open, before the watcher starts. Engine-ON therefore lands
-  // first on every open, and an unanswered status used to answer "there is a
-  // recorder": the selector mounted, called, retried five times and raised
-  // #620's banner inside a window the fixture had closed.
+  // the capture build and then for main's watcher to finish its first scan.
+  // Engine-ON therefore lands first on every open, and a MISSING status used
+  // to answer "there is a recorder": the selector mounted, called, retried
+  // five times and raised #620's banner inside a window the fixture had
+  // closed.
   //
-  // So this status does NOT resolve in the same flush.
-  it("asks for no versions before main's status has answered", async () => {
-    const status = deferred<typeof FAILED_STATUS>();
+  // So this open does NOT resolve in the same flush.
+  it("asks for no versions before main's capture decision lands", async () => {
+    const decision = deferred<typeof FAILED_STATUS>();
     const bridge = makeEngineBridge(Promise.resolve(null));
-    bridge.openWorkspace = vi.fn(() => status.promise);
-    bridge.getSyncStatus = vi.fn(() => status.promise);
+    bridge.openWorkspace = vi.fn(() => decision.promise);
+    bridge.getSyncStatus = vi.fn(() => decision.promise);
     bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
       throw new Error(
         "dohc could not start Versions for this workspace. Restart dohc to try again.",
@@ -5575,7 +5576,7 @@ describe("versions surface after a failed capture build", () => {
 
     // Both halves of the premise. The titlebar Chats button renders on the
     // renderer's own read alone, so it proves that read answered engine-ON;
-    // `data-ready` proves no status has.
+    // `data-ready` proves the open has not resolved.
     await screen.findByTestId("titlebar-chats-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
 
@@ -5585,8 +5586,82 @@ describe("versions surface after a failed capture build", () => {
     // And the answer keeps it that way — no banner from retries that never
     // started.
     await act(async () => {
-      status.resolve(FAILED_STATUS);
-      await status.promise;
+      decision.resolve(FAILED_STATUS);
+      await decision.promise;
+    });
+    expect(screen.queryByTestId("version-menu-button")).toBeNull();
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The same window, entered the way production actually enters it: with a
+  // status that EXISTS and says nothing is wrong, because main has not
+  // decided yet.
+  //
+  // `workspaceActivity.open` registers the workspace's entry BEFORE it awaits
+  // the capture build — it must, so a batch settling during the build finds a
+  // slot — and until the build answers, that entry still holds
+  // `historyRecordingOff: false` and `historyRecordingUnavailable: false`.
+  // Any workspace's activity event makes this shell refresh, and while the
+  // renderer's own settings read is still in flight `refreshHistory` takes
+  // its opted-out branch and commits that half-filled status. Reading it as
+  // "there is a recorder" is the same defect as reading a missing status that
+  // way, one indirection along — so the gate waits for the DECISION, which
+  // only `openWorkspace` returning can report.
+  it("asks for no versions while main's status is still a default", async () => {
+    const settings = deferred<WorkspaceSettingsResult>();
+    const decision = deferred<typeof FAILED_STATUS>();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
+    bridge.openWorkspace = vi.fn(() => decision.promise);
+    // Main's answer BEFORE the decision: the entry exists and its recorder
+    // fields are still at their defaults. After the decision it reports what
+    // was decided. A fake that refused before the decision, or kept answering
+    // with the defaults after it, would model something main cannot do — and
+    // the second of those is what this pin is about.
+    let decided = false;
+    bridge.getSyncStatus = vi.fn(async () => (decided ? FAILED_STATUS : SYNC_STATUS));
+    bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
+      throw new Error(
+        "dohc could not start Versions for this workspace. Restart dohc to try again.",
+      );
+    });
+    renderShell(bridge);
+
+    // Another workspace records a batch. The shell refreshes, and with its own
+    // read still in flight it commits that pre-decision status.
+    await act(async () => {
+      bridge.emitWorkspaceActivity();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true");
+
+    // Now the renderer's read answers engine-ON. Every input the old gate had
+    // now says "recorder", and main has still decided nothing.
+    await act(async () => {
+      settings.resolve({
+        settings: {
+          ...DEFAULT_WORKSPACE_SETTINGS,
+          experimental: {
+            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+            workspaceEngineAlpha: true,
+          },
+        },
+        source: "stored",
+      });
+      await settings.promise;
+    });
+    await screen.findByTestId("titlebar-chats-sidebar");
+
+    expect(screen.queryByTestId("version-menu-button")).toBeNull();
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+
+    // The decision lands, and it is the failure. Still nothing.
+    await act(async () => {
+      decided = true;
+      decision.resolve(FAILED_STATUS);
+      await decision.promise;
     });
     expect(screen.queryByTestId("version-menu-button")).toBeNull();
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
@@ -5613,7 +5688,7 @@ describe("versions surface after a failed capture build", () => {
     bridge.getSyncStatus = vi.fn(() => status.promise);
     renderShell(bridge);
 
-    // Before the status answers, the tab mounts no page AND claims nothing:
+    // Before the decision lands, the tab mounts no page AND claims nothing:
     // the renderer's own read proves nothing about what main recorded (#542).
     await screen.findByTestId("titlebar-chats-sidebar");
     expect(screen.queryByTestId("version-compare-page")).toBeNull();
@@ -5625,18 +5700,75 @@ describe("versions surface after a failed capture build", () => {
       await status.promise;
     });
 
-    // One line, per the empty-state recipe (copy.md): what is missing, then
-    // the next step this surface really has — the tab closes. No cause: the
-    // History placeholder and the notice center own that.
+    // One line, per the empty-state recipe (copy.md), and the cause main
+    // established chooses it. The cause here is a BUILD FAILURE, so the line
+    // says what dohc could not do and how to retry. It must never say the
+    // workspace has no versions: versions made before this session are still
+    // on disk, and the restart this very sentence prescribes brings them
+    // back.
     const placeholder = await screen.findByTestId("version-compare-off");
     expect(placeholder.textContent).toContain(
-      "This workspace has no versions to compare. Close this tab to go back to your files.",
+      "dohc could not open versions for this workspace. Your files still save normally. Restart dohc to try again.",
     );
+    expect(placeholder.textContent).not.toContain("no versions");
     expect(placeholder.className).toContain("text-sm");
     expect(placeholder.className).toContain("text-muted");
     expect(screen.queryByTestId("version-compare-page")).toBeNull();
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+});
+
+// A capability flag is not a count. Whatever main established about the
+// RECORDER, none of it establishes that no version exists: versions live on
+// disk and outlive a session whose capture failed to build, an engine the
+// user switched off, and a settings file dohc could not read. The compare tab
+// has no count to read, so it may never claim absence.
+describe("version-compare off copy", () => {
+  const base = {
+    state: "synced" as const,
+    pendingChangeCount: 0,
+    lastSyncedAtMs: null,
+    historyRecordingUnavailable: false,
+    historyShareView: false,
+  };
+
+  it("calls a failed capture build unavailable, never empty", () => {
+    // #505's cause. `historyRecordingOff` rides with it, and reading that
+    // first would turn a startup failure into a claim about durable data.
+    const copy = versionCompareOffCopy({
+      ...base,
+      historyRecordingOff: true,
+      historyRecordingUnavailable: true,
+    });
+    expect(copy).toBe(
+      "dohc could not open versions for this workspace. Your files still save normally. Restart dohc to try again.",
+    );
+    expect(copy).not.toContain("no versions");
+  });
+
+  it("calls the opt-out off, never empty", () => {
+    const copy = versionCompareOffCopy({ ...base, historyRecordingOff: true });
+    expect(copy).toContain("Versions are off for this workspace.");
+    expect(copy).toContain("Settings → Advanced");
+    expect(copy).not.toContain("no versions");
+  });
+
+  it("names the unreadable settings file instead of blaming the toggle", () => {
+    // #483: the opt-out line below names Settings, and nobody touched it.
+    const copy = versionCompareOffCopy({
+      ...base,
+      historyRecordingOff: true,
+      settingsWarning: "dohc could not read /w/x/.dohc/settings.json.",
+    });
+    expect(copy).toBe("dohc could not read /w/x/.dohc/settings.json.");
+  });
+
+  it("claims nothing when main established nothing", () => {
+    // The renderer's own read failed. It proves nothing either way (#542).
+    const copy = versionCompareOffCopy(base);
+    expect(copy).toContain("dohc could not confirm whether this workspace has versions.");
+    expect(copy).not.toContain("no versions");
   });
 });
 
@@ -5752,15 +5884,21 @@ describe("shared view chats surface", () => {
     renderShell(bridge);
     await screen.findByTestId("chats-panel");
 
-    const event = new KeyboardEvent("keydown", {
-      key: "b",
-      ctrlKey: true,
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
+    // The handler re-registers in a passive effect whenever `chatsEnabled`
+    // changes, so a single dispatch can land in the commit before that effect
+    // runs. Retry with a FRESH event: a stale one carries the previous
+    // attempt's defaultPrevented and would pass on the first arming forever.
+    await waitFor(() => {
+      const event = new KeyboardEvent("keydown", {
+        key: "b",
+        ctrlKey: true,
+        altKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
     });
-    window.dispatchEvent(event);
-    expect(event.defaultPrevented).toBe(true);
   });
 
   // The last ungated chat call. Linked mentions ride on every markdown open
