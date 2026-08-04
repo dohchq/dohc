@@ -1156,10 +1156,16 @@ function MarkdownView(props: {
    * down, but now reported as saved.
    *
    * So the honest outcome is the refusal the user can see: the indicator says
-   * "Couldn't save", nothing stale reaches disk, and the text stays in the
-   * editor. Carrying those keystrokes ACROSS the bind needs the set-aside
-   * #579 builds (eager serialization + a recovery notice); this issue does
-   * not duplicate it.
+   * "Couldn't save", and nothing stale reaches disk.
+   *
+   * DELIBERATELY INCOMPLETE, and #604 must not merge before #579. If the
+   * retry BINDS, the engine-backed branch replaces this editor and the typed
+   * text goes with it: a stale write became a silent loss. Preserving it
+   * needs eager serialization plus a recovery surface — the set-aside #579
+   * builds — and a second one here would be the wrong mechanism in the wrong
+   * place. On that rebase: route this draft into #579's set-aside (it gets
+   * the notice and the Copy control), and fold `retryOpening` into #579's
+   * opening gates.
    */
   function disarmDraftThenRetry(): void {
     const retry = props.onRetryEngineOpen;
