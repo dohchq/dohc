@@ -15,6 +15,7 @@ import {
   joinedSharedChannelForTarget,
   joinedSharedChannelLimitRefusal,
   mergeJoinedChannel,
+  releaseJoinedSharedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
 } from "./sharedChannels";
@@ -273,52 +274,58 @@ describe("mergeJoinedChannel", () => {
     expect(rejoinedSameShare[1]!.access).toBe("read-only");
   });
 
-  // The joined lane is relay-fed: autoJoinReceivedDms appends a row per
-  // received DM grant on every syncDms, with no user action. So it needs a
-  // bound, and per AGENTS.md a bound that rejects work must be measured
-  // first. This is that measurement — the evidence, recorded where the limit
-  // can be changed.
+  // WHAT JUSTIFIES THE LIMIT.
   //
-  // The lane holds one row per chat-channel share this workspace joined: one
-  // per DM correspondent, one per shared channel, plus an ended tombstone per
-  // share that was revoked or left (tombstones are the write gate, so they are
-  // never reaped — see mergeJoinedChannel).
-  describe("representative healthy accounts", () => {
-    const accounts = [
-      { name: "solo, no cloud account", dms: 0, channels: 0, ended: 0 },
-      { name: "small team of 12", dms: 11, channels: 6, ended: 2 },
-      { name: "department of 60", dms: 59, channels: 25, ended: 10 },
-      { name: "organization of 500, three years in", dms: 499, channels: 120, ended: 60 },
-      // The heaviest account this model can produce: every other member of a
-      // large organization DMed at least once, a channel per team and
-      // sub-team, and years of revoked or left shares.
-      {
-        name: "organization of 1000, a DM with every other member",
-        dms: 999,
-        channels: 250,
-        ended: 200,
-      },
-    ];
-
-    // The cap counts LIVE rows. An ended row is a tombstone the user cannot
-    // delete, so it must not consume the budget — see mergeJoinedChannel.
-    for (const account of accounts) {
-      it(`fits ${account.name} under the limit`, () => {
-        expect(account.dms + account.channels).toBeLessThan(MAX_CHAT_CHANNEL_SHARE_ROWS);
+  // An earlier version of this block claimed to measure representative healthy
+  // accounts. It did not: it declared invented account sizes and checked their
+  // arithmetic, and its central assumption — one DM per correspondent — is not
+  // even the product's shape, because a DM can have several recipients. Codex
+  // was right to reject it, and a fabricated fixture is worse than none: it
+  // reads as evidence.
+  //
+  // The live count has one real contract, and this is it. Every sync pass
+  // walks the LIVE joined channels and does a pull for each, plus a push for
+  // each read-write one — see syncJoinedSharedChannels. So the live count IS
+  // the per-pass relay fan-out, which makes the cap a backpressure threshold
+  // on that fan-out rather than a limit on user work. AGENTS.md exempts
+  // backpressure from the measurement rule and asks it to be justified from
+  // its actual contract instead. This pins the contract.
+  //
+  // The specific number is NOT yet justified by it, and this comment will not
+  // pretend otherwise. Tracked with the total-retention gap; both resolve by
+  // scoping the lane rather than by choosing a better constant.
+  describe("the live count is the per-pass relay fan-out", () => {
+    it("does one pull per live channel and none for a tombstone", async () => {
+      const pulls: string[] = [];
+      const pushes: string[] = [];
+      const channels = [
+        joined({ shareId: "live-rw-1", channelWireId: "wire-1" }),
+        joined({ shareId: "live-rw-2", channelWireId: "wire-2" }),
+        joined({ shareId: "live-ro", channelWireId: "wire-3", access: "read-only" }),
+        joined({ shareId: "tombstone", channelWireId: "wire-4", ended: true }),
+      ];
+      await syncJoinedSharedChannels({
+        rootDir: "/tmp/ws",
+        workspaceId: "ws-1",
+        relay: RELAY,
+        channels,
+        pull: async (input) => {
+          pulls.push(input.shareId);
+          return pullResult(0);
+        },
+        push: async (input) => {
+          pushes.push(input.shareId);
+          return { pushed: 0 };
+        },
       });
-    }
-
-    // The limit sits BEYOND the measured range, not at it. Without this the
-    // table above could be trimmed to fit whatever number the constant holds.
-    it("leaves headroom beyond the heaviest account measured", () => {
-      const heaviest = Math.max(
-        ...accounts.map((account) => account.dms + account.channels),
-      );
-      expect(heaviest).toBe(1249);
-      expect(MAX_CHAT_CHANNEL_SHARE_ROWS).toBeGreaterThan(heaviest * 2);
-      // The tombstones the heaviest account also carries: durable, uncounted,
-      // and the reason the cap counts live rows rather than all of them.
-      expect(Math.max(...accounts.map((account) => account.ended))).toBe(200);
+      const live = channels.filter((channel) => channel.ended !== true);
+      // One pull per live row — the relationship the cap throttles.
+      expect(pulls).toHaveLength(live.length);
+      expect(pulls).not.toContain("tombstone");
+      // And a push for each live read-write row, so the fan-out is bounded by
+      // the live count, never by the total.
+      expect(pushes).toEqual(["live-rw-1", "live-rw-2"]);
+      expect(pulls.length + pushes.length).toBeGreaterThan(live.length);
     });
   });
 
@@ -426,6 +433,45 @@ describe("mergeJoinedChannel", () => {
       }),
     ).not.toThrow();
     expect(() => ListJoinedSharedChannelsResult.parse({ joined: over })).not.toThrow();
+  });
+});
+
+// The other half of the reservation (#617 codex P1): both join paths write the
+// row BEFORE they pull, so a pull that fails has to hand the slot back.
+describe("releaseJoinedSharedChannel", () => {
+  it("removes the reserved row entirely, leaving no tombstone", () => {
+    const existing = [
+      joined({ shareId: "share-keep", channelWireId: "wire-keep" }),
+      joined({ shareId: "share-reserved", channelWireId: "wire-reserved" }),
+    ];
+    const released = releaseJoinedSharedChannel(existing, "share-reserved");
+    expect(released.map((row) => row.shareId)).toEqual(["share-keep"]);
+    // A leave keeps a tombstone because a channel was really joined. This
+    // never was, so a tombstone here would gate writes into a channel the
+    // workspace does not have — and hold capacity nobody can reclaim.
+    expect(released.some((row) => row.shareId === "share-reserved")).toBe(false);
+  });
+
+  it("frees the capacity the reservation took", () => {
+    const full = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS }, (_, index) =>
+      joined({ shareId: `share-${index}`, channelWireId: `wire-${index}` }),
+    );
+    const reserved = mergeJoinedChannel(
+      releaseJoinedSharedChannel(full, "share-0"),
+      joined({ shareId: "share-new", channelWireId: "wire-new" }),
+    );
+    expect(
+      joinedSharedChannelLimitRefusal(reserved, {
+        shareId: "share-another",
+        channelWireId: "wire-another",
+      }),
+    ).not.toBeNull();
+    expect(
+      joinedSharedChannelLimitRefusal(
+        releaseJoinedSharedChannel(reserved, "share-new"),
+        { shareId: "share-another", channelWireId: "wire-another" },
+      ),
+    ).toBeNull();
   });
 });
 

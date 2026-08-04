@@ -760,6 +760,97 @@ describe("ChatsView panel navigator unread badges", () => {
     });
   });
 
+  // #618 codex P2. An over-limit listing is NOT an outage: the same request
+  // answers the same way forever. Reporting it as unreachable gave the
+  // surface a Try again that could never work and no way to say what was
+  // wrong — the defect #618 exists to fix, for the one condition dohc's own
+  // cap creates.
+  it("names the count and the limit for an over-limit listing, and offers no retry", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: "session-a",
+      relay: {
+        state: "over-limit" as const,
+        lanes: [
+          { lane: "granted" as const, rows: 4097 },
+          { lane: "received" as const, rows: 5000 },
+        ],
+        limit: 4096,
+      },
+    });
+    render(navigator(0));
+
+    const notice = await screen.findByTestId("chats-shares-unreadable");
+    expect(notice.dataset.failure).toBe("over-limit");
+    // The constraint, what it observed, and the configured limit — in the
+    // nouns the surface already uses, not the lane names main uses.
+    expect(notice.textContent).toContain("dohc cannot list this many shares.");
+    expect(notice.textContent).toContain("You share 4097 channels; the limit is 4096.");
+    expect(notice.textContent).toContain(
+      "5000 channels are shared with you; the limit is 4096.",
+    );
+    // A retry repeats the identical request, so there is no button to press.
+    expect(screen.queryByTestId("chats-shares-unreadable-retry")).toBeNull();
+    // And it never poses as the outage it is not.
+    expect(notice.textContent).not.toContain("could not read");
+  });
+
+  // Over-limit is non-authoritative for the same reason unreachable is: dohc
+  // has no listing it can stand behind, so the cached rows are still the best
+  // thing it knows. Without this the new state could quietly become
+  // authoritative and clear them — the #551 clobber, through the door this
+  // round opened.
+  it("keeps cached relay share rows when a refresh resolves over-limit", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    const view = render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 0 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: "session-a",
+      relay: {
+        state: "over-limit" as const,
+        lanes: [{ lane: "received" as const, rows: 4097 }],
+        limit: 4096,
+      },
+    });
+    view.rerender(navigator(1));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+    // The invitation dohc already knew about is still on offer...
+    expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+    // ...and it is marked as possibly older than this answer.
+    const notice = screen.getByTestId("chats-shares-unreadable");
+    expect(notice.dataset.failure).toBe("over-limit");
+    expect(notice.textContent).toContain("This list may be out of date.");
+  });
+
   // The cached rows stay (that is #551), and now they are labelled: they are
   // real, they are just older than this failure.
   it("marks cached invitations as possibly out of date while the relay is unreachable", async () => {

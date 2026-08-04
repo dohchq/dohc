@@ -323,6 +323,15 @@ export type RelayChatShareLanes =
       received: ChatChannelShareReceivedRow[];
     }
   | { state: "unreachable" }
+  // The relay answered, and the answer is one dohc cannot list. Separate from
+  // "unreachable" because the two owe the user different things: an outage
+  // owes a retry, and this owes the count, the limit, and the fact that
+  // retrying will not change it.
+  | {
+      state: "over-limit";
+      lanes: Array<{ lane: "granted" | "received"; rows: number }>;
+      limit: number;
+    }
   | { state: "signed-out" };
 
 export async function readRelayChatShareLanes(input: {
@@ -375,10 +384,16 @@ export async function readRelayChatShareLanes(input: {
     // lengths are final, and a relay-controlled body should not be fully
     // zod-parsed on the main thread only to be thrown away.
     //
-    // Over-cap resolves UNREACHABLE rather than truncating. "answered" claims
-    // authority: a truncated lane would tell the user that the shares dohc cut
-    // do not exist, and a missing grant reads as a revoked one. dohc could not
-    // read this answer, which is what unreachable means.
+    // Over-cap does not truncate. "answered" claims authority: a truncated
+    // lane would tell the user that the shares dohc cut do not exist, and a
+    // missing grant reads as a revoked one.
+    //
+    // Nor does it report an outage. This answer arrived, and it will arrive
+    // again identically — calling it unreachable gives the surface a Try
+    // again that can never work and no way to say what is wrong. It resolves
+    // OVER-LIMIT, carrying what it observed and the configured limit, and it
+    // is non-authoritative for exactly the same reason unreachable is, so
+    // cached rows still stand.
     const overCap = ([
       ["granted", mapped.granted.length],
       ["received", mapped.received.length],
@@ -390,9 +405,13 @@ export async function readRelayChatShareLanes(input: {
         .map(([lane, rows]) => `"${lane}" holds ${rows} rows`)
         .join(", ");
       console.warn(
-        `[desktop] relay share listing ${lanes}; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing unreachable, so cached rows survive.`,
+        `[desktop] relay share listing ${lanes}; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
       );
-      return { state: "unreachable" };
+      return {
+        state: "over-limit",
+        lanes: overCap.map(([lane, rows]) => ({ lane, rows })),
+        limit: MAX_CHAT_CHANNEL_SHARE_ROWS,
+      };
     }
     return {
       state: "answered",

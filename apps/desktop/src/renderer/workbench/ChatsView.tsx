@@ -138,6 +138,19 @@ interface ShareListing {
   sessionKey: string | null;
 }
 
+// Why a committed share read carried no rows. "unreachable" covers both a
+// relay that did not answer and a listing the IPC rejected outright: dohc
+// could not read it, and a retry is the honest next step. "over-limit" is the
+// answer that DID arrive and that dohc cannot list — retrying repeats it
+// exactly, so the surface owes the count and the limit instead of a button.
+type ShareReadFailure =
+  | { kind: "unreachable" }
+  | {
+      kind: "over-limit";
+      lanes: ReadonlyArray<{ lane: "granted" | "received"; rows: number }>;
+      limit: number;
+    };
+
 // A share listing answers two independent questions. The JOINED rows come from
 // the local registry, so any reader that got a listing at all has the true
 // answer. The granted/received rows come from the relay — a reader that is not
@@ -742,35 +755,60 @@ function UnreadPill(props: { count: number; testId: string }) {
   );
 }
 
-// What the sharing surface says when dohc could not read the share listing.
-// An unreachable listing commits no rows, so without this the surface renders
-// an empty list — which reads as "you have no shares" (#618). It states what
-// dohc could not do, whether what is on screen may be stale, and offers the
-// one thing that helps.
-function SharesUnreadableNotice(props: {
+// One sentence per over-limit lane, in the user's nouns. "granted" and
+// "received" are internal words; the surface calls them channels you share and
+// channels shared with you.
+function overLimitSentences(failure: {
+  lanes: ReadonlyArray<{ lane: "granted" | "received"; rows: number }>;
+  limit: number;
+}): string[] {
+  return failure.lanes.map(({ lane, rows }) =>
+    lane === "granted"
+      ? `You share ${rows} channels; the limit is ${failure.limit}.`
+      : `${rows} channels are shared with you; the limit is ${failure.limit}.`,
+  );
+}
+
+// What the sharing surface says when a committed share read carried no rows.
+// Without it the surface renders an empty list, which reads as "you have no
+// shares" (#618).
+//
+// The two reasons owe different things. An outage owes a retry, because the
+// next request can answer. A listing over dohc's own cap owes the count and
+// the limit and NO retry: the same request answers the same way forever, and a
+// button that cannot work is the defect this notice exists to remove.
+function ShareReadFailureNotice(props: {
   testId: string;
+  failure: ShareReadFailure;
   // True when rows are still on screen from an earlier read: they are real,
   // they are just older than this failure.
   stale: boolean;
   onRetry: () => void;
 }) {
+  const staleLine = props.stale ? " This list may be out of date." : "";
   return (
     <div
       data-testid={props.testId}
+      data-failure={props.failure.kind}
       className="flex items-start gap-1.5 border-b border-line px-3 py-2"
     >
       <span className="min-w-0 flex-1 text-[11px] leading-4 text-muted">
-        dohc could not read your shares.
-        {props.stale ? " This list may be out of date." : ""}
+        {props.failure.kind === "unreachable"
+          ? `dohc could not read your shares.${staleLine}`
+          : `dohc cannot list this many shares. ${overLimitSentences(
+              props.failure,
+            ).join(" ")}${staleLine}`}
       </span>
-      <button
-        type="button"
-        data-testid={`${props.testId}-retry`}
-        onClick={props.onRetry}
-        className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
-      >
-        Try again
-      </button>
+      {props.failure.kind === "unreachable" ? (
+        <button
+          type="button"
+          data-testid={`${props.testId}-retry`}
+          onClick={props.onRetry}
+          className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+        >
+          Try again
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -1013,13 +1051,19 @@ export function ChatsView(props: {
   // out / listing failed) and every sharing affordance stays hidden — the
   // solo view is unchanged.
   const [channelShares, setChannelShares] = useState<ShareListing | null>(null);
-  // Whether the last share read this workspace committed could NOT be read.
-  // The rows above are what dohc knows; this is whether dohc could ask. They
-  // are separate facts: an unreachable relay commits no rows AND keeps the
+  // WHY the last committed share read did not produce rows, or null when it
+  // did. The rows above are what dohc knows; this is what stopped it knowing.
+  // Separate facts: a relay that did not answer commits no rows AND keeps the
   // cached ones, so without this the surface renders an empty list that reads
   // as "no shares" (#618). Its own commit lane, because it answers its own
   // question and an older response must not overwrite a newer one.
-  const [sharesUnreadable, setSharesUnreadable] = useState(false);
+  //
+  // The two reasons owe the user different things. An outage owes a retry.
+  // A listing over dohc's own cap owes the count, the limit, and no retry at
+  // all — the same request will answer the same way forever.
+  const [shareReadFailure, setShareReadFailure] = useState<ShareReadFailure | null>(
+    null,
+  );
   // The workspace `channelShares` was last DEFINITIVELY resolved for (even when
   // that resolution is `null` — signed out / listing failed). Presence stays
   // dormant until this equals the current workspaceId, so a conversation's
@@ -1179,7 +1223,7 @@ export function ChatsView(props: {
         // ticket, must still be able to correct it. Taking the lane here left
         // "dohc could not read your shares" standing over a listing that then
         // arrived and worked.
-        setSharesUnreadable(true);
+        setShareReadFailure({ kind: "unreachable" });
         setSharesWorkspaceId(workspaceId);
         return;
       }
@@ -1192,7 +1236,9 @@ export function ChatsView(props: {
         // The listing did not answer at all, so the surface says so. Without
         // this the user sees an empty sharing surface and every channel
         // read-only, with nothing naming either.
-        if (claimLanes(["relayReach"], ticket)) setSharesUnreadable(true);
+        if (claimLanes(["relayReach"], ticket)) {
+          setShareReadFailure({ kind: "unreachable" });
+        }
         setSharesWorkspaceId(workspaceId);
         return;
       }
@@ -1200,7 +1246,17 @@ export function ChatsView(props: {
       // resolved listing carries it — including the unreachable one, which
       // claims no row lane at all.
       if (claimLanes(["relayReach"], ticket)) {
-        setSharesUnreadable(value.relay.state === "unreachable");
+        setShareReadFailure(
+          value.relay.state === "unreachable"
+            ? { kind: "unreachable" }
+            : value.relay.state === "over-limit"
+              ? {
+                  kind: "over-limit",
+                  lanes: value.relay.lanes,
+                  limit: value.relay.limit,
+                }
+              : null,
+        );
       }
       // The relay lanes are only this answer's to write when it learned an
       // account-scoped fact: the relay's rows, or that no session exists
@@ -1208,7 +1264,12 @@ export function ChatsView(props: {
       // and recipient emails must not survive a logout). "Unreachable" is NOT
       // an empty listing: the cached rows stand, and the unclaimed lane lets
       // a real relay answer land its rows.
-      const relayAuthoritative = value.relay.state !== "unreachable";
+      // Over-limit is non-authoritative for the same reason unreachable is:
+      // dohc has no listing it can stand behind, so the cached rows are still
+      // the best thing it knows, and the unclaimed lane lets a listing that
+      // later fits land its rows.
+      const relayAuthoritative =
+        value.relay.state !== "unreachable" && value.relay.state !== "over-limit";
       const listing: ShareListing =
         value.relay.state === "answered"
           ? {
@@ -1548,7 +1609,7 @@ export function ChatsView(props: {
     setNewThreadBody("");
     setCreatingChannel(null);
     setChannelShares(null);
-    setSharesUnreadable(false);
+    setShareReadFailure(null);
     setSharesWorkspaceId(null);
     // Nothing is committed for the new workspace yet. Tickets stay monotonic:
     // an in-flight response from the old workspace holds an older ticket AND
@@ -4392,9 +4453,10 @@ export function ChatsView(props: {
             {/* Same honesty on the owner side: an unreadable listing left this
                 panel showing no members, which reads as "nobody has this
                 channel". */}
-            {sharesUnreadable ? (
-              <SharesUnreadableNotice
+            {shareReadFailure ? (
+              <ShareReadFailureNotice
                 testId="chats-share-members-unreadable"
+                failure={shareReadFailure}
                 stale={channelGrants.length > 0}
                 onRetry={() => void refreshShares()}
               />
@@ -4788,7 +4850,7 @@ export function ChatsView(props: {
             ) : null}
           </div>
         ) : null}
-        {receivedNotJoined.length > 0 || sharesUnreadable ? (
+        {receivedNotJoined.length > 0 || shareReadFailure !== null ? (
           <div data-testid="chats-shared-with-you">
             <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
               Shared with you
@@ -4797,9 +4859,10 @@ export function ChatsView(props: {
                 unreadable listing was the whole of #618: the invitations
                 vanished with no copy anywhere saying dohc could not read
                 them. */}
-            {sharesUnreadable ? (
-              <SharesUnreadableNotice
+            {shareReadFailure ? (
+              <ShareReadFailureNotice
                 testId="chats-shares-unreadable"
+                failure={shareReadFailure}
                 stale={receivedNotJoined.length > 0}
                 onRetry={() => void refreshShares()}
               />

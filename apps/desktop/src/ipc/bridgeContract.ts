@@ -2442,11 +2442,22 @@ export type ShareChatChannelResult = z.infer<typeof ShareChatChannelResult>;
 // lane IS the set of shares that can become joined rows, so both bound the
 // same quantity — an account's chat-channel shares.
 //
-// MEASURED, per AGENTS.md "measure limits that reject work". The heaviest
-// account modelled in sharedChannels.test.ts ("representative healthy
-// accounts") holds 1249 LIVE chat-channel shares: a 1000-person organization,
-// a DM with every other member, 250 shared channels. This bound sits about
-// 3.3x beyond it. The previous 1000 rejected that account.
+// This number is PROVISIONAL, and an earlier version of this comment claimed
+// it was measured. It was not: the fixture behind that claim invented account
+// sizes and checked their arithmetic, and its central assumption — one DM per
+// correspondent — is not the product's shape, because a DM can have several
+// recipients. The fabricated fixture is gone; see sharedChannels.test.ts for
+// the one contract the live count really has (it is the per-pass relay
+// fan-out, which makes this backpressure rather than a limit on user work).
+//
+// Two things this number does NOT do, both open:
+//  - It does not bound total retained state. A revocation moves a row out of
+//    the live count without deleting its tombstone, so revoke-and-grant
+//    cycles grow the durable array and every joined-lane response without
+//    limit.
+//  - It has no evidence fixing it at 4096 rather than any other value.
+// Both resolve by scoping the lane to the channels a caller is showing —
+// paging, the alternative #617 named — not by choosing a better constant.
 //
 // On the joined lane it counts LIVE rows only — an ended tombstone is a
 // durable row the user cannot delete, so counting it would make the refusal's
@@ -2520,6 +2531,27 @@ export const ListChatChannelSharesResult = z.object({
       received: z.array(ChatChannelShareReceivedRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
     }),
     z.object({ state: z.literal("unreachable") }),
+    // Over the per-lane cap. NOT "unreachable": that word means dohc could not
+    // read the answer, and a retry is the right next step for it. This answer
+    // arrived and will arrive again identically, so a surface that shows it as
+    // an outage offers a Try again that can never work and never says what is
+    // wrong — the #618 defect, reintroduced for the one condition dohc's own
+    // cap creates. It carries what it observed and the configured limit so the
+    // surface can name the constraint. Like "unreachable" it is NOT
+    // authoritative: cached rows stand.
+    z.object({
+      state: z.literal("over-limit"),
+      lanes: z
+        .array(
+          z.object({
+            lane: z.enum(["granted", "received"]),
+            rows: z.number().int().nonnegative(),
+          }),
+        )
+        .min(1)
+        .max(2),
+      limit: z.number().int().positive(),
+    }),
     z.object({ state: z.literal("signed-out") }),
   ]),
 });

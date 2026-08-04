@@ -134,6 +134,17 @@ export function mergeJoinedChannel(
   return [...joinedChannelsAfterMerge(existing, joined), joined];
 }
 
+// Undo a reservation whose durable work never landed. NOT a leave: no
+// tombstone, because nothing was ever joined — the row only ever held the
+// slot for a pull that failed, and keeping it would hold capacity for a
+// channel this workspace does not have.
+export function releaseJoinedSharedChannel(
+  existing: readonly JoinedSharedChannel[],
+  shareId: string,
+): JoinedSharedChannel[] {
+  return existing.filter((channel) => channel.shareId !== shareId);
+}
+
 // Member leave stops sync but keeps a durable provenance tombstone. The local
 // rows stay readable, and DM ownership must not flip when live grant data goes.
 export function endJoinedChannel(

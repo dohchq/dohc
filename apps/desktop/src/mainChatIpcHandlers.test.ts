@@ -659,7 +659,7 @@ describe("readRelayChatShareLanes", () => {
   }
 
   for (const lane of ["granted", "received"] as const) {
-    it(`reports an over-cap ${lane} lane as unreachable, so cached rows survive`, async () => {
+    it(`reports an over-cap ${lane} lane as over-limit, so cached rows survive and the surface can name it`, async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
         const lanes = await readRelayChatShareLanes({
@@ -667,13 +667,22 @@ describe("readRelayChatShareLanes", () => {
           fetchListing: () => Promise.resolve(relayRowsOverCap(lane)),
           remoteWorkspaceId: "remote-1",
         });
-        expect(lanes).toEqual({ state: "unreachable" });
-        // The refusal names the constraint, the limit, the unit, and what it
-        // observed, because nobody reads this path except through this line.
+        // NOT "unreachable": that word means dohc could not read the answer,
+        // and it earns a Try again. This answer arrived and will arrive again
+        // identically, so it carries what it observed and the limit instead,
+        // and the surface names the constraint rather than posing as an
+        // outage (#618 codex).
+        expect(lanes).toEqual({
+          state: "over-limit",
+          lanes: [{ lane, rows: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }],
+          limit: MAX_CHAT_CHANNEL_SHARE_ROWS,
+        });
+        // The log refusal still names the constraint, the limit, the unit, and
+        // what it observed, because nobody reads this path except through it.
         expect(warn).toHaveBeenCalledWith(
           `[desktop] relay share listing "${lane}" holds ${
             MAX_CHAT_CHANNEL_SHARE_ROWS + 1
-          } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing unreachable, so cached rows survive.`,
+          } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
         );
         // The composition is the defect: the guard's answer must survive the
         // contract parse the IPC handler runs immediately after it. This is
@@ -704,13 +713,20 @@ describe("readRelayChatShareLanes", () => {
           }),
         remoteWorkspaceId: "remote-1",
       });
-      expect(lanes).toEqual({ state: "unreachable" });
+      expect(lanes).toEqual({
+        state: "over-limit",
+        lanes: [
+          { lane: "granted", rows: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
+          { lane: "received", rows: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
+        ],
+        limit: MAX_CHAT_CHANNEL_SHARE_ROWS,
+      });
       expect(warn).toHaveBeenCalledWith(
         `[desktop] relay share listing "granted" holds ${
           MAX_CHAT_CHANNEL_SHARE_ROWS + 1
         } rows, "received" holds ${
           MAX_CHAT_CHANNEL_SHARE_ROWS + 1
-        } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing unreachable, so cached rows survive.`,
+        } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
       );
     } finally {
       warn.mockRestore();

@@ -313,6 +313,7 @@ import {
   JoinedSharedChannelLimitError,
   joinedSharedChannelLimitRefusal,
   mergeJoinedChannel,
+  releaseJoinedSharedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
 } from "./workspaces/sharedChannels";
@@ -4395,18 +4396,40 @@ function registerIpcHandlers(
       // the renderer's "Joining…" button stuck forever.
       fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
     };
-    let info;
+    const info = await fetchSharedChannelInfo({ relay, shareId: input.shareId }).catch(
+      (error: unknown) => {
+        if (error instanceof ShareUnavailableError) {
+          throw new Error("That shared channel isn't available anymore.");
+        }
+        throw error;
+      },
+    );
+    const joined: JoinedSharedChannel = {
+      shareId: info.shareId,
+      channelWireId: info.channelWireId,
+      access: info.access,
+      granterEmail: info.granterEmail,
+      relayUrl: joinedRelayUrl,
+      recipientUserId: joinedRecipientUserId,
+    };
+    // RESERVE the slot before the pull, not after it. A separate check ahead
+    // of an awaited pull is not a gate: two joins can both pass it at the
+    // limit, both pull, and the loser's merge then throws with its channel
+    // already durably imported and no registry row to gate it — the read-only
+    // channel reads as locally owned again. The reservation IS the merge, and
+    // the merge is synchronous over the cached registry, so two callers cannot
+    // interleave inside it: the loser refuses having pulled nothing.
+    //
+    // Dedup by shareId AND channelWireId (CodeRabbit Data Integrity): a
+    // re-join of the same channel under a NEW share id (revoked + re-granted)
+    // replaces the stale row instead of listing and syncing the channel twice.
+    // Read the rows FRESH here — the fetch above awaited, so the entry
+    // captured before it may already be stale.
+    setWorkspaceSharedChannels(
+      input.workspaceId,
+      mergeJoinedChannel(findWorkspace(input.workspaceId)?.sharedChannels ?? [], joined),
+    );
     try {
-      info = await fetchSharedChannelInfo({ relay, shareId: input.shareId });
-      // Before the pull, which is this path's first durable mutation: a
-      // refusal raised after it would leave the channel's messages in the
-      // local store with no registry row, and no row reads as a channel this
-      // workspace owns and may write into. The info fetch above is a read.
-      const refusal = joinedSharedChannelLimitRefusal(
-        findWorkspace(input.workspaceId)?.sharedChannels ?? [],
-        { shareId: info.shareId, channelWireId: info.channelWireId },
-      );
-      if (refusal) throw new JoinedSharedChannelLimitError(refusal);
       const daemonRelay = relayClientForWorkspace({
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
@@ -4420,26 +4443,20 @@ function registerIpcHandlers(
         await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
       }
     } catch (error) {
+      // The join did not happen, so the slot it reserved goes back. Leaving it
+      // would hold capacity for a channel this workspace never imported.
+      setWorkspaceSharedChannels(
+        input.workspaceId,
+        releaseJoinedSharedChannel(
+          findWorkspace(input.workspaceId)?.sharedChannels ?? [],
+          joined.shareId,
+        ),
+      );
       if (error instanceof ShareUnavailableError) {
         throw new Error("That shared channel isn't available anymore.");
       }
       throw error;
     }
-    const joined: JoinedSharedChannel = {
-      shareId: info.shareId,
-      channelWireId: info.channelWireId,
-      access: info.access,
-      granterEmail: info.granterEmail,
-      relayUrl: joinedRelayUrl,
-      recipientUserId: joinedRecipientUserId,
-    };
-    // Dedup by shareId AND channelWireId (CodeRabbit Data Integrity): a
-    // re-join of the same channel under a NEW share id (revoked + re-granted)
-    // replaces the stale row instead of listing and syncing the channel twice.
-    setWorkspaceSharedChannels(
-      input.workspaceId,
-      mergeJoinedChannel(entry.sharedChannels ?? [], joined),
-    );
     return JoinSharedChannelResult.parse({ joined: { ...joined, ended: false } });
   });
 
@@ -6859,18 +6876,6 @@ function registerIpcHandlers(
         // The DM peek confirmed it — claim it here (or confirm this is home).
         if (!claimDmHome(dmHomeFile(), shareId, workspace.workspaceId)) continue;
         const info = await fetchSharedChannelInfo({ relay, shareId });
-        const daemonRelay = relayClientForWorkspace({
-          workspaceId: workspace.workspaceId,
-          rootPath: workspace.rootPath,
-          relay,
-        });
-        const pulled = await daemonRelay.pullSharedChannel({
-          shareId: info.shareId,
-          channelWireId: info.channelWireId,
-        });
-        if (pulled.applied > 0) {
-          await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
-        }
         const joined: JoinedSharedChannel = {
           shareId: info.shareId,
           channelWireId: info.channelWireId,
@@ -6879,6 +6884,9 @@ function registerIpcHandlers(
           relayUrl,
           recipientUserId,
         };
+        // RESERVE before the pull, for the reason joinSharedChannel states:
+        // the refusal has to land while this path still owns nothing durable.
+        // Rows read fresh — every await above could have changed them.
         setWorkspaceSharedChannels(
           workspace.workspaceId,
           mergeJoinedChannel(
@@ -6886,6 +6894,29 @@ function registerIpcHandlers(
             joined,
           ),
         );
+        try {
+          const daemonRelay = relayClientForWorkspace({
+            workspaceId: workspace.workspaceId,
+            rootPath: workspace.rootPath,
+            relay,
+          });
+          const pulled = await daemonRelay.pullSharedChannel({
+            shareId: info.shareId,
+            channelWireId: info.channelWireId,
+          });
+          if (pulled.applied > 0) {
+            await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
+          }
+        } catch (error) {
+          setWorkspaceSharedChannels(
+            workspace.workspaceId,
+            releaseJoinedSharedChannel(
+              findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
+              joined.shareId,
+            ),
+          );
+          throw error;
+        }
       } catch (error) {
         // A share revoked between the listing and the fetch surfaces as
         // unavailable — skip it; the next pass reconciles. Never blocks the

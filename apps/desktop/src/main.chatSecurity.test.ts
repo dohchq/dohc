@@ -247,27 +247,38 @@ describe("main-process chat authorization", () => {
   // and channelIsLocked then read a READ-ONLY shared channel as a local one
   // the user may write into. The order is the authorization, so it is pinned
   // here rather than left to the reader.
-  it("refuses a joined-lane overflow before either join path mutates anything durable", () => {
-    const manual = handlerSource("joinSharedChannel");
-    const refusalAt = manual.indexOf("joinedSharedChannelLimitRefusal(");
-    const pullAt = manual.indexOf("pullSharedChannel({");
-    expect(refusalAt).toBeGreaterThan(-1);
-    expect(pullAt).toBeGreaterThan(-1);
-    expect(refusalAt).toBeLessThan(pullAt);
-
+  // A check ahead of an awaited pull is not a gate: two joins at the limit
+  // both pass it, both pull, and the loser's merge throws with its channel
+  // already imported. So the RESERVATION — the merge itself, synchronous over
+  // the cached registry — is what has to precede the pull. The loser then
+  // refuses having pulled nothing.
+  it("reserves the joined-lane slot before either join path pulls anything", () => {
     const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");
     const autoJoinEnd = mainSource.indexOf("ipcMain.handle(", autoJoinStart);
     expect(autoJoinStart).toBeGreaterThan(-1);
     expect(autoJoinEnd).toBeGreaterThan(autoJoinStart);
+
+    for (const [label, source] of [
+      ["joinSharedChannel", handlerSource("joinSharedChannel")],
+      ["autoJoinReceivedDms", mainSource.slice(autoJoinStart, autoJoinEnd)],
+    ] as const) {
+      const reserveAt = source.indexOf("mergeJoinedChannel(");
+      const pullAt = source.indexOf("pullSharedChannel({");
+      expect(reserveAt, label).toBeGreaterThan(-1);
+      expect(pullAt, label).toBeGreaterThan(-1);
+      expect(reserveAt, label).toBeLessThan(pullAt);
+      // And a pull that fails hands the slot back: a reservation held for a
+      // channel this workspace never imported is capacity nobody can reclaim.
+      expect(source, label).toContain("releaseJoinedSharedChannel(");
+      expect(source.indexOf("releaseJoinedSharedChannel("), label).toBeGreaterThan(pullAt);
+    }
+
+    // The cheap early-out still runs ahead of the DM home claim: a claim left
+    // behind for a join that never happened pins the share to a workspace that
+    // holds no row for it, and every other workspace then skips it for good.
     const autoJoin = mainSource.slice(autoJoinStart, autoJoinEnd);
     const autoRefusalAt = autoJoin.indexOf("joinedSharedChannelLimitRefusal(");
     expect(autoRefusalAt).toBeGreaterThan(-1);
-    // Ahead of the DM home claim as well: a claim left behind for a join that
-    // never happened pins the share to a workspace that holds no row for it.
-    for (const durable of ["claimDmHome(", "pullSharedChannel({"]) {
-      const durableAt = autoJoin.indexOf(durable);
-      expect(durableAt, durable).toBeGreaterThan(-1);
-      expect(autoRefusalAt, durable).toBeLessThan(durableAt);
-    }
+    expect(autoRefusalAt).toBeLessThan(autoJoin.indexOf("claimDmHome("));
   });
 });
