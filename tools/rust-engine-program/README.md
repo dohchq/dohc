@@ -10,7 +10,7 @@ local evidence pipeline.
 
 | Script | What it does |
 | --- | --- |
-| `run-rust-checks.mjs` | Rust policy gate: tree provenance (the commit the run examined; HEAD moving or the worktree changing mid-run fails the verdict, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, the collab crash tier (`cargo test -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. Prints a pass/fail summary and a pasteable evidence line. |
+| `run-rust-checks.mjs` | Rust policy gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, the collab crash tier (`cargo test -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. Prints a pass/fail summary and a pasteable evidence line. |
 | `native-target.mjs` | The gate's first step, importable so it can be tested: asks rustc through cargo what it compiled for. See [Native target](#native-target). |
 | `build-reviewer-packet.mjs` | (R01-ORACLE) assembles per-shard reviewer packets. Unrelated to the runners. |
 
@@ -41,12 +41,19 @@ node tools/rust-engine-program/run-rust-checks.mjs
 It prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
 
 ```
-- 2026-07-28T10:11:10.183Z | run-rust-checks | win32/x64 (rust cfg x86_64/windows/msvc, head 1f47af31 clean) | PASS | tree provenance=PASS native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS
+- 2026-07-28T10:11:10.183Z | run-rust-checks | win32/x64 (rust cfg x86_64/windows/msvc, head 1f47af31 clean, 10 reads) | PASS | tree provenance=PASS native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS
 ```
 
 `win32/x64` is Node's view of the host. The `rust cfg` field is what rustc
 reported through cargo, and the run stops before any other step unless the two
 agree — see [Native target](#native-target).
+
+`head 1f47af31 clean, 10 reads` is the tree the run examined. The gate reads
+the tree before the first step and after each one, and reports how many
+readings agreed. It is not a claim that the tree was watched between them: a
+change made and undone inside one step is invisible to any number of readings.
+A run whose tree moved between two readings reports `tree provenance=FAIL`,
+names the step that straddled the change, and stamps `head UNATTRIBUTABLE`.
 
 Copy that line into `EXECUTION_LOG.md` under the relevant shard entry.
 

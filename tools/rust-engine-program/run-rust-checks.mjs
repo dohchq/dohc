@@ -42,7 +42,7 @@ import { arch, platform, release } from "node:os";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
   classifyTreeProvenance,
-  formatTreeStamp,
+  formatTreeState,
   readTreeState,
 } from "./tree-provenance.mjs";
 
@@ -118,12 +118,22 @@ const optional = [
 const results = [];
 let failed = false;
 
-const treeBefore = readTreeState(captureGit);
+// One reading per step boundary, not one before and one after the run. A tree
+// that changes and changes back reads identical at the two ends, so endpoints
+// alone certify an interval nothing observed.
+//
+// Each reading is a `git rev-parse` and a `git status --untracked-files=all`
+// through a shell. Measured on this repo on Windows, the slowest of the
+// platforms the gate runs on: ~0.9s per reading, ~9s for the ten a full run
+// takes — under a percent of a gate that spends twenty minutes in cargo.
+const readings = [{ step: "start", state: readTreeState(captureGit) }];
+const readTreeAfter = (step) =>
+  readings.push({ step, state: readTreeState(captureGit) });
 
 console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
 console.log(`repo: ${repoRoot}`);
-console.log(`tree at start: ${formatTreeStamp(treeBefore)}\n`);
+console.log(`tree at start: ${formatTreeState(readings[0].state)}\n`);
 
 console.log(`\n--- native target ---`);
 const native = verifyNativeTarget();
@@ -140,12 +150,16 @@ results.push({
   status: native.ok ? "PASS" : "FAIL",
   reason: native.ok ? undefined : native.reason,
 });
+readTreeAfter("native target");
 
 // An unverified host makes every later result unattributable, so nothing else
 // runs — and the expensive steps are the ones worth skipping.
 for (const step of native.ok ? required : []) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);
+  // Read as soon as the command returns, before anything else can touch the
+  // tree, so the interval this reading closes is the step's own.
+  readTreeAfter(step.name);
   if (r.code === step.skipCode) {
     // A skipped required step is a FAIL: stamping PASS with a row missing is
     // exactly the blind spot this gate exists to prevent.
@@ -174,19 +188,23 @@ for (const step of native.ok ? optional : []) {
     console.warn(
       `  ${step.name} not installed — SKIPPED (install with \`cargo install ${step.name} --locked\`).`,
     );
+    // Nothing ran, so there is no interval to attribute to this step and no
+    // reading to take: a boundary names the step that consumed the time
+    // before it.
     results.push({ name: step.name, status: "SKIP" });
     continue;
   }
   const r = run(step.cmd);
+  readTreeAfter(step.name);
   if (!r.ok) failed = true;
   results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL" });
 }
 
-// Provenance closes the run: the tree is read again, and a HEAD or a worktree
-// that moved makes every row above unattributable — the checks straddled two
-// trees, so the verdict describes neither.
-const treeAfter = readTreeState(captureGit);
-const provenance = classifyTreeProvenance(treeBefore, treeAfter);
+// Provenance closes the run: the series of readings is judged, and a step
+// that straddled a change makes its own row and the rows after it
+// unattributable — those checks read two trees, so the verdict describes
+// neither.
+const provenance = classifyTreeProvenance(readings);
 if (provenance.status === "FAIL") failed = true;
 // First row: it frames every row under it.
 results.unshift({
