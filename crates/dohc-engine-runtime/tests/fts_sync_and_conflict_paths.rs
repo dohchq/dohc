@@ -724,6 +724,7 @@ async fn local_conflict_resolution_actor_indexes_text_and_deletion() {
     let written = actor
         .conflict_resolve_indexed(
             local_resolution("local-text-conflict", "text", 1_400),
+            dohc_engine_collab::LeaseRegistry::new(),
             scratch.path().to_path_buf(),
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -767,6 +768,7 @@ async fn local_conflict_resolution_actor_indexes_text_and_deletion() {
     actor
         .conflict_resolve_indexed(
             local_resolution("local-delete-conflict", "delete", 1_700),
+            dohc_engine_collab::LeaseRegistry::new(),
             scratch.path().to_path_buf(),
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -949,6 +951,7 @@ async fn resolving_onto_a_binary_side_drops_the_indexed_text() {
     actor
         .conflict_resolve_indexed(
             local_resolution("local-binary-conflict", "binary", 1_400),
+            dohc_engine_collab::LeaseRegistry::new(),
             scratch.path().to_path_buf(),
             Arc::new(NoFaults),
             CancellationToken::new(),

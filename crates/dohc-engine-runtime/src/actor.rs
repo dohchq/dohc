@@ -1234,6 +1234,7 @@ enum Command {
     },
     ConflictResolve {
         input: ResolveTextConflict,
+        leases: LeaseRegistry,
         root_dir: Option<PathBuf>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -3497,10 +3498,11 @@ impl ActorHandle {
     pub async fn conflict_resolve(
         &self,
         input: ResolveTextConflict,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
-        self.conflict_resolve_with_root(input, None, faults, token)
+        self.conflict_resolve_with_root(input, leases, None, faults, token)
             .await
     }
 
@@ -3509,17 +3511,19 @@ impl ActorHandle {
     pub async fn conflict_resolve_indexed(
         &self,
         input: ResolveTextConflict,
+        leases: LeaseRegistry,
         root_dir: PathBuf,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
-        self.conflict_resolve_with_root(input, Some(root_dir), faults, token)
+        self.conflict_resolve_with_root(input, leases, Some(root_dir), faults, token)
             .await
     }
 
     async fn conflict_resolve_with_root(
         &self,
         input: ResolveTextConflict,
+        leases: LeaseRegistry,
         root_dir: Option<PathBuf>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -3528,6 +3532,7 @@ impl ActorHandle {
         self.tx
             .send(Command::ConflictResolve {
                 input,
+                leases,
                 root_dir,
                 faults,
                 token,
@@ -7475,6 +7480,7 @@ fn worker_main(
             }
             Command::ConflictResolve {
                 input,
+                leases,
                 root_dir,
                 faults,
                 token,
@@ -7484,6 +7490,7 @@ fn worker_main(
                     &mut store,
                     &input,
                     root_dir.as_deref(),
+                    &leases,
                     faults.as_ref(),
                     &token,
                 );
@@ -10661,11 +10668,42 @@ fn conflict_resolve_on_store(
     store: &mut EngineStore,
     input: &ResolveTextConflict,
     root_dir: Option<&std::path::Path>,
+    leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<ResolveTextConflictResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    // A LIVE editor holds the document this resolution would rewrite. The
+    // fold commits a full-document update to the durable Y.Doc, and the
+    // client keeps editing the copy it already has: its next update merges
+    // from pre-resolution state, so the reviewed choice is reversed or the
+    // live edits are lost — the same property the open/settle freeze
+    // protects, breached from the other side (the session is already
+    // holding the document rather than trying to acquire it).
+    //
+    // Refuse rather than mutate underneath it. The caller closes or resyncs
+    // the session and resolves again; `ydoc_resync_on_store` is the door
+    // that makes that recoverable.
+    let held_object: Option<(String, String)> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT target_version_id, current_object_id FROM conflicts              WHERE workspace_id=?1 AND conflict_id=?2",
+            params![input.workspace_id, input.conflict_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map(|row| row.and_then(|(version, object)| object.map(|object| (version, object))))
+        .map_err(StorageError::corrupt_public)
+    })?;
+    if let Some((version_id, object_id)) = held_object
+        && let Ok(key) = DocKey::new(input.workspace_id.clone(), version_id, object_id)
+        && leases.is_held(&key)
+    {
+        return Err(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "ydoc-session-live",
+        }
+        .into());
     }
     let result = VersionedTextStore::new(store)
         .resolve_text_conflict_with(input, faults, |tx, result| {

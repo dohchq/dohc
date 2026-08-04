@@ -7122,6 +7122,132 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
 }
 
 #[test]
+fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
+    // `lineage_has_state` was a PROXY for "the head was merged", and the two
+    // come apart exactly where it matters. A local-only session crashes
+    // leaving durable unmaterialized rows; capture then records an external
+    // disk edit, so the visible head is newer than anything the lineage
+    // produced. The union is the crashed draft plus the peer's base — the
+    // captured head is in NEITHER — yet the proxy said "rows exist, so the
+    // CRDT is the merge" and the projection overwrote the user's edit with
+    // no conflict at all.
+    //
+    // The fact is `last_settled_sha`: the content this lineage last put on
+    // disk. Same move as the resolve path, where `metadata_origin == "sync"`
+    // was replaced by the head ids the payload already carried.
+    //
+    // MUTATION: gate the divergence check on `!lineage_has_state` again —
+    // the external edit is silently overwritten and the assertions below
+    // fail.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-crashed',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-crashed").expect("key");
+
+    // A local-only session that crashed: durable rows, never settled.
+    let draft = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "crashed draft");
+    dohc_engine_collab::record_local_update_creating_marker(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::LocalOnly,
+        &draft,
+        None,
+        &NoFaults,
+        1_500,
+    )
+    .expect("crashed draft rows");
+
+    // Capture records an EXTERNAL disk edit: the head is now newer than
+    // anything this lineage produced.
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-crashed".to_owned(),
+                    path: "notes/crashed.md".to_owned(),
+                    text: "the user's external edit".to_owned(),
+                    moment_id: "m-external".to_owned(),
+                    metadata_origin: "capture".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_600,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("external edit");
+
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "peer base");
+    let base_sha = engine
+        .put_binary_blob(&base_doc.encode_full_state())
+        .expect("base blob");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &envelope(
+            "peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-crashed",
+                "path": "notes/crashed.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": base_sha,
+                "isBaseState": true
+            }),
+        ),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-base-conflict"),
+            conflicts_opened: 1,
+        }),
+        "a head this lineage never produced must open a conflict"
+    );
+
+    let head: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.object_id='object-crashed'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("head");
+    assert_eq!(
+        head, "the user's external edit",
+        "the external edit survives for review instead of being overwritten"
+    );
+}
+
+#[test]
 fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
     // The convergent twin of the divergence test: a head whose bytes already
     // equal the base's projection fast-forwards silently.

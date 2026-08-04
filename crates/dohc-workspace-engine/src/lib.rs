@@ -7709,6 +7709,7 @@ impl EngineService {
                     now_ms: local.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
+                self.leases.clone(),
                 open.root,
                 Arc::new(NoFaults),
                 cancellation.token(),

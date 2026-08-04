@@ -975,7 +975,7 @@ pub fn apply_ydoc_envelope(
         // update rows (a crash left them behind): the projection must be the
         // reconstructed lineage PLUS the base, or the visible snapshot would
         // drop local content that is still durably part of the CRDT.
-        let (base_doc, lineage_has_state) = {
+        let (base_doc, _lineage_has_state) = {
             let persisted =
                 dohc_engine_collab::load_persisted(store, &key).map_err(map_collab_hard_error)?;
             let lineage_has_state = persisted.as_ref().is_some_and(|persisted| {
@@ -1051,7 +1051,41 @@ pub fn apply_ydoc_envelope(
             // both machines. A head that already equals the base's projection
             // needs no conflict, and a lineage WITH durable rows takes the
             // union path below (the projection carries the local content).
-            if !lineage_has_state && let Some(snapshot) = current.snapshot.as_ref() {
+            // Whether the head is REPRESENTED in this union, not whether the
+            // lineage happens to hold rows. `lineage_has_state` was a proxy
+            // for "the head was merged" and the two come apart exactly where
+            // it matters: a local-only session that crashed leaves durable
+            // unmaterialized rows, capture then records an external disk
+            // edit, and the union is the crashed draft plus the peer's base
+            // — not the newer captured head. The proxy said "rows exist, so
+            // the CRDT is the merge" and the projection overwrote the user's
+            // external edit with no conflict at all.
+            //
+            // The fact is `last_settled_sha`: the content this lineage last
+            // put on disk. A head equal to it came from this lineage and is
+            // therefore inside the union. A head that differs was written by
+            // someone else — capture, an external editor — and nothing has
+            // merged it, which is the same reasoning that replaced
+            // `metadata_origin == "sync"` with the payload's head ids in the
+            // resolve path.
+            let head_settled_by_this_lineage: Option<String> = tx
+                .query_row(
+                    "SELECT last_settled_sha FROM ydoc_docs \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![
+                        claim_key.workspace_id,
+                        claim_key.version_id,
+                        claim_key.object_id
+                    ],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)?
+                .flatten();
+            let head_is_in_the_union = current.snapshot.as_ref().is_some_and(|snapshot| {
+                head_settled_by_this_lineage.as_deref() == Some(snapshot.blob_sha256.as_str())
+            });
+            if !head_is_in_the_union && let Some(snapshot) = current.snapshot.as_ref() {
                 let projection = base_doc
                     .project(kind)
                     .map_err(|_| SyncError::InvalidInput {

@@ -221,6 +221,7 @@ async fn resolving_keep_current_folds_the_choice_into_the_lineage() {
                 now_ms: 11,
                 request_id: None,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -355,6 +356,7 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
                 now_ms: 11,
                 request_id: None,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -464,6 +466,7 @@ async fn an_oversized_resolution_fold_reports_its_measurements() {
                 now_ms: 11,
                 request_id: None,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -546,6 +549,7 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
                 now_ms: 500,
                 request_id: None,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -581,5 +585,81 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
     assert_eq!(
         marker_heads.0, marker_heads.1,
         "the snapshot head caught up with the update head"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resolution_refuses_while_a_session_holds_the_document() {
+    // The freeze from the other side. The open/settle guards stop a session
+    // ACQUIRING a document under review; this is a conflict resolving while
+    // an editor is ALREADY holding one. The fold commits a full-document
+    // rewrite to the durable Y.Doc while the client keeps editing the copy
+    // it has, so its next update merges from pre-resolution state — losing
+    // the live edits or reversing the reviewed choice.
+    //
+    // MUTATION: drop the lease probe in `conflict_resolve_on_store` — the
+    // resolve succeeds under the live lease and this refusal fails.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let (key, _winner_base, _winner_doc, conflict_id) = {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        seed_divergent_base(&mut store)
+    };
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 10).expect("open actor").actor;
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let _held = leases.acquire(&key).expect("hold the document live");
+
+    let refused = handle
+        .conflict_resolve(
+            ResolveTextConflict {
+                workspace_id: WS.to_owned(),
+                conflict_id,
+                resolution: ResolveConflictKind::KeepCurrent,
+                object_id: "resolution-fresh-object".to_owned(),
+                write_moment_id: "m-resolve-live".to_owned(),
+                delete_moment_id: "m-resolve-delete".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 11,
+                request_id: None,
+            },
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a live session must block the fold");
+    assert!(
+        matches!(
+            refused,
+            dohc_engine_runtime::RuntimeError::Domain(
+                dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-session-live"
+                }
+            )
+        ),
+        "unexpected resolve outcome: {refused:?}"
+    );
+
+    // The conflict is untouched: still open, still awaiting review.
+    supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 12).expect("inspect");
+    let open_conflicts: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE workspace_id=?1 AND status='open'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("count");
+    assert_eq!(
+        open_conflicts, 1,
+        "the refused resolve left the review open"
     );
 }
