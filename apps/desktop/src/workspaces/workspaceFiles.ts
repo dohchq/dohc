@@ -1,8 +1,10 @@
 import {
   classifyPath,
   DOHC_TRASH_GUARD,
+  fitWithinNameMax,
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
+  trashEntryName,
   validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
@@ -64,21 +66,6 @@ function isInside(parent: string, child: string): boolean {
     !rel.startsWith("..") &&
     !rel.startsWith(`${sep}`)
   );
-}
-
-// Truncate a (decorative) basename so `${prefix}${name}` fits NAME_MAX — the
-// 255-BYTE per-component limit on ext4/APFS/NTFS. Byte-accurate, not char:
-// a multibyte sequence split at the cut decodes to U+FFFD, which we trim so
-// the trash entry never carries a dangling replacement char.
-function fitWithinNameMax(name: string, prefix: string): string {
-  const NAME_MAX = 255;
-  const budget = NAME_MAX - Buffer.byteLength(prefix, "utf8");
-  if (budget <= 0) return "";
-  if (Buffer.byteLength(name, "utf8") <= budget) return name;
-  return Buffer.from(name, "utf8")
-    .subarray(0, budget)
-    .toString("utf8")
-    .replace(/\uFFFD+$/, "");
 }
 
 // Head bytes read to find a markdown page's `icon` frontmatter. The icon is a
@@ -672,7 +659,7 @@ export async function moveIntoWorkspaceTrash(
   // decorative, so truncate it to fit NAME_MAX (255 bytes on ext4/APFS/NTFS):
   // a long source name + the 50-odd-byte unique prefix must not ENAMETOOLONG.
   const prefix = `${Date.now()}-${randomUUID()}-`;
-  const trashed = join(trashDir, `${prefix}${fitWithinNameMax(basename(target), prefix)}`);
+  const trashed = join(trashDir, trashEntryName(basename(target), prefix));
   await rename(target, trashed);
   return trashed;
 }

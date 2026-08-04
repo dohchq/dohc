@@ -20,6 +20,7 @@ import {
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
   packageManagerFromFiles,
+  trashEntryName,
   validateUserMaterializePath,
   validateUserReadPath,
   type ChangeAuthor,
@@ -266,6 +267,17 @@ async function recordedChangeFields(
 
 function failureReason(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+// The errno code alone, for refusals that translate a filesystem failure. An
+// agent can act on "EACCES"; it cannot act on a sentence that hides which
+// failure happened.
+function errorCode(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const { code } = error as { code?: unknown };
+    if (typeof code === "string") return code;
+  }
+  return "unknown";
 }
 
 async function ensureRecordable(ctx: ToolContext) {
@@ -977,26 +989,54 @@ export async function deleteWorkspacePath(
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
-  try {
-    await lstat(resolved.absolute);
-    const trashDir = await safeTrashDir(ctx);
-    const trashedTo = join(
-      trashDir,
-      `${Date.now()}-${randomUUID()}-${basename(resolved.normalized)}`,
-    );
-    await rename(resolved.absolute, trashedTo);
+  // "Nothing is there" answered on its own, before anything can fail: it is a
+  // different fact from "the move failed", and an lstat errno naming an
+  // absolute host path told the agent neither (#613).
+  if (!(await lstat(resolved.absolute).catch(() => null))) {
     return {
-      ok: true as const,
-      path: resolved.normalized,
-      trashed: true,
-      ...(await recordedChangeFields(ctx)),
+      ok: false as const,
+      reason: `dohc could not delete ${resolved.normalized}. Nothing is at that path in this workspace. List the folder to see what is there.`,
     };
+  }
+  // The guard refusals name their own constraint (#585), so they pass through
+  // as they are.
+  let trashDir: string;
+  try {
+    trashDir = await safeTrashDir(ctx);
   } catch (error) {
     return {
       ok: false as const,
-      reason: failureReason(error, `failed to delete: ${args.path}`),
+      reason: failureReason(error, `failed to delete: ${resolved.normalized}`),
     };
   }
+  // trashEntryName, not a bare concatenation: the ~51-byte unique prefix plus
+  // a legal 230-character basename used to exceed the filesystem's
+  // per-component limit, and the rename answered ENOENT about a file that was
+  // right there. The basename is decorative -- recovery is opening
+  // <workspace>/.dohc/trash and moving the entry back -- so truncating it is
+  // always better than failing the delete (#613).
+  const prefix = `${Date.now()}-${randomUUID()}-`;
+  const trashedTo = join(
+    trashDir,
+    trashEntryName(basename(resolved.normalized), prefix),
+  );
+  try {
+    await rename(resolved.absolute, trashedTo);
+  } catch (error) {
+    // Name the outcome, not just the failure. rename is atomic, so the path is
+    // exactly as it was, and an agent that cannot tell a failed delete from a
+    // silent one cannot decide what to do next.
+    return {
+      ok: false as const,
+      reason: `dohc could not delete ${resolved.normalized}. The move to the workspace trash failed (${errorCode(error)}). ${resolved.normalized} is unchanged.`,
+    };
+  }
+  return {
+    ok: true as const,
+    path: resolved.normalized,
+    trashed: true,
+    ...(await recordedChangeFields(ctx)),
+  };
 }
 
 // --- dohc_list_workspaces / cloud binding helpers ---------------------------

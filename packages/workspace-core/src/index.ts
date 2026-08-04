@@ -1,5 +1,6 @@
 export * from "./workspaceMode";
 export * from "./dohcGuardRefusals";
+export * from "./trashEntryName";
 export * from "./metadata";
 export * from "./paths";
 export * from "./changeSet";

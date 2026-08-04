@@ -44,6 +44,18 @@ import {
 } from "./tools";
 import { DEFAULT_WORKSPACE_SETTINGS } from "@dohc/workspace-contracts/workspace-settings";
 
+// The trash destination carries a uuid, so a test that needs to pre-create it
+// has to know it. Pass-through until a test arms it; only the rename-failure
+// test below does.
+const uuidOverride = vi.hoisted(() => ({ value: null as string | null }));
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  return {
+    ...actual,
+    randomUUID: () => uuidOverride.value ?? actual.randomUUID(),
+  };
+});
+
 // Keep these split so siteNoLegacyAppModel.test.ts does not flag this
 // compatibility regression fixture as active legacy guidance.
 const LEGACY_APPS_SEGMENT = `.${"apps"}`;
@@ -397,6 +409,83 @@ describe("mcp tool path containment", () => {
       await expect(readFile(join(ctx.root, "keep.txt"), "utf8")).resolves.toBe("still here");
 
       await rm(outside, { recursive: true, force: true });
+    });
+  });
+
+  // #613: the trash name joined a ~51-byte timestamp+uuid prefix onto an
+  // untruncated basename. A 230-character name is legal on NTFS, ext4 and
+  // APFS, so the file exists and the DELETE is what fails -- with "ENOENT: no
+  // such file or directory, rename ...", which an agent would reasonably read
+  // as a delete that did not happen.
+  it("deletes a file whose legal 230-character name the prefix would overflow", async () => {
+    await withWorkspace(async (ctx) => {
+      const name = `${"a".repeat(226)}.txt`;
+      expect(name).toHaveLength(230);
+      await writeFile(join(ctx.root, name), "keep me recoverable");
+
+      await expect(
+        deleteWorkspacePath(ctx, { path: name }),
+      ).resolves.toMatchObject({ ok: true, path: name, trashed: true });
+
+      // Gone from the workspace, and recoverable from the trash under a name
+      // the filesystem could actually hold.
+      await expect(readFile(join(ctx.root, name), "utf8")).rejects.toThrow();
+      const trashed = await readdir(join(ctx.root, ".dohc", "trash"));
+      expect(trashed).toHaveLength(1);
+      const entry = trashed[0]!;
+      expect(new TextEncoder().encode(entry).length).toBeLessThanOrEqual(255);
+      expect(
+        await readFile(join(ctx.root, ".dohc", "trash", entry), "utf8"),
+      ).toBe("keep me recoverable");
+    });
+  });
+
+  // The other raw errno this surface emitted: lstat's, naming an absolute host
+  // path the agent never gave and cannot use.
+  it("says nothing is there instead of handing back an lstat errno", async () => {
+    await withWorkspace(async (ctx) => {
+      const result = await deleteWorkspacePath(ctx, { path: "notes/gone.md" });
+      expect(result).toMatchObject({
+        ok: false,
+        reason:
+          "dohc could not delete notes/gone.md. Nothing is at that path in this workspace. List the folder to see what is there.",
+      });
+      expect(result.reason).not.toMatch(/ENOENT|lstat/);
+      expect(result.reason).not.toContain(ctx.root);
+    });
+  });
+
+  // A failing rename must say what happened AND what did not. rename is
+  // atomic, so the file is exactly as it was -- and an agent that cannot tell
+  // a refused delete from a silent one cannot decide what to do next.
+  it("names the failure and says the path is unchanged when the move fails", async () => {
+    await withWorkspace(async (ctx) => {
+      const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
+      const now = 1785780488421;
+      uuidOverride.value = uuid;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+      try {
+        await writeFile(join(ctx.root, "note.md"), "still here");
+        // A DIRECTORY sitting at the exact destination: rename refuses to
+        // replace it on every platform this ships to.
+        const trashDir = join(ctx.root, ".dohc", "trash");
+        await mkdir(trashDir, { recursive: true });
+        await mkdir(join(trashDir, `${now}-${uuid}-note.md`));
+
+        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
+        // The errno code varies by platform; everything around it does not.
+        expect(result.reason).toMatch(
+          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. note\.md is unchanged\.$/,
+        );
+        expect(result.ok).toBe(false);
+        // The claim the message makes, checked.
+        expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe(
+          "still here",
+        );
+      } finally {
+        clock.mockRestore();
+        uuidOverride.value = null;
+      }
     });
   });
 
