@@ -4,7 +4,10 @@ import {
   fitWithinNameMax,
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
-  trashEntryName,
+  nameUnitFor,
+  trashEntryCharBudget,
+  trashEntryPlan,
+  WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
@@ -299,7 +302,7 @@ function collisionVariant(name: string, attempt: number): string {
   const stem = dot > 0 ? name.slice(0, dot) : name;
   const extension = dot > 0 ? name.slice(dot) : "";
   const marker = ` (${attempt})`;
-  return `${fitWithinNameMax(stem, marker + extension)}${marker}${extension}`;
+  return `${fitWithinNameMax(stem, marker + extension, { unit: nameUnitFor(process.platform) })}${marker}${extension}`;
 }
 
 // One copy that never overwrites: COPYFILE_EXCL on every attempt, retrying
@@ -658,10 +661,37 @@ export async function moveIntoWorkspaceTrash(
   // bytes. The per-call UUID makes every trash entry unique. The basename is
   // decorative, so truncate it to fit NAME_MAX (255 bytes on ext4/APFS/NTFS):
   // a long source name + the 50-odd-byte unique prefix must not ENAMETOOLONG.
+  // Renaming down a ladder rather than predicting which limit applies: the
+  // real name first, then the component-fitted one, then one that also fits
+  // the legacy MAX_PATH limit -- each reached only because the platform
+  // refused the one above it. A name that fits is never shortened, and the
+  // trash keeps no record of the original, so a dropped character is gone.
   const prefix = `${Date.now()}-${randomUUID()}-`;
-  const trashed = join(trashDir, trashEntryName(basename(target), prefix));
-  await rename(target, trashed);
-  return trashed;
+  const plan = trashEntryPlan(basename(target), prefix, {
+    unit: nameUnitFor(process.platform),
+    maxEntryChars: trashEntryCharBudget(trashDir, process.platform),
+  });
+  let moveError: unknown = null;
+  for (const candidate of plan.candidates) {
+    const trashed = join(trashDir, candidate);
+    try {
+      await rename(target, trashed);
+      return trashed;
+    } catch (error) {
+      moveError = error;
+      // Only a length failure earns a shorter name. Windows reports an
+      // over-long path as ENOENT, which is how #613 disguised itself;
+      // anything else is not about length.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENAMETOOLONG" && code !== "ENOENT") throw error;
+    }
+  }
+  if (plan.exhausted) {
+    throw new Error(
+      `dohc could not move ${basename(target)} to the workspace trash. The trash folder is ${trashDir.length} characters deep, and this platform allows ${WINDOWS_MAX_PATH_CHARS} characters for a whole path, which leaves no room for a trash entry name. Move the workspace to a shorter path.`,
+    );
+  }
+  throw moveError;
 }
 
 // Export bounds: policy caps for what main will buffer into one in-memory

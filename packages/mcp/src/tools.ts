@@ -20,7 +20,10 @@ import {
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
   packageManagerFromFiles,
-  trashEntryName,
+  nameUnitFor,
+  trashEntryCharBudget,
+  trashEntryPlan,
+  WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
   validateUserReadPath,
   type ChangeAuthor,
@@ -289,7 +292,7 @@ function failureReason(error: unknown, fallback: string): string {
 // The probe is demoted to raising a WARNING when it has positive evidence of
 // change. A missed warning leaves a true message; there is no reading of the
 // probe that makes a false one.
-type Aftermath = "replaced" | "gone" | "undetermined";
+type Aftermath = "replaced" | "gone" | "unchecked" | "undetermined";
 
 // Positive evidence only. A different inode, or the same inode on a different
 // device, proves a different entry. Equal values prove nothing, and an inode
@@ -304,12 +307,26 @@ function replacedSince(before: Stats, after: Stats): boolean {
 function deleteAftermath(path: string, aftermath: Aftermath): string {
   switch (aftermath) {
     case "replaced":
-      return ` Something else replaced ${path} while dohc worked: a retry deletes the replacement, not the entry you asked for.`;
+      // The observation, not a consequence drawn from it. An atomic save
+      // replaces the entry too -- writeFileAtomicallyForTool does exactly
+      // that, and so does most editors' save -- so "a retry deletes the
+      // replacement, not the entry you asked for" was wrong whenever the
+      // replacement was the same document, one revision newer. What is at the
+      // path changed; who put it there, and whether the agent still wants it
+      // deleted, is not this sentence's to decide.
+      return ` A different entry is at ${path} now: something replaced it while dohc worked.`;
     case "gone":
       return ` ${path} is no longer in this workspace: something else moved or deleted it.`;
+    case "unchecked":
+      // The look itself failed. That dohc could not check is ITSELF provable,
+      // and it is a different state from "the entry looks the same" -- the two
+      // used to render byte-identical, which told an agent the second when the
+      // truth was the first.
+      return ` dohc could not check ${path} afterwards.`;
     case "undetermined":
-      // Nothing about what ELSE touched the path is provable. The refusal
-      // already says what dohc did, which is what a retry decision needs.
+      // The look succeeded and found no evidence of change. Nothing about what
+      // ELSE touched the path is provable, and the refusal already says what
+      // dohc did, which is what a retry decision needs.
       return "";
   }
 }
@@ -317,12 +334,17 @@ function deleteAftermath(path: string, aftermath: Aftermath): string {
 // The errno code alone, for refusals that translate a filesystem failure. An
 // agent can act on "EACCES"; it cannot act on a sentence that hides which
 // failure happened.
-function errorCode(error: unknown): string {
+//
+// null means "this is not an errno at all", which is a different fact and has
+// to stay one: it is how a guard refusal this code wrote is told apart from a
+// failure the platform reported, and rendering it as "(unknown)" would put a
+// non-code in a slot that is documented to hold one.
+function errnoCode(error: unknown): string | null {
   if (typeof error === "object" && error !== null && "code" in error) {
     const { code } = error as { code?: unknown };
     if (typeof code === "string") return code;
   }
-  return "unknown";
+  return null;
 }
 
 async function ensureRecordable(ctx: ToolContext) {
@@ -1044,7 +1066,7 @@ export async function deleteWorkspacePath(
   // direction. Every other code keeps its own failure.
   const source = await lstat(resolved.absolute).then(
     (stats) => ({ found: true as const, stats }),
-    (error: unknown) => ({ found: false as const, code: errorCode(error) }),
+    (error: unknown) => ({ found: false as const, code: errnoCode(error) ?? "no errno" }),
   );
   if (!source.found) {
     return {
@@ -1055,31 +1077,71 @@ export async function deleteWorkspacePath(
           : `dohc could not delete ${resolved.normalized}. The check on that path failed (${source.code}). dohc did not move it.`,
     };
   }
-  // The guard refusals name their own constraint (#585), so they pass through
-  // as they are.
+  // The guard refusals name their own constraint (#585) and pass through as
+  // they are. Everything else here is an errno from mkdir or lstat, and it
+  // used to reach the agent raw, absolute host path and all -- the very defect
+  // this tool's other arms were fixed for. A guard refusal is an Error this
+  // code wrote and carries no `code`; an errno does.
   let trashDir: string;
   try {
     trashDir = await safeTrashDir(ctx);
   } catch (error) {
+    const code = errnoCode(error);
     return {
       ok: false as const,
-      reason: failureReason(error, `failed to delete: ${resolved.normalized}`),
+      reason:
+        code === null
+          ? failureReason(error, `failed to delete: ${resolved.normalized}`)
+          : `dohc could not delete ${resolved.normalized}. Preparing the workspace trash folder failed (${code}). dohc did not move it.`,
     };
   }
-  // trashEntryName, not a bare concatenation: the ~51-byte unique prefix plus
-  // a legal 230-character basename used to exceed the filesystem's
-  // per-component limit, and the rename answered ENOENT about a file that was
-  // right there. The basename is decorative -- recovery is opening
-  // <workspace>/.dohc/trash and moving the entry back -- so truncating it is
-  // always better than failing the delete (#613).
+  // Renaming down a ladder, not predicting which limit applies. Rung 1 is the
+  // file's real name: a name that fits is never shortened, which matters
+  // because the trash keeps no record of the original and a dropped character
+  // cannot be recovered. Rung 2 fits the per-component limit, rung 3 also fits
+  // the legacy MAX_PATH limit -- and each is only reached because the platform
+  // actually refused the one above it.
+  //
+  // Predicting went wrong twice: assuming the component limit was the only one
+  // (#613, a rename past MAX_PATH answering ENOENT about a file that was right
+  // there), then assuming MAX_PATH always binds, which took deletion away from
+  // deep workspaces on hosts where long paths work.
   const prefix = `${Date.now()}-${randomUUID()}-`;
-  const trashedTo = join(
-    trashDir,
-    trashEntryName(basename(resolved.normalized), prefix),
-  );
-  try {
-    await rename(resolved.absolute, trashedTo);
-  } catch (error) {
+  const plan = trashEntryPlan(basename(resolved.normalized), prefix, {
+    unit: nameUnitFor(process.platform),
+    maxEntryChars: trashEntryCharBudget(trashDir, process.platform),
+  });
+
+  let moveError: unknown = null;
+  let trashed = false;
+  for (const candidate of plan.candidates) {
+    try {
+      await rename(resolved.absolute, join(trashDir, candidate));
+      trashed = true;
+      break;
+    } catch (error) {
+      moveError = error;
+      // Only a length failure earns another attempt with a shorter name.
+      // ENAMETOOLONG says so outright; Windows says ENOENT, because Win32
+      // normalization rejects an over-long path as ERROR_PATH_NOT_FOUND --
+      // which is exactly how #613 disguised itself. Anything else (EACCES,
+      // EBUSY, EXDEV) is not about length and must not be retried into a
+      // truncation.
+      const code = errnoCode(error);
+      if (code !== "ENAMETOOLONG" && code !== "ENOENT") break;
+    }
+  }
+
+  if (!trashed) {
+    // The ladder ran out. When a composed-path limit left no room even for the
+    // unique prefix there was never a shorter name to try, so say that and
+    // name the limit -- otherwise report the failure itself.
+    if (plan.exhausted) {
+      return {
+        ok: false as const,
+        reason: `dohc could not delete ${resolved.normalized}. The workspace trash folder is ${trashDir.length} characters deep, and this platform allows ${WINDOWS_MAX_PATH_CHARS} characters for a whole path, which leaves no room for a trash entry name. Move the workspace to a shorter path. dohc did not move it.`,
+      };
+    }
     // Name the outcome, not just the failure: an agent that cannot tell a
     // refused delete from a silent one cannot decide what to do next.
     //
@@ -1093,12 +1155,12 @@ export async function deleteWorkspacePath(
     // path between the check above and this rename.
     const after = await lstat(resolved.absolute).then(
       (stats) => (replacedSince(source.stats, stats) ? "replaced" : "undetermined"),
-      (probe: unknown) => (errorCode(probe) === "ENOENT" ? "gone" : "undetermined"),
+      (probe: unknown) => (errnoCode(probe) === "ENOENT" ? "gone" : "unchecked"),
     );
     return {
       ok: false as const,
       reason:
-        `dohc could not delete ${resolved.normalized}. The move to the workspace trash failed (${errorCode(error)}). dohc did not move it.` +
+        `dohc could not delete ${resolved.normalized}. The move to the workspace trash failed (${errnoCode(moveError) ?? "no errno"}). dohc did not move it.` +
         deleteAftermath(resolved.normalized, after),
     };
   }

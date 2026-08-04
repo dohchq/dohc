@@ -1,119 +1,224 @@
 import { describe, expect, it } from "vitest";
 import {
   fitWithinNameMax,
-  NAME_MAX_BYTES,
-  trashEntryName,
+  NAME_MAX_UNITS,
+  nameUnitFor,
+  trashEntryCharBudget,
+  trashEntryPlan,
+  WINDOWS_MAX_PATH_CHARS,
 } from "./trashEntryName";
 
 const PREFIX = "1785780488421-0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10-";
 
 const byteLength = (value: string) => new TextEncoder().encode(value).length;
 
-describe("trash entry names", () => {
-  // The #613 vector: a basename that is legal everywhere, and a prefix that
-  // pushes the pair past the per-component limit.
-  it("fits a legal 230-character basename that the prefix would overflow", () => {
-    const name = `${"a".repeat(226)}.txt`;
-    expect(name).toHaveLength(230);
-    expect(byteLength(`${PREFIX}${name}`)).toBeGreaterThan(NAME_MAX_BYTES);
+// The name a caller would actually land on when nothing refuses it.
+const firstOf = (name: string, prefix: string, options = {}) =>
+  trashEntryPlan(name, prefix, options).candidates[0]!;
+// The name a caller falls back to once the platform has refused the rest.
+const lastOf = (name: string, prefix: string, options = {}) => {
+  const { candidates } = trashEntryPlan(name, prefix, options);
+  return candidates[candidates.length - 1]!;
+};
 
-    const entry = trashEntryName(name, PREFIX);
-    expect(byteLength(entry)).toBe(NAME_MAX_BYTES);
-    expect(entry.startsWith(PREFIX)).toBe(true);
+describe("the component limit, and its unit", () => {
+  // The limit is the filesystem's, not ours: 255 per component on ext4, APFS
+  // and NTFS alike. Pinned here because this package owns the number.
+  it("caps a component at the filesystem's 255", () => {
+    expect(NAME_MAX_UNITS).toBe(255);
+    expect(byteLength(lastOf("z".repeat(1000), PREFIX, { unit: "utf8" }))).toBe(255);
+    expect(lastOf("z".repeat(1000), PREFIX, { unit: "utf16" })).toHaveLength(255);
+  });
+
+  // NTFS counts UTF-16 code units; ext4 and APFS count UTF-8 bytes.
+  it("counts UTF-16 units on Windows and UTF-8 bytes everywhere else", () => {
+    expect(nameUnitFor("win32")).toBe("utf16");
+    expect(nameUnitFor("linux")).toBe("utf8");
+    expect(nameUnitFor("darwin")).toBe("utf8");
+  });
+
+  // The data-loss case. 70 CJK characters is 70 UTF-16 units and 210 UTF-8
+  // bytes, so a byte rule on NTFS drops characters the filesystem would have
+  // taken whole -- and the trash keeps no record of the original name, so
+  // restoring cannot put them back.
+  it("keeps a CJK name NTFS would accept, which a byte rule would truncate", () => {
+    const name = `${"中".repeat(70)}.md`;
+    expect(byteLength(`${PREFIX}${name}`)).toBeGreaterThan(NAME_MAX_UNITS);
+    expect(`${PREFIX}${name}`.length).toBeLessThanOrEqual(NAME_MAX_UNITS);
+
+    // Windows keeps every character...
+    expect(lastOf(name, PREFIX, { unit: "utf16" })).toBe(`${PREFIX}${name}`);
+    // ...and a byte-counting filesystem legitimately cannot.
+    expect(lastOf(name, PREFIX, { unit: "utf8" })).not.toBe(`${PREFIX}${name}`);
+    expect(byteLength(lastOf(name, PREFIX, { unit: "utf8" }))).toBeLessThanOrEqual(
+      NAME_MAX_UNITS,
+    );
   });
 
   it("leaves a name that already fits exactly as it is", () => {
-    const name = "notes.md";
-    expect(trashEntryName(name, PREFIX)).toBe(`${PREFIX}${name}`);
+    expect(lastOf("notes.md", PREFIX, { unit: "utf8" })).toBe(`${PREFIX}notes.md`);
   });
 
   // The boundary either side, because an off-by-one here either truncates a
   // name that fits or ships one the filesystem rejects.
   it("keeps the longest name that fits and trims the first that does not", () => {
-    const budget = NAME_MAX_BYTES - byteLength(PREFIX);
+    const budget = NAME_MAX_UNITS - byteLength(PREFIX);
     const exact = "b".repeat(budget);
-    expect(trashEntryName(exact, PREFIX)).toBe(`${PREFIX}${exact}`);
-    const oneOver = "b".repeat(budget + 1);
-    expect(byteLength(trashEntryName(oneOver, PREFIX))).toBe(NAME_MAX_BYTES);
+    expect(lastOf(exact, PREFIX, { unit: "utf8" })).toBe(`${PREFIX}${exact}`);
+    expect(byteLength(lastOf("b".repeat(budget + 1), PREFIX, { unit: "utf8" }))).toBe(
+      NAME_MAX_UNITS,
+    );
   });
 
-  // Bytes, not characters: 200 two-byte characters is 400 bytes, and a
-  // character-counting cap would ship a name the filesystem cannot hold.
-  it("counts bytes, and never leaves half a character behind", () => {
-    const name = "é".repeat(200);
-    expect(name).toHaveLength(200);
-    const entry = trashEntryName(name, PREFIX);
-    expect(byteLength(entry)).toBeLessThanOrEqual(NAME_MAX_BYTES);
-    expect(entry).not.toMatch(/�/);
+  it("never leaves half a character behind when counting bytes", () => {
+    const entry = lastOf("é".repeat(200), PREFIX, { unit: "utf8" });
+    expect(byteLength(entry)).toBeLessThanOrEqual(NAME_MAX_UNITS);
+    expect(entry).not.toMatch(/\uFFFD/);
   });
 
-  // A cut that lands mid-sequence decodes to U+FFFD. Trimming it is what keeps
-  // the trash listing readable.
   it("trims a replacement character produced by the cut", () => {
-    const budget = NAME_MAX_BYTES - byteLength(PREFIX);
-    // One single-byte character short of the budget, then a 2-byte character
-    // that the cut must split.
+    const budget = NAME_MAX_UNITS - byteLength(PREFIX);
     const name = `${"c".repeat(budget - 1)}é`;
-    const entry = trashEntryName(name, PREFIX);
-    expect(entry).toBe(`${PREFIX}${"c".repeat(budget - 1)}`);
-    expect(byteLength(entry)).toBe(NAME_MAX_BYTES - 1);
+    expect(lastOf(name, PREFIX, { unit: "utf8" })).toBe(
+      `${PREFIX}${"c".repeat(budget - 1)}`,
+    );
   });
 
   it("answers an empty name when the prefix alone exhausts the limit", () => {
-    const prefix = "p".repeat(NAME_MAX_BYTES);
-    expect(fitWithinNameMax("anything", prefix)).toBe("");
-    expect(trashEntryName("anything", prefix)).toBe(prefix);
+    const prefix = "p".repeat(NAME_MAX_UNITS);
+    expect(fitWithinNameMax("anything", prefix, { unit: "utf8" })).toBe("");
+  });
+
+  // A UTF-16 cut can land between a surrogate pair, under either unit.
+  it("never leaves half a surrogate pair", () => {
+    const utf16 = lastOf("😀".repeat(200), PREFIX, { unit: "utf16" });
+    expect(utf16).not.toMatch(/[\uD800-\uDBFF]$/);
+    const budgeted = lastOf("😀".repeat(20), PREFIX, {
+      unit: "utf16",
+      maxEntryChars: PREFIX.length + 11,
+    });
+    expect(budgeted).toBe(`${PREFIX}${"😀".repeat(5)}`);
+  });
+});
+
+// #613 twice over. The rule predicted which limit applied and was wrong both
+// ways: first that the component limit was the only one, then that MAX_PATH
+// always binds -- which took deletion away from deep workspaces on hosts
+// where long paths work. It offers candidates now, and the caller asks the
+// filesystem.
+describe("the ladder, longest name first", () => {
+  const TRASH_DIR =
+    "C:\\Users\\ice\\AppData\\Local\\Temp\\dohc-mcp-test-bJMVxX\\ws\\.dohc\\trash";
+
+  // The whole point: a name that fits is never shortened for a limit that did
+  // not apply, and costs exactly one rename.
+  it("offers the real name first, and only that when it fits", () => {
+    const plan = trashEntryPlan("notes.md", PREFIX, {
+      unit: "utf16",
+      maxEntryChars: trashEntryCharBudget(TRASH_DIR, "win32"),
+    });
+    expect(plan.candidates).toEqual([`${PREFIX}notes.md`]);
+    expect(plan.exhausted).toBe(false);
+  });
+
+  it("starts from the untruncated name even when it cannot fit", () => {
+    const name = `${"a".repeat(226)}.txt`;
+    const plan = trashEntryPlan(name, PREFIX, {
+      unit: "utf16",
+      maxEntryChars: trashEntryCharBudget(TRASH_DIR, "win32"),
+    });
+    expect(plan.candidates[0]).toBe(`${PREFIX}${name}`);
+    // Then the component limit, then the composed-path limit: shorter each
+    // time, and each reached only after the platform refused the last.
+    expect(plan.candidates).toHaveLength(3);
+    expect(plan.candidates[1]).toHaveLength(NAME_MAX_UNITS);
+    expect(`${TRASH_DIR}\\${plan.candidates[2]}`.length).toBeLessThanOrEqual(
+      WINDOWS_MAX_PATH_CHARS,
+    );
+  });
+
+  // Where no composed-path limit applies there is nothing to fall back TO, so
+  // the ladder must not invent a rung and truncate for a limit that is not
+  // there.
+  it("has no composed-path rung off Windows", () => {
+    const name = `${"a".repeat(226)}.txt`;
+    const plan = trashEntryPlan(name, PREFIX, {
+      unit: "utf8",
+      maxEntryChars: trashEntryCharBudget("/home/ice/ws/.dohc/trash", "linux"),
+    });
+    expect(plan.candidates).toHaveLength(2);
+    expect(plan.exhausted).toBe(false);
+  });
+
+  it("budgets the whole path on Windows and nothing anywhere else", () => {
+    expect(trashEntryCharBudget(TRASH_DIR, "win32")).toBe(
+      WINDOWS_MAX_PATH_CHARS - TRASH_DIR.length - 1,
+    );
+    expect(trashEntryCharBudget(TRASH_DIR, "linux")).toBe(Number.POSITIVE_INFINITY);
+    expect(trashEntryCharBudget(TRASH_DIR, "darwin")).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  // When even the unique prefix cannot fit there is no shorter name to try,
+  // and the caller has to refuse rather than rename onto a path the platform
+  // will reject.
+  it("reports exhausted when the prefix alone cannot fit", () => {
+    const deep = `C:\\${"nested\\".repeat(30)}.dohc\\trash`;
+    const plan = trashEntryPlan("notes.md", PREFIX, {
+      unit: "utf16",
+      maxEntryChars: trashEntryCharBudget(deep, "win32"),
+    });
+    expect(plan.exhausted).toBe(true);
+    // It still offers the real name: on a host where the legacy limit does
+    // not apply, that one works and nothing needed refusing.
+    expect(plan.candidates[0]).toBe(`${PREFIX}notes.md`);
   });
 });
 
 // This rule replaced a Buffer implementation with a TextDecoder one, and the
 // two are equivalent everywhere EXCEPT a leading U+FEFF: the default decoder
 // eats it as a byte-order mark. For filename bytes that is data loss with no
-// error attached -- through the desktop's collisionVariant, importing a
-// colliding near-limit file would land under a name quietly missing its first
-// character.
+// error attached.
 describe("truncation decodes filename bytes, not a text stream", () => {
   it("keeps a leading U+FEFF instead of eating it as a byte-order mark", () => {
-    const budget = NAME_MAX_BYTES - byteLength(PREFIX);
-    // U+FEFF is 3 bytes, so the tail is sized to leave the name over budget
-    // and the truncation is what has to preserve the first character.
-    const name = `﻿${"a".repeat(budget)}`;
-    expect(byteLength(name)).toBeGreaterThan(budget);
-
-    const fitted = fitWithinNameMax(name, PREFIX);
-    expect(fitted.startsWith("﻿")).toBe(true);
-    expect(fitted).toBe(`﻿${"a".repeat(budget - 3)}`);
+    const budget = NAME_MAX_UNITS - byteLength(PREFIX);
+    const name = `\uFEFF${"a".repeat(budget)}`;
+    const fitted = fitWithinNameMax(name, PREFIX, { unit: "utf8" });
+    expect(fitted.startsWith("\uFEFF")).toBe(true);
+    expect(fitted).toBe(`\uFEFF${"a".repeat(budget - 3)}`);
   });
 
-  // The equivalence the swap assumed, checked rather than asserted: every cut
-  // offset of 2-, 3- and 4-byte sequences, plus malformed input where the two
-  // decoders could plausibly count replacement characters differently.
-  it("decodes a truncated prefix exactly as Buffer#toString does", () => {
+  // Checked THROUGH the module rather than beside it: the prefix is sized so
+  // the module's own cut lands at each byte offset in turn, with
+  // Buffer#toString as the oracle. Malformed input is deliberately absent --
+  // the module takes a STRING and encodes it itself, so the only invalid
+  // sequence it can decode is one its own cut produced.
+  it("cuts and decodes exactly as Buffer#toString does, at every offset", () => {
     const corpus = [
-      "﻿report.md",
-      "﻿",
+      "\uFEFFreport.md",
+      "\uFEFF\uFEFFnotes.md",
+      "a\uFEFFb",
       "éé",
       "中中",
       "😀😀",
-      "éé",
-    ].map((text) => new TextEncoder().encode(text));
-    const malformed = [
-      [0x80, 0x61],
-      [0xc0, 0xaf],
-      [0xed, 0xa0, 0x80],
-      [0xf0, 0x9f, 0x61],
-      [0xff, 0x61],
-      [0xf4, 0x90, 0x80, 0x80],
-    ].map((bytes) => Uint8Array.from(bytes));
+      "e\u0301e\u0301",
+      "\uFEFF😀中é",
+    ];
 
-    for (const bytes of [...corpus, ...malformed]) {
+    let compared = 0;
+    for (const text of corpus) {
+      const bytes = new TextEncoder().encode(text);
       for (let cut = 1; cut <= bytes.length; cut += 1) {
-        const slice = bytes.subarray(0, cut);
+        const prefix = "p".repeat(NAME_MAX_UNITS - cut);
+        const oracle = Buffer.from(bytes.subarray(0, cut))
+          .toString("utf8")
+          .replace(/\uFFFD+$/, "");
         expect(
-          new TextDecoder("utf-8", { ignoreBOM: true }).decode(slice),
-          `cut ${cut} of ${JSON.stringify(Array.from(bytes))}`,
-        ).toBe(Buffer.from(slice).toString("utf8"));
+          fitWithinNameMax(text, prefix, { unit: "utf8" }),
+          `cut ${cut} of ${JSON.stringify(text)}`,
+        ).toBe(oracle);
+        compared += 1;
       }
     }
+    expect(compared).toBeGreaterThan(50);
   });
 });
