@@ -7581,7 +7581,10 @@ impl EngineService {
         // already uses.
         for row in &mut rows {
             if serde_json::to_string(row).map_or(0, |s| s.len()) > CONFLICT_ROW_HARD_CAP_BYTES {
-                withhold_conflict_side_texts(row);
+                // EVERY body, not just the over-cap ones: the row crossed on
+                // the sum of its parts, so withholding only the parts that
+                // individually cross can leave it over the cap.
+                withhold_all_conflict_side_texts(row);
             }
         }
         let included = byte_budget_cut_serialized_with_row_cap(
@@ -10383,17 +10386,26 @@ fn snapshot_json(snapshot: &TextSnapshot) -> Value {
     })
 }
 
-/// Withhold one text body past the in-band cap, in place: the digest and the
-/// limit go out, the body does not. This is the shape `versionedText.read`
-/// already uses, so the caller hydrates with `versionedText.readBlob`.
+/// Withhold one text body, in place: the digest and the limit go out, the body
+/// does not. `byteLength` is left as serialized, so a caller can size the
+/// hydration before it asks for it.
+fn withhold_text(body: &mut Value) {
+    if body.get("text").is_some_and(|text| !text.is_null()) {
+        body["text"] = Value::Null;
+        body["inbandLimitBytes"] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+    }
+}
+
+/// Withhold one text body past the in-band cap, in place. This is the shape
+/// `versionedText.read` already uses, so the caller hydrates with
+/// `versionedText.readBlob`.
 fn withhold_over_cap_text(body: &mut Value) {
     let over_cap = body
         .get("text")
         .and_then(Value::as_str)
         .is_some_and(|text| text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES);
     if over_cap {
-        body["text"] = Value::Null;
-        body["inbandLimitBytes"] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        withhold_text(body);
     }
 }
 
@@ -10435,6 +10447,26 @@ fn withhold_conflict_side_texts(value: &mut Value) {
             && !snapshot.is_null()
         {
             withhold_over_cap_text(snapshot);
+        }
+    }
+}
+
+/// Withhold EVERY side body of one serialized conflict, whatever each body's
+/// own size.
+///
+/// The per-body rule above cannot degrade an AGGREGATE overrun: three sides of
+/// 128 KiB each are individually in band, and beside metadata near
+/// `CONFLICT_METADATA_BUDGET_BYTES` their sum still carries the row past
+/// `CONFLICT_ROW_HARD_CAP_BYTES`. Withholding only the over-cap bodies would
+/// leave the row over the cap and dead-end the cursor — the failure is the
+/// sum, so the remedy has to be the sum. With every body withheld, what
+/// remains is bounded at open, so the row provably fits.
+fn withhold_all_conflict_side_texts(value: &mut Value) {
+    for side in ["base", "current", "incoming"] {
+        if let Some(snapshot) = value[side].get_mut("snapshot")
+            && !snapshot.is_null()
+        {
+            withhold_text(snapshot);
         }
     }
 }

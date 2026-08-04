@@ -3526,6 +3526,9 @@ export function createWorkspaceEngineCapture(
         const page = await engine.listTextConflicts({
           workspaceId,
           status: "open",
+          // Ids only. This drains every page, so hydrating would fetch every
+          // body of every open conflict and keep none of them.
+          bodies: "withheld",
           ...(afterConflictId !== undefined ? { afterConflictId } : {}),
         });
         ids.push(...page.conflicts.map((conflict) => conflict.id));

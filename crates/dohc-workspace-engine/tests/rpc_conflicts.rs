@@ -1650,6 +1650,141 @@ async fn healthy_conflict_metadata_sits_far_inside_the_row_budget() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_over_the_cap_on_the_sum_of_its_bodies_withholds_every_one_of_them() {
+    // The AGGREGATE gap. Three sides exactly at the in-band body limit are
+    // each individually carriable, so the per-body rule withholds none of
+    // them — while their sum, beside metadata near the budget, still carries
+    // the row past `CONFLICT_ROW_HARD_CAP_BYTES`. Withholding only the bodies
+    // that individually cross would leave the row over the cap and dead-end
+    // the cursor for every open conflict, which is #537 again by another
+    // route. The failure is the sum, so the remedy is the sum.
+    //
+    // MUTATION: call `withhold_conflict_side_texts` instead of
+    // `withhold_all_conflict_side_texts` in `conflicts_list`, and this listing
+    // refuses with `conflict-row-exceeds-wire-limit`.
+    let (_scratch, transport, handle, workspace_id) = fixture("aggregate-row").await;
+    // Exactly AT the in-band limit, so no side trips the per-body rule.
+    let body = "b".repeat(128 * 1024);
+    let mut payload = conflict_payload(&workspace_id, 0, &body);
+    payload["conflict"]["metadata"]["summary"] = json!("m".repeat(7_960_000));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(10, "conflicts.open", Some(handle.clone()), payload),
+        )
+        .await
+        .expect("the conflict is inside the metadata budget and opens");
+    assert_eq!(opened.result["inserted"], true);
+
+    let listed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                11,
+                "conflicts.list",
+                Some(handle),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("an aggregate over-cap row degrades instead of refusing the page");
+    let rows = listed.result["conflicts"]
+        .as_array()
+        .expect("conflict rows");
+    assert_eq!(rows.len(), 1);
+    for side in ["base", "current", "incoming"] {
+        let snapshot = &rows[0][side]["snapshot"];
+        assert!(
+            snapshot["text"].is_null(),
+            "{side} body must be withheld once the ROW crosses the cap"
+        );
+        // The caller has to be able to size and fetch what was withheld.
+        assert!(snapshot["inbandLimitBytes"].is_number());
+        assert_eq!(snapshot["byteLength"], json!(body.len()));
+        assert!(snapshot["blobSha256"].is_string());
+    }
+    // And the degraded row really does fit the cap it was degraded for.
+    let encoded = serde_json::to_string(&listed.result).expect("serialize the page");
+    assert!(
+        encoded.len() <= 8 * 1024 * 1024 - 64 * 1024,
+        "the degraded page is {} bytes",
+        encoded.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_continuation_id_is_measured_at_both_copies_the_page_serves() {
+    // `conflicts.list` serves a conflict id TWICE: once inside its row, and
+    // again as `nextAfterConflictId`. Counting one copy would admit an id
+    // that then puts the page over the frame, which the daemon's writer
+    // treats as fatal rather than answering.
+    //
+    // MUTATION: count `conflict_id` once in `non_withheld_encoded_bytes` and
+    // the over-budget open below succeeds.
+    let (_scratch, transport, handle, workspace_id) = fixture("cursor-copies").await;
+    // Under one copy this fits the budget; under two it cannot.
+    let long_id = "c".repeat(6 * 1024 * 1024);
+    let mut payload = conflict_payload(&workspace_id, 0, "small body");
+    payload["conflict"]["id"] = json!(long_id);
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(10, "conflicts.open", Some(handle.clone()), payload),
+        )
+        .await
+        .expect_err("an id the page would serve twice is refused at open");
+    assert_eq!(refused.code, ErrorCode::PayloadTooLarge);
+
+    // The ENCODED guard: at the largest id the budget admits, the whole page
+    // — leading row plus the continuation it hands back — still fits the
+    // frame. This measures what is SERVED rather than summing what is
+    // stored, so a string served more times than the budget counts fails
+    // here even if nobody remembered to enumerate it.
+    let paged_id = "c".repeat(4_000_000);
+    let mut first = conflict_payload(&workspace_id, 0, "small body");
+    first["conflict"]["id"] = json!(paged_id);
+    assert_eq!(
+        transport
+            .call(
+                RequestContext::unbounded(),
+                request(11, "conflicts.open", Some(handle.clone()), first),
+            )
+            .await
+            .expect("the largest admitted id opens")
+            .result["inserted"],
+        true
+    );
+    let second = conflict_payload(&workspace_id, 1, "small body");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(12, "conflicts.open", Some(handle.clone()), second),
+        )
+        .await
+        .expect("a second conflict, so the page must emit a continuation");
+
+    let listed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "conflicts.list",
+                Some(handle),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("the page answers");
+    assert_eq!(listed.result["nextAfterConflictId"], json!(paged_id));
+    let encoded = serde_json::to_string(&listed.result).expect("serialize the page");
+    assert!(
+        encoded.len() <= 8 * 1024 * 1024 - 64 * 1024,
+        "a page serving its id twice is {} bytes",
+        encoded.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn side_metadata_is_measured_at_the_two_copies_the_row_actually_carries() {
     // A side's metadata pair is STORED once but SERVED twice: the load reads
     // one column pair into both the side and its snapshot, so the listing row

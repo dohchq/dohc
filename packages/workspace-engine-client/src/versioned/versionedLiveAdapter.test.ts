@@ -452,6 +452,115 @@ describe("VersionedLiveAdapter", () => {
     ).toHaveLength(1);
   });
 
+  it("reads no bodies for a metadata-only conflict listing", async () => {
+    // `listOpenConflictIds` drains every page to collect ids. Hydrating for it
+    // fetches every body of every open conflict and keeps none of them.
+    // MUTATION: drop the `bodies: "withheld"` early return and this listing
+    // issues a blob read.
+    const withheld: ConflictRecord = {
+      ...conflict,
+      current: {
+        ...conflictState,
+        snapshot: { ...snapshot, text: null, inbandLimitBytes: 128 * 1024 },
+      },
+    };
+    const requests: Request[] = [];
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
+        return {
+          id: request.id,
+          result: { conflicts: [withheld], nextAfterConflictId: null },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    const listed = await adapter.listTextConflicts({
+      workspaceId: WORKSPACE,
+      bodies: "withheld",
+    });
+    expect(listed.conflicts).toHaveLength(1);
+    // Served exactly as the daemon sent it: still withheld, not an empty body.
+    expect(listed.conflicts[0]!.current.snapshot?.text).toBeNull();
+    expect(
+      requests.filter(
+        (request) => request.method === VERSIONED_METHOD.textReadBlob,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("cuts a hydrated conflict page to its byte budget before fetching bodies", async () => {
+    // The concurrency limit bounds simultaneous reads, not retained bytes. A
+    // page of degraded conflicts whose sides approach the daemon's text limit
+    // is kilobytes of metadata on the wire and hundreds of megabytes once
+    // rebuilt. The page is cut by the `byteLength` each withheld side already
+    // carries, so the bodies past the budget are never transferred.
+    //
+    // MUTATION: drop the budget cut in `listTextConflicts` and both conflicts
+    // hydrate, issuing a second blob read.
+    const body = "rebuilt";
+    const bodySha = createHash("sha256").update(body, "utf8").digest("hex");
+    const huge = (id: string): ConflictRecord => ({
+      ...conflict,
+      id,
+      base: { ...conflictState, snapshot: null },
+      incoming: { ...conflictState, snapshot: null },
+      current: {
+        ...conflictState,
+        snapshot: {
+          ...snapshot,
+          text: null,
+          inbandLimitBytes: 128 * 1024,
+          // Each side alone fits the budget; two together cannot.
+          byteLength: 5 * 1024 * 1024,
+          blobSha256: bodySha,
+        },
+      },
+    });
+    const requests: Request[] = [];
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        if (request.method === WORKSPACE_METHOD.conflictsList) {
+          return {
+            id: request.id,
+            result: {
+              conflicts: [huge("conflict-a"), huge("conflict-b")],
+              nextAfterConflictId: null,
+            },
+          };
+        }
+        return {
+          id: request.id,
+          result: { bytesBase64: Buffer.from(body, "utf8").toString("base64") },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    const listed = await adapter.listTextConflicts({ workspaceId: WORKSPACE });
+    expect(listed.conflicts).toHaveLength(1);
+    expect(listed.conflicts[0]!.id).toBe("conflict-a");
+    expect(listed.conflicts[0]!.current.snapshot?.text).toBe(body);
+    // The caller continues from the row the cut stopped at, not the daemon's
+    // own continuation, or the dropped conflict would never be served.
+    expect(listed.nextAfterConflictId).toBe("conflict-a");
+    // The body past the budget was never fetched.
+    expect(
+      requests.filter(
+        (request) => request.method === VERSIONED_METHOD.textReadBlob,
+      ),
+    ).toHaveLength(1);
+  });
+
   it("refuses a withheld conflict side whose blob the daemon cannot serve", async () => {
     // A withheld side names its body by digest. When the daemon then cannot
     // serve that digest, silently returning the null-bodied record would hand

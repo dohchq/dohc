@@ -106,7 +106,12 @@ fn non_withheld_encoded_bytes(conflict: &TextConflict) -> usize {
     fn optional(value: &Option<String>) -> usize {
         value.as_deref().map_or(0, json_encoded_len)
     }
-    let mut total = json_encoded_len(&conflict.conflict_id)
+    // COUNTED TWICE, for the same reason the side metadata below is: the
+    // response serves it twice. `conflicts.list` emits the id inside its row
+    // AND again as `nextAfterConflictId`, the continuation the cursor hands
+    // back. Counting one copy would let a ~4.2 MiB id pass here and then put
+    // the page over the frame, which the daemon's writer treats as fatal.
+    let mut total = 2 * json_encoded_len(&conflict.conflict_id)
         + json_encoded_len(&conflict.workspace_id)
         + json_encoded_len(&conflict.path)
         + json_encoded_len(&conflict.target_version_id)
