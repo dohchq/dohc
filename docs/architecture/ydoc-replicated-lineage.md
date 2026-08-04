@@ -507,7 +507,11 @@ daemons cannot share a relay workspace yet (#356).
 
 One size question is open too. #549 — the base inherits `MAX_YDOC_UPDATE_BYTES`,
 a cap written for a single update, so a document past 5 MiB of Y.Doc state
-cannot originate and its edits fail.
+cannot originate. Its edits no longer fail with it: `ydoc_originate_base_in_tx`
+measures the encoded base and declines BEFORE it claims, so the edit commits
+and the lineage stays local-only. The issue's own account of a rolled-back edit
+describes the code before that guard. #549 still owns the measured
+base-specific bound that replaces the guard.
 
 **One open item is not dormant. #558 — the gate reads past contact, and it
 never reads false again.** `workspace_replicates_with_relay_in_tx` asks whether
@@ -515,10 +519,14 @@ a durable relay position exists, and nothing deletes one: `recover_origin` is
 the only deleter and it re-inserts a row in the same transaction. No
 disable-sync path exists in the desktop at all. So the gate keeps answering
 `true` after the user signs out, after a token expires, and after the recorded
-remote stops matching the signed-in account — and every later rich `.md` edit
-promotes a private lineage to `Replicated`. A replicated lineage never prunes
-on close, and its deltas queue in `replication_log` for whoever binds the
-workspace next. The desktop can already tell bound-and-credentialed from
+remote stops matching the signed-in account — and the next eligible rich `.md`
+edit promotes a private lineage to `Replicated`. **Eligible is narrower than
+every edit.** `ydoc_originate_base_in_tx` declines while the document has an
+unresolved dependency, and declines while its encoded base is over
+`MAX_YDOC_UPDATE_BYTES` — the two branches #548 and #549 own. Those edits
+commit and leave the lineage local-only. Every other edit promotes it, and a
+promoted lineage never prunes on close: its deltas queue in `replication_log`
+for whoever binds the workspace next. The desktop can already tell bound-and-credentialed from
 historically-contacted (`workspaceRemoteMatchesCredentials`, in
 `apps/desktop/src/workspaces/chatRelayIdentity.ts`). The engine has no durable
 record of that answer, and no way to be told it changed.
