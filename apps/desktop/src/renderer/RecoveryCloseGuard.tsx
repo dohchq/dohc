@@ -60,33 +60,27 @@ export function requestGuardedReload(): void {
 // INSTEAD of the install, whose confirm makes the one and only call.
 // Returns null when the dialog took over — the caller's own flow ends there.
 export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult | null> {
-  // A restart already staged cannot be staged again — quitAndInstall's latch
-  // is one-shot. It is not spent, though: what remains is the quit it would
-  // have made, so a second Restart finishes THAT (#579 review, r17). This is
-  // what makes the late warning's "Go back" a real reverse path instead of a
-  // button that quietly strands the update for the rest of the run.
-  if (installStaged) {
-    if (orphanedDraftCount() > 0 && openRecoveryWarning !== null) {
-      openRecoveryWarning({
-        kind: "update",
-        resume: () => resumeExit("update"),
-      });
+  if (orphanedDraftCount() === 0 || openRecoveryWarning === null) {
+    const result = await beginInstall();
+    // Main's boundary re-check refuses the install when a reopen set an edit
+    // aside after THIS renderer's own check (#579 review, r12). That refusal
+    // is a RECOVERY decision, not an install failure, and the direct branch
+    // used to report it as one — the user's Restart click became a generic
+    // error and the drafts were never mentioned (#579 review, r18). The
+    // dialog path already re-prompts; both paths reach the same state, so
+    // both must say the same thing.
+    if (!result.accepted && orphanedDraftCount() > 0 && openRecoveryWarning !== null) {
+      openRecoveryWarning({ kind: "update", resume: resumeInstall });
       return null;
     }
-    await resumeExit("update");
-    // No new action result: nothing was installed, the app is on its way out,
-    // and the callers' own flow ends on null.
-    return null;
+    return result;
   }
-  if (orphanedDraftCount() === 0 || openRecoveryWarning === null) {
-    return beginInstall();
-  }
-  openRecoveryWarning({
-    kind: "update",
-    resume: () => beginInstall().then((result) => result.accepted, () => false),
-  });
+  openRecoveryWarning({ kind: "update", resume: resumeInstall });
   return null;
 }
+
+const resumeInstall = () =>
+  beginInstall().then((result) => result.accepted, () => false);
 
 // Resumes an exit main has already approved, re-claiming the intent each
 // attempt so a draft captured before THIS attempt's unload still produces a
@@ -101,15 +95,11 @@ function resumeExit(kind: "update" | "quit"): Promise<boolean> {
     );
 }
 
-// True once quitAndInstall has been called for this app run.
-let installStaged = false;
-
 // Test seam: this module's state is deliberately app-run scoped, so suites
-// reset it between tests instead of leaking a staged restart or an unclaimed
-// intent into the next one.
+// reset it between tests instead of leaking an unclaimed intent into the next
+// one.
 export function resetGuardedExits(): void {
   pendingUnload = null;
-  installStaged = false;
 }
 
 // The install's own exit runs through beforeunload like any other unload, and
@@ -137,8 +127,7 @@ function beginInstall(): Promise<UpdateActionResult> {
     .installUpdate()
     .then(
       (result) => {
-        if (result.accepted) installStaged = true;
-        else forget();
+        if (!result.accepted) forget();
         return result;
       },
       (error: unknown) => {

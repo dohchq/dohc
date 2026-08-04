@@ -107,6 +107,13 @@ export function createRecoveryChecker(options: {
   const timeoutMs = options.timeoutMs ?? QUIT_ASK_TIMEOUT_MS;
   let sequence = 0;
   const pending = new Map<number, (blocked: boolean) => void>();
+  // Requests whose ACK window elapsed and whose dialog is now on screen. From
+  // that moment the DIALOG owns the answer (#579 review, r18): a late renderer
+  // reply must not settle behind it, or the user is either clicking a question
+  // that resolves into nothing, or watching a dialog ask whether to proceed
+  // with an install that already started. A dialog that is not the decider is
+  // a dialog that lies.
+  const escalated = new Set<number>();
   const settle = (requestId: number, blocked: boolean): void => {
     const resolve = pending.get(requestId);
     if (!resolve) return;
@@ -118,9 +125,11 @@ export function createRecoveryChecker(options: {
       const requestId = ++sequence;
       return new Promise<boolean>((resolve) => {
         const timer = setTimeout(() => {
-          void options
-            .confirmProceed()
-            .then((proceed) => settle(requestId, !proceed));
+          escalated.add(requestId);
+          void options.confirmProceed().then((proceed) => {
+            escalated.delete(requestId);
+            settle(requestId, !proceed);
+          });
         }, timeoutMs);
         timer.unref?.();
         pending.set(requestId, (blocked) => {
@@ -131,6 +140,8 @@ export function createRecoveryChecker(options: {
       });
     },
     answer(requestId, blocked) {
+      // Too late: the user is already being asked, and their answer decides.
+      if (escalated.has(requestId)) return;
       settle(requestId, blocked);
     },
   };

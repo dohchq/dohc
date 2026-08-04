@@ -277,6 +277,41 @@ describe("recovery boundary check", () => {
     await expect(pending).resolves.toBe(false);
   });
 
+  // #579 review r18: once the dialog is on screen it OWNS the answer. A late
+  // renderer reply settling behind it either strands the user's click on a
+  // request that no longer exists, or lets the install begin while the dialog
+  // is still asking whether to proceed.
+  it("lets the escalation dialog own the request against a late renderer answer", async () => {
+    vi.useFakeTimers();
+    let decide!: (proceed: boolean) => void;
+    let asked: number | null = null;
+    const checker = createRecoveryChecker({
+      send: (requestId) => {
+        asked = requestId;
+        return true;
+      },
+      confirmProceed: () =>
+        new Promise<boolean>((resolve) => {
+          decide = resolve;
+        }),
+      timeoutMs: 1_000,
+    });
+    const pending = checker.ask();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // The renderer wakes mid-dialog and says "clear".
+    // MUTATION (dialog ownership): drop the escalated guard from answer().
+    // This settles the request as clear, so the install proceeds while the
+    // user is still looking at a dialog asking whether it should.
+    checker.answer(asked!, false);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The user is still deciding, and their answer is the one that counts.
+    decide(false);
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(pending).resolves.toBe(true);
+  });
+
   it("does not block when there is no renderer to ask", async () => {
     const checker = createRecoveryChecker({
       send: () => false,

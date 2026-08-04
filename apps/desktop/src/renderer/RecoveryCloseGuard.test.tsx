@@ -648,11 +648,11 @@ describe("RecoveryCloseGuard", () => {
     closeSpy.mockRestore();
   });
 
-  // #579 review r17: a draft appearing after main's recovery check opens the
-  // late warning, and "Go back" saves the text — but quitAndInstall has
-  // already run by then. The restart must stay finishable, or Go back is a
-  // reverse path that reverses nothing and the update strands for the run.
-  it("finishes a staged restart on the next Restart instead of re-installing", async () => {
+  // #579 review r18: the renderer no longer holds "a restart is staged" — a
+  // reload reset that flag while main's latch stayed set, stranding the
+  // update for the rest of the run. Main owns it now, so the renderer just
+  // asks again and main completes the staged restart.
+  it("asks main again to finish a restart, holding no staged state of its own", async () => {
     const user = userEvent.setup();
     let reopened = false;
     const harness = confirmedRestartHarness({
@@ -675,24 +675,55 @@ describe("RecoveryCloseGuard", () => {
     await user.click(screen.getByTestId("recovery-close-anyway"));
     await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(1));
 
-    // The late draft blocks the install's own exit, and the user goes back to
-    // save it. quitAndInstall's latch is spent.
+    // The late draft vetoes the install's own unload; the user goes back to
+    // save it, then resolves the drafts and asks to restart again.
     const event = new Event("beforeunload", { cancelable: true });
     act(() => {
       window.dispatchEvent(event);
     });
     expect(event.defaultPrevented).toBe(true);
     await user.click(await screen.findByTestId("recovery-close-goback"));
-    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
-
-    // They copy the text, resolve the drafts, and ask to restart again.
     resetOrphanedDrafts();
-    // MUTATION (staged restart): drop the installStaged branch from
-    // requestGuardedUpdateInstall. The second Restart calls installUpdate
-    // again, the spent latch refuses it, and no restart ever happens.
+
+    // MUTATION (renderer-local staged state): reintroduce an installStaged
+    // module flag and branch on it. A renderer reload between these two
+    // clicks then resets it while main stays latched — the shape this round
+    // removed. The renderer must simply ask again.
     await requestGuardedUpdateInstall();
-    await waitFor(() => expect(harness.resumeQuit).toHaveBeenCalledTimes(1));
-    expect(harness.installUpdate).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(2));
+  });
+
+  // #579 review r18: main's boundary re-check refuses the install when a
+  // reopen set an edit aside after the renderer's own check. That is a
+  // RECOVERY decision, not an install failure — and the direct branch used to
+  // report it as one, so the drafts were never mentioned and the user saw a
+  // generic error. Both paths reach the same state; both must say so.
+  it("opens the recovery warning when the boundary check refuses a clean install", async () => {
+    const harness = confirmedRestartHarness({
+      accepted: false,
+      onInstall: () => {
+        captureOrphanedDraft("ws-1", "late.md", "Typed in the gap");
+      },
+    });
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await harness.ready();
+
+    // No drafts at click time, so this takes the direct branch.
+    // MUTATION (boundary re-prompt): return the refused result straight from
+    // this branch. The click becomes a generic install failure and the
+    // recovery decision never appears.
+    const result = await requestGuardedUpdateInstall();
+    expect(result).toBeNull();
+    const rows = await screen.findAllByTestId("recovery-list-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain("late.md");
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
+      "Restart anyway",
+    );
   });
 
   // #579 review r17: answering the quit ask "clear" does not end the story. A

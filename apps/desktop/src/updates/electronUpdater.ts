@@ -105,17 +105,17 @@ export function publicUpdateState(
     currentVersion: string;
     channel: UpdateChannel;
     checkInFlight?: boolean;
-    installInFlight?: boolean;
+    restartStaged?: boolean;
   },
 ): PublicUpdateState {
   const canCheck =
     !options.checkInFlight &&
-    !options.installInFlight &&
+    !options.restartStaged &&
     (state.status === "idle" ||
       state.status === "up-to-date" ||
       state.status === "offline" ||
       state.status === "error");
-  // A STAGED restart is still offerable (#579 review, r17). `installInFlight`
+  // A STAGED restart is still offerable (#579 review, r17). `restartStaged`
   // latches once quitAndInstall runs and never clears, so gating on it stranded
   // the update for the rest of the run whenever the restart was interrupted —
   // a late recovery warning whose "Go back" then had nothing to go back to.
@@ -143,6 +143,10 @@ export async function startAutoUpdates(options: {
   pollIntervalMs?: number;
   onState?: (state: UpdateState, publicState: PublicUpdateState) => void;
   onBeforeQuitForUpdate?: () => void;
+  // Completes a restart that was already staged. quitAndInstall starts its
+  // own quit on the first call and has none left to start on a second, so
+  // main makes it (#579 review, r18).
+  quitForStagedRestart?: () => void;
   importUpdater?: () => Promise<UpdaterModuleLike>;
 }): Promise<AutoUpdateController | null> {
   const env = options.env ?? process.env;
@@ -158,7 +162,7 @@ export async function startAutoUpdates(options: {
 
   let state = initialUpdateState;
   let checkInFlight = false;
-  let installInFlight = false;
+  let restartStaged = false;
   let installErrorMessage: string | null = null;
   let stopped = false;
   const publicState = () => {
@@ -166,7 +170,7 @@ export async function startAutoUpdates(options: {
       currentVersion,
       channel,
       checkInFlight,
-      installInFlight,
+      restartStaged,
     });
     return installErrorMessage && state.status === "ready"
       ? { ...base, message: installErrorMessage }
@@ -216,14 +220,14 @@ export async function startAutoUpdates(options: {
     options.onBeforeQuitForUpdate?.();
   });
   autoUpdater.on("error", (error) => {
-    if (installInFlight && state.status === "ready") {
-      installInFlight = false;
+    if (restartStaged && state.status === "ready") {
+      restartStaged = false;
       installErrorMessage = INSTALL_RESTART_FAILURE;
       options.onState?.(state, publicState());
       return;
     }
     checkInFlight = false;
-    installInFlight = false;
+    restartStaged = false;
     dispatch(
       OFFLINE_PATTERN.test(error.message)
         ? { type: "offline" }
@@ -235,7 +239,7 @@ export async function startAutoUpdates(options: {
     if (
       stopped ||
       checkInFlight ||
-      installInFlight ||
+      restartStaged ||
       state.status === "checking" ||
       state.status === "available" ||
       state.status === "downloading" ||
@@ -271,10 +275,20 @@ export async function startAutoUpdates(options: {
   // pre-approves the quit) — there is deliberately no resume path here
   // (#579 review, r10).
   const installUpdate = async (): Promise<UpdateActionResult> => {
-    if (stopped || installInFlight || state.status !== "ready") {
+    if (stopped || state.status !== "ready") {
       return { accepted: false, completed: false, state: publicState() };
     }
-    installInFlight = true;
+    if (restartStaged) {
+      // The latch is spent, but the restart is not lost: electron-updater
+      // installs it on the next quit. What remains is exactly that quit, and
+      // it is MAIN's to make (#579 review, r18). The renderer must not have
+      // to know — it held this fact in a module variable, which a reload
+      // reset while this latch stayed set, stranding the update for the rest
+      // of the run.
+      options.quitForStagedRestart?.();
+      return { accepted: true, completed: false, state: publicState() };
+    }
+    restartStaged = true;
     installErrorMessage = null;
     options.onState?.(state, publicState());
     try {
@@ -284,7 +298,7 @@ export async function startAutoUpdates(options: {
       }
       return { accepted: true, completed: false, state: publicState() };
     } catch {
-      installInFlight = false;
+      restartStaged = false;
       installErrorMessage = INSTALL_RESTART_FAILURE;
       options.onState?.(state, publicState());
       return { accepted: false, completed: false, state: publicState() };

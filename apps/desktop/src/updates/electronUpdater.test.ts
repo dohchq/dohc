@@ -56,6 +56,7 @@ async function startWith(updater: ReturnType<typeof fakeUpdater>, options: {
   env?: NodeJS.ProcessEnv;
   currentVersion?: string;
   onBeforeQuitForUpdate?: () => void;
+  quitForStagedRestart?: () => void;
 } = {}): Promise<AutoUpdateController | null> {
   return startAutoUpdates({
     isPackaged: options.isPackaged ?? true,
@@ -64,6 +65,7 @@ async function startWith(updater: ReturnType<typeof fakeUpdater>, options: {
     startupDelayMs: 60 * 60_000,
     pollIntervalMs: 60 * 60_000,
     onBeforeQuitForUpdate: options.onBeforeQuitForUpdate,
+    quitForStagedRestart: options.quitForStagedRestart,
     importUpdater: async () => ({ autoUpdater: updater }),
   });
 }
@@ -165,9 +167,16 @@ describe("electron updater actions", () => {
     });
   });
 
-  it("installs only after update-downloaded and only once", async () => {
+  // The latch is pulled ONCE (#579 review, r10). What a second request means
+  // changed in r18: it used to be refused, which stranded the update whenever
+  // a recovery warning vetoed the first restart's unload. The restart is not
+  // lost — electron-updater installs it on the next quit — so a second
+  // request completes it by quitting, and this is MAIN's fact to hold, not a
+  // renderer module variable a reload resets.
+  it("installs only after update-downloaded, pulls the latch once, and completes a staged restart", async () => {
     const updater = fakeUpdater();
-    const controller = await startWith(updater);
+    const quitForStagedRestart = vi.fn();
+    const controller = await startWith(updater, { quitForStagedRestart });
     expect(controller).not.toBeNull();
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
@@ -180,9 +189,17 @@ describe("electron updater actions", () => {
     await expect(controller!.installUpdate()).resolves.toMatchObject({
       accepted: true,
     });
+    expect(quitForStagedRestart).not.toHaveBeenCalled();
+
+    // MUTATION (staged restart): return accepted:false here instead. The
+    // second Restart reports a generic install failure and nothing ever
+    // finishes the update.
     await expect(controller!.installUpdate()).resolves.toMatchObject({
-      accepted: false,
+      accepted: true,
     });
+    expect(quitForStagedRestart).toHaveBeenCalledTimes(1);
+    // MUTATION (one-shot): drop the restartStaged branch so quitAndInstall
+    // runs again. electron-updater ignores it, and the app never quits.
     expect(updater.quitAndInstall).toHaveBeenCalledTimes(1);
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
   });
@@ -325,13 +342,13 @@ describe("publicUpdateState", () => {
     const checking = transition(initialUpdateState, { type: "check" });
     const ready = transition(checking, { type: "downloaded", version: "1.0.1" });
 
-    // MUTATION (staged restart offerable): gate canInstall on installInFlight
+    // MUTATION (staged restart offerable): gate canInstall on restartStaged
     // again. The Restart button disappears for the rest of the app run.
     expect(
       publicUpdateState(ready, {
         currentVersion: "1.0.0",
         channel: "latest",
-        installInFlight: true,
+        restartStaged: true,
       }),
     ).toMatchObject({
       status: "ready",

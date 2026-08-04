@@ -8329,6 +8329,12 @@ if (!app.requestSingleInstanceLock()) {
       isPackaged: app.isPackaged,
       currentVersion: app.getVersion(),
       onBeforeQuitForUpdate: stopSitePreviewsForQuit,
+      // A restart already staged has no install left to make — quitAndInstall
+      // started its own quit on the first call and has none left to start.
+      // Main makes it, so the fact lives HERE and not in a renderer module a
+      // reload would reset (#579 review, r18). The quit is already approved:
+      // the IPC handler approves before asking the controller.
+      quitForStagedRestart: () => app.quit(),
       onState: (_state, state) => {
         broadcastUpdateState(state);
       },

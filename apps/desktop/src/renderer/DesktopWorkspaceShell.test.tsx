@@ -6354,6 +6354,82 @@ describe("set-aside draft recovery", () => {
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
   });
 
+  // #579 review r18: a SUCCESSFUL switch announces before its selector
+  // refresh, and announcing again after that refresh fails would bump the
+  // version epoch a second time — the same-version reopen moves whatever the
+  // user typed in between into set-aside recovery, which is in-memory only
+  // and dies on the next reload.
+  //
+  // What this test pins is the OUTCOME: one switch, one reopen. It does not
+  // pin the `announced` guard that also enforces it — removing that guard
+  // still passes, because a successful switch re-keys the version panel and
+  // the unmount advances `operationToken`, so the catch path's liveness check
+  // returns before it can announce twice. That masking is a remount RACE, not
+  // a guarantee, which is why the guard stays; it is defence in depth, and it
+  // becomes load-bearing the moment the re-keying changes.
+  it("reopens once when a successful switch's selector refresh fails", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    let switched = false;
+    let refreshFailed = false;
+    bridge.listWorkspaceVersions = vi.fn(async () => {
+      // The switch's OWN refresh fails; the catch path's recovery read then
+      // succeeds and reports the version the switch already announced. That
+      // is the shape that announces twice.
+      if (switched && !refreshFailed) {
+        refreshFailed = true;
+        throw new Error("selector refresh failed");
+      }
+      return {
+        versions: [
+          {
+            id: "main",
+            name: "Main",
+            kind: "main" as const,
+            createdAtMs: 0,
+            canMergeIntoMain: false,
+          },
+          {
+            id: "v2",
+            name: "Draft two",
+            kind: "named" as const,
+            createdAtMs: 1,
+            canMergeIntoMain: true,
+          },
+        ],
+        activeVersionId: switched ? "v2" : "main",
+      };
+    });
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      switched = true;
+      return { activeVersionId: "v2", changedFileCount: 0 };
+    });
+    const openEngineYDocSession = vi.fn(async () => ({ available: false }));
+    Object.assign(bridge, { openEngineYDocSession });
+    renderShell(bridge);
+    await screen.findByTestId("view-markdown");
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+    await waitFor(() =>
+      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
+    );
+
+    // The switch landed, so the reopen it announced is the RIGHT one.
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(openEngineYDocSession).toHaveBeenCalledTimes(2);
+  });
+
   // #579 review r5: a deleted file's tab is gone, so no inspector will ever
   // render its notice again — the notice center is the path-independent
   // surface where the draft stays reachable, Copy/Dismiss included.

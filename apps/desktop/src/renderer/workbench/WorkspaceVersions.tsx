@@ -188,6 +188,13 @@ export function VersionMenu(props: {
       // mid-way leaves the version unchanged AND the sessions dead — only
       // the reopen re-binds them (#579 review, r7).
       let switchIssued = false;
+      // The success path announces BEFORE its selector refresh, so a refresh
+      // that fails must not announce again (#579 review, r18). A second
+      // announcement bumps the version epoch a second time, and that
+      // same-version reopen moves a freshly typed edit into set-aside
+      // recovery — which is in-memory only and dies on the next reload — for
+      // a selector-refresh failure that changed nothing.
+      let announced = false;
       setBusy("switch");
       setInlineError(null);
       try {
@@ -205,6 +212,7 @@ export function VersionMenu(props: {
         // already be in flight, and every await between here and the
         // announcement is a window it can answer in.
         props.onWorkspaceStateChanged(versionId);
+        announced = true;
         await refresh();
       } catch (error) {
         if (token !== operationToken.current) return;
@@ -224,6 +232,7 @@ export function VersionMenu(props: {
         // session is gone (#579 review, r7). An unknown outcome (the re-read
         // failed too) also announces: showing an uncertain reality beats
         // staying blind.
+        if (announced) return;
         if (
           !switchIssued &&
           recovered !== null &&
