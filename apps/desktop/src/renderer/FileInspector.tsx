@@ -801,12 +801,27 @@ function MarkdownView(props: {
   // The unmount flush keys off this — never off the timer handle, which stays
   // set (already fired) after a completed autosave and would double-write.
   const unsavedDraft = useRef(false);
-  // The write in flight, retained from issue to settle. `unsavedDraft`
-  // clears at ISSUE time, so a flush that only reads it cannot see a write
-  // already awaiting its IPC — the one window a version switch could race
-  // (#579 review, r3). Never-rejecting: waiters only need "landed or
-  // failed"; the failure itself is reported through unsavedDraft/saveState.
-  const pendingWrite = useRef<Promise<void> | null>(null);
+  // ONE queue, joined at ENTRY (#579 review, r15). The earlier design tracked
+  // the write that held the slot, so a writer PARKED behind it was invisible:
+  // the flush could see an empty slot while a waiter was still queued, and
+  // that waiter then landed the previous version's text after the switch.
+  // Three rounds each closed one interleaving and exposed the next, which is
+  // what polling a slot always does. Membership now starts when the writer
+  // arrives, so "everything ahead of me" is one await of this tail.
+  //
+  // Never rejects: a failed write is its own caller's business, not a poison
+  // pill for every writer behind it.
+  const writeChain = useRef<Promise<void>>(Promise.resolve());
+  // Writers that have ENTERED and not yet finished. Zero means the queue is
+  // idle and the next writer can run without deferring (see writeDraftNow).
+  const writersLive = useRef(0);
+  // Armed while the flush drains. A writer arriving now holds text from the
+  // version (or path) the caller is about to leave: running it before the
+  // change races the flush, and running it after IS the clobber #567 is
+  // about. So it is REFUSED rather than re-armed — re-arming would write
+  // pre-switch text onto the post-switch tree. The draft stays unsaved, and
+  // the reopen's render-phase capture above sets it aside.
+  const flushBarrier = useRef(false);
 
   // #567 cancel-and-restore: the moment `opening` flips true, the pending
   // draft leaves the save pipeline. Writing it would land the previous
@@ -1203,67 +1218,76 @@ function MarkdownView(props: {
     }
   }, [props.body, editing]);
 
-  async function writeDraftNow(options: { rejectOnError?: boolean } = {}): Promise<void> {
-    // The REF, not the captured value. The 800ms autosave timer holds the
-    // closure from the render that armed it, where readOnly was false — so a
-    // document that turned read-only after the keystroke still wrote (#534).
-    // Writes are blocked (a read-only view, or the version refusal). The edit
-    // does NOT reach disk — and the indicator must stop saying it is going to.
-    // Leaving it on "saving" is the same lie as a doc reading "Saved" over a
-    // zero-byte file: this reports the honest state, that the file on disk is
-    // behind the editor.
-    //
-    // ONE write in flight, ever (#579 review, r4). Without this, autosave A
-    // awaiting its IPC and a later B can overlap — B settles first, a waiter
-    // releases, and A's older temp-file rename lands over newer content. The
-    // loop, not a single await: every waiter that resumes re-checks, and the
-    // first to proceed claims the slot synchronously before the next runs.
-    // Serializing also means the later write reads the NEWER draft text.
-    while (pendingWrite.current) await pendingWrite.current;
-    // Guards AFTER the wait: `readOnly`/`opening` may have flipped while an
-    // earlier write was landing, and the refs carry the current answer.
-    //
-    // The draft itself is still lost when the view is torn down in this state:
-    // preserving the TEXT needs eager serialization, because
-    // `serializeDraftRef` reads the live editor and a read-only window
-    // unmounts it — a naive rearm here writes the PRE-EDIT body. The
-    // `opening` window is different: its render-phase capture serialized the
-    // draft eagerly and surfaced it, so this gate only refuses the write.
-    if (writesBlocked() || openingRef.current) {
-      setSaveState("error");
-      return;
-    }
-    const text = serializeDraftRef.current();
-    latestDraft.current = text;
-    unsavedDraft.current = false;
-    setSaveState("saving");
-    const write = bridge().writeWorkspaceText({
-      workspaceId: props.workspaceId,
-      relativePath: props.path,
-      text,
-    });
-    // Retained from issue to settle (see pendingWrite). Registered BEFORE
-    // this function's own await, so a waiter resuming off it runs after the
-    // state below has been applied.
-    const inFlight = write.then(
+  async function writeDraftNow(
+    options: { rejectOnError?: boolean; fromFlush?: boolean } = {},
+  ): Promise<void> {
+    // Refused, not queued (see flushBarrier): a writer that joined behind the
+    // barrier could only ever land stale text. Silent, because the flush owns
+    // the save state from here — it either lands this same draft itself or
+    // the reopen sets it aside.
+    if (flushBarrier.current && !options.fromFlush) return;
+    const run = async (): Promise<void> => {
+      // The REFS, not captured values. The 800ms autosave timer holds the
+      // closure from the render that armed it, where readOnly was false — so
+      // a document that turned read-only after the keystroke still wrote
+      // (#534). And this runs after everything ahead of it in the queue, so
+      // `readOnly`/`opening` may have flipped meanwhile; the refs carry the
+      // current answer. Writes are blocked (a read-only view, or the version
+      // refusal). The edit does NOT reach disk — and the indicator must stop
+      // saying it is going to. Leaving it on "saving" is the same lie as a
+      // doc reading "Saved" over a zero-byte file.
+      //
+      // The draft itself is still lost when the view is torn down in this
+      // state: preserving the TEXT needs eager serialization, because
+      // `serializeDraftRef` reads the live editor and a read-only window
+      // unmounts it — a naive rearm here writes the PRE-EDIT body. The
+      // `opening` window is different: its render-phase capture serialized
+      // the draft eagerly and surfaced it, so this gate only refuses.
+      if (writesBlocked() || openingRef.current) {
+        setSaveState("error");
+        return;
+      }
+      // Serialized HERE, not at enqueue: a writer that waited reads the
+      // newest text, so an older queued write can never land over a newer one
+      // (#579 review, r4).
+      const text = serializeDraftRef.current();
+      latestDraft.current = text;
+      unsavedDraft.current = false;
+      setSaveState("saving");
+      try {
+        await bridge().writeWorkspaceText({
+          workspaceId: props.workspaceId,
+          relativePath: props.path,
+          text,
+        });
+        setDraft(text);
+        setSavedBody(text);
+        setSaveState("saved");
+      } catch (error) {
+        // The write failed: the draft is still unsaved, so the unmount flush
+        // gets another shot at landing it.
+        unsavedDraft.current = true;
+        setSaveState("error");
+        if (options.rejectOnError) throw error;
+      }
+    };
+    // Synchronous when the queue is idle. Callers like the source-mode toggle
+    // serialize-then-switch-mode in ONE tick, and switching re-points
+    // serializeDraftRef at the Tiptap parse — deferring the serialize by even
+    // a microtask would write that lossy parse instead of the typed source.
+    // Only a writer that must actually wait is deferred.
+    const runsNow = writersLive.current === 0;
+    writersLive.current += 1;
+    const queued = (runsNow ? run() : writeChain.current.then(run)).finally(
+      () => {
+        writersLive.current -= 1;
+      },
+    );
+    writeChain.current = queued.then(
       () => undefined,
       () => undefined,
     );
-    pendingWrite.current = inFlight;
-    try {
-      await write;
-      setDraft(text);
-      setSavedBody(text);
-      setSaveState("saved");
-    } catch (error) {
-      // The write failed: the draft is still unsaved, so the unmount flush
-      // gets another shot at landing it.
-      unsavedDraft.current = true;
-      setSaveState("error");
-      if (options.rejectOnError) throw error;
-    } finally {
-      if (pendingWrite.current === inFlight) pendingWrite.current = null;
-    }
+    return queued;
   }
 
   async function saveNow(): Promise<void> {
@@ -1395,27 +1419,35 @@ function MarkdownView(props: {
       // timer (#579 review, r3): the caller is about to move paths or switch
       // versions, and must not proceed while the previous state's text is
       // still landing. If that write FAILS, `unsavedDraft` is true again by
-      // the time this resumes, and the retry below lands it before the move.
+      // the time this resumes, and the seam's own write below lands it before
+      // the move.
       //
-      // Drain until the queue is empty AT RELEASE (#579 review, r8 + r9):
-      // a queued writer parked in writeDraftNow's own wait resumes FIRST
-      // when the active write settles and claims the slot — including one
-      // that queued DURING this seam's own final write (Ctrl+S mid-flush).
-      // Each pass waits out everything in flight and lands any re-armed
-      // draft; the seam returns only when nothing is pending and nothing is
-      // queued, so no writer can still hold the previous version's text.
-      for (;;) {
-        while (pendingWrite.current) await pendingWrite.current;
-        // The ref, not the captured value: the shell can call this seam
-        // between the refusal and the re-registration. `opening` too (#567):
-        // a flush that arrives mid-reopen must not write the previous
-        // version's draft.
+      // A BARRIER in the write queue, not a poll of it (#579 review, r15).
+      // Arming and reading the tail are one synchronous step, so no writer
+      // can slip between them.
+      flushBarrier.current = true;
+      try {
+        // Everything already enqueued — in flight OR parked behind it — runs
+        // to completion ahead of this point, and nothing can join behind.
+        await writeChain.current;
+        // This seam is now the only writer that can exist. Land the draft, so
+        // the keystrokes reach disk while this path and this version still
+        // mean what the editor shows. The REFS, not captured values: the
+        // shell can call this between the refusal and the re-registration,
+        // and `opening` (#567) means a flush arriving mid-reopen must not
+        // write the previous version's draft. A write that FAILS leaves
+        // `unsavedDraft` true, and the unmount flush gets the next shot.
         if (!unsavedDraft.current || writesBlocked() || openingRef.current) {
           return;
         }
         if (saveTimer.current) clearTimeout(saveTimer.current);
-        await writeDraftNow({ rejectOnError: true });
+        await writeDraftNow({ rejectOnError: true, fromFlush: true });
+      } finally {
+        flushBarrier.current = false;
       }
+      // INVARIANT at return: the queue is empty. No writer — in flight,
+      // parked, or arriving during the drain — survives this seam holding
+      // text from before the caller's change.
     });
     return () => registerDraftFlush(null);
     // writeDraftNow reads refs (latestDraft) + per-mount-stable props only, so the

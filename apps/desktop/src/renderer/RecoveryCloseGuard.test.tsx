@@ -8,7 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppErrorBoundary } from "./ErrorBoundary";
 import {
   RecoveryCloseGuard,
@@ -22,6 +22,26 @@ import {
   orphanedDraftIds,
   resetOrphanedDrafts,
 } from "./orphanedDrafts";
+
+// The quit bridge is a REQUIRED contract (#579 review, r15): the guard calls
+// onQuitRequested / onRecoveryCheckRequested directly, so a stub that omits
+// them is a mismatched build and must fail loudly. Every test therefore
+// stubs the whole surface and overrides only what it asserts on.
+function stubBridge(overrides: Record<string, unknown> = {}): void {
+  vi.stubGlobal("dohcDesktop", {
+    onQuitRequested: () => () => undefined,
+    onRecoveryCheckRequested: () => () => undefined,
+    answerRecoveryCheck: async () => undefined,
+    holdQuit: async () => undefined,
+    resumeQuit: async () => undefined,
+    ...overrides,
+  });
+}
+
+// Every test gets the full contract; overrides replace it where asserted on.
+beforeEach(() => {
+  stubBridge();
+});
 
 afterEach(() => {
   cleanup();
@@ -109,6 +129,25 @@ describe("RecoveryCloseGuard", () => {
     closeSpy.mockRestore();
   });
 
+  // #579 review r15: the bridge and the preload gained both quit listeners in
+  // this same change. Treating them as optional would define a SECOND
+  // supported preload — one where the renderer silently drops native-quit
+  // handling — and every future change would have to keep that path alive.
+  // There are no users and no old preloads to carry.
+  it("fails loudly on a preload without the quit contract", () => {
+    vi.stubGlobal("dohcDesktop", { installUpdate: async () => undefined });
+    // MUTATION (optional contract): restore `onQuitRequested?.(...)` and the
+    // catch-based fallback. This render then succeeds with native-quit
+    // handling missing, and the mismatched build ships unnoticed.
+    expect(() =>
+      render(
+        <RecoveryCloseGuard>
+          <div />
+        </RecoveryCloseGuard>,
+      ),
+    ).toThrow(/is not a function/);
+  });
+
   it("does not intercept closing when no set-aside edits exist", async () => {
     render(
       <RecoveryCloseGuard>
@@ -167,7 +206,7 @@ describe("RecoveryCloseGuard", () => {
   it("a blocked reload resumes as a reload, never an exit", async () => {
     const user = userEvent.setup();
     const reloadRenderer = vi.fn(async () => undefined);
-    vi.stubGlobal("dohcDesktop", { reloadRenderer });
+    stubBridge({ reloadRenderer });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     const Thrower = (): never => {
       throw new Error("boom");
@@ -229,7 +268,7 @@ describe("RecoveryCloseGuard", () => {
       completed: false,
       state: readyState,
     }));
-    vi.stubGlobal("dohcDesktop", { installUpdate });
+    stubBridge({ installUpdate });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     render(
       <RecoveryCloseGuard>
@@ -271,7 +310,7 @@ describe("RecoveryCloseGuard", () => {
         version: "1.2.4",
       },
     }));
-    vi.stubGlobal("dohcDesktop", { installUpdate });
+    stubBridge({ installUpdate });
     render(
       <RecoveryCloseGuard>
         <div />
@@ -302,7 +341,7 @@ describe("RecoveryCloseGuard", () => {
         version: "1.2.4",
       },
     }));
-    vi.stubGlobal("dohcDesktop", { installUpdate });
+    stubBridge({ installUpdate });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     render(
       <RecoveryCloseGuard>
@@ -340,10 +379,7 @@ describe("RecoveryCloseGuard", () => {
       };
     });
     const answerRecoveryCheck = vi.fn(async () => undefined);
-    vi.stubGlobal("dohcDesktop", {
-      onRecoveryCheckRequested,
-      answerRecoveryCheck,
-    });
+    stubBridge({ onRecoveryCheckRequested, answerRecoveryCheck });
     render(
       <RecoveryCloseGuard>
         <div />
@@ -403,7 +439,7 @@ describe("RecoveryCloseGuard", () => {
     });
     const answerRecoveryCheck = vi.fn(async () => undefined);
     let checkListener: ((requestId: number) => void) | null = null;
-    vi.stubGlobal("dohcDesktop", {
+    stubBridge({
       installUpdate,
       answerRecoveryCheck,
       onRecoveryCheckRequested: (listener: (requestId: number) => void) => {
@@ -602,7 +638,7 @@ describe("RecoveryCloseGuard", () => {
     });
     const holdQuit = vi.fn(async () => undefined);
     const resumeQuit = vi.fn(async () => undefined);
-    vi.stubGlobal("dohcDesktop", { onQuitRequested, holdQuit, resumeQuit });
+    stubBridge({ onQuitRequested, holdQuit, resumeQuit });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     render(
       <RecoveryCloseGuard>
@@ -644,7 +680,7 @@ describe("RecoveryCloseGuard", () => {
     });
     const holdQuit = vi.fn(async () => undefined);
     const resumeQuit = vi.fn(async () => undefined);
-    vi.stubGlobal("dohcDesktop", { onQuitRequested, holdQuit, resumeQuit });
+    stubBridge({ onQuitRequested, holdQuit, resumeQuit });
     render(
       <RecoveryCloseGuard>
         <div />

@@ -35,6 +35,10 @@ export type WorkspaceWindowRegistry<W> = {
   track(window: W): W;
   forget(window: W): void;
   live(): W | undefined;
+  // Every live workspace window. The force-quit path destroys them, so a
+  // renderer that wakes cannot veto a decision the user already made
+  // (#579 review, r15).
+  allLive(): readonly W[];
 };
 
 export function createWorkspaceWindowRegistry<W>(
@@ -54,6 +58,9 @@ export function createWorkspaceWindowRegistry<W>(
         if (!isDestroyed(window)) return window;
       }
       return undefined;
+    },
+    allLive() {
+      return [...windows].filter((window) => !isDestroyed(window));
     },
   };
 }
@@ -115,6 +122,13 @@ export function createQuitGuard(options: {
   // Resolves true only when the user explicitly chose to quit anyway.
   confirmForceQuit: () => Promise<boolean>;
   quit: () => void;
+  // The explicit "quit anyway" answer, which an ordinary quit cannot deliver
+  // (#579 review, r15). A renderer that wakes before its window closes runs
+  // beforeunload knowing nothing of THIS dialog — no bypass, no approved ids
+  // — so it vetoes the exit and opens a second warning, while the guard stays
+  // approved forever. The user already decided over an unresponsive renderer;
+  // this path makes that decision stick.
+  forceQuit: () => void;
   timeoutMs?: number;
 }): QuitGuard {
   const timeoutMs = options.timeoutMs ?? QUIT_ASK_TIMEOUT_MS;
@@ -142,7 +156,7 @@ export function createQuitGuard(options: {
           // dialog that named the loss.
           if (!quitAnyway || approved || askTimer !== null) return;
           approved = true;
-          options.quit();
+          options.forceQuit();
         });
       }, timeoutMs);
       options.askRenderer();

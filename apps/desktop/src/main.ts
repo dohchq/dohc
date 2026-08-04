@@ -3154,6 +3154,15 @@ const quitGuard = createQuitGuard({
     return response === 1;
   },
   quit: () => app.quit(),
+  // The user chose "quit anyway" over a renderer that never answered. Destroy
+  // the workspace windows FIRST: a destroyed window runs no beforeunload, so
+  // a renderer that wakes cannot veto the decision and open a second warning
+  // (#579 review, r15). app.quit() still follows, so the will-quit teardown —
+  // engine sessions, stores, WAL locks — runs exactly as for any other quit.
+  forceQuit: () => {
+    for (const window of workspaceWindows.allLive()) window.destroy();
+    app.quit();
+  },
 });
 
 // Recovery re-check at the quit boundary (#579 review, r12). The renderer's

@@ -132,7 +132,6 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     }
   };
   useEffect(() => {
-    openRecoveryWarning = (warning) => setCloseWarning(warning);
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       // Consumed either way: if this unload proceeds the slot dies with the
       // page, and if it is blocked the dialog now owns the answer.
@@ -154,61 +153,57 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
         resume: pending?.resume ?? null,
       });
     };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    // A native quit (Cmd+Q, tray Quit) never reaches beforeunload unguarded:
-    // main intercepts it and ASKS first (#579 review, r10). Answer promptly
-    // — resume when nothing is at stake, hold when the dialog takes over —
-    // so main's hung-renderer fail-safe never fires for a live renderer.
-    let unsubscribeQuit: (() => void) | undefined;
-    let unsubscribeRecoveryCheck: (() => void) | undefined;
-    try {
-      // Main re-asks at the quit boundary (#579 review, r12) — the answer is
-      // read at ANSWER time, so an edit set aside after this renderer's own
-      // check still blocks the install. The answer is the LIVE store measured
-      // against what the user approved (#579 review, r13), never a blanket
-      // "the user already confirmed": a draft captured after the confirm was
-      // in no warning, and quitAndInstall is the last chance to stop. A
-      // refusal here is what brings the dialog back with that draft listed.
-      unsubscribeRecoveryCheck = bridge().onRecoveryCheckRequested?.(
-        (requestId) => {
-          void bridge().answerRecoveryCheck({
-            requestId,
-            blocked: hasUnapprovedDrafts(),
-          });
-        },
-      );
-    } catch {
-      unsubscribeRecoveryCheck = undefined;
-    }
-    try {
-      // Optional-call: a missing bridge or an older preload without the quit
-      // API degrades to "no quit interception", never to a crashed guard —
-      // this component sits above the error boundary.
-      unsubscribeQuit = bridge().onQuitRequested?.(() => {
-        if (!hasUnapprovedDrafts()) {
-          void bridge().resumeQuit();
-          return;
-        }
-        void bridge().holdQuit();
-        setCloseWarning({
-          kind: "quit",
-          resume: () =>
-            bridge()
-              .resumeQuit()
-              .then(
-                () => true,
-                () => false,
-              ),
+    // Required contract, called directly (#579 review, r15). The bridge and
+    // the preload gained both listeners in this same change, so an optional
+    // call would define a SECOND supported preload — one where the renderer
+    // silently drops native-quit handling instead of showing the mismatched
+    // build. There are no users and no old preloads to carry.
+    //
+    // Main re-asks at the quit boundary (#579 review, r12) — the answer is
+    // read at ANSWER time, so an edit set aside after this renderer's own
+    // check still blocks the install. The answer is the LIVE store measured
+    // against what the user approved (#579 review, r13), never a blanket
+    // "the user already confirmed": a draft captured after the confirm was in
+    // no warning, and quitAndInstall is the last chance to stop. A refusal
+    // here is what brings the dialog back with that draft listed.
+    const unsubscribeRecoveryCheck = bridge().onRecoveryCheckRequested(
+      (requestId) => {
+        void bridge().answerRecoveryCheck({
+          requestId,
+          blocked: hasUnapprovedDrafts(),
         });
+      },
+    );
+    // A native quit (Cmd+Q, tray Quit) is main-initiated: answer promptly —
+    // resume when nothing is at stake, hold when the dialog takes over — so
+    // main's hung-renderer fail-safe never fires for a live renderer.
+    const unsubscribeQuit = bridge().onQuitRequested(() => {
+      if (!hasUnapprovedDrafts()) {
+        void bridge().resumeQuit();
+        return;
+      }
+      void bridge().holdQuit();
+      setCloseWarning({
+        kind: "quit",
+        resume: () =>
+          bridge()
+            .resumeQuit()
+            .then(
+              () => true,
+              () => false,
+            ),
       });
-    } catch {
-      unsubscribeQuit = undefined;
-    }
+    });
+    // Registered LAST, so a preload that fails the contract above leaves no
+    // listener and no opener behind — a half-installed guard is worse than
+    // none, because the cleanup React skips would never remove it.
+    window.addEventListener("beforeunload", onBeforeUnload);
+    openRecoveryWarning = (warning) => setCloseWarning(warning);
     return () => {
       openRecoveryWarning = null;
       window.removeEventListener("beforeunload", onBeforeUnload);
-      unsubscribeQuit?.();
-      unsubscribeRecoveryCheck?.();
+      unsubscribeQuit();
+      unsubscribeRecoveryCheck();
       if (bypassRearmTimer.current) clearTimeout(bypassRearmTimer.current);
     };
     // rearmGuard and hasUnapprovedDrafts read refs and the module store, never

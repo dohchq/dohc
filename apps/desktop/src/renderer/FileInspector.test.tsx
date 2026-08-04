@@ -2133,12 +2133,87 @@ describe("markdown document opening state", () => {
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
   });
 
-  // #579 review r9: a writer can queue DURING the flush's own final write —
-  // typing (or Ctrl+S) mid-flush arms a new autosave that claims the slot
-  // the moment the flush's write settles. The seam must drain until the
-  // queue is empty AT RELEASE, or that writer lands the previous version's
-  // text after the switch.
-  it("the flush drains a writer that queued during its own final write", async () => {
+  // #579 review r15, the exact reported interleaving: the flush registers on
+  // the in-flight write BEFORE a later Ctrl+S registers on the same promise.
+  // Ctrl+S saves unconditionally, so `unsavedDraft` is already false — the
+  // old seam therefore returned the moment the slot cleared, and the queued
+  // writer landed the previous version's text after the switch. Membership
+  // now starts at ENTRY and the barrier refuses anything arriving after the
+  // seam began, so there is no writer left to resume.
+  it("refuses a Ctrl+S that arrives after the flush began, with no draft pending", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    let releaseA!: () => void;
+    const heldA = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseA = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => heldA);
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    let flush: (() => Promise<void>) | null = null;
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        registerDraftFlush={(next: (() => Promise<void>) | null) => {
+          flush = next;
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    const editor = await screen.findByTestId(
+      "markdown-editor",
+      {},
+      { timeout: 5_000 },
+    );
+    await user.type(editor, "One");
+    // Autosave A issues and holds. It cleared `unsavedDraft` at issue time.
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    // The seam starts first, then Ctrl+S — the reported order.
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    editor.focus();
+    await user.keyboard("{Control>}s{/Control}");
+
+    // MUTATION (barrier): drop the flushBarrier check from writeDraftNow.
+    // Ctrl+S joins the queue behind A, the seam's captured tail does not
+    // include it, and it lands the previous version's text after the switch.
+    await act(async () => {
+      releaseA();
+      await heldA;
+    });
+    await act(async () => {
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
+  // #579 review r9 + r15: a writer can arrive DURING the flush's own final
+  // write — typing (or Ctrl+S) mid-flush. Draining it was the wrong answer:
+  // its text is from the version the caller is about to leave, so landing it
+  // before the switch races the flush and landing it after IS the clobber.
+  // The barrier refuses it outright, and the draft stays unsaved for the
+  // reopen's capture to set aside.
+  it("refuses a writer that arrives during the flush instead of landing its stale text", async () => {
     const user = userEvent.setup();
     const bridge = makeHeldOpenBridge();
     let releaseF!: () => void;
@@ -2194,34 +2269,28 @@ describe("markdown document opening state", () => {
       expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
     );
 
-    // Mid-flush, the user types more: a new autosave arms and parks behind
-    // the flush's held write.
+    // Mid-flush, the user types more: a new autosave arms and fires while the
+    // barrier is up.
     await user.type(screen.getByTestId("markdown-editor"), "Two");
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
-    // The flush's write lands; the queued writer claims the slot and issues.
+    // The flush's write lands. Nothing is queued behind it, so the seam
+    // returns with an EMPTY queue — the invariant the barrier exists for.
+    // MUTATION (barrier): drop the flushBarrier check from writeDraftNow.
+    // The mid-flush writer joins the queue, issues a second write, and lands
+    // the previous version's text.
     await act(async () => {
       releaseF();
       await heldF;
-    });
-    await waitFor(() =>
-      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    // MUTATION (drain at release): revert the seam to drain-then-one-write.
-    // The flush settles right here, with the queued writer still landing.
-    expect(flushSettled).toBe(false);
-
-    await act(async () => {
-      releaseB();
-      await heldB;
     });
     await act(async () => {
       await flushPromise;
     });
     expect(flushSettled).toBe(true);
-    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    void releaseB;
+    void heldB;
   });
 
   // #579 review r7: READ mode (a large, non-truncated document) edits title

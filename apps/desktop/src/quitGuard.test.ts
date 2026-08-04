@@ -10,6 +10,7 @@ function makeGuard(overrides: {
 } = {}) {
   const askRenderer = vi.fn();
   const quit = vi.fn();
+  const forceQuit = vi.fn();
   const confirmForceQuit = vi.fn(
     overrides.confirmForceQuit ?? (async () => false),
   );
@@ -17,9 +18,10 @@ function makeGuard(overrides: {
     askRenderer,
     confirmForceQuit,
     quit,
+    forceQuit,
     timeoutMs: 1_000,
   });
-  return { guard, askRenderer, quit, confirmForceQuit };
+  return { guard, askRenderer, quit, forceQuit, confirmForceQuit };
 }
 
 function quitEvent() {
@@ -93,12 +95,22 @@ describe("quit guard", () => {
     expect(later.prevented).toBe(true);
   });
 
-  it("force-quits only on an explicit decision", async () => {
+  // #579 review r15: an ordinary app.quit() does not deliver this answer. A
+  // renderer that wakes before its window closes runs beforeunload knowing
+  // nothing of the MAIN-side dialog — no bypass, no approved ids — so it
+  // vetoes the exit and opens a second warning while the guard stays
+  // approved. The explicit decision has to take the force path.
+  it("force-quits only on an explicit decision, and through the force path", async () => {
     vi.useFakeTimers();
-    const { guard, quit } = makeGuard({ confirmForceQuit: async () => true });
+    const { guard, quit, forceQuit } = makeGuard({
+      confirmForceQuit: async () => true,
+    });
     guard.beforeQuit(quitEvent());
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(quit).toHaveBeenCalledTimes(1);
+    // MUTATION (carry the decision): call options.quit() here instead. The
+    // waking renderer vetoes the unload the user already chose.
+    expect(forceQuit).toHaveBeenCalledTimes(1);
+    expect(quit).not.toHaveBeenCalled();
     const next = quitEvent();
     expect(guard.beforeQuit(next)).toBe("proceed");
   });
@@ -106,7 +118,7 @@ describe("quit guard", () => {
   it("drops a stale force-quit answer when the renderer already resumed", async () => {
     vi.useFakeTimers();
     let decide!: (quitAnyway: boolean) => void;
-    const { guard, quit } = makeGuard({
+    const { guard, quit, forceQuit } = makeGuard({
       confirmForceQuit: () =>
         new Promise<boolean>((resolve) => {
           decide = resolve;
@@ -119,8 +131,9 @@ describe("quit guard", () => {
     expect(quit).toHaveBeenCalledTimes(1);
     decide(true);
     await vi.advanceTimersByTimeAsync(0);
-    // No second quit from the stale dialog answer.
+    // No second quit from the stale dialog answer, by either path.
     expect(quit).toHaveBeenCalledTimes(1);
+    expect(forceQuit).not.toHaveBeenCalled();
   });
 
   it("pre-approves an update's own quit, and a refused install revokes it", () => {
@@ -143,6 +156,25 @@ describe("quit guard", () => {
 // over drafts that were fully available.
 describe("workspace window registry", () => {
   type FakeWindow = { id: string; destroyed: boolean };
+
+  it("lists every live workspace window for the force-quit path", () => {
+    const registry = createWorkspaceWindowRegistry<FakeWindow>(
+      (window) => window.destroyed,
+    );
+    const first: FakeWindow = { id: "first", destroyed: false };
+    const gone: FakeWindow = { id: "gone", destroyed: true };
+    const second: FakeWindow = { id: "second", destroyed: false };
+    registry.track(first);
+    registry.track(gone);
+    registry.track(second);
+    // MUTATION (allLive): return every tracked window. The force path then
+    // calls destroy() on one that is already destroyed.
+    expect(registry.allLive().map((window) => window.id)).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
 
   it("answers with a tracked workspace window, never another live window", () => {
     const registry = createWorkspaceWindowRegistry<FakeWindow>(

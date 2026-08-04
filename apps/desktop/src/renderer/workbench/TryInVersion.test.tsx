@@ -305,6 +305,30 @@ describe("TryInVersionReviewCard", () => {
     expect(onWorkspaceStateChanged).toHaveBeenCalledWith(undefined);
   });
 
+  // #579 review r15: the announcement already happened at line 161, before
+  // the dismissal IPC. A dismissal that fails afterwards does not un-know
+  // where the workspace landed, and announcing twice bumps the version epoch
+  // a SECOND time — that same-version reopen sets aside a draft the user
+  // typed while the dismissal hung, for a failure that has nothing to do with
+  // the version.
+  it("announces the landing once when only the dismissal fails", async () => {
+    const onWorkspaceStateChanged = vi.fn();
+    const user = userEvent.setup();
+    bridgeMock.dismissTryInVersionReview.mockRejectedValueOnce(
+      new Error("dismissal failed"),
+    );
+    renderCard(reviewState(), { onWorkspaceStateChanged });
+    await user.click(screen.getByTestId("try-review-set-aside"));
+    await waitFor(() =>
+      expect(screen.getByTestId("try-review-error")).toBeTruthy(),
+    );
+
+    // MUTATION (double bump): drop the `landedOn !== undefined` return. The
+    // catch announces the same landing again and reopens Main twice.
+    expect(onWorkspaceStateChanged).toHaveBeenCalledTimes(1);
+    expect(onWorkspaceStateChanged).toHaveBeenCalledWith("main");
+  });
+
   it("says so plainly when the agent changed nothing and offers the way back", () => {
     renderCard(reviewState({ changedFileCount: 0 }));
     expect(screen.getByTestId("try-review-card").textContent).toContain(

@@ -166,12 +166,19 @@ export function TryInVersionReviewCard(props: {
       if (token !== liveToken.current) return;
       setInlineError(ipcErrorMessage(error, "Could not switch back to Main."));
       // Make the shell reflect reality — but only the reality this call may
-      // have CHANGED. A dismissal that failed AFTER the switch does not
-      // un-know where the workspace landed; a mid-switch failure needs the
-      // shell to ask; and a failure before the switch IPC ever started must
-      // announce nothing (#579 review, r11).
-      if (!switchIssued && landedOn === undefined) return;
-      props.onWorkspaceStateChanged(landedOn);
+      // have CHANGED, and only ONCE (#579 review, r11 + r15).
+      //
+      // Already announced: the dismissal failed AFTER the announcement, which
+      // does not un-know where the workspace landed. Announcing again bumps
+      // the version epoch a SECOND time, and that same-version reopen would
+      // set aside a draft the user typed while the dismissal hung — pulling
+      // it out of the save pipeline for a failure that has nothing to do with
+      // the version.
+      if (landedOn !== undefined) return;
+      // Nothing was issued, so nothing changed.
+      if (!switchIssued) return;
+      // Mid-switch: the shell has to ask where it landed.
+      props.onWorkspaceStateChanged(undefined);
     } finally {
       if (token === liveToken.current) setBusy(null);
     }
