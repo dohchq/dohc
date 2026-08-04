@@ -1629,7 +1629,7 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn local_blob_bytes(
+pub(crate) fn local_blob_bytes(
     store: &EngineStore,
     sha256: &str,
     kind: BlobKind,

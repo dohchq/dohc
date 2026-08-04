@@ -15299,6 +15299,34 @@ fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
     );
 }
 
+/// The PUSH side of the same mistake. `upload_missing_blobs` reads the blob out
+/// of the local store before it sends it, and that reader carried the binary
+/// ceiling as a `5 * 1024 * 1024` literal — so a Y.Doc base this engine had just
+/// originated read back as `BlobInvalid`. Wrong constraint, wrong error, and it
+/// would have made the widened bound unusable in the direction that matters
+/// first (#549).
+///
+/// MUTATION: put the literal back in `local_blob_bytes` and the Y.Doc read
+/// fails with `BlobInvalid`.
+#[test]
+fn the_local_blob_reader_measures_against_the_referenced_kind() {
+    let (_scratch, _path, engine) = store();
+    let (_, binary_limit) = blob_ceiling(BlobKind::Binary);
+    let bytes = vec![4u8; binary_limit + 1];
+    let sha256 = engine.put_binary_blob(&bytes).expect("store the blob");
+
+    assert_eq!(
+        crate::relay::local_blob_bytes(&engine, &sha256, BlobKind::Ydoc),
+        Ok(Some(bytes)),
+        "a Y.Doc payload past the captured-file cap is readable for push"
+    );
+    assert_eq!(
+        crate::relay::local_blob_bytes(&engine, &sha256, BlobKind::Binary),
+        Err(RelayError::BlobInvalid),
+        "the same bytes referenced as a captured file are still over ITS ceiling"
+    );
+}
+
 /// The Y.Doc half of the ingest chokepoint. Text and binary are pinned above.
 ///
 /// MUTATION: route `BlobContent::Ydoc` through the binary ceiling in

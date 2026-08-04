@@ -305,7 +305,7 @@ documents pay per BLOCK, not per byte: the same 10 MiB costs 1.07x as long-form
 prose and 1.41x as a heavily broken outline, because every block costs an XML
 element plus its text item. The ratio is stable across document size (1.123 at
 1 MiB, 1.129 at 10 MiB for one shape), which is why the shipped check measures a
-1 MiB corpus and projects it.
+small corpus and projects it.
 
 So the old cap rejected a rich document holding roughly **3.5 MiB of markdown** —
 a third of what the store accepts, and unmistakably healthy work.
