@@ -464,11 +464,23 @@ function mapRelayShareListing(
     // from another workspace is managed there.
     if (!selector || remoteWorkspaceId === null) continue;
     if (row.workspaceId !== remoteWorkspaceId) continue;
+    // REVOKED grants are the granted lane's tombstones, and they are dropped
+    // rather than listed. The relay keeps returning them to the granter, so
+    // counting them made the cap measure an account's LIFETIME grants: past
+    // 4096 the listing stayed over-limit with every grant revoked, new grants
+    // were blocked, and revoking more could not reduce the count — a permanent
+    // lockout with no user action that helps.
+    //
+    // Same rule the joined lane already follows: a cap may only count what the
+    // user can actually reduce. Nothing displays these either — grantedByWire
+    // skips them — so dropping them shrinks the payload the cap exists to
+    // bound instead of merely uncounting it.
+    if (row.revokedAtMs !== null && row.revokedAtMs !== undefined) continue;
     granted.push({
       shareId: row.shareId,
       ...selector,
       recipientEmail: row.recipientEmail ?? null,
-      revokedAtMs: row.revokedAtMs ?? null,
+      revokedAtMs: null,
     });
   }
   for (const row of receivedRows) {

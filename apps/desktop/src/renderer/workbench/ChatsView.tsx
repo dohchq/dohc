@@ -779,6 +779,18 @@ function overLimitSentences(failure: {
   );
 }
 
+// Whether a NEW outgoing grant would deepen the over-limit state. Only the
+// GRANTED lane can: an outgoing share adds a row there and nowhere else. A
+// full RECEIVED lane is an inbound backlog the user did not create and cannot
+// clear from here, and rejecting their outgoing work over it turns one
+// account-wide problem into a second one.
+function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
+  return (
+    failure?.kind === "over-limit" &&
+    failure.lanes.some((entry) => entry.lane === "granted")
+  );
+}
+
 // What the sharing surface says when a committed share read carried no rows.
 // Without it the surface renders an empty list, which reads as "you have no
 // shares" (#618).
@@ -1255,18 +1267,39 @@ export function ChatsView(props: {
       // Whether dohc could READ the relay is its own answer, and every
       // resolved listing carries it — including the unreachable one, which
       // claims no row lane at all.
-      if (claimLanes(["relayReach"], ticket)) {
-        setShareReadFailure(
-          value.relay.state === "unreachable"
-            ? { kind: "unreachable" }
-            : value.relay.state === "over-limit"
-              ? {
-                  kind: "over-limit",
-                  lanes: value.relay.lanes,
-                  limit: value.relay.limit,
-                }
-              : null,
-        );
+      const nextFailure: ShareReadFailure | null =
+        value.relay.state === "unreachable"
+          ? { kind: "unreachable" }
+          : value.relay.state === "over-limit"
+            ? {
+                kind: "over-limit",
+                lanes: value.relay.lanes,
+                limit: value.relay.limit,
+              }
+            : null;
+      // A refresh NOBODY ASKED FOR may take the reachability lane only when it
+      // ESTABLISHED an account-scoped answer. The test is what the read
+      // learned, not which sentinel it returned: a background read that
+      // resolved "unreachable" or "over-limit" established no listing, exactly
+      // like one that rejected, and taking the lane over either would let it
+      // outrank an authoritative answer still in flight — leaving the notice
+      // standing over a listing that then arrived and worked. Keying this on
+      // `value === null` covered one of the three shapes.
+      //
+      // It may still SAY so where nothing has answered yet, so the surface
+      // resolves instead of waiting on a request that may never return.
+      const establishedRelayFact =
+        value.relay.state === "answered" || value.relay.state === "signed-out";
+      if (!options?.background || establishedRelayFact) {
+        if (claimLanes(["relayReach"], ticket)) setShareReadFailure(nextFailure);
+      } else if (ticket > committedLane.current.relayReach) {
+        // It may still SAY so — an outage the user should see is a real fact,
+        // and refusing to show it would trade one silence for another. It
+        // READS the watermark without taking it: newer than what is displayed,
+        // so a late-arriving older outage cannot repaint over a fresher
+        // answer; unclaimed, so an authoritative answer still in flight on an
+        // OLDER ticket can still land and clear it.
+        setShareReadFailure(nextFailure);
       }
       // The relay lanes are only this answer's to write when it learned an
       // account-scoped fact: the relay's rows, or that no session exists
@@ -3034,8 +3067,9 @@ export function ChatsView(props: {
     if (readOnly) return;
     // The disabled control is honesty; this is the gate. A submit that slips
     // past it (a stale enter key, a re-render race) would still grow the lane
-    // dohc already cannot list.
-    if (shareReadFailure?.kind === "over-limit") return;
+    // dohc already cannot list. Only the GRANTED lane, though — an outgoing
+    // share never touches the received one.
+    if (grantedLaneIsOverLimit(shareReadFailure)) return;
     if (nav.level !== "channel" || shareBusy) return;
     const recipientEmail = shareEmail.trim();
     if (recipientEmail.length === 0) return;
@@ -4362,7 +4396,7 @@ export function ChatsView(props: {
     // to retry or degrade; offering the one control that moves retry further
     // away is the opposite. Removal and paging belong to the lane-scoping
     // work, not here.
-    const shareGrantsBlocked = shareReadFailure?.kind === "over-limit";
+    const shareGrantsBlocked = grantedLaneIsOverLimit(shareReadFailure);
     const canShare =
       !readOnly &&
       nav.channel.kind !== "agent" &&

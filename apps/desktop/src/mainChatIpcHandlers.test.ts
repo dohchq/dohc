@@ -822,6 +822,56 @@ describe("readRelayChatShareLanes", () => {
     ]);
   });
 
+  // #618 codex round 5. The relay keeps returning REVOKED grants to the
+  // granter, so counting them made the cap measure an account's LIFETIME
+  // grants: past the cap the listing stayed over-limit with every grant
+  // revoked, and revoking more could not reduce it. Third time this cap
+  // produced a permanent-refusal shape, same cause each time — counting rows
+  // the user cannot remove.
+  it("drops revoked grants, so revoking one gets an account back under the cap", async () => {
+    const grantRows = (revokedFrom: number) =>
+      Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) => ({
+        shareId: `share-${index}`,
+        workspaceId: "remote-1",
+        recipientEmail: "ana@example.com",
+        revokedAtMs: index >= revokedFrom ? 1_700_000_000_000 : null,
+        selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      }));
+
+    // Every grant live: genuinely over the cap.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const allLive = await readRelayChatShareLanes({
+        shareIdsClaimedElsewhere: new Set<string>(),
+        fetchListing: () =>
+          Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS + 1) }),
+        remoteWorkspaceId: "remote-1",
+      });
+      expect(allLive.state).toBe("over-limit");
+    } finally {
+      warn.mockRestore();
+    }
+
+    // Revoke ONE. The relay still returns it, but it no longer counts, so the
+    // account is back under the cap and can list again.
+    const afterOneRevoke = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
+      fetchListing: () =>
+        Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS) }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(afterOneRevoke.state).toBe("answered");
+    expect(
+      afterOneRevoke.state === "answered" && afterOneRevoke.granted,
+    ).toHaveLength(MAX_CHAT_CHANNEL_SHARE_ROWS);
+    // And no revoked row is listed at all — nothing renders them, and carrying
+    // them would leave the payload unbounded while merely uncounting them.
+    expect(
+      afterOneRevoke.state === "answered" &&
+        afterOneRevoke.granted.every((row) => row.revokedAtMs === null),
+    ).toBe(true);
+  });
+
   // #618 codex round 4: an ENDED row in another workspace claims nothing. The
   // tombstone is that workspace's own write gate and stays for that, but it
   // was never an argument for cross-workspace exclusivity — once A has left,

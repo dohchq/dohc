@@ -892,6 +892,57 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(notice.textContent).toContain("This list may be out of date.");
   });
 
+  // #618 codex round 5. The sibling test above covers a background read that
+  // REJECTED. This one resolves structurally with `unreachable` — the same
+  // "learned nothing" fact wearing a different shape — and it must be treated
+  // the same. Keying the carve-out on `value === null` covered one of three.
+  it("lets an in-flight listing clear a notice a resolved background outage raised", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    let resolveMount!: (value: ReturnType<typeof shareListing>) => void;
+    const mountRead = new Promise<ReturnType<typeof shareListing>>((resolve) => {
+      resolveMount = resolve;
+    });
+    bridgeMock.listChatChannelShares.mockReturnValueOnce(mountRead).mockResolvedValue({
+      joined: [],
+      sessionKey: "session-a",
+      relay: { state: "unreachable" as const },
+    });
+
+    const view = render(navigator(0));
+    await waitFor(() =>
+      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1),
+    );
+    view.rerender(navigator(1));
+    await waitFor(() =>
+      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2),
+    );
+    expect(await screen.findByTestId("chats-shares-unreadable")).toBeTruthy();
+
+    // The read that was always in flight answers, authoritatively, on an
+    // OLDER ticket.
+    resolveMount(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
+
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-shares-unreadable")).toBeNull();
+    });
+  });
+
   // The cached rows stay (that is #551), and now they are labelled: they are
   // real, they are just older than this failure.
   it("marks cached invitations as possibly out of date while the relay is unreachable", async () => {
@@ -4601,6 +4652,45 @@ describe("ChatsView shared channels (MU-C4)", () => {
       (screen.getByTestId("chats-share-submit") as HTMLButtonElement).disabled,
     ).toBe(true);
     expect(bridgeMock.shareChatChannel).not.toHaveBeenCalled();
+  });
+
+  // #618 codex round 5. Only the GRANTED lane can be deepened by a new
+  // outgoing share. A full RECEIVED lane is an inbound backlog the user did
+  // not create and cannot clear from here, and blocking their outgoing work
+  // over it turns one account-wide problem into a second one.
+  it("still allows sharing when only the received lane is over the limit", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: "session-a",
+      relay: {
+        state: "over-limit" as const,
+        lanes: [{ lane: "received" as const, rows: 5000 }],
+        limit: 4096,
+      },
+    });
+    bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-new" });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-share-channel"));
+
+    // The surface still names the inbound problem...
+    expect(
+      (await screen.findByTestId("chats-share-members-unreadable")).dataset.failure,
+    ).toBe("over-limit");
+    // ...and outgoing sharing still works, because it adds to the other lane.
+    expect((screen.getByTestId("chats-share-email") as HTMLInputElement).disabled).toBe(
+      false,
+    );
+    await userEvent.type(screen.getByTestId("chats-share-email"), "bo@example.com");
+    expect(
+      (screen.getByTestId("chats-share-submit") as HTMLButtonElement).disabled,
+    ).toBe(false);
+    await userEvent.click(screen.getByTestId("chats-share-submit"));
+    await waitFor(() => expect(bridgeMock.shareChatChannel).toHaveBeenCalled());
   });
 
   // The owner side of #618: an unreachable listing left this panel showing no
