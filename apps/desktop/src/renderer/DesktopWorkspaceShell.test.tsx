@@ -4377,7 +4377,63 @@ describe("history page", () => {
     expect(await screen.findByText("Wrote the plan")).toBeTruthy();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
     expect(screen.queryByText("No changes yet")).toBeNull();
-    expect(await screen.findByText("try state failed")).toBeTruthy();
+    // Three lanes share one banner, so the sentence has to say WHICH one went
+    // stale — the cause alone names none of them — and it has to offer the way
+    // back that the rendered timeline has just hidden.
+    const banner = await screen.findByTestId("workspace-shell-error");
+    expect(banner.textContent).toContain(
+      "dohc could not refresh this workspace's try run.",
+    );
+    expect(banner.textContent).toContain("try state failed");
+    expect(screen.getByTestId("workspace-shell-error-retry")).toBeTruthy();
+  });
+
+  // The reverse path, end to end. Separating the lanes took one away: a
+  // sibling that fails while the page succeeds renders the timeline, and the
+  // timeline hides History's Try again — so the only control that could reach
+  // this read is the one on the banner. It has to WORK, not just be there.
+  it("asks the failed lane again from the banner", async () => {
+    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
+    let nextStatus: typeof SYNC_STATUS | typeof syncingStatus = SYNC_STATUS;
+    let failNextRead = false;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () =>
+      historyPage([historyMoment("m-1", "Wrote the plan")]),
+    );
+    bridge.getSyncStatus = vi.fn(() => {
+      if (failNextRead) {
+        failNextRead = false;
+        return Promise.reject(new Error("sync status failed"));
+      }
+      return Promise.resolve(nextStatus);
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText("Wrote the plan")).toBeTruthy();
+
+    failNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(failNextRead).toBe(false));
+
+    // The page renders, so History's own retry is not on screen. The banner
+    // names the lane and carries the only way back.
+    const banner = await screen.findByTestId("workspace-shell-error");
+    expect(banner.textContent).toContain("dohc could not refresh sync status.");
+    expect(screen.queryByTestId("history-load-failed")).toBeNull();
+    expect(screen.getByText("Wrote the plan")).toBeTruthy();
+
+    // The workspace moved on while the lane was stale.
+    nextStatus = syncingStatus;
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
   // Independent of each other's SUCCESS is only half of it. A refresh that

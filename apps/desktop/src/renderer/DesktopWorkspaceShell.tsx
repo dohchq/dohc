@@ -1207,7 +1207,15 @@ export function DesktopWorkspaceShell(props: {
     versionName?: string;
   } | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
-  const [shellError, setShellError] = useState<string | null>(null);
+  // The banner carries its own way out. An error that names a value the user
+  // can see and gives no way to ask again leaves them with a stale reading and
+  // nothing to do about it — the reverse path every reversible state change
+  // owes (AGENTS.md). Errors that are already over when they are shown carry
+  // no retry.
+  const [shellError, setShellError] = useState<{
+    message: string;
+    retry: (() => void) | null;
+  } | null>(null);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
     kind: "file" | "folder";
@@ -1675,8 +1683,30 @@ export function DesktopWorkspaceShell(props: {
   ]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
-    setShellError(error instanceof Error ? error.message : fallback);
+    setShellError({
+      message: error instanceof Error ? error.message : fallback,
+      retry: null,
+    });
   }, []);
+  // What a failed snapshot lane owes the user, and `reportShellError` supplies
+  // one third of it. It shows the cause and DROPS the fallback, so three lanes
+  // that share one banner arrive as one backend sentence naming none of them —
+  // and the user cannot tell whether sync status, agent runs or the try run
+  // went stale. The lane says WHICH, the cause says why, and the control asks
+  // again: the three parts an error owes (copy.md), in that order, so the lane
+  // survives truncation.
+  //
+  // The retry matters most on the first load. A sibling that fails while the
+  // page succeeds renders the timeline, which hides History's own Try again —
+  // so without this the lane had no way back at all, and its value could sit
+  // stale until unrelated workspace activity happened to refresh it.
+  const reportLaneFailure = useCallback(
+    (lane: string, error: unknown, retry: () => void) => {
+      const cause = error instanceof Error ? error.message : null;
+      setShellError({ message: cause ? `${lane} ${cause}` : lane, retry });
+    },
+    [],
+  );
 
   // Quiet, self-dismissing status line for import/share-mount summaries
   // ("Imported 3 files into notes.") — informational, never the error banner.
@@ -1891,9 +1921,12 @@ export function DesktopWorkspaceShell(props: {
       token,
       bridge().getAgentRunStatus({ workspaceId }),
       (agent) => setAgentActive(agent.activeRun !== null),
-      (error) => reportShellError("Could not refresh agent runs.", error),
+      (error) =>
+        reportLaneFailure("dohc could not refresh agent runs.", error, () =>
+          refreshAgentLane(),
+        ),
     );
-  }, [reportShellError, workspaceId]);
+  }, [reportLaneFailure, workspaceId]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
       if (!mutated) {
@@ -1937,26 +1970,41 @@ export function DesktopWorkspaceShell(props: {
       // Each is handed whole to the lane rule, which judges both ways it can
       // settle.
       const pageRead = bridge().listEngineMoments({ workspaceId, limit: 200 });
+      // Asking again IS this refresh: it re-reads all four, so the lane that
+      // failed is read again. Same control the History surface offers for its
+      // own read, and the same one the caller runs on any activity.
+      const askAgain = () => {
+        void refreshHistory().catch((error) =>
+          reportShellError("Could not refresh history.", error),
+        );
+      };
       settleSnapshotLane(
         syncStatusLane,
         token,
         bridge().getSyncStatus({ workspaceId }),
         (status) => setSyncStatus(status),
-        (error) => reportShellError("Could not refresh sync status.", error),
+        (error) =>
+          reportLaneFailure("dohc could not refresh sync status.", error, askAgain),
       );
       settleSnapshotLane(
         agentActiveLane,
         token,
         bridge().getAgentRunStatus({ workspaceId }),
         (agent) => setAgentActive(agent.activeRun !== null),
-        (error) => reportShellError("Could not refresh agent runs.", error),
+        (error) =>
+          reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
       );
       settleSnapshotLane(
         tryStateLane,
         token,
         bridge().getTryInVersionState({ workspaceId }),
         (trySession) => setTryState(trySession.state),
-        (error) => reportShellError("Could not refresh the version try run.", error),
+        (error) =>
+          reportLaneFailure(
+            "dohc could not refresh this workspace's try run.",
+            error,
+            askAgain,
+          ),
       );
       let page: Awaited<typeof pageRead>;
       try {
@@ -2013,7 +2061,7 @@ export function DesktopWorkspaceShell(props: {
     ]);
     setSyncStatus(status);
     setAgentActive(agent.activeRun !== null);
-  }, [engineEnabled, isShareView, reportShellError, workspaceId]);
+  }, [engineEnabled, isShareView, reportLaneFailure, reportShellError, workspaceId]);
 
   const loadMoreEngineHistory = useCallback(async () => {
     const cursor = engineHistory?.nextBeforeMomentOrder;
@@ -3373,7 +3421,7 @@ export function DesktopWorkspaceShell(props: {
     onThreadRead: onChatsThreadRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: setShellError,
+    onError: (message: string) => setShellError({ message, retry: null }),
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
@@ -3392,7 +3440,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: setShellError,
+    onError: (message: string) => setShellError({ message, retry: null }),
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
@@ -3438,7 +3486,24 @@ export function DesktopWorkspaceShell(props: {
           data-testid="workspace-shell-error"
           className="flex min-h-8 items-center gap-2 border-b border-line bg-danger/10 px-3 text-[12px] text-danger"
         >
-          <span className="min-w-0 flex-1 truncate">{shellError}</span>
+          <span className="min-w-0 flex-1 truncate">{shellError.message}</span>
+          {shellError.retry ? (
+            <button
+              type="button"
+              data-testid="workspace-shell-error-retry"
+              onClick={() => {
+                const retry = shellError.retry;
+                // Clearing first is what shows the control took: the read is
+                // on its way, and a failure that is being retried is no longer
+                // the newest thing this surface knows.
+                setShellError(null);
+                retry?.();
+              }}
+              className="h-6 shrink-0 cursor-pointer rounded border border-danger/40 px-2 text-[11px] hover:bg-danger/10"
+            >
+              Try again
+            </button>
+          ) : null}
           <button
             type="button"
             aria-label="Dismiss workspace error"
@@ -3661,7 +3726,7 @@ export function DesktopWorkspaceShell(props: {
                   flushActiveDraft={flushActiveDraft}
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-                  onError={(message) => setShellError(message)}
+                  onError={(message) => setShellError({ message, retry: null })}
                   {...(shareView
                     ? {}
                     : {
@@ -3927,7 +3992,7 @@ export function DesktopWorkspaceShell(props: {
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
                     onOpenPath={openPathWithHeading}
                     onThreadRead={onChatsThreadRead}
-                    onError={(message) => setShellError(message)}
+                    onError={(message) => setShellError({ message, retry: null })}
                   />
                 </Suspense>
               ) : (
