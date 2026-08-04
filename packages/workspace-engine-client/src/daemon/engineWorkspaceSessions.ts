@@ -314,57 +314,21 @@ export class EngineWorkspaceSessions {
           }
           const retryable = retryAfterReconnect || retryAfterTransport;
           this.noteBudgetAttempt();
-          if (!retryable || attempt >= maxAttempts) {
-            // An EXHAUSTED ladder on a spent budget is a deadline, not a
-            // transport failure. The last allowed attempt can start inside
-            // the budget and finish outside it, and this branch used to
-            // throw the transport error — which the surface reads as an
-            // ordinary refusal and answers with the writable plain editor,
-            // the exact outcome the budget exists to prevent. Only a
-            // retryable failure converts: a permission refusal is not a
-            // timeout however long the caller waited.
-            if (retryable) {
-              this.throwPastRetryDeadline(
-                workspace.workspaceId,
-                retryDeadlineMs,
-                startedAtMs,
-                attempt,
-                error,
-              );
-            }
-            throw error;
-          }
+          // A failure this ladder will not retry never reaches the gates: a
+          // permission refusal is not a timeout however long we waited.
+          if (!retryable) throw error;
           rebindStarted = true;
           lastError = error;
-          // Both gates bound WAITING, never a healthy first attempt: at quit
-          // the failure is final, and past the caller's deadline the run
-          // stops starting new attempts (#564). They gate EVERY retry,
-          // whichever disposition asked for it — an `afterReconnect` retry
-          // takes no backoff, so it used to skip these entirely and spend
-          // six full opens holding the capture chain, through the quit timer.
-          if (this.shuttingDown) throw error;
-          this.throwPastRetryDeadline(
-            workspace.workspaceId,
+          const next = await this.settleAttempt({
+            workspaceId: workspace.workspaceId,
             retryDeadlineMs,
             startedAtMs,
             attempt,
-            error,
-          );
-          if (retryAfterTransport) {
-            // Only a transport retry waits, and the deadline is checked on
-            // BOTH sides of that wait — an attempt that ends just inside it
-            // must not ride the backoff over the line and then start a fresh
-            // open on a spent budget.
-            await this.interruptibleSleep(transportBackoffMs(attempt));
-            if (this.shuttingDown) throw error;
-            this.throwPastRetryDeadline(
-              workspace.workspaceId,
-              retryDeadlineMs,
-              startedAtMs,
-              attempt,
-              error,
-            );
-          }
+            lastAttempt: attempt >= maxAttempts,
+            backoff: retryAfterTransport,
+            cause: error,
+          });
+          if (next === "stop") throw error;
         }
       }
       throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
@@ -454,6 +418,65 @@ export class EngineWorkspaceSessions {
       attempt,
       cause,
     );
+  }
+
+  /**
+   * What happens after ONE failed attempt, for every ladder that has them:
+   * the operation retries, the open ladder, and the client-churn loop.
+   *
+   * The gates used to be applied by each ladder remembering to apply them,
+   * and the churn loop forgot one — its terminal throw ran ahead of the
+   * deadline check, so a churn-exhausted open past its budget rejected with
+   * `EngineWorkspaceRebindError`. Main maps only the deadline error to the
+   * read-only retry surface, so that downgraded an engine-owned document to
+   * the writable plain editor: the disk/Y.Doc race the budget exists to
+   * prevent (#564, codex). One method owns the sequence now — a fourth ladder
+   * either asks here or is visibly hand-rolling gates it should not.
+   *
+   * Throws `EngineWorkspaceRetryDeadlineError` when a deadline is spent,
+   * including on the LAST allowed attempt, which can start inside the budget
+   * and finish outside it. Returns "stop" when the ladder must give up with
+   * its own terminal error, "retry" when it may start another attempt.
+   *
+   * The CALLER decides whether a failure is retryable at all: a permission
+   * refusal is not a timeout however long the caller waited.
+   */
+  private async settleAttempt(gate: {
+    workspaceId: string;
+    retryDeadlineMs: number | undefined;
+    startedAtMs: number;
+    attempt: number;
+    lastAttempt: boolean;
+    // Transport retries wait; an `afterReconnect` retry takes no backoff at
+    // all, and used to skip these gates entirely because of it.
+    backoff: boolean;
+    cause: unknown;
+  }): Promise<"retry" | "stop"> {
+    const checkDeadline = (): void => {
+      this.throwPastRetryDeadline(
+        gate.workspaceId,
+        gate.retryDeadlineMs,
+        gate.startedAtMs,
+        gate.attempt,
+        gate.cause,
+      );
+    };
+    if (gate.lastAttempt) {
+      checkDeadline();
+      return "stop";
+    }
+    // At quit the failure is final: free the caller in one attempt rather
+    // than spend the budget on a daemon that is not coming back.
+    if (this.shuttingDown) return "stop";
+    checkDeadline();
+    if (!gate.backoff) return "retry";
+    // Checked on BOTH sides of the wait: an attempt that ends just inside the
+    // deadline must not ride the backoff over the line and then start a fresh
+    // open on a spent budget.
+    await this.interruptibleSleep(transportBackoffMs(gate.attempt));
+    if (this.shuttingDown) return "stop";
+    checkDeadline();
+    return "retry";
   }
 
   private async interruptibleSleep(delayMs: number): Promise<void> {
@@ -584,45 +607,24 @@ export class EngineWorkspaceSessions {
         if (error instanceof EngineWorkspaceRetryDeadlineError) throw error;
         lastError = error;
         this.noteBudgetAttempt();
-        if (attempt >= maxAttempts) {
-          // Same shape as run()'s terminal branch: a last open that starts
-          // inside the budget and ends outside it is a deadline, and only
-          // that error keeps the document read-only instead of downgrading
-          // it to the writable plain editor.
-          if (daemonMayBeRelaunching(error)) {
-            this.throwPastRetryDeadline(
-              workspace.workspaceId,
-              options.retryDeadlineMs,
-              startedAtMs,
-              attempt,
-              error,
-            );
-          }
-          break;
+        const lastAttempt = attempt >= maxAttempts;
+        // A daemon-down open is the other place a caller can spend a whole
+        // backoff ladder, and it holds the same resources — so it settles
+        // through the same gates as run()'s operation retries (#564).
+        if (!daemonMayBeRelaunching(error)) {
+          if (lastAttempt) break;
+          continue;
         }
-        if (daemonMayBeRelaunching(error)) {
-          // The same waiting gates as run()'s operation retries (#564): a
-          // daemon-down open is the other place a caller can spend the whole
-          // backoff ladder, and it holds the same resources. Checked on both
-          // sides of the backoff, like every other ladder.
-          if (this.shuttingDown) break;
-          this.throwPastRetryDeadline(
-            workspace.workspaceId,
-            options.retryDeadlineMs,
-            startedAtMs,
-            attempt,
-            error,
-          );
-          await this.interruptibleSleep(transportBackoffMs(attempt));
-          if (this.shuttingDown) break;
-          this.throwPastRetryDeadline(
-            workspace.workspaceId,
-            options.retryDeadlineMs,
-            startedAtMs,
-            attempt,
-            error,
-          );
-        }
+        const next = await this.settleAttempt({
+          workspaceId: workspace.workspaceId,
+          retryDeadlineMs: options.retryDeadlineMs,
+          startedAtMs,
+          attempt,
+          lastAttempt,
+          backoff: true,
+          cause: error,
+        });
+        if (next === "stop") break;
       }
     }
     if (rebindStarted) {
@@ -653,39 +655,33 @@ export class EngineWorkspaceSessions {
       }
       if (this.source.currentClient() !== client) {
         await this.closeBinding(binding).catch(() => undefined);
-        if (attempt >= this.transportRebindAttempts) {
-          throw new EngineWorkspaceRebindError(
-            workspace.workspaceId,
-            new Error("Rust engine client changed on every open attempt."),
-          );
-        }
-        // The client-churn ladder waits like every other ladder (#564,
+        // A churned open is a failed daemon attempt the budget paid for. Left
+        // uncounted, a wait this ladder caused reported "across 0 attempts".
+        this.noteBudgetAttempt();
+        const lastAttempt = attempt >= this.transportRebindAttempts;
+        // The client-churn ladder settles like every other ladder (#564,
         // codex): without these gates, churning generations held a caller
         // through six full opens — past its deadline and past quit.
         const churn = new Error(
           "Rust engine client changed while opening the workspace.",
         );
-        if (this.shuttingDown) {
-          throw new EngineWorkspaceRebindError(workspace.workspaceId, churn);
-        }
-        this.throwPastRetryDeadline(
-          workspace.workspaceId,
-          options.retryDeadlineMs,
+        const next = await this.settleAttempt({
+          workspaceId: workspace.workspaceId,
+          retryDeadlineMs: options.retryDeadlineMs,
           startedAtMs,
           attempt,
-          churn,
-        );
-        await this.interruptibleSleep(transportBackoffMs(attempt));
-        if (this.shuttingDown) {
-          throw new EngineWorkspaceRebindError(workspace.workspaceId, churn);
+          lastAttempt,
+          backoff: true,
+          cause: churn,
+        });
+        if (next === "stop") {
+          throw new EngineWorkspaceRebindError(
+            workspace.workspaceId,
+            lastAttempt
+              ? new Error("Rust engine client changed on every open attempt.")
+              : churn,
+          );
         }
-        this.throwPastRetryDeadline(
-          workspace.workspaceId,
-          options.retryDeadlineMs,
-          startedAtMs,
-          attempt,
-          churn,
-        );
         continue;
       }
       entry.binding = binding;

@@ -978,6 +978,49 @@ describe("EngineWorkspaceSessions", () => {
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
     });
 
+    it("calls an exhausted CHURN ladder past its budget a deadline too", async () => {
+      // codex round 7: the churn ladder ordered its terminal throw AHEAD of
+      // the deadline check, so a last open that started inside the budget and
+      // finished outside it rejected with EngineWorkspaceRebindError. Main
+      // maps only EngineWorkspaceRetryDeadlineError to `openTimedOut`, so
+      // that downgraded an engine-owned document to the writable plain
+      // editor — the disk/Y.Doc race this budget exists to prevent.
+      const workspace = await tempWorkspace("workspace-churn-exhausted");
+      const first = new MockClient("handle-churn-e");
+      const second = new MockClient("handle-churn-f");
+      let nowMs = 0;
+      let reads = 0;
+      const sessions = new EngineWorkspaceSessions(
+        {
+          currentClient: () => {
+            reads += 1;
+            // Two reads per open attempt: the last allowed attempt starts at
+            // 3,000 ms — inside the budget — and ends at 6,000 ms, outside it.
+            nowMs += 1_500;
+            return reads % 2 === 1 ? first : second;
+          },
+        },
+        {
+          now: () => nowMs,
+          sleep: async () => {},
+          transportRebindAttempts: 2,
+        },
+      );
+
+      const outcome = await sessions
+        .withRetryBudget(5_000, async () => {
+          return await sessions.run(workspace, async () => "unreachable");
+        })
+        .catch((error: unknown) => error);
+
+      // MUTATION: throw the rebind error before the terminal deadline check
+      // -> EngineWorkspaceRebindError, and the document downgrades.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      // MUTATION: stop counting churned opens on the budget -> "across 0
+      // attempts" for a wait this ladder is the whole explanation for.
+      expect((outcome as Error).message).toContain("across 2 attempts");
+    });
+
     it("counts attempts across the whole budget, not one ladder's share", async () => {
       // codex round 5: the refusal reported the LOCAL ladder's counter, which
       // each `run` resets — so a wait covering several daemon attempts could
