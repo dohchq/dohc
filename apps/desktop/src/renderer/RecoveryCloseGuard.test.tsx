@@ -16,8 +16,12 @@ import {
 } from "./RecoveryCloseGuard";
 import {
   captureOrphanedDraft,
+  dismissOrphanedDraft,
   noteWorkspaceLabel,
+  orphanedDraftCount,
+  orphanedDraftIds,
   resetOrphanedDrafts,
+  thawOrphanedCaptures,
 } from "./orphanedDrafts";
 
 afterEach(() => {
@@ -374,6 +378,135 @@ describe("RecoveryCloseGuard", () => {
         blocked: true,
       }),
     );
+  });
+
+  // #579 review r13: an approval is only valid for the store state it was
+  // given. "Restart anyway" approves losing the drafts the dialog LISTED, and
+  // quitAndInstall is one-shot — so from the confirm to the exit the store
+  // stops taking new drafts, and the boundary re-check reads the LIVE store
+  // instead of trusting the confirm.
+  function confirmedRestartHarness() {
+    const readyState = {
+      status: "ready" as const,
+      message: "Update 1.2.4 is ready.",
+      currentVersion: "1.2.3",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.4",
+    };
+    const installUpdate = vi.fn(async () => ({
+      accepted: true,
+      completed: false,
+      state: readyState,
+    }));
+    const answerRecoveryCheck = vi.fn(async () => undefined);
+    let checkListener: ((requestId: number) => void) | null = null;
+    vi.stubGlobal("dohcDesktop", {
+      installUpdate,
+      answerRecoveryCheck,
+      onRecoveryCheckRequested: (listener: (requestId: number) => void) => {
+        checkListener = listener;
+        return () => {
+          checkListener = null;
+        };
+      },
+    });
+    return {
+      installUpdate,
+      answerRecoveryCheck,
+      askBoundaryCheck: (requestId: number) => {
+        act(() => {
+          checkListener?.(requestId);
+        });
+      },
+      ready: async () => {
+        await waitFor(() => expect(checkListener).not.toBeNull());
+      },
+    };
+  }
+
+  it("freezes new set-aside drafts from the confirm until the exit resolves", async () => {
+    const user = userEvent.setup();
+    const harness = confirmedRestartHarness();
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await harness.ready();
+
+    await requestGuardedUpdateInstall();
+    await screen.findByTestId("recovery-close-warning");
+    await user.click(screen.getByTestId("recovery-close-anyway"));
+    await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(1));
+
+    // MUTATION (freeze): drop freezeOrphanedCaptures() from the confirm. A
+    // reopen queued behind the click sets an edit aside under a recovery
+    // promise the restart is about to break.
+    expect(captureOrphanedDraft("ws-1", "b.md", "Typed in the gap")).toBe(false);
+    expect(orphanedDraftCount()).toBe(1);
+
+    // The approved draft still does not block the restart the user asked for.
+    harness.askBoundaryCheck(1);
+    await waitFor(() =>
+      expect(harness.answerRecoveryCheck).toHaveBeenCalledWith({
+        requestId: 1,
+        blocked: false,
+      }),
+    );
+  });
+
+  it("blocks the exit for a draft the approval never covered", async () => {
+    const user = userEvent.setup();
+    const harness = confirmedRestartHarness();
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    const [approvedId] = orphanedDraftIds();
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await harness.ready();
+
+    await requestGuardedUpdateInstall();
+    await screen.findByTestId("recovery-close-warning");
+    await user.click(screen.getByTestId("recovery-close-anyway"));
+    await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(1));
+
+    // A capture that reaches the store anyway. The guard must answer from what
+    // is THERE, not from "the user already confirmed" — the freeze is the
+    // mechanism, this is the check that the mechanism held. The approved draft
+    // is dismissed in the same window, so the COUNT is unchanged: only the
+    // drafts' identity says the list is no longer the one that was approved.
+    thawOrphanedCaptures();
+    dismissOrphanedDraft("ws-1", "a.md", approvedId);
+    captureOrphanedDraft("ws-1", "b.md", "Never shown");
+    expect(orphanedDraftCount()).toBe(1);
+
+    // MUTATION (stale bypass): answer `!bypassCloseGuard.current &&
+    // orphanedDraftCount() > 0`. The re-check reports clear and quitAndInstall
+    // destroys the only copy of a draft that was in no warning.
+    harness.askBoundaryCheck(1);
+    await waitFor(() =>
+      expect(harness.answerRecoveryCheck).toHaveBeenCalledWith({
+        requestId: 1,
+        blocked: true,
+      }),
+    );
+
+    // The same live answer governs the unload the bypass was meant to permit.
+    // MUTATION (bypassed unload): return early whenever the bypass is set.
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    // A fresh decision over what is actually there, approvals cleared.
+    const rows = await screen.findAllByTestId("recovery-list-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain("b.md");
   });
 
   // #579 review r10: a native quit (Cmd+Q, tray Quit) is main-initiated —

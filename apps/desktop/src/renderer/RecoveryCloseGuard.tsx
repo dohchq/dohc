@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import { orphanedDraftCount, useAllOrphanedDrafts } from "./orphanedDrafts";
+import {
+  freezeOrphanedCaptures,
+  orphanedDraftCount,
+  orphanedDraftIds,
+  thawOrphanedCaptures,
+  useAllOrphanedDrafts,
+} from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
 
 type UnloadKind = "close" | "reload" | "update" | "quit";
@@ -102,15 +108,27 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   // LIVE, not a snapshot (#579 review, r10): the dialog embeds Copy/Dismiss,
   // so the count must follow every dismissal, and an emptied dialog has
   // nothing left to warn about.
-  const liveCount = useAllOrphanedDrafts().length;
+  const liveDrafts = useAllOrphanedDrafts();
+  const liveCount = liveDrafts.length;
   const warningOpen = closeWarning !== null;
   useEffect(() => {
     if (warningOpen && liveCount === 0) setCloseWarning(null);
   }, [warningOpen, liveCount]);
   const bypassCloseGuard = useRef(false);
   const bypassRearmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The drafts the warning LISTED when the user confirmed. An approval covers
+  // exactly those (#579 review, r13) — never a draft a queued reopen sets
+  // aside afterwards, which the user was never shown and which the exit would
+  // destroy. The store is frozen for the same window, so this set can only
+  // shrink; the checks below still read the LIVE store, so a capture that ever
+  // slipped past the freeze stops the exit instead of riding a stale bypass.
+  const approvedDraftIds = useRef<ReadonlySet<number>>(new Set());
+  const hasUnapprovedDrafts = () =>
+    orphanedDraftIds().some((id) => !approvedDraftIds.current.has(id));
   const rearmGuard = () => {
     bypassCloseGuard.current = false;
+    approvedDraftIds.current = new Set();
+    thawOrphanedCaptures();
     if (bypassRearmTimer.current) {
       clearTimeout(bypassRearmTimer.current);
       bypassRearmTimer.current = null;
@@ -123,13 +141,16 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // page, and if it is blocked the dialog now owns the answer.
       const pending = pendingUnload;
       pendingUnload = null;
-      if (bypassCloseGuard.current) {
-        // One-shot (#579 review, r9): the bypass covers exactly the resumed
-        // unload attempt — never a later, unrelated close.
-        rearmGuard();
+      if (!hasUnapprovedDrafts()) {
+        // One-shot (#579 review, r9): a bypass is consumed by the unload it
+        // permits — never a later, unrelated close.
+        if (bypassCloseGuard.current) rearmGuard();
         return;
       }
-      if (orphanedDraftCount() === 0) return;
+      // Past this line the store holds a draft the user never saw. The earlier
+      // approval does not cover it, so the exit stops and asks again with the
+      // full list (#579 review, r13).
+      rearmGuard();
       event.preventDefault();
       setCloseWarning({
         kind: pending?.kind ?? "close",
@@ -146,14 +167,15 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     try {
       // Main re-asks at the quit boundary (#579 review, r12) — the answer is
       // read at ANSWER time, so an edit set aside after this renderer's own
-      // check still blocks the install. The bypass means the user already
-      // decided in the dialog.
+      // check still blocks the install. The answer is the LIVE store measured
+      // against what the user approved (#579 review, r13), never a blanket
+      // "the user already confirmed": a draft captured after the confirm was
+      // in no warning, and quitAndInstall is the last chance to stop.
       unsubscribeRecoveryCheck = bridge().onRecoveryCheckRequested?.(
         (requestId) => {
           void bridge().answerRecoveryCheck({
             requestId,
-            blocked:
-              !bypassCloseGuard.current && orphanedDraftCount() > 0,
+            blocked: hasUnapprovedDrafts(),
           });
         },
       );
@@ -165,7 +187,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // API degrades to "no quit interception", never to a crashed guard —
       // this component sits above the error boundary.
       unsubscribeQuit = bridge().onQuitRequested?.(() => {
-        if (bypassCloseGuard.current || orphanedDraftCount() === 0) {
+        if (!hasUnapprovedDrafts()) {
           void bridge().resumeQuit();
           return;
         }
@@ -191,7 +213,9 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       unsubscribeRecoveryCheck?.();
       if (bypassRearmTimer.current) clearTimeout(bypassRearmTimer.current);
     };
-    // rearmGuard only touches refs; the handlers register once.
+    // rearmGuard and hasUnapprovedDrafts read refs and the module store, never
+    // render state, so the first closure stays correct; the handlers register
+    // once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
@@ -265,6 +289,15 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   // explicit failure signal, and restored by the fail-safe
                   // timer when no signal exists — a resumed action that
                   // never unloads must not leave a later close unguarded.
+                  //
+                  // It is scoped to THIS LIST too (#579 review, r13): the user
+                  // approved losing the drafts the dialog just showed. Freeze
+                  // the store so a reopen queued behind this click cannot add
+                  // one more before the exit runs.
+                  approvedDraftIds.current = new Set(
+                    liveDrafts.map((row) => row.draft.id),
+                  );
+                  freezeOrphanedCaptures();
                   bypassCloseGuard.current = true;
                   if (bypassRearmTimer.current) {
                     clearTimeout(bypassRearmTimer.current);

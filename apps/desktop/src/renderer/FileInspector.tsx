@@ -40,6 +40,7 @@ import { PageIdentity } from "./PageIdentity";
 import {
   captureOrphanedDraft,
   dismissOrphanedDraft,
+  useOrphanedCapturesFrozen,
   useOrphanedDrafts,
 } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
@@ -827,33 +828,50 @@ function MarkdownView(props: {
   // writeDraftNow documents). The transition guard keeps it idempotent under
   // replayed renders (`readOnlyRef` precedent below).
   const orphanedDrafts = useOrphanedDrafts(props.workspaceId, props.path);
+  // The store refuses captures while an approved exit is pending (#579
+  // review, r13): the user agreed to lose a named list, and one more edit must
+  // not join it behind their back. Subscribing here is what re-runs the
+  // capture below when a cancelled exit lifts the freeze.
+  const capturesFrozen = useOrphanedCapturesFrozen();
   const openingRef = useRef(opening);
-  if (opening && !openingRef.current) {
+  // A draft this reopen took out of the save pipeline that the store REFUSED.
+  // It stays in the editor, where the user can still see and copy it, and no
+  // write path may touch it — it is the previous version's text.
+  const setAsideRefused = useRef(false);
+  if ((opening && !openingRef.current) || (setAsideRefused.current && !capturesFrozen)) {
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
     if (unsavedDraft.current) {
-      unsavedDraft.current = false;
-      captureOrphanedDraft(
-        props.workspaceId,
-        props.path,
-        serializeDraftRef.current(),
-      );
-      // The armed save will never issue, so "saving" must not stand. The
-      // set-aside edit's own signal is DERIVED from the store below — that
-      // way Dismiss retires it (#579 review, P2) instead of stranding an
-      // error chip on a draft that no longer exists.
-      setSaveState("saved");
-      // The surface goes back to the document. Clearing the flag lets the
-      // props.body sync effect take over when a dependency fires — but in
-      // READ mode `editing` never flips and the reopened body can be
-      // byte-identical, so that effect has nothing to fire on and the
-      // set-aside title/property edit would keep painting the view and ride
-      // into the next property save (#579 review, r7). Reset here.
-      setDraft(props.body);
-      setSavedBody(props.body);
-      latestDraft.current = props.body;
+      if (
+        captureOrphanedDraft(
+          props.workspaceId,
+          props.path,
+          serializeDraftRef.current(),
+        )
+      ) {
+        setAsideRefused.current = false;
+        unsavedDraft.current = false;
+        // The armed save will never issue, so "saving" must not stand. The
+        // set-aside edit's own signal is DERIVED from the store below — that
+        // way Dismiss retires it (#579 review, P2) instead of stranding an
+        // error chip on a draft that no longer exists.
+        setSaveState("saved");
+        // The surface goes back to the document. Clearing the flag lets the
+        // props.body sync effect take over when a dependency fires — but in
+        // READ mode `editing` never flips and the reopened body can be
+        // byte-identical, so that effect has nothing to fire on and the
+        // set-aside title/property edit would keep painting the view and ride
+        // into the next property save (#579 review, r7). Reset here.
+        setDraft(props.body);
+        setSavedBody(props.body);
+        latestDraft.current = props.body;
+      } else {
+        // Refused. `unsavedDraft` stays true, so the external-refresh effect
+        // keeps its hands off the text and it survives to the retry.
+        setAsideRefused.current = true;
+      }
     }
   }
   openingRef.current = opening;
@@ -1229,7 +1247,7 @@ function MarkdownView(props: {
     // unmounts it — a naive rearm here writes the PRE-EDIT body. The
     // `opening` window is different: its render-phase capture serialized the
     // draft eagerly and surfaced it, so this gate only refuses the write.
-    if (writesBlocked() || openingRef.current) {
+    if (writesBlocked() || openingRef.current || setAsideRefused.current) {
       setSaveState("error");
       return;
     }
@@ -1368,8 +1386,16 @@ function MarkdownView(props: {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
       // `opening` too (#567): unmounting mid-reopen must not land the
-      // previous version's draft on the tree the reopen is binding.
-      if (!unsavedDraft.current || writesBlocked() || openingRef.current) return;
+      // previous version's draft on the tree the reopen is binding. A refused
+      // set-aside is that same draft, still waiting (#579 review, r13).
+      if (
+        !unsavedDraft.current ||
+        writesBlocked() ||
+        openingRef.current ||
+        setAsideRefused.current
+      ) {
+        return;
+      }
       unsavedDraft.current = false;
       const text = serializeDraftRef.current();
       void bridge()
@@ -1409,8 +1435,14 @@ function MarkdownView(props: {
         // The ref, not the captured value: the shell can call this seam
         // between the refusal and the re-registration. `opening` too (#567):
         // a flush that arrives mid-reopen must not write the previous
-        // version's draft.
-        if (!unsavedDraft.current || writesBlocked() || openingRef.current) {
+        // version's draft — nor may it write a refused set-aside, which is
+        // that same draft still waiting for the store (#579 review, r13).
+        if (
+          !unsavedDraft.current ||
+          writesBlocked() ||
+          openingRef.current ||
+          setAsideRefused.current
+        ) {
           return;
         }
         if (saveTimer.current) clearTimeout(saveTimer.current);
