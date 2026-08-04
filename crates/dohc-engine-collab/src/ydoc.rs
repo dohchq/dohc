@@ -624,17 +624,28 @@ fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
     parse_markdown_blocks_at(body, 0)
 }
 
-/// The fold parses at most this many nested blockquote levels. Measured
-/// against the projector's own renderable ceiling, not guessed: each
-/// quote level costs two of `MAX_PROJECTION_DEPTH`'s 128 units (element
-/// plus child), so 60 levels is the deepest document the projection can
-/// still render with margin for the innermost paragraph — beyond it no
-/// faithful representation exists at all, because plain paragraph text
-/// escapes a leading `>` on projection. Past the ceiling the quoted
-/// lines stay one verbatim paragraph: content survives, and 60 recursion
-/// frames cannot exhaust the parser stack or the actor thread no matter
-/// how many megabytes of `> ` prefixes one resolve frame carries.
-const QUOTE_FOLD_MAX_DEPTH: usize = 60;
+/// How many nested blockquote levels the fold will build before it stops
+/// recursing and keeps the remaining quoted lines as verbatim paragraph text.
+///
+/// This is a RECURSION BUDGET against hostile input, not a fidelity ceiling —
+/// the earlier comment here claimed the latter and was wrong on both counts.
+/// `markdown_node` increments projection depth by one per level, not two, and
+/// the projector renders far deeper than 60: measured in-tree, a fold
+/// round-trips byte-exactly at 40, 100 and 120 levels.
+///
+/// The overflow is also NOT lossless, which the old comment asserted and the
+/// fold relied on: a paragraph holding `> > …` re-projects with its leading
+/// markers escaped as `&gt;`. That is why the caller
+/// (`fold_resolution_into_ydoc_in_tx`) re-projects and compares before it
+/// commits anything — past this bound a resolution is REFUSED, never silently
+/// stored as bytes the user did not choose.
+///
+/// 120 sits under the projector's own `MAX_PROJECTION_DEPTH`, so a document
+/// the projection can render is one the fold can rebuild, and the refusal
+/// above it costs no representable content. Real prose nests single digits
+/// deep; the budget exists so a megabyte of `> ` prefixes inside one resolve
+/// frame cannot exhaust the parser stack or the actor thread.
+const QUOTE_FOLD_MAX_DEPTH: usize = 120;
 
 /// `depth` bounds blockquote recursion at [`QUOTE_FOLD_MAX_DEPTH`].
 fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
@@ -728,16 +739,24 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
         }
         if let Some((start, item)) = parse_ordered_item(line) {
             let mut items = vec![item];
-            let mut expected = start + 1;
+            // A parsed ordinal can be i64::MAX, and the successor it implies
+            // cannot be represented: unchecked `+ 1` panics the workspace
+            // actor in debug and test builds and wraps in release, where the
+            // wrapped value then mis-parses every following line. The list
+            // simply ends when no successor exists.
+            let mut expected = start.checked_add(1);
             index += 1;
-            while let Some((ordinal, next)) =
-                lines.get(index).and_then(|line| parse_ordered_item(line))
-            {
-                if ordinal != expected {
+            while let Some(next_expected) = expected {
+                let Some((ordinal, next)) =
+                    lines.get(index).and_then(|line| parse_ordered_item(line))
+                else {
+                    break;
+                };
+                if ordinal != next_expected {
                     break;
                 }
                 items.push(next);
-                expected += 1;
+                expected = next_expected.checked_add(1);
                 index += 1;
             }
             blocks.push(MdBlock::OrderedList { start, items });
@@ -3510,24 +3529,10 @@ fn main() {}
 
     #[test]
     fn resolution_fold_bounds_blockquote_depth() {
-        // Codex #596 round 4: an adversarial run of `> ` prefixes must not
-        // recurse without bound inside the resolve frame. Below the ceiling
-        // the fold nests real blockquotes and roundtrips byte-exactly; past
-        // it the quoted remainder stays one verbatim paragraph (no faithful
-        // representation exists there - the projection itself cannot render
-        // deeper). MUTATION: drop the depth bound - the adversarial count
-        // assertion fails with one node per prefix.
-        let renderable = Ydoc::wire();
-        let chosen = format!("{}deep", "> ".repeat(40));
-        renderable.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen);
-        let projected = renderable
-            .project(ContentKind::Richdoc)
-            .expect("projection");
-        assert_eq!(
-            projected.markdown, chosen,
-            "a renderable depth roundtrips byte-identically"
-        );
-
+        // An adversarial run of `> ` prefixes must not recurse without bound
+        // inside the resolve frame. MUTATION: drop the depth bound — the
+        // adversarial arm builds one blockquote per prefix and this count
+        // assertion fails.
         let adversarial = Ydoc::wire();
         let hostile = format!("{}deep", "> ".repeat(1_000));
         adversarial.rewrite_content_to_markdown(ContentKind::Richdoc, &hostile);
@@ -3536,11 +3541,51 @@ fn main() {}
         let blockquotes = body.matches("\"blockquote\"").count();
         assert_eq!(
             blockquotes, QUOTE_FOLD_MAX_DEPTH,
-            "nesting stops at the measured ceiling: {blockquotes}"
+            "nesting stops at the recursion budget: {blockquotes}"
+        );
+    }
+
+    #[test]
+    fn a_fold_past_the_quote_budget_is_detectably_lossy_not_silently_wrong() {
+        // The overflow is NOT lossless: the leftover `> ` markers become
+        // paragraph text, which the projector escapes to `&gt;`. The previous
+        // comment asserted losslessness and the fold trusted it, so a
+        // resolution past the budget would have been stored as bytes the user
+        // never chose. This pins the real behaviour — the divergence is
+        // OBSERVABLE — which is what `fold_resolution_into_ydoc_in_tx`
+        // re-projects to catch before it commits anything.
+        let overflowed = Ydoc::wire();
+        let hostile = format!("{}deep", "> ".repeat(QUOTE_FOLD_MAX_DEPTH + 5));
+        overflowed.rewrite_content_to_markdown(ContentKind::Richdoc, &hostile);
+        let projected = overflowed
+            .project(ContentKind::Richdoc)
+            .expect("projection");
+        assert_ne!(
+            projected.markdown, hostile,
+            "past the budget the fold cannot reproduce the chosen bytes"
         );
         assert!(
-            body.contains("deep"),
-            "the quoted content survives past the ceiling"
+            projected.markdown.contains("&gt;"),
+            "and the loss is the projector's escaping"
         );
+    }
+
+    #[test]
+    fn a_fold_within_the_quote_budget_roundtrips_byte_exactly() {
+        // MUTATION: lower QUOTE_FOLD_MAX_DEPTH below 100 — the 100-level arm
+        // overflows into escaped paragraph text and this fails. The bound's
+        // previous derivation claimed 60 was the projector's ceiling; it is
+        // not, and a budget set from that false reading would refuse
+        // documents the projection renders happily.
+        for levels in [1_usize, 40, 100, QUOTE_FOLD_MAX_DEPTH] {
+            let doc = Ydoc::wire();
+            let chosen = format!("{}deep", "> ".repeat(levels));
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen);
+            let projected = doc.project(ContentKind::Richdoc).expect("projection");
+            assert_eq!(
+                projected.markdown, chosen,
+                "a {levels}-level quote must roundtrip byte-identically"
+            );
+        }
     }
 }

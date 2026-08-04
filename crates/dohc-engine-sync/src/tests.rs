@@ -7332,6 +7332,161 @@ fn resolution_fold_refuses_while_deferred_updates_are_parked() {
 }
 
 #[test]
+fn a_fold_that_cannot_reproduce_the_choice_refuses_instead_of_diverging() {
+    // The fold's markdown parser is ASSERTED to be the projector's inverse
+    // and nothing makes that true. Past the quote budget the leftover `> `
+    // markers become paragraph text and the projector escapes them to
+    // `&gt;` — so the fold would commit a lineage projecting bytes the user
+    // never chose while stamping last_settled_sha with the chosen text's
+    // hash in the same statement: the head file saying one thing, the CRDT
+    // another, and the marker asserting they agree. That is the silent
+    // reversal this PR exists to close, arriving through the fold itself.
+    //
+    // MUTATION: delete the re-projection check in
+    // `fold_resolution_into_ydoc_in_tx` — this fold succeeds and the
+    // divergence assertion below fails, proving the guard is what stops it.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-unrepresentable',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-unrepresentable").expect("key");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.richdoc_append_paragraph("original");
+    dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &doc.encode_full_state(),
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim");
+
+    // Deeper than the fold's recursion budget: representable as markdown,
+    // not reproducible by the parser.
+    let unrepresentable = format!("{}deep", "> ".repeat(200));
+    let refused = engine.write_with(&NoFaults, |tx| {
+        crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+            tx,
+            "ws",
+            "main",
+            "object-unrepresentable",
+            "notes/unrepresentable.md",
+            &unrepresentable,
+            1_600,
+        )
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(SyncError::InvalidInput {
+                reason: "ydoc-resolution-not-representable"
+            })
+        ),
+        "a fold that cannot reproduce the choice must refuse: {refused:?}"
+    );
+
+    // And it left nothing behind: no appended update, and the settle marker
+    // does not claim bytes the lineage cannot produce.
+    let (updates, settled): (i64, Option<String>) = engine
+        .read_with(|conn| {
+            Ok::<_, SyncError>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates WHERE workspace_id='ws' \
+                     AND object_id='object-unrepresentable'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+                conn.query_row(
+                    "SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id='ws' \
+                     AND object_id='object-unrepresentable'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+            ))
+        })
+        .expect("post-refusal state");
+    assert_eq!(updates, 0, "the refused fold appended nothing");
+    assert_ne!(
+        settled.as_deref(),
+        Some(dohc_engine_storage::hex_sha256(unrepresentable.as_bytes()).as_str()),
+        "and never stamped the choice it could not store"
+    );
+}
+
+#[test]
+fn a_fold_the_parser_can_reproduce_still_commits() {
+    // The guard must not refuse everything: a rich choice the parser does
+    // model folds and journals as before.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-representable',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-representable").expect("key");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.richdoc_append_paragraph("original");
+    dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &doc.encode_full_state(),
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim");
+    let chosen = "# Heading\n\nchosen body\n\n- one\n- two";
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+                tx,
+                "ws",
+                "main",
+                "object-representable",
+                "notes/representable.md",
+                chosen,
+                1_600,
+            )
+        })
+        .expect("a representable choice folds");
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load")
+        .expect("lineage");
+    assert_eq!(
+        persisted
+            .doc
+            .project(dohc_engine_collab::ContentKind::Richdoc)
+            .expect("projection")
+            .markdown,
+        chosen,
+        "the lineage projects exactly the chosen bytes"
+    );
+}
+
+#[test]
 fn resolution_fold_names_the_cap_it_hits() {
     // Codex #596 P2: the fold's size refusal must name the constraint, the
     // limit, and the observed bytes. MUTATION: revert it to a static

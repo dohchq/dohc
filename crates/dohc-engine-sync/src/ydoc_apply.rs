@@ -135,21 +135,14 @@ pub(crate) fn redelivered_conflicts_opened(
     if envelope.op_kind != "ydoc.update" {
         return Ok(0);
     }
-    let payload: YdocUpdatePayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc.update payload is malformed",
-        })?;
-    if !payload.is_base_state {
-        return Ok(0);
-    }
-    let Ok(key) = DocKey::new(
-        envelope.workspace_id.clone(),
-        payload.version_id,
-        payload.object_id,
-    ) else {
-        return Ok(0);
-    };
-    let _ = key;
+    // NEVER reparse the payload here. A malformed `ydoc.update` is refused
+    // and ACKED; if the process then crashes before the relay cursor
+    // commits, the next pull replays that coordinate as `Skipped` and asks
+    // this helper to recount. Decoding the payload again returns
+    // InvalidInput and aborts the whole pull, so every retry wedges on an
+    // operation already durably handled. The decision record is keyed by
+    // the ENVELOPE coordinate, which needs no payload at all: read it, and
+    // read its absence as zero.
     let recorded: Option<String> = store.read_with(|conn| {
         conn.query_row(
             "SELECT payload_hash FROM engine_requests \
@@ -555,6 +548,29 @@ pub fn fold_resolution_into_ydoc_in_tx(
         })?;
     if projection.markdown != chosen_text {
         let update = doc.rewrite_content_to_markdown(marker.content_kind, chosen_text);
+        // VERIFY THE FOLD'S OWN OUTPUT. The markdown parser behind the
+        // rewrite is asserted to be the projector's inverse, and nothing
+        // makes that true: a construct it does not model round-trips through
+        // the projector's escaping (a deep `>` chain returns as `&gt;`), and
+        // the fold would then commit a lineage whose projection is NOT the
+        // chosen text while stamping last_settled_sha with the chosen text's
+        // hash in the same statement — the head file saying one thing, the
+        // CRDT another, and the marker asserting they agree. That is the
+        // silent reversal this whole PR exists to close, reintroduced by the
+        // fold. Re-project and compare instead of trusting the parser: the
+        // doc and the transaction are already in hand, so the check is one
+        // projection, and it covers every construct the parser will ever
+        // fail to model rather than the ones known today.
+        let refolded = doc
+            .project(marker.content_kind)
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc projection exceeds materialization cap",
+            })?;
+        if refolded.markdown != chosen_text {
+            return Err(SyncError::InvalidInput {
+                reason: "ydoc-resolution-not-representable",
+            });
+        }
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(SyncError::BlobTooLarge {
                 constraint: "MAX_YDOC_UPDATE_BYTES (conflict resolution fold)",
