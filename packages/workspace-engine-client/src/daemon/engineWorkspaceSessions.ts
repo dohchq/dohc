@@ -131,27 +131,37 @@ export class EngineWorkspaceSessionsClosedError extends Error {
   }
 }
 
-// The retryDeadlineMs limit was reached: the run stopped STARTING transport
-// retries. The last transport error rides as the cause.
+// A retry limit was reached: the run stopped STARTING retries. The last
+// failure rides as the cause.
+//
+// `constraint` is the name of the option the CALLER actually set, because two
+// different limits reach here and an agent has to be able to find the one that
+// fired. Naming `retryDeadlineMs` for a region budget pointed readers at an
+// option with no production caller (#564, codex).
 export class EngineWorkspaceRetryDeadlineError extends Error {
   readonly workspaceId: string;
+  readonly constraint: string;
+  readonly limitMs: number;
 
   constructor(
     workspaceId: string,
-    retryDeadlineMs: number,
+    constraint: string,
+    limitMs: number,
     waitedMs: number,
     attempts: number,
     cause: unknown,
   ) {
     super(
-      `Rust engine stopped retrying the open for workspace ${workspaceId}: ` +
-        `the retryDeadlineMs limit of ${retryDeadlineMs}ms was reached ` +
+      `Rust engine stopped retrying for workspace ${workspaceId}: ` +
+        `the ${constraint} limit of ${limitMs}ms was reached ` +
         `(waited ${waitedMs}ms across ${attempts} attempts). ` +
         `Retry the operation, or wait for the daemon to come back.`,
       { cause },
     );
     this.name = "EngineWorkspaceRetryDeadlineError";
     this.workspaceId = workspaceId;
+    this.constraint = constraint;
+    this.limitMs = limitMs;
   }
 }
 
@@ -239,7 +249,19 @@ export class EngineWorkspaceSessions {
   // holding a shared resource across several daemon calls actually needs.
   private readonly retryBudgets = new AsyncLocalStorage<{
     budgetMs: number;
-    startedAtMs: number;
+    // The clock starts at the FIRST FAILURE, not at region entry, because the
+    // budget bounds RECOVERY and a healthy attempt is not recovery (#564,
+    // codex P1). Anchored at entry, a legitimately slow open — a large
+    // document's lineage resurrection, the slow case #514 fought — spent the
+    // budget on work that was succeeding, and one transport blip after it was
+    // then refused a retry that would have bound. That made this a limit
+    // rejecting valid work, which AGENTS.md says must be measured first; the
+    // measurement on record covers the JS chain path, not daemon restart or
+    // lineage recovery. Anchoring at the first failure removes the case
+    // instead: what remains bounded is the recovery window, and that IS
+    // derived from the transport contract it is built from
+    // (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS).
+    failedAtMs: number | null;
     // Failed attempts across every run the region made, because the region
     // is what the budget spans: a per-run counter resets on each `run` and
     // would report "across 1 attempts" for a wait that covered six.
@@ -380,16 +402,19 @@ export class EngineWorkspaceSessions {
       );
     }
     return await this.retryBudgets.run(
-      { budgetMs, startedAtMs: this.now(), attempts: 0 },
+      { budgetMs, failedAtMs: null, attempts: 0 },
       task,
     );
   }
 
   // One failed daemon attempt, counted on the ambient budget so the refusal
   // can report what the WAIT actually cost rather than one ladder's share.
+  // The first failure also starts the budget's clock: see `failedAtMs`.
   private noteBudgetAttempt(): void {
     const budget = this.retryBudgets.getStore();
-    if (budget !== undefined) budget.attempts += 1;
+    if (budget === undefined) return;
+    budget.attempts += 1;
+    budget.failedAtMs ??= this.now();
   }
 
   // The one deadline gate every retry ladder consults, on both sides of its
@@ -405,11 +430,14 @@ export class EngineWorkspaceSessions {
   ): void {
     const now = this.now();
     const budget = this.retryBudgets.getStore();
-    if (budget !== undefined) {
-      const spentMs = now - budget.startedAtMs;
+    if (budget !== undefined && budget.failedAtMs !== null) {
+      const spentMs = now - budget.failedAtMs;
       if (spentMs >= budget.budgetMs) {
         throw new EngineWorkspaceRetryDeadlineError(
           workspaceId,
+          // The option the caller actually set, not the per-run one it did
+          // not pass.
+          "withRetryBudget budgetMs",
           budget.budgetMs,
           spentMs,
           // The REGION's count, not this ladder's: the budget spans several
@@ -424,6 +452,7 @@ export class EngineWorkspaceSessions {
     if (waitedMs < retryDeadlineMs) return;
     throw new EngineWorkspaceRetryDeadlineError(
       workspaceId,
+      "retryDeadlineMs",
       retryDeadlineMs,
       waitedMs,
       attempt,
@@ -476,16 +505,44 @@ export class EngineWorkspaceSessions {
       checkDeadline();
       return "stop";
     }
-    // At quit the failure is final: free the caller in one attempt rather
-    // than spend the budget on a daemon that is not coming back.
-    if (this.shuttingDown) return "stop";
+    // At quit a BOUNDED region's failure is final: free the caller in one
+    // attempt rather than spend the budget on a daemon that is not coming
+    // back.
+    //
+    // Only a bounded region. `beginShutdown` is a global flag doing a scoped
+    // job, and the scope is the document OPEN — the one thing #564 asked to
+    // stop waiting on, and the one thing safe to abandon, because an opening
+    // document is read-only (#533) and holds no edit. Work outside a region
+    // is the opposite obligation: an already-open document retrying a journal
+    // write holds the user's only copy in its canonical Y.Doc, and abandoning
+    // that retry discards the edit while `closeAllEngineYDocSessions` swallows
+    // the failure (#564, codex P1). An open that cannot finish is abandoned;
+    // a write already accepted is not.
+    //
+    // Cancelling the armed sleep stays global on purpose: outside a region it
+    // makes the retry happen SOONER, which is what a caller racing the quit
+    // timer needs.
+    if (this.shuttingDown && this.retryBudgets.getStore() !== undefined) {
+      return "stop";
+    }
     checkDeadline();
     if (!gate.backoff) return "retry";
+    // Reaching here at quit means this run is OUTSIDE a bounded region — the
+    // branch above already stopped the regions. It is racing the quit timer to
+    // finish a write that was already accepted, so it retries at once: a
+    // backoff would spend the window it needs, and `beginShutdown` only ever
+    // cancels the ONE armed sleep, so waiting again here could outlast the
+    // quit entirely.
+    if (this.shuttingDown) return "retry";
     // Checked on BOTH sides of the wait: an attempt that ends just inside the
     // deadline must not ride the backoff over the line and then start a fresh
     // open on a spent budget.
     await this.interruptibleSleep(transportBackoffMs(gate.attempt));
-    if (this.shuttingDown) return "stop";
+    // Same scope as before the wait: quit ends a bounded region's retries, and
+    // only a bounded region's.
+    if (this.shuttingDown && this.retryBudgets.getStore() !== undefined) {
+      return "stop";
+    }
     checkDeadline();
     return "retry";
   }

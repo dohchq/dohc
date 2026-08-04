@@ -2882,6 +2882,12 @@ app.on("will-quit", (event) => {
   // at most one attempt instead of spending the whole 3 s budget. Nothing is
   // abandoned that a user could see: an opening document is read-only (#533),
   // so no edit exists yet on the path being given up.
+  //
+  // That claim only holds because the sessions scope this to a BOUNDED region
+  // — the document open. An already-open document retrying a write the engine
+  // accepted keeps retrying, without backoff, for whatever the quit timer
+  // leaves it: its update exists only in the canonical in-memory Y.Doc, so
+  // abandoning that retry would discard the edit (codex P1).
   rustEngineWorkspaceSessions?.beginShutdown();
   searchRegistry.killAll();
   const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
