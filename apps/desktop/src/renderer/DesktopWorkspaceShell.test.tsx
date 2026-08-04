@@ -5305,6 +5305,175 @@ describe("history page", () => {
     );
   });
 
+  // A failure reports, and it takes nothing. The lane's watermark is what an
+  // ANSWER earns: a read that failed proves nothing, and the older read still
+  // in flight may be the only answer anyone gets. Moving the watermark on a
+  // rejection would reject that answer when it lands, and the status bar would
+  // sit on a value the workspace has left with nothing to correct it (#507).
+  it("commits an older sync status when the newer read failed", async () => {
+    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
+    const heldStatus = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
+    // Which read gets what is set by this test, not by a call count: the shell
+    // reads status more than once while a workspace opens.
+    let holdNextRead = false;
+    let failNextRead = false;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(() => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        return heldStatus.promise;
+      }
+      if (failNextRead) {
+        failNextRead = false;
+        return Promise.reject(new Error("sync status failed"));
+      }
+      return Promise.resolve(SYNC_STATUS);
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    expect(screen.getByTestId("sync-status").dataset.state).toBe("synced");
+
+    // One refresh's status read is still in flight.
+    holdNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(holdNextRead).toBe(false));
+
+    // A newer refresh asks the same lane, and its read fails. The failure is
+    // reported — nothing else can say the shown value is now old.
+    failNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(failNextRead).toBe(false));
+    expect(await screen.findByTestId("workspace-shell-error")).toBeTruthy();
+
+    // Then the older read answers. It is the only answer this lane has.
+    await act(async () => {
+      heldStatus.resolve(syncingStatus);
+      await heldStatus.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+    );
+  });
+
+  // The twin of the test above, on the other way a read settles. The lane's
+  // own reader answers the observation, and that read can FAIL — after a newer
+  // refresh already committed the lane. A failure judged without the token
+  // then raises a banner about a reading nothing is showing: the newer answer
+  // is on screen, correct, and the user is told it could not be read.
+  it("keeps a failed agent-lane read from reporting over a newer refresh", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const afterTheRun = deferred<ListEngineMomentsResult>();
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      afterTheRun.promise,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    // The observation's own read is the one that fails, and it is the first
+    // agent read issued after the held panel read is released — nothing else
+    // asks in between, because every shell refresh here is driven by the test.
+    let failNextAgentRead = false;
+    let failObservationRead!: (error: Error) => void;
+    let runIsAlive = false;
+    bridge.getAgentRunStatus = vi.fn(() => {
+      if (failNextAgentRead) {
+        failNextAgentRead = false;
+        return new Promise<never>((_resolve, reject) => {
+          failObservationRead = reject;
+        });
+      }
+      return Promise.resolve({
+        mcpEnabled: true,
+        activeRun: runIsAlive
+          ? {
+              id: "run-1",
+              startedAt: 1,
+              agentId: "agent-1",
+              onBehalfOf: "ice",
+              status: "running" as const,
+            }
+          : null,
+        lastRun: null,
+      });
+    });
+    const heldPanelReads: Array<() => void> = [];
+    let panelReads = 0;
+    const mcpConfig: McpConfigResult = {
+      command: "dohc-mcp",
+      args: [],
+      workspacePath: WORKSPACE.rootPath,
+      home: "/tmp/dohc-home",
+    };
+    bridge.getMcpConfig = vi.fn(() => {
+      panelReads += 1;
+      if (panelReads === 1) return Promise.resolve(mcpConfig);
+      return new Promise<McpConfigResult>((resolveRead) => {
+        heldPanelReads.push(() => resolveRead(mcpConfig));
+      });
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve(historyPage([historyMoment("m-first", "Added the launch checklist")]));
+      await first.promise;
+    });
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Settings: Open Agents & MCP",
+      ),
+    );
+    await screen.findByTestId("mcp-enable-toggle");
+
+    // A run starts under the rendered label, so the toggle's reread reports it
+    // rather than starting or ending anything.
+    runIsAlive = true;
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await waitFor(() => expect(heldPanelReads.length).toBe(1));
+
+    // Release the reread. The observation lands and asks the lane's own
+    // reader, whose read is the one that will fail.
+    failNextAgentRead = true;
+    await act(async () => {
+      for (const answerRead of heldPanelReads) answerRead();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(failObservationRead).toBeTruthy());
+
+    // A newer refresh answers the same lane first, and it says the run is
+    // alive. That is what the user is looking at.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      afterTheRun.resolve(historyPage([historyMoment("m-after", "Rewrote the plan")]));
+      await afterTheRun.promise;
+    });
+    expect(await screen.findByTestId("agent-run-indicator")).toBeTruthy();
+
+    // Only now does the older read fail. It has nothing to report: the lane
+    // already holds a newer answer, and it is on screen.
+    await act(async () => {
+      failObservationRead(new Error("agent status failed"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
+  });
+
   // Supersession is per LANE. The user dismissed a review; that says nothing
   // about sync or agent state, and the dismiss emits no activity event, so
   // rejecting those lanes too would strand the status bar with no other source.

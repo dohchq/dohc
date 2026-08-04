@@ -206,17 +206,41 @@ export function chatsNavigationChangesDestination(
   );
 }
 
-// One lane of the snapshot group. It accepts an answer only if that answer is
-// newer than whatever last wrote the lane — a response, or a local action by
-// the user, which counts as newer than every request already issued.
-function commitSnapshotLane(
+// One lane of the snapshot group, and the only thing that writes one from an
+// answer. It takes the whole read, so BOTH ways a read can settle face the
+// same question: is this answer newer than whatever last wrote the lane — a
+// response, or a local action by the user, which counts as newer than every
+// request already issued.
+//
+// A failure is an answer too, and asking it separately is how the rule leaks.
+// It may report, because a lane with no failure surface of its own has only
+// the banner to say a shown value is now old. It may not report over a NEWER
+// answer that already succeeded — a stale failure outranking a fresh success
+// is a banner about nothing the user can see. And it never advances the
+// watermark: a read that failed proves nothing, and an older read that still
+// succeeds is the only answer anyone has (#507).
+//
+// The history page is not a lane here. It carries its own admission rules —
+// version staleness, a pagination that may hold it — and the refresh returns
+// it, so it is judged where those rules live.
+function settleSnapshotLane<T>(
   lane: { current: number },
   token: number,
-  apply: () => void,
+  read: Promise<T>,
+  apply: (value: T) => void,
+  report: (error: unknown) => void,
 ): void {
-  if (token <= lane.current) return;
-  lane.current = token;
-  apply();
+  void read.then(
+    (value) => {
+      if (token <= lane.current) return;
+      lane.current = token;
+      apply(value);
+    },
+    (error: unknown) => {
+      if (token <= lane.current) return;
+      report(error);
+    },
+  );
 }
 
 // What the history-off placeholder may claim (#542). The placeholder renders
@@ -1844,15 +1868,13 @@ export function DesktopWorkspaceShell(props: {
   // so it is the freshest thing available.
   const refreshAgentLane = useCallback(() => {
     const token = ++engineHistoryToken.current;
-    void bridge()
-      .getAgentRunStatus({ workspaceId })
-      .then(
-        (agent) =>
-          commitSnapshotLane(committedAgentActiveToken, token, () =>
-            setAgentActive(agent.activeRun !== null),
-          ),
-        (error: unknown) => reportShellError("Could not refresh agent runs.", error),
-      );
+    settleSnapshotLane(
+      committedAgentActiveToken,
+      token,
+      bridge().getAgentRunStatus({ workspaceId }),
+      (agent) => setAgentActive(agent.activeRun !== null),
+      (error) => reportShellError("Could not refresh agent runs.", error),
+    );
   }, [reportShellError, workspaceId]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
@@ -1894,40 +1916,30 @@ export function DesktopWorkspaceShell(props: {
       // The snapshots need no ordering against the page: nothing can block
       // them, and holding them for a later commit would republish a world the
       // user has already acted on — a dismissed review card, most visibly.
-      // A lane that did not answer keeps the value it last had and does not
-      // move its watermark — the same rule the page lane follows, because a
-      // read that failed proves nothing and an older read that still succeeds
-      // is the only answer anyone has (#507). The banner is the only thing
-      // that can say a shown value is now old, so a failed lane still reports.
+      // Each is handed whole to the lane rule, which judges both ways it can
+      // settle.
       const pageRead = bridge().listEngineMoments({ workspaceId, limit: 200 });
-      void bridge()
-        .getSyncStatus({ workspaceId })
-        .then(
-          (status) =>
-            commitSnapshotLane(committedSyncStatusToken, token, () =>
-              setSyncStatus(status),
-            ),
-          (error: unknown) => reportShellError("Could not refresh sync status.", error),
-        );
-      void bridge()
-        .getAgentRunStatus({ workspaceId })
-        .then(
-          (agent) =>
-            commitSnapshotLane(committedAgentActiveToken, token, () =>
-              setAgentActive(agent.activeRun !== null),
-            ),
-          (error: unknown) => reportShellError("Could not refresh agent runs.", error),
-        );
-      void bridge()
-        .getTryInVersionState({ workspaceId })
-        .then(
-          (trySession) =>
-            commitSnapshotLane(committedTryStateToken, token, () =>
-              setTryState(trySession.state),
-            ),
-          (error: unknown) =>
-            reportShellError("Could not refresh the version try run.", error),
-        );
+      settleSnapshotLane(
+        committedSyncStatusToken,
+        token,
+        bridge().getSyncStatus({ workspaceId }),
+        (status) => setSyncStatus(status),
+        (error) => reportShellError("Could not refresh sync status.", error),
+      );
+      settleSnapshotLane(
+        committedAgentActiveToken,
+        token,
+        bridge().getAgentRunStatus({ workspaceId }),
+        (agent) => setAgentActive(agent.activeRun !== null),
+        (error) => reportShellError("Could not refresh agent runs.", error),
+      );
+      settleSnapshotLane(
+        committedTryStateToken,
+        token,
+        bridge().getTryInVersionState({ workspaceId }),
+        (trySession) => setTryState(trySession.state),
+        (error) => reportShellError("Could not refresh the version try run.", error),
+      );
       let page: Awaited<typeof pageRead>;
       try {
         page = await pageRead;
