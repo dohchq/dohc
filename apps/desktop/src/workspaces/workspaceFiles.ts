@@ -299,11 +299,42 @@ const MAX_COLLISION_RENAMES = 99;
 // limit where one applies. Without that second rung a colliding multibyte name
 // in a deep folder composes past MAX_PATH and copyFile answers ENOENT, which
 // aborts the whole import.
-function collisionVariants(name: string, attempt: number, absDir: string): string[] {
+function collisionVariants(
+  name: string,
+  attempt: number,
+  maxEntryChars: number,
+): string[] {
   return collisionVariantPlan(name, attempt, {
     unit: nameUnitFor(process.platform),
-    maxEntryChars: entryCharBudget(absDir, process.platform),
+    maxEntryChars,
   });
+}
+
+/**
+ * Is this copy failure about the NAME being too long, or about the source?
+ * Exported for unit testing, as `extractFrontmatterIcon` above is: neither an
+ * ENOENT from a vanished source nor a real MAX_PATH refusal is arrangeable on
+ * demand in that suite, and getting the two confused is the whole point.
+ *
+ * `maxEntryChars` must be the SAME budget that shaped the candidate list. An
+ * earlier revision compared the composed path against `WINDOWS_MAX_PATH_CHARS`
+ * directly, with no platform check anywhere in the copy loop -- so on macOS and
+ * Linux, where a 259-character path is ordinary, a genuinely missing source
+ * read as a length refusal, walked the shorter rungs, and was counted as
+ * SKIPPED instead of aborting the batch. Two copies of one fact, disagreeing.
+ */
+export function isLengthRefusal(
+  code: string | undefined,
+  candidate: string,
+  maxEntryChars: number,
+): boolean {
+  // Says so outright, on every platform.
+  if (code === "ENAMETOOLONG") return true;
+  // Windows reports an over-long path as ENOENT. So does a missing source,
+  // everywhere -- so ENOENT reads as length only where a composed-path limit
+  // actually applies AND this name exceeds it. Off Windows the budget is
+  // Infinity and this is never true.
+  return code === "ENOENT" && candidate.length > maxEntryChars;
 }
 
 // Why a trash ladder stopped before its next rung. Three outcomes, not two:
@@ -372,30 +403,24 @@ async function copyWithoutOverwrite(
   absDir: string,
   name: string,
 ): Promise<string | null> {
+  // ONE budget, used both to shape the candidates and to classify a failure.
+  // Two copies of this fact can disagree, and did.
+  const maxEntryChars = entryCharBudget(absDir, process.platform);
   for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
     // Longest first, exactly as the trash ladder does: a shorter name is used
     // only once the platform has actually refused the longer one for length.
     const candidates =
-      attempt === 1 ? [name] : collisionVariants(name, attempt, absDir);
+      attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
     for (const [rung, candidate] of candidates.entries()) {
-      const destination = join(absDir, candidate);
       try {
-        await copyFile(source, destination, constants.COPYFILE_EXCL);
+        await copyFile(source, join(absDir, candidate), constants.COPYFILE_EXCL);
         return candidate;
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         // EEXIST is the collision itself: take the next attempt NUMBER, not a
         // shorter spelling of this one.
         if (code === "EEXIST") break;
-        // ENAMETOOLONG says "too long" outright. Windows says ENOENT -- but
-        // ENOENT also means the SOURCE is missing, which is a real error, so
-        // it only reads as length when the composed path is actually over the
-        // legacy limit. Only ENOENT means absence; everything else keeps its
-        // own meaning, and that cuts both ways.
-        const tooLong =
-          code === "ENAMETOOLONG" ||
-          (code === "ENOENT" && destination.length > WINDOWS_MAX_PATH_CHARS);
-        if (!tooLong) throw error;
+        if (!isLengthRefusal(code, candidate, maxEntryChars)) throw error;
         // No shorter rung left: a name this filesystem cannot hold skips the
         // source instead of aborting the batch.
         if (rung === candidates.length - 1) return null;

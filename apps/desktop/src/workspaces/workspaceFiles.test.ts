@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   classifyLadderProbe,
   collectZipEntries,
+  isLengthRefusal,
   copyIntoWorkspace,
   createFile,
   createFolder,
@@ -836,5 +837,43 @@ describe("trash ladder stop classification", () => {
     expect(classifyLadderProbe({ ino: 0, dev: 3 }, { looked: true, now: entry })).toBe(
       "unchecked",
     );
+  });
+});
+
+// A copy that fails has to say WHICH thing failed: the name being too long for
+// this filesystem, or the source not being there. Both answer ENOENT on
+// Windows, and a missing source answers ENOENT everywhere -- so reading the
+// second as the first silently SKIPS a source that should abort the batch.
+describe("copy length-refusal classification", () => {
+  // What entryCharBudget answers for a Windows folder, and for every other
+  // platform, respectively.
+  const WINDOWS_BUDGET = 68;
+  const NO_LIMIT = Number.POSITIVE_INFINITY;
+
+  it("takes ENAMETOOLONG at its word on any platform", () => {
+    expect(isLengthRefusal("ENAMETOOLONG", "short.md", NO_LIMIT)).toBe(true);
+    expect(isLengthRefusal("ENAMETOOLONG", "short.md", WINDOWS_BUDGET)).toBe(true);
+  });
+
+  it("reads ENOENT as length only when this name exceeds the budget", () => {
+    expect(isLengthRefusal("ENOENT", "n".repeat(WINDOWS_BUDGET + 1), WINDOWS_BUDGET)).toBe(
+      true,
+    );
+    expect(isLengthRefusal("ENOENT", "n".repeat(WINDOWS_BUDGET), WINDOWS_BUDGET)).toBe(
+      false,
+    );
+  });
+
+  // The finding. Off Windows the budget is Infinity, so a 259-plus-character
+  // path is ordinary and an ENOENT can only mean the source is gone.
+  it("never reads ENOENT as length where no composed limit applies", () => {
+    expect(isLengthRefusal("ENOENT", "n".repeat(300), NO_LIMIT)).toBe(false);
+    expect(isLengthRefusal("ENOENT", "n".repeat(5000), NO_LIMIT)).toBe(false);
+  });
+
+  it("leaves every other failure to abort the batch", () => {
+    for (const code of ["EACCES", "EPERM", "EIO", "EXDEV", undefined]) {
+      expect(isLengthRefusal(code, "n".repeat(5000), WINDOWS_BUDGET), code).toBe(false);
+    }
   });
 });
