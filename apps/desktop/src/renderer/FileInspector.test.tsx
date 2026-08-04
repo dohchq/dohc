@@ -1209,27 +1209,27 @@ describe("engine markdown source view", () => {
 
       await user.click(screen.getByText("Try again"));
       await waitFor(() => expect(opens).toBe(3));
-      // ONE write: the retry landed the pending draft before asking to
-      // reopen (round 3 P1). Nothing else may reach disk while the open is
-      // in flight — MUTATION: drop the retry-window gate from
-      // writesRefusedRef -> a second, stale write lands inside the window.
-      const writesAfterLanding = bridgeMock.writeWorkspaceText.mock.calls.length;
-      expect(writesAfterLanding).toBe(1);
+      // Nothing reaches disk while the open is in flight — MUTATION: drop
+      // the retry-window gate from writesRefusedRef -> a stale write lands
+      // inside the window.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
       });
-      expect(bridgeMock.writeWorkspaceText.mock.calls).toHaveLength(1);
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  // #564, codex round 3 P1: a draft typed BEFORE the timed-out reopen is
-  // still armed — its timer and `unsavedDraft` outlive the timeout, and a
-  // SUCCESSFUL retry clears the write guard, so that stale text could land
-  // on top of the artifact the engine just bound. The retry lands it FIRST,
-  // while no session exists, so the engine seeds from a file that holds it.
-  it("lands a pending draft before the retry binds, never after", async () => {
+  // #564 P1: a draft typed BEFORE the timed-out reopen stays armed — its
+  // timer and `unsavedDraft` outlive the timeout, and a SUCCESSFUL retry
+  // clears the write guard, so that stale text could land on top of the
+  // artifact the engine just bound. The retry disarms it and reports the
+  // refusal; it deliberately does NOT write it first, because a file write
+  // is not canonical here (the reopen seeds from the engine head, and only
+  // when no CRDT lineage exists) — the next settle would overwrite it while
+  // the indicator claimed a save.
+  it("disarms a pending draft at the retry, and never writes it", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -1274,16 +1274,16 @@ describe("engine markdown source view", () => {
 
       fireEvent.click(screen.getByText("Try again"));
       await waitFor(() => expect(opens).toBe(3));
-      // MUTATION: retry without landing the draft -> the write lands AFTER
-      // open-3, over the artifact the engine just bound (or never at all,
-      // and the keystrokes are gone).
-      expect(order).toEqual(["open-1", "open-2", "write", "open-3"]);
+      // The retry reopened and wrote NOTHING — not before the bind (a file
+      // write is not canonical here) and not after it.
+      expect(order).toEqual(["open-1", "open-2", "open-3"]);
 
-      // Nothing stale is left armed to fire over the bound session.
+      // MUTATION: leave the draft armed at the retry -> the 800 ms timer
+      // fires here and "write" lands over the artifact open-3 just bound.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
       });
-      expect(order.filter((step) => step === "write")).toHaveLength(1);
+      expect(order).toEqual(["open-1", "open-2", "open-3"]);
     } finally {
       vi.useRealTimers();
     }

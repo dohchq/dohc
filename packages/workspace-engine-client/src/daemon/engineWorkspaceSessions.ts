@@ -183,7 +183,14 @@ export function isEngineSessionReconnectError(error: unknown): boolean {
 
 function daemonMayBeRelaunching(error: unknown): boolean {
   return (
-    isTransportError(error) || error instanceof EngineDaemonUnavailableError
+    isTransportError(error) ||
+    error instanceof EngineDaemonUnavailableError ||
+    // A `workspace.open` that refuses with the afterReconnect disposition is
+    // the same "come back on a new session" answer as a dropped transport,
+    // and the open ladder retries it either way — so it must reach the same
+    // shutdown/deadline gate (#564). Without this the ladder ran six full
+    // opens on a spent budget, and `beginShutdown` did not stop it.
+    requiresReconnect(error)
   );
 }
 

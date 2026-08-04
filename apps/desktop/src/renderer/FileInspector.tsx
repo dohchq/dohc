@@ -1077,18 +1077,7 @@ function MarkdownView(props: {
     }
   }, [props.body, editing]);
 
-  async function writeDraftNow(
-    options: {
-      rejectOnError?: boolean;
-      // Landing a draft that predates a timed-out open, at the moment the
-      // user asks to retry (#564, codex round 3). The document is read-only
-      // BECAUSE that open timed out, so the ordinary guard would refuse the
-      // one write that makes the retry safe: no session is bound yet, and
-      // writing now is what puts the keystrokes into the file the engine is
-      // about to seed from. Every other refusal still applies.
-      landingBeforeRetry?: boolean;
-    } = {},
-  ): Promise<void> {
+  async function writeDraftNow(options: { rejectOnError?: boolean } = {}): Promise<void> {
     // The REF, not the captured value. The 800ms autosave timer holds the
     // closure from the render that armed it, where readOnly was false — so a
     // document that turned read-only after the keystroke still wrote (#534).
@@ -1102,11 +1091,7 @@ function MarkdownView(props: {
     // and #567 owns that: preserving the TEXT needs eager serialization,
     // because `serializeDraftRef` reads the live editor and a read-only window
     // unmounts it — a naive rearm here writes the PRE-EDIT body.
-    if (
-      options.landingBeforeRetry
-        ? props.writesRefusedRef.current
-        : writesBlocked()
-    ) {
+    if (writesBlocked()) {
       setSaveState("error");
       return;
     }
@@ -1152,35 +1137,43 @@ function MarkdownView(props: {
   }
 
   /**
-   * "Try again" after a timed-out open (#564, codex round 3).
+   * "Try again" after a timed-out open (#564).
    *
    * A draft typed BEFORE the reopen is still armed here: its 800 ms timer and
    * `unsavedDraft` outlive the timeout, and a successful retry clears the
-   * write guard — so the timer (or the unmount flush) could then write that
-   * stale text OVER the artifact the engine just bound. Landing it FIRST is
-   * what gives those keystrokes somewhere to go: no session exists yet, so
-   * the write is the plain editor's to make, and the engine seeds from a file
-   * that already holds it.
+   * write guard — so the timer (or the unmount flush) could write that stale
+   * text over the artifact the engine just bound. Disarm both, and say so.
    *
-   * A failed landing still retries — the save state says "Couldn't save", and
-   * refusing to reopen would strand the user in a read-only document. The
-   * text a user types DURING the retry window is #579's set-aside case, not
-   * this one's.
+   * It does NOT write the draft first. Writing it would look like landing the
+   * keystrokes and would not: `writeWorkspaceText` updates the FILE only
+   * (main.ts -> workspaceAssets), while the reopen seeds the document from
+   * the engine's HEAD SNAPSHOT and only when no CRDT lineage exists
+   * (`seed_markdown: (!lineage_existing).then(head.text)`, actor.rs
+   * ydoc_open_state_on_store). Capture ingests a file write asynchronously,
+   * so the reopen races it: with a lineage the draft is ignored outright, and
+   * without one the seed is whatever the head held when the open ran. Either
+   * way the next settle overwrites the file — the same clobber, one layer
+   * down, but now reported as saved.
+   *
+   * So the honest outcome is the refusal the user can see: the indicator says
+   * "Couldn't save", nothing stale reaches disk, and the text stays in the
+   * editor. Carrying those keystrokes ACROSS the bind needs the set-aside
+   * #579 builds (eager serialization + a recovery notice); this issue does
+   * not duplicate it.
    */
-  function landDraftThenRetry(): void {
+  function disarmDraftThenRetry(): void {
     const retry = props.onRetryEngineOpen;
     if (!retry) return;
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    if (!unsavedDraft.current) {
-      retry();
-      return;
+    if (unsavedDraft.current) {
+      // Nothing may write it later — not this timer, not the unmount flush.
+      unsavedDraft.current = false;
+      setSaveState("error");
     }
-    void writeDraftNow({ landingBeforeRetry: true })
-      .catch(() => undefined)
-      .finally(() => retry());
+    retry();
   }
 
   function scheduleSave() {
@@ -1557,7 +1550,7 @@ function MarkdownView(props: {
       />
       {props.truncatedNotice}
       {engine.openTimedOut && props.onRetryEngineOpen ? (
-        <EngineOpenTimedOutNotice onRetry={landDraftThenRetry} contentShown />
+        <EngineOpenTimedOutNotice onRetry={disarmDraftThenRetry} contentShown />
       ) : null}
       {surfaceMode === "source" ? (
         <textarea

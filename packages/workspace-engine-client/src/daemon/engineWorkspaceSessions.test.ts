@@ -904,6 +904,47 @@ describe("EngineWorkspaceSessions", () => {
       expect(attempts).toBe(3);
     });
 
+    it("bounds an OPEN that keeps refusing with afterReconnect", async () => {
+      // codex round 4: the open ladder's gate only recognised transport and
+      // daemon-unavailable errors, so a `workspace.open` refusing with the
+      // afterReconnect disposition — which the shipping daemon does — ran
+      // six full opens past a spent budget.
+      const workspace = await tempWorkspace("workspace-open-reconnect");
+      let nowMs = 0;
+      let opens = 0;
+      const client: EngineDaemonClient = {
+        close: () => undefined,
+        async sendRequest() {
+          opens += 1;
+          nowMs += 2_000;
+          throw new DaemonRefusalError(
+            {
+              code: "CONFLICT",
+              message: "workspace handle is stale",
+              retry: "afterReconnect",
+            },
+            undefined,
+          );
+        },
+      };
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .run(workspace, async () => "unreachable", {
+          retryTransportErrors: true,
+          retryDeadlineMs: 5_000,
+        })
+        .catch((error: unknown) => error);
+
+      // MUTATION: drop requiresReconnect from daemonMayBeRelaunching -> the
+      // ladder runs every attempt and rejects with the refusal instead.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(opens).toBe(3);
+    });
+
     it("rejects an invalid deadline instead of quietly voiding it", async () => {
       const workspace = await tempWorkspace("workspace-bad-deadline");
       const client = new MockClient("handle-bad-deadline");
@@ -983,6 +1024,41 @@ describe("EngineWorkspaceSessions", () => {
       });
       sessions.beginShutdown();
       await expect(run).rejects.toBeInstanceOf(EngineWorkspaceRebindError);
+    });
+
+    it("stops an OPEN that keeps refusing with afterReconnect", async () => {
+      const workspace = await tempWorkspace("workspace-open-reconnect-quit");
+      let opens = 0;
+      const sleep = vi.fn(async () => {});
+      const client: EngineDaemonClient = {
+        close: () => undefined,
+        async sendRequest() {
+          opens += 1;
+          throw new DaemonRefusalError(
+            {
+              code: "CONFLICT",
+              message: "workspace handle is stale",
+              retry: "afterReconnect",
+            },
+            undefined,
+          );
+        },
+      };
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { sleep },
+      );
+      sessions.beginShutdown();
+
+      await expect(
+        sessions.run(workspace, async () => "unreachable", {
+          retryTransportErrors: true,
+        }),
+      ).rejects.toBeInstanceOf(DaemonRefusalError);
+      // MUTATION: drop requiresReconnect from the gate -> six opens while the
+      // quit teardown waits on the chain behind them.
+      expect(opens).toBe(1);
+      expect(sleep).not.toHaveBeenCalled();
     });
 
     it("makes a later afterReconnect refusal final too", async () => {
