@@ -363,6 +363,32 @@ test("PR workflow validates the canonical verdict and installed cargo-deny versi
   );
 });
 
+test("both gate filters select on .gitignore, which the gates now read", () => {
+  // The tree-provenance row reads `git status`, so an ignore rule decides
+  // what the gate can see at all: ignoring a path removes it from every
+  // reading, and ignoring the wiring probe would disable
+  // scripts/rust-gate-artifact.test.mjs without changing a line of it. A
+  // .gitignore-only PR selecting neither job is a check whose preconditions
+  // sit outside what the check can see — which is the defect class this whole
+  // change is about.
+  const filters = workflow.slice(
+    workflow.indexOf("filters: |"),
+    workflow.indexOf("\n  javascript:"),
+  );
+  const rustFilter = filters.slice(
+    filters.indexOf("\n            rust:"),
+    filters.indexOf("\n            js:"),
+  );
+  const jsFilter = filters.slice(filters.indexOf("\n            js:"));
+  assert.match(rustFilter, /^ +- '\.gitignore'$/m);
+  assert.match(jsFilter, /^ +- '\.gitignore'$/m);
+  // Both slices must be real filter lists, or the assertions above pass by
+  // reading the same text twice.
+  assert.match(rustFilter, /- 'tools\/rust-engine-program\/\*\*'/);
+  assert.match(jsFilter, /- 'scripts\/\*\*'/);
+  assert.doesNotMatch(rustFilter, /- 'scripts\/\*\*'/);
+});
+
 test("PR workflow is deliberately disabled: dispatch-only, decision documented", () => {
   // Ice's 2026-07-28 pre-launch decision: the gate is dispatch-only for now.
   // This test pins that state so a half re-enable (say, pull_request without

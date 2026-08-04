@@ -89,7 +89,11 @@ jobs:
         with:
           filters: |
             # fuzz/ is a cargo workspace member the gate clippy/builds;
-            # .cargo/ holds audit.toml, where advisory ignores would hide.
+            # .cargo/ holds audit.toml, where advisory ignores would hide;
+            # .gitignore decides what the gate's own tree-provenance readings
+            # can see, so it is an input to the gate and not just to git --
+            # ignoring a path removes it from every reading, and the gate tees
+            # its log into the repo root.
             rust:
               - 'crates/**'
               - 'fuzz/**'
@@ -102,13 +106,17 @@ jobs:
               - 'tools/rust-engine-program/**'
               - 'packages/ydoc-projection/**'
               - 'pnpm-lock.yaml'
+              - '.gitignore'
               - '.github/workflows/pr-checks.yml'
             # services/ are pnpm workspace members (sync-relay, workspace-api
             # are live product); tsconfig.base.json is extended by every
             # package; the root suite asserts on the rust-engine plan docs
             # (scripts/rust-engine-decisions.test.mjs), so a docs-only PR can
             # break it; Cargo files rebuild the daemon binary the desktop
-            # e2e drives -- same rationale as crates/**.
+            # e2e drives -- same rationale as crates/**; .gitignore is read by
+            # scripts/rust-gate-artifact.test.mjs through git, which is how it
+            # sees the probe file that test writes into the repo root, so an
+            # ignore rule can disable that regression test silently.
             js:
               - 'apps/**'
               - 'packages/**'
@@ -126,6 +134,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - '.gitignore'
               - '.github/workflows/pr-checks.yml'
 
   javascript:
