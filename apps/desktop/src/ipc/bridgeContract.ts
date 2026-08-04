@@ -2444,9 +2444,13 @@ export type ShareChatChannelResult = z.infer<typeof ShareChatChannelResult>;
 //
 // MEASURED, per AGENTS.md "measure limits that reject work". The heaviest
 // account modelled in sharedChannels.test.ts ("representative healthy
-// accounts") holds 1449 rows: a 1000-person organization, a DM with every
-// other member, 250 shared channels, 200 ended tombstones. This bound sits
-// about 2.8x beyond it. The previous 1000 rejected that account.
+// accounts") holds 1249 LIVE chat-channel shares: a 1000-person organization,
+// a DM with every other member, 250 shared channels. This bound sits about
+// 3.3x beyond it. The previous 1000 rejected that account.
+//
+// On the joined lane it counts LIVE rows only — an ended tombstone is a
+// durable row the user cannot delete, so counting it would make the refusal's
+// own recovery impossible to act on. See mergeJoinedChannel.
 //
 // readRelayChatShareLanes applies it to the RELAY lanes before this schema
 // sees them: a relay-controlled body over the cap would otherwise fail the

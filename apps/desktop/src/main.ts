@@ -311,6 +311,7 @@ import {
   createKeyedSerializer,
   endJoinedChannel,
   JoinedSharedChannelLimitError,
+  joinedSharedChannelLimitRefusal,
   mergeJoinedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
@@ -4397,6 +4398,15 @@ function registerIpcHandlers(
     let info;
     try {
       info = await fetchSharedChannelInfo({ relay, shareId: input.shareId });
+      // Before the pull, which is this path's first durable mutation: a
+      // refusal raised after it would leave the channel's messages in the
+      // local store with no registry row, and no row reads as a channel this
+      // workspace owns and may write into. The info fetch above is a read.
+      const refusal = joinedSharedChannelLimitRefusal(
+        findWorkspace(input.workspaceId)?.sharedChannels ?? [],
+        { shareId: info.shareId, channelWireId: info.channelWireId },
+      );
+      if (refusal) throw new JoinedSharedChannelLimitError(refusal);
       const daemonRelay = relayClientForWorkspace({
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
@@ -6816,6 +6826,18 @@ function registerIpcHandlers(
         )
       ) {
         continue;
+      }
+      // Before ANY durable mutation on this path — the DM home claim below
+      // and the pull after it. A refusal raised at the merge would leave a
+      // claimed home and the channel's pulled messages with no registry row,
+      // and no row reads as a channel this workspace owns and may write into.
+      const refusal = joinedSharedChannelLimitRefusal(existing, {
+        shareId,
+        channelWireId: selector.channelWireId,
+      });
+      if (refusal) {
+        console.warn(`[desktop] DM auto-join stopped: ${refusal}`);
+        return;
       }
       // Probe each received share AT MOST ONCE (CodeRabbit: unbounded relay
       // round-trips). Skip without a network peek when it is either already

@@ -238,4 +238,36 @@ describe("main-process chat authorization", () => {
       slice("async function openCliWorkspace(", "const store = linkedChatStoreFor("),
     ).toContain("engineOffRefusal(");
   });
+
+  // #617 codex P1. Both join paths pull the share's log into this workspace's
+  // chat store, and autoJoinReceivedDms claims the DM home first — both
+  // durable. A joined-lane refusal raised AFTER either one leaves the pulled
+  // messages with no registry row, and no row is what
+  // joinedSharedChannelForTarget answers null for: assertSharedChannelWritable
+  // and channelIsLocked then read a READ-ONLY shared channel as a local one
+  // the user may write into. The order is the authorization, so it is pinned
+  // here rather than left to the reader.
+  it("refuses a joined-lane overflow before either join path mutates anything durable", () => {
+    const manual = handlerSource("joinSharedChannel");
+    const refusalAt = manual.indexOf("joinedSharedChannelLimitRefusal(");
+    const pullAt = manual.indexOf("pullSharedChannel({");
+    expect(refusalAt).toBeGreaterThan(-1);
+    expect(pullAt).toBeGreaterThan(-1);
+    expect(refusalAt).toBeLessThan(pullAt);
+
+    const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");
+    const autoJoinEnd = mainSource.indexOf("ipcMain.handle(", autoJoinStart);
+    expect(autoJoinStart).toBeGreaterThan(-1);
+    expect(autoJoinEnd).toBeGreaterThan(autoJoinStart);
+    const autoJoin = mainSource.slice(autoJoinStart, autoJoinEnd);
+    const autoRefusalAt = autoJoin.indexOf("joinedSharedChannelLimitRefusal(");
+    expect(autoRefusalAt).toBeGreaterThan(-1);
+    // Ahead of the DM home claim as well: a claim left behind for a join that
+    // never happened pins the share to a workspace that holds no row for it.
+    for (const durable of ["claimDmHome(", "pullSharedChannel({"]) {
+      const durableAt = autoJoin.indexOf(durable);
+      expect(durableAt, durable).toBeGreaterThan(-1);
+      expect(autoRefusalAt, durable).toBeLessThan(durableAt);
+    }
+  });
 });

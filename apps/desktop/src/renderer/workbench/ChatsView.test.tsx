@@ -706,6 +706,60 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
 
+  // #618 codex P2. A refresh nobody asked for that FAILED learned nothing, so
+  // it takes no data lane — and it must take no reachability lane either.
+  // Claiming one let a background failure outrank the answer already in
+  // flight: the listing landed, its rows rendered, and "could not read your
+  // shares" stayed on top of them until some later refresh happened.
+  it("lets an in-flight listing clear the notice a later background failure raised", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    // The mount's read never settles until this test says so; the background
+    // refresh behind it fails first and therefore holds the NEWER ticket.
+    let resolveMount!: (value: ReturnType<typeof shareListing>) => void;
+    const mountRead = new Promise<ReturnType<typeof shareListing>>((resolve) => {
+      resolveMount = resolve;
+    });
+    bridgeMock.listChatChannelShares
+      .mockReturnValueOnce(mountRead)
+      .mockRejectedValue(new Error("offline"));
+
+    const view = render(navigator(0));
+    await waitFor(() =>
+      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1),
+    );
+    // The background refresh: nothing has answered yet, so it fills in.
+    view.rerender(navigator(1));
+    await waitFor(() =>
+      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2),
+    );
+    expect(await screen.findByTestId("chats-shares-unreadable")).toBeTruthy();
+
+    // Now the read that was always in flight answers, authoritatively.
+    resolveMount(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
+
+    // Its rows land, and the notice goes with them — an older ticket still
+    // answers a question the newer failure never learned anything about.
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-shares-unreadable")).toBeNull();
+    });
+  });
+
   // The cached rows stay (that is #551), and now they are labelled: they are
   // real, they are just older than this failure.
   it("marks cached invitations as possibly out of date while the relay is unreachable", async () => {

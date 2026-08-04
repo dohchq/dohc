@@ -1173,7 +1173,13 @@ export function ChatsView(props: {
           committedLane.current.relayShares > 0;
         if (answered) return;
         setChannelShares(null);
-        if (claimLanes(["relayReach"], ticket)) setSharesUnreadable(true);
+        // Claims NO lane, reachability included. This refresh learned nothing
+        // and only fills in where nothing has answered yet — so a real answer
+        // still in flight, issued EARLIER and therefore holding an older
+        // ticket, must still be able to correct it. Taking the lane here left
+        // "dohc could not read your shares" standing over a listing that then
+        // arrived and worked.
+        setSharesUnreadable(true);
         setSharesWorkspaceId(workspaceId);
         return;
       }

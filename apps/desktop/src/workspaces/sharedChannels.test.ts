@@ -13,6 +13,7 @@ import {
   endJoinedChannel,
   JoinedSharedChannelLimitError,
   joinedSharedChannelForTarget,
+  joinedSharedChannelLimitRefusal,
   mergeJoinedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
@@ -299,10 +300,11 @@ describe("mergeJoinedChannel", () => {
       },
     ];
 
+    // The cap counts LIVE rows. An ended row is a tombstone the user cannot
+    // delete, so it must not consume the budget — see mergeJoinedChannel.
     for (const account of accounts) {
       it(`fits ${account.name} under the limit`, () => {
-        const rows = account.dms + account.channels + account.ended;
-        expect(rows).toBeLessThan(MAX_CHAT_CHANNEL_SHARE_ROWS);
+        expect(account.dms + account.channels).toBeLessThan(MAX_CHAT_CHANNEL_SHARE_ROWS);
       });
     }
 
@@ -310,28 +312,74 @@ describe("mergeJoinedChannel", () => {
     // table above could be trimmed to fit whatever number the constant holds.
     it("leaves headroom beyond the heaviest account measured", () => {
       const heaviest = Math.max(
-        ...accounts.map((account) => account.dms + account.channels + account.ended),
+        ...accounts.map((account) => account.dms + account.channels),
       );
-      expect(heaviest).toBe(1449);
+      expect(heaviest).toBe(1249);
       expect(MAX_CHAT_CHANNEL_SHARE_ROWS).toBeGreaterThan(heaviest * 2);
+      // The tombstones the heaviest account also carries: durable, uncounted,
+      // and the reason the cap counts live rows rather than all of them.
+      expect(Math.max(...accounts.map((account) => account.ended))).toBe(200);
     });
   });
 
-  it("refuses a join that would grow the lane past the limit, naming the limit", () => {
-    const full = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS }, (_, index) =>
+  function fullLane() {
+    return Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS }, (_, index) =>
       joined({ shareId: `share-${index}`, channelWireId: `wire-${index}` }),
     );
+  }
+  const newcomer = { shareId: "share-new", channelWireId: "wire-new" };
+
+  it("refuses a join that would grow the lane past the limit, naming the limit", () => {
+    const full = fullLane();
     // At the limit, one more row is one too many.
-    expect(() =>
-      mergeJoinedChannel(full, joined({ shareId: "share-new", channelWireId: "wire-new" })),
-    ).toThrow(JoinedSharedChannelLimitError);
-    // The refusal names the constraint, the observed count, the configured
-    // limit, its unit, and what the user can do — nothing else reports it.
-    expect(() =>
-      mergeJoinedChannel(full, joined({ shareId: "share-new", channelWireId: "wire-new" })),
-    ).toThrow(
-      `This workspace holds ${MAX_CHAT_CHANNEL_SHARE_ROWS} shared chat channels; the limit is ${MAX_CHAT_CHANNEL_SHARE_ROWS} channels. Leave a shared channel to join another.`,
+    expect(() => mergeJoinedChannel(full, joined(newcomer))).toThrow(
+      JoinedSharedChannelLimitError,
     );
+    // The refusal names the constraint, the observed count, the configured
+    // limit, its unit, and a recovery — nothing else reports it.
+    const message = `This workspace has ${MAX_CHAT_CHANNEL_SHARE_ROWS} shared chat channels; the limit is ${MAX_CHAT_CHANNEL_SHARE_ROWS}. Leave a shared channel, then join this one.`;
+    expect(joinedSharedChannelLimitRefusal(full, newcomer)).toBe(message);
+    expect(() => mergeJoinedChannel(full, joined(newcomer))).toThrow(message);
+  });
+
+  // #617 codex P2: the refusal above prescribes leaving a channel, and
+  // leaving only marks the row ended. If ended rows kept their place in the
+  // budget the instruction would be false — the lane would stay full for
+  // good. The recovery it names has to work.
+  it("frees capacity when the user leaves a channel, which is what the refusal tells them to do", () => {
+    const full = fullLane();
+    expect(joinedSharedChannelLimitRefusal(full, newcomer)).not.toBeNull();
+
+    const afterLeave = endJoinedChannel(full, "share-3");
+    // Nothing was deleted — the tombstone still gates writes into share-3.
+    expect(afterLeave).toHaveLength(MAX_CHAT_CHANNEL_SHARE_ROWS);
+    expect(afterLeave.find((row) => row.shareId === "share-3")?.ended).toBe(true);
+    // And the join it refused now fits.
+    expect(joinedSharedChannelLimitRefusal(afterLeave, newcomer)).toBeNull();
+    const merged = mergeJoinedChannel(afterLeave, joined(newcomer));
+    expect(merged).toHaveLength(MAX_CHAT_CHANNEL_SHARE_ROWS + 1);
+    expect(merged.filter((row) => row.ended !== true)).toHaveLength(
+      MAX_CHAT_CHANNEL_SHARE_ROWS,
+    );
+  });
+
+  // The pre-flight check exists so both join paths can refuse BEFORE they
+  // pull the share's log and claim its DM home. It must answer from registry
+  // rows alone, and it must agree with the merge in both directions.
+  it("answers the same refusal the merge would raise, from the rows alone", () => {
+    const full = fullLane();
+    expect(joinedSharedChannelLimitRefusal(full, newcomer)).not.toBeNull();
+    // A re-join replaces a row, so it never grows the live set.
+    expect(
+      joinedSharedChannelLimitRefusal(full, {
+        shareId: "share-7",
+        channelWireId: "wire-7",
+      }),
+    ).toBeNull();
+    // A lane of pure tombstones consumes no budget at all.
+    const tombstones = full.map((row) => ({ ...row, ended: true }));
+    expect(joinedSharedChannelLimitRefusal(tombstones, newcomer)).toBeNull();
+    expect(() => mergeJoinedChannel(tombstones, joined(newcomer))).not.toThrow();
   });
 
   // A lane an earlier build already grew past the limit must stay repairable:
@@ -341,6 +389,12 @@ describe("mergeJoinedChannel", () => {
     const over = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) =>
       joined({ shareId: `share-${index}`, channelWireId: `wire-${index}` }),
     );
+    expect(
+      joinedSharedChannelLimitRefusal(over, {
+        shareId: "share-7",
+        channelWireId: "wire-7",
+      }),
+    ).toBeNull();
     const repaired = mergeJoinedChannel(
       over,
       joined({ shareId: "share-7", channelWireId: "wire-7", access: "read-only" }),
