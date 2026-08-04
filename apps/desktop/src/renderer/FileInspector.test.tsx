@@ -874,14 +874,17 @@ describe("engine markdown source view", () => {
   const DOC_MARKDOWN = "---\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.\n";
 
   /**
-   * Put a draft in the document WITHOUT any pointer event.
+   * Put a draft in the document through the SOURCE editor — a textarea, and
+   * the surface these draft tests actually mean.
    *
-   * A click into the mounted WYSIWYG surface reaches prosemirror's mousedown,
-   * which calls `elementFromPoint` — jsdom 27 does not implement it, so the
-   * handler throws asynchronously, AFTER the test that caused it has passed.
-   * Vitest reports that as an unhandled error and fails the whole run with
-   * every assertion green. Stepping to source mode (a textarea) and firing a
-   * change event keeps the draft path honest and the pointer out of it.
+   * Written to keep pointers out of the WYSIWYG surface, because
+   * ProseMirror's `mousedown` called `elementFromPoint` and jsdom did not
+   * implement it: the handler threw after the test had passed, failing the
+   * run with every assertion green. #619 has since stubbed hit testing in
+   * `vitest.setup.ts` (measured: the TypeError returns in 21 of 32 loaded
+   * runs without it), so that hazard is gone. This stays because driving the
+   * textarea is the honest way to say "the user typed a draft here" — not
+   * because the pointer is unsafe.
    */
   async function typeIntoSourceEditor(value: string): Promise<HTMLElement> {
     // Read -> WYSIWYG -> source: the surface may start in any of the three,
