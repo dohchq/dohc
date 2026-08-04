@@ -311,10 +311,10 @@ function collisionVariants(
 }
 
 /**
- * Is this copy failure about the NAME being too long, or about the source?
- * Exported for unit testing, as `extractFrontmatterIcon` above is: neither an
- * ENOENT from a vanished source nor a real MAX_PATH refusal is arrangeable on
- * demand in that suite, and getting the two confused is the whole point.
+ * COULD this copy failure be about the name being too long? Exported for unit
+ * testing, as `extractFrontmatterIcon` above is: neither an ENOENT from a
+ * vanished source nor a real MAX_PATH refusal is arrangeable on demand in that
+ * suite, and getting the two confused is the whole point.
  *
  * `maxEntryChars` must be the SAME budget that shaped the candidate list. An
  * earlier revision compared the composed path against `WINDOWS_MAX_PATH_CHARS`
@@ -322,8 +322,10 @@ function collisionVariants(
  * Linux, where a 259-character path is ordinary, a genuinely missing source
  * read as a length refusal, walked the shorter rungs, and was counted as
  * SKIPPED instead of aborting the batch. Two copies of one fact, disagreeing.
+ *
+ * "Could" is as far as arithmetic gets for ENOENT. See `bothStillThere`.
  */
-export function isLengthRefusal(
+export function couldBeLengthRefusal(
   code: string | undefined,
   candidate: string,
   maxEntryChars: number,
@@ -331,10 +333,34 @@ export function isLengthRefusal(
   // Says so outright, on every platform.
   if (code === "ENAMETOOLONG") return true;
   // Windows reports an over-long path as ENOENT. So does a missing source,
-  // everywhere -- so ENOENT reads as length only where a composed-path limit
-  // actually applies AND this name exceeds it. Off Windows the budget is
+  // everywhere -- so ENOENT can only be about length where a composed-path
+  // limit actually applies AND this name exceeds it. Off Windows the budget is
   // Infinity and this is never true.
   return code === "ENOENT" && candidate.length > maxEntryChars;
+}
+
+// The arithmetic above says an over-budget name COULD be refused for length.
+// It cannot say it WAS. On a long-path-aware Windows host the budget is not
+// the real limit -- a 300-character path works there -- so an ENOENT means
+// something that should exist does not: the source moved after the file dialog
+// validated it, or the destination folder went away. Predicting from the
+// budget silently counted that as `skipped`, and a user does not notice a
+// skipped line.
+//
+// So ask, exactly as the ladder does for the rename. Only on the ambiguous
+// branch: ENAMETOOLONG never reaches here, and neither does any other errno.
+async function bothStillThere(source: string, absDir: string): Promise<boolean> {
+  const [sourceThere, dirThere] = await Promise.all([
+    lstat(source).then(
+      () => true,
+      () => false,
+    ),
+    lstat(absDir).then(
+      () => true,
+      () => false,
+    ),
+  ]);
+  return sourceThere && dirThere;
 }
 
 // Why a trash ladder stopped before its next rung. Three outcomes, not two:
@@ -420,7 +446,11 @@ async function copyWithoutOverwrite(
         // EEXIST is the collision itself: take the next attempt NUMBER, not a
         // shorter spelling of this one.
         if (code === "EEXIST") break;
-        if (!isLengthRefusal(code, candidate, maxEntryChars)) throw error;
+        if (!couldBeLengthRefusal(code, candidate, maxEntryChars)) throw error;
+        // "Could" is not enough for an ENOENT: it is the one code that also
+        // means something vanished. A missing source or destination folder is
+        // a real failure and must surface, not be shortened into a skip.
+        if (code === "ENOENT" && !(await bothStillThere(source, absDir))) throw error;
         // No shorter rung left: a name this filesystem cannot hold skips the
         // source instead of aborting the batch.
         if (rung === candidates.length - 1) return null;

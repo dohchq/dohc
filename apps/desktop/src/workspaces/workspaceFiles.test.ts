@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import {
   mkdtemp,
   mkdir,
+  rm,
   readdir,
   readFile,
   stat,
@@ -9,12 +10,13 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   classifyLadderProbe,
   collectZipEntries,
-  isLengthRefusal,
+  couldBeLengthRefusal,
   copyIntoWorkspace,
   createFile,
   createFolder,
@@ -851,15 +853,15 @@ describe("copy length-refusal classification", () => {
   const NO_LIMIT = Number.POSITIVE_INFINITY;
 
   it("takes ENAMETOOLONG at its word on any platform", () => {
-    expect(isLengthRefusal("ENAMETOOLONG", "short.md", NO_LIMIT)).toBe(true);
-    expect(isLengthRefusal("ENAMETOOLONG", "short.md", WINDOWS_BUDGET)).toBe(true);
+    expect(couldBeLengthRefusal("ENAMETOOLONG", "short.md", NO_LIMIT)).toBe(true);
+    expect(couldBeLengthRefusal("ENAMETOOLONG", "short.md", WINDOWS_BUDGET)).toBe(true);
   });
 
   it("reads ENOENT as length only when this name exceeds the budget", () => {
-    expect(isLengthRefusal("ENOENT", "n".repeat(WINDOWS_BUDGET + 1), WINDOWS_BUDGET)).toBe(
+    expect(couldBeLengthRefusal("ENOENT", "n".repeat(WINDOWS_BUDGET + 1), WINDOWS_BUDGET)).toBe(
       true,
     );
-    expect(isLengthRefusal("ENOENT", "n".repeat(WINDOWS_BUDGET), WINDOWS_BUDGET)).toBe(
+    expect(couldBeLengthRefusal("ENOENT", "n".repeat(WINDOWS_BUDGET), WINDOWS_BUDGET)).toBe(
       false,
     );
   });
@@ -867,13 +869,67 @@ describe("copy length-refusal classification", () => {
   // The finding. Off Windows the budget is Infinity, so a 259-plus-character
   // path is ordinary and an ENOENT can only mean the source is gone.
   it("never reads ENOENT as length where no composed limit applies", () => {
-    expect(isLengthRefusal("ENOENT", "n".repeat(300), NO_LIMIT)).toBe(false);
-    expect(isLengthRefusal("ENOENT", "n".repeat(5000), NO_LIMIT)).toBe(false);
+    expect(couldBeLengthRefusal("ENOENT", "n".repeat(300), NO_LIMIT)).toBe(false);
+    expect(couldBeLengthRefusal("ENOENT", "n".repeat(5000), NO_LIMIT)).toBe(false);
   });
 
   it("leaves every other failure to abort the batch", () => {
     for (const code of ["EACCES", "EPERM", "EIO", "EXDEV", undefined]) {
-      expect(isLengthRefusal(code, "n".repeat(5000), WINDOWS_BUDGET), code).toBe(false);
+      expect(couldBeLengthRefusal(code, "n".repeat(5000), WINDOWS_BUDGET), code).toBe(false);
+    }
+  });
+});
+
+// Arithmetic says an over-budget name COULD be refused for length; it cannot
+// say it WAS. On a long-path-aware host the budget is not the real limit -- a
+// 300-character path works -- so an ENOENT there means something vanished.
+// Predicting from the budget silently counted that as `skipped`, and nobody
+// reads a skipped line.
+describe("import surfaces a vanished source instead of skipping it", () => {
+  it("throws rather than skipping when the source is gone in a deep folder", async () => {
+    const base = await mkdtemp(join(tmpdir(), "dohc-vanished-"));
+    try {
+      const root = join(
+        base,
+        ...Array.from({ length: 8 }, (_, index) => `nested-folder-${index}`),
+      );
+      await mkdir(root, { recursive: true });
+      // Over the legacy budget for this folder, which is what used to make an
+      // ENOENT read as "too long" rather than "not there".
+      const name = `${"n".repeat(120)}.md`;
+      expect(name.length).toBeGreaterThan(259 - root.length - 1);
+      const missing = join(base, name); // validated by the dialog, then gone
+
+      await expect(copyIntoWorkspace(root, [missing])).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
+        () => undefined,
+      );
+    }
+  });
+
+  // The converse still holds: a source that IS there, with a name this path
+  // cannot hold, is still shortened rather than failing the batch.
+  it("still shortens a real name that the path cannot hold", async () => {
+    const base = await mkdtemp(join(tmpdir(), "dohc-longname-"));
+    try {
+      const root = join(base, "ws");
+      await mkdir(root, { recursive: true });
+      const name = `${"n".repeat(120)}.md`;
+      const source = join(base, name);
+      await writeFile(source, "keep me");
+      // A collision forces the variant path, where the ladder lives.
+      await writeFile(join(root, name), "already here");
+
+      const outcome = await copyIntoWorkspace(root, [source]);
+      expect(outcome.skipped).toBe(0);
+      expect(outcome.imported).toHaveLength(1);
+    } finally {
+      await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
+        () => undefined,
+      );
     }
   });
 });
