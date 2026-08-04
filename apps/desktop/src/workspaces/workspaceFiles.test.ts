@@ -12,6 +12,7 @@ import {
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  classifyLadderProbe,
   collectZipEntries,
   copyIntoWorkspace,
   createFile,
@@ -791,5 +792,49 @@ describe("importDroppedPaths", () => {
     );
     expect(outcome).toEqual({ imported: ["notes/doc.md"], skipped: 0 });
     expect(await readFile(join(root, "notes", "doc.md"), "utf8")).toBe("dropped");
+  });
+});
+
+// The trash ladder is several renames, and it re-checks the source between
+// them. This is the decision it makes, separated from the I/O because an
+// EACCES on that second look is not arrangeable here -- and it is the case
+// that carried the defect: a check that FAILED was reported as a change.
+describe("trash ladder stop classification", () => {
+  const entry = { ino: 7, dev: 3 };
+
+  it("carries on only when the entry is provably the same", () => {
+    expect(classifyLadderProbe(entry, { looked: true, now: { ino: 7, dev: 3 } })).toBeNull();
+  });
+
+  it("stops on a replacement", () => {
+    expect(classifyLadderProbe(entry, { looked: true, now: { ino: 8, dev: 3 } })).toBe(
+      "replaced",
+    );
+    expect(classifyLadderProbe(entry, { looked: true, now: { ino: 7, dev: 4 } })).toBe(
+      "replaced",
+    );
+  });
+
+  it("reports a path that is gone as gone, not as a replacement", () => {
+    expect(classifyLadderProbe(entry, { looked: false, code: "ENOENT" })).toBe("gone");
+  });
+
+  // The finding: EACCES, EIO and friends establish nothing about the path.
+  // They establish that dohc could not look, which is a different sentence.
+  it("says it could not check when the look itself failed", () => {
+    for (const code of ["EACCES", "EIO", "EPERM", undefined]) {
+      expect(classifyLadderProbe(entry, { looked: false, code }), code).toBe("unchecked");
+    }
+  });
+
+  it("says it could not check when there was no starting identity", () => {
+    expect(classifyLadderProbe(null, { looked: true, now: entry })).toBe("unchecked");
+  });
+
+  // A filesystem with no inode to give proves neither sameness nor difference.
+  it("says it could not check when the filesystem gives no inode", () => {
+    expect(classifyLadderProbe({ ino: 0, dev: 3 }, { looked: true, now: entry })).toBe(
+      "unchecked",
+    );
   });
 });

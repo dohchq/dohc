@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  collisionVariantPlan,
+  entryCharBudget,
   fitWithinNameMax,
   NAME_MAX_UNITS,
   nameUnitFor,
-  trashEntryCharBudget,
   trashEntryPlan,
   WINDOWS_MAX_PATH_CHARS,
 } from "./trashEntryName";
@@ -115,7 +116,7 @@ describe("the ladder, longest name first", () => {
   it("offers the real name first, and only that when it fits", () => {
     const plan = trashEntryPlan("notes.md", PREFIX, {
       unit: "utf16",
-      maxEntryChars: trashEntryCharBudget(TRASH_DIR, "win32"),
+      maxEntryChars: entryCharBudget(TRASH_DIR, "win32"),
     });
     expect(plan.candidates).toEqual([`${PREFIX}notes.md`]);
     expect(plan.exhausted).toBe(false);
@@ -125,7 +126,7 @@ describe("the ladder, longest name first", () => {
     const name = `${"a".repeat(226)}.txt`;
     const plan = trashEntryPlan(name, PREFIX, {
       unit: "utf16",
-      maxEntryChars: trashEntryCharBudget(TRASH_DIR, "win32"),
+      maxEntryChars: entryCharBudget(TRASH_DIR, "win32"),
     });
     expect(plan.candidates[0]).toBe(`${PREFIX}${name}`);
     // Then the component limit, then the composed-path limit: shorter each
@@ -144,18 +145,18 @@ describe("the ladder, longest name first", () => {
     const name = `${"a".repeat(226)}.txt`;
     const plan = trashEntryPlan(name, PREFIX, {
       unit: "utf8",
-      maxEntryChars: trashEntryCharBudget("/home/ice/ws/.dohc/trash", "linux"),
+      maxEntryChars: entryCharBudget("/home/ice/ws/.dohc/trash", "linux"),
     });
     expect(plan.candidates).toHaveLength(2);
     expect(plan.exhausted).toBe(false);
   });
 
   it("budgets the whole path on Windows and nothing anywhere else", () => {
-    expect(trashEntryCharBudget(TRASH_DIR, "win32")).toBe(
+    expect(entryCharBudget(TRASH_DIR, "win32")).toBe(
       WINDOWS_MAX_PATH_CHARS - TRASH_DIR.length - 1,
     );
-    expect(trashEntryCharBudget(TRASH_DIR, "linux")).toBe(Number.POSITIVE_INFINITY);
-    expect(trashEntryCharBudget(TRASH_DIR, "darwin")).toBe(Number.POSITIVE_INFINITY);
+    expect(entryCharBudget(TRASH_DIR, "linux")).toBe(Number.POSITIVE_INFINITY);
+    expect(entryCharBudget(TRASH_DIR, "darwin")).toBe(Number.POSITIVE_INFINITY);
   });
 
   // When even the unique prefix cannot fit there is no shorter name to try,
@@ -165,7 +166,7 @@ describe("the ladder, longest name first", () => {
     const deep = `C:\\${"nested\\".repeat(30)}.dohc\\trash`;
     const plan = trashEntryPlan("notes.md", PREFIX, {
       unit: "utf16",
-      maxEntryChars: trashEntryCharBudget(deep, "win32"),
+      maxEntryChars: entryCharBudget(deep, "win32"),
     });
     expect(plan.exhausted).toBe(true);
     // It still offers the real name: on a host where the legacy limit does
@@ -260,5 +261,56 @@ describe("truncation decodes filename bytes, not a text stream", () => {
       }
     }
     expect(compared).toBeGreaterThan(50);
+  });
+});
+
+// The collision path had the ladder's mechanism sitting right next to it and
+// not wired in. Measuring the component in UTF-16 units is right for NTFS and
+// leaves a multibyte name LONGER than the old byte rule did, so a colliding
+// CJK name in a deep folder composed past MAX_PATH -- and copyFile answered
+// ENOENT, #613's original symptom arriving through the import path.
+describe("collision variants ride the same ladder", () => {
+  // A real Windows-shaped depth, written without escapes so the length is
+  // obvious: 190 characters, leaving 68 for the entry name.
+  const DEEP = `C:${"/nested-folder".repeat(13)}/inbox`;
+
+  it("offers the plain variant first, and only that when it fits", () => {
+    expect(collisionVariantPlan("report.md", 2, { unit: "utf16" })).toEqual([
+      "report (2).md",
+    ]);
+  });
+
+  it("suffixes dotfiles and extensionless names at the end", () => {
+    expect(collisionVariantPlan(".env", 2, { unit: "utf16" })).toEqual([".env (2)"]);
+    expect(collisionVariantPlan("Makefile", 3, { unit: "utf16" })).toEqual([
+      "Makefile (3)",
+    ]);
+  });
+
+  // The regression: 84 CJK characters is 84 UTF-16 units, so the component
+  // rule keeps them all -- and the composed path then passes 259.
+  it("adds a shorter candidate when the composed path would not fit", () => {
+    const name = `${"中".repeat(84)}.md`;
+    const budget = entryCharBudget(DEEP, "win32");
+    const plan = collisionVariantPlan(name, 2, { unit: "utf16", maxEntryChars: budget });
+
+    expect(plan).toHaveLength(2);
+    // Rung 1 keeps every character, and is tried first.
+    expect(plan[0]).toBe(`${"中".repeat(84)} (2).md`);
+    expect(`${DEEP}/${plan[0]}`.length).toBeGreaterThan(WINDOWS_MAX_PATH_CHARS);
+    // Rung 2 is the one that fits, used only once the platform refuses rung 1.
+    expect(`${DEEP}/${plan[1]}`.length).toBeLessThanOrEqual(WINDOWS_MAX_PATH_CHARS);
+    expect(plan[1]!.endsWith(" (2).md")).toBe(true);
+  });
+
+  // Off Windows there is no composed-path limit worth budgeting, so inventing
+  // a second rung would truncate for a limit that does not exist.
+  it("has no second rung where no composed limit applies", () => {
+    const name = `${"中".repeat(84)}.md`;
+    const plan = collisionVariantPlan(name, 2, {
+      unit: "utf8",
+      maxEntryChars: entryCharBudget("/home/ice/inbox", "linux"),
+    });
+    expect(plan).toHaveLength(1);
   });
 });

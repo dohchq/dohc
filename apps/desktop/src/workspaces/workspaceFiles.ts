@@ -1,12 +1,12 @@
 import {
   classifyPath,
   DOHC_TRASH_GUARD,
-  fitWithinNameMax,
+  collisionVariantPlan,
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
   nameUnitFor,
   sameFsEntry,
-  trashEntryCharBudget,
+  entryCharBudget,
   trashEntryPlan,
   WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
@@ -21,7 +21,7 @@ import {
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -293,17 +293,72 @@ export async function resolveImportDestination(
 // as skipped instead of probing forever.
 const MAX_COLLISION_RENAMES = 99;
 
-// "report.md" + attempt 2 -> "report (2).md". Dotfiles (".env") and
-// extensionless names suffix at the end (".env (2)", "Makefile (2)").
-// The stem is byte-truncated so the variant never exceeds NAME_MAX — a
-// near-255-byte basename colliding must degrade to a shorter variant, not
-// abort the whole import with ENAMETOOLONG (codex P2).
-function collisionVariant(name: string, attempt: number): string {
-  const dot = name.lastIndexOf(".");
-  const stem = dot > 0 ? name.slice(0, dot) : name;
-  const extension = dot > 0 ? name.slice(dot) : "";
-  const marker = ` (${attempt})`;
-  return `${fitWithinNameMax(stem, marker + extension, { unit: nameUnitFor(process.platform) })}${marker}${extension}`;
+// "report.md" + attempt 2 -> "report (2).md", longest first. The naming rule
+// is shared with the trash, because it is the same rule: fit the component in
+// the platform's unit, and keep a shorter candidate for the composed-path
+// limit where one applies. Without that second rung a colliding multibyte name
+// in a deep folder composes past MAX_PATH and copyFile answers ENOENT, which
+// aborts the whole import.
+function collisionVariants(name: string, attempt: number, absDir: string): string[] {
+  return collisionVariantPlan(name, attempt, {
+    unit: nameUnitFor(process.platform),
+    maxEntryChars: entryCharBudget(absDir, process.platform),
+  });
+}
+
+// Why a trash ladder stopped before its next rung. Three outcomes, not two:
+// "dohc could not check" is a different fact from "something changed it", and
+// reporting the second when only the first was established is the same defect
+// this file's delete path was fixed for -- a confident claim on no evidence.
+type LadderStop = "gone" | "replaced" | "unchecked";
+
+/**
+ * The decision, separated from the I/O. Exported for unit testing, as
+ * extractFrontmatterIcon above is: an EACCES on the second look is not
+ * arrangeable in this suite, and it is the case that carries the defect.
+ *
+ * `null` means "same entry, carry on".
+ */
+export function classifyLadderProbe(
+  started: { ino: number; dev: number } | null,
+  probe:
+    | { looked: true; now: { ino: number; dev: number } }
+    | { looked: false; code: string | undefined },
+): LadderStop | null {
+  // No starting identity means there is nothing to compare against, so the
+  // question cannot be answered rather than answered "changed".
+  if (!started) return "unchecked";
+  // Only ENOENT means absence. EACCES, EIO and the rest establish nothing
+  // about the path -- they establish that dohc could not look.
+  if (!probe.looked) return probe.code === "ENOENT" ? "gone" : "unchecked";
+  const identity = sameFsEntry(started, probe.now);
+  if (identity === "same") return null;
+  return identity === "replaced" ? "replaced" : "unchecked";
+}
+
+async function ladderStop(
+  target: string,
+  started: Stats | null,
+): Promise<LadderStop | null> {
+  const probe = await lstat(target).then(
+    (now) => ({ looked: true as const, now }),
+    (error: unknown) => ({
+      looked: false as const,
+      code: (error as NodeJS.ErrnoException).code,
+    }),
+  );
+  return classifyLadderProbe(started, probe);
+}
+
+function ladderStopReason(name: string, stop: LadderStop): string {
+  switch (stop) {
+    case "gone":
+      return `dohc did not move ${name} to the trash. ${name} is no longer at that path: something else moved or deleted it.`;
+    case "replaced":
+      return `dohc did not move ${name} to the trash. A different entry is at that path now: something replaced it while dohc worked.`;
+    case "unchecked":
+      return `dohc did not move ${name} to the trash. dohc could not check that path, so it stopped rather than move something it could not identify.`;
+  }
 }
 
 // One copy that never overwrites: COPYFILE_EXCL on every attempt, retrying
@@ -318,14 +373,33 @@ async function copyWithoutOverwrite(
   name: string,
 ): Promise<string | null> {
   for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
-    const candidate = attempt === 1 ? name : collisionVariant(name, attempt);
-    try {
-      await copyFile(source, join(absDir, candidate), constants.COPYFILE_EXCL);
-      return candidate;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENAMETOOLONG") return null;
-      if (code !== "EEXIST") throw error;
+    // Longest first, exactly as the trash ladder does: a shorter name is used
+    // only once the platform has actually refused the longer one for length.
+    const candidates =
+      attempt === 1 ? [name] : collisionVariants(name, attempt, absDir);
+    for (const [rung, candidate] of candidates.entries()) {
+      const destination = join(absDir, candidate);
+      try {
+        await copyFile(source, destination, constants.COPYFILE_EXCL);
+        return candidate;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        // EEXIST is the collision itself: take the next attempt NUMBER, not a
+        // shorter spelling of this one.
+        if (code === "EEXIST") break;
+        // ENAMETOOLONG says "too long" outright. Windows says ENOENT -- but
+        // ENOENT also means the SOURCE is missing, which is a real error, so
+        // it only reads as length when the composed path is actually over the
+        // legacy limit. Only ENOENT means absence; everything else keeps its
+        // own meaning, and that cuts both ways.
+        const tooLong =
+          code === "ENAMETOOLONG" ||
+          (code === "ENOENT" && destination.length > WINDOWS_MAX_PATH_CHARS);
+        if (!tooLong) throw error;
+        // No shorter rung left: a name this filesystem cannot hold skips the
+        // source instead of aborting the batch.
+        if (rung === candidates.length - 1) return null;
+      }
     }
   }
   return null;
@@ -670,7 +744,7 @@ export async function moveIntoWorkspaceTrash(
   const prefix = `${Date.now()}-${randomUUID()}-`;
   const plan = trashEntryPlan(basename(target), prefix, {
     unit: nameUnitFor(process.platform),
-    maxEntryChars: trashEntryCharBudget(trashDir, process.platform),
+    maxEntryChars: entryCharBudget(trashDir, process.platform),
   });
   // Captured ONCE, before the first rename. A rung that failed for length
   // leaves a window in which another process can REPLACE the source, and the
@@ -681,16 +755,10 @@ export async function moveIntoWorkspaceTrash(
   let moveError: unknown = null;
   for (const [rung, candidate] of plan.candidates.entries()) {
     if (rung > 0) {
-      const now = await lstat(target).catch(() => null);
-      const identity =
-        started && now ? sameFsEntry(started, now) : ("unknown" as const);
-      // "unknown" stops it too: absent evidence is not permission to move a
-      // file this code can no longer prove is the right one.
-      if (identity !== "same") {
-        throw new Error(
-          `dohc did not move ${basename(target)} to the trash. Something changed that path while dohc worked. Check the folder, then try again.`,
-        );
-      }
+      const stop = await ladderStop(target, started);
+      // "could not check" stops it too: absent evidence is not permission to
+      // move a file this code can no longer prove is the right one.
+      if (stop) throw new Error(ladderStopReason(basename(target), stop));
     }
     const trashed = join(trashDir, candidate);
     try {

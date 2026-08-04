@@ -22,7 +22,7 @@ import {
   packageManagerFromFiles,
   nameUnitFor,
   sameFsEntry,
-  trashEntryCharBudget,
+  entryCharBudget,
   trashEntryPlan,
   WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
@@ -1128,7 +1128,7 @@ export async function deleteWorkspacePath(
   const prefix = `${Date.now()}-${randomUUID()}-`;
   const plan = trashEntryPlan(basename(resolved.normalized), prefix, {
     unit: nameUnitFor(process.platform),
-    maxEntryChars: trashEntryCharBudget(trashDir, process.platform),
+    maxEntryChars: entryCharBudget(trashDir, process.platform),
   });
 
   let moveError: unknown = null;

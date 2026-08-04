@@ -162,12 +162,39 @@ export function trashEntryPlan(
   return { candidates, exhausted };
 }
 
+// "report.md" + attempt 2 -> "report (2).md", for a copy that must not
+// overwrite. Dotfiles (".env") and extensionless names suffix at the end.
+//
+// The SAME ladder as a trash entry, and for the same reason: the stem is fitted
+// to the per-component limit in the platform's unit, and a second, shorter
+// candidate also fits the composed-path limit where one applies. Measuring the
+// component in UTF-16 units is right for NTFS and leaves a multibyte name
+// LONGER than the old byte rule did, so without this rung a colliding CJK name
+// in a deep folder composes past MAX_PATH -- and `copyFile` answers ENOENT,
+// which is #613's original symptom arriving through the collision path.
+export function collisionVariantPlan(
+  name: string,
+  attempt: number,
+  options: { unit?: NameUnit; maxEntryChars?: number } = {},
+): string[] {
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : "";
+  const suffix = ` (${attempt})${extension}`;
+  // fitWithinNameMax budgets against the rest of the name, whichever side it
+  // sits on: here the marker and extension follow the stem rather than lead it.
+  const variant = (maxEntryChars?: number) =>
+    `${fitWithinNameMax(stem, suffix, { unit: options.unit, maxEntryChars })}${suffix}`;
+  const rungs = [variant(), variant(options.maxEntryChars)];
+  return rungs[0] === rungs[1] ? [rungs[0]!] : rungs;
+}
+
 // How many characters an entry name may use inside `directory` IF the legacy
 // composed-path limit turns out to apply. Only Windows has one worth
 // budgeting -- PATH_MAX is 4096 on Linux and 1024 on macOS, both far past
 // anything the component limit allows -- so every other platform answers
 // Infinity and the component rule alone governs.
-export function trashEntryCharBudget(directory: string, platform: string): number {
+export function entryCharBudget(directory: string, platform: string): number {
   if (platform !== "win32") return Number.POSITIVE_INFINITY;
   return WINDOWS_MAX_PATH_CHARS - directory.length - 1; // 1 for the separator
 }
