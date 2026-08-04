@@ -1142,6 +1142,18 @@ export function DesktopWorkspaceShell(props: {
   // whatever the renderer's own capability read said.
   const statusSaysNoRecorder = (status: SyncStatusResult | null) =>
     Boolean(status?.historyRecordingOff || status?.historyRecordingUnavailable);
+  // The same answer read the other way round, for the surfaces that CALL on
+  // mount. A null status is not a live recorder: `getWorkspaceSettings` is one
+  // file read while `openWorkspace` waits for the watcher's first scan, so
+  // engine-on lands first on every open and the null window is the normal
+  // case, not a race. History can read `statusSaysNoRecorder` because it
+  // issues nothing until the status lands and its placeholder must never
+  // claim an opt-out main has not established (#542). Versions cannot: the
+  // selector calls the moment it mounts, so an unanswered status put the
+  // whole #620 loop — refusal, five retries, danger banner — inside that
+  // window.
+  const statusConfirmsRecorder = (status: SyncStatusResult | null) =>
+    status !== null && !statusSaysNoRecorder(status);
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
   const [cloudStatus, setCloudStatus] = useState<CloudStatusResult | null>(null);
@@ -2028,13 +2040,23 @@ export function DesktopWorkspaceShell(props: {
   // for a perfectly NORMAL workspace, and every version call is refused the
   // same way — the same retries and the same danger banner, from a different
   // cause (#620). Main's status is the single answer to "does anything record
-  // here", so it overrides that read here exactly as it does for history.
+  // here", so it overrides that read here exactly as it does for history —
+  // and it overrides it only once it has ANSWERED, which is why this reads
+  // `statusConfirmsRecorder` and not history's `!statusSaysNoRecorder`.
+  //
+  // THE version capability. Every version entry point reads this one value —
+  // the selector, the Try-in-version banner and review card, and the
+  // persisted compare tab below — so the fact is decided once. A surface that
+  // re-derives it drifts, which is exactly how the compare tab kept mounting
+  // after #614 gated the selector.
   const versionsEnabled =
-    engineEnabled && !isShareView && !statusSaysNoRecorder(syncStatus);
+    engineEnabled && !isShareView && statusConfirmsRecorder(syncStatus);
   // Chats key off the same capture (#615). A shared view gets no capture, so
-  // main refuses every Chats call — the panel, the tab, and the graph's chat
-  // mentions all reached requireEngineCapture and showed an error for a
-  // capability the share never had. Same fact, same branch.
+  // main refuses every Chats call — the panel, the tab, the graph's chat
+  // mentions and the linked-mentions panel under every open document all
+  // reached requireEngineCapture for a capability the share never had. Same
+  // fact, same branch, and THE chats capability: every chat entry point reads
+  // this one value.
   const chatsEnabled = engineEnabled && !isShareView;
   // Bumped after a version switch/merge/conflict resolution so open editors
   // re-read their file content immediately (FileInspector refreshKey).
@@ -2105,10 +2127,11 @@ export function DesktopWorkspaceShell(props: {
         // refreshHistory uses it (#620): this callback also runs from the
         // conflict review dialog, which the notice center opens with no
         // version surface on screen. Not asking leaves the previous statement
-        // standing — what the catch below already does.
+        // standing — what the catch below already does. Same three clauses as
+        // `versionsEnabled`, so the fetch cannot outlive the render gate.
         engineEnabled &&
         !isShareView &&
-        !statusSaysNoRecorder(syncStatusRef.current)
+        statusConfirmsRecorder(syncStatusRef.current)
       ) {
         // Nobody could name it: the operation changed no version, or it failed
         // and left an unknown one active. Ask. This read is the only remaining
@@ -3718,18 +3741,45 @@ export function DesktopWorkspaceShell(props: {
                 no longer available. Current history lives in the History rail.
               </div>
             ) : isVersionCompareTabPath(wb.activeTab) ? (
-              isShareView ? (
-                // A persisted compare tab on a shared view (#589). The page
-                // asks main for the versions, and a shared view has none —
-                // the same refusal the selector used to raise as a danger
-                // banner. The tab stays closeable and states the capability.
-                <div
-                  data-testid="version-compare-share-view"
-                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
-                >
-                  A shared view has no versions to compare. Close this tab to
-                  go back to the shared files.
-                </div>
+              // A persisted compare tab reads THE version capability, like
+              // every other version entry point. Gating it on the share fact
+              // alone left the whole #620 cause open: on a workspace whose
+              // capture build failed the page still mounted, called
+              // listWorkspaceVersions and compareWorkspaceVersions, and said
+              // "Could not compare with Main."
+              !versionsEnabled ? (
+                isShareView ? (
+                  // A persisted compare tab on a shared view (#589). The page
+                  // asks main for the versions, and a shared view has none —
+                  // the same refusal the selector used to raise as a danger
+                  // banner. The tab stays closeable and states the capability.
+                  <div
+                    data-testid="version-compare-share-view"
+                    className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                  >
+                    A shared view has no versions to compare. Close this tab to
+                    go back to the shared files.
+                  </div>
+                ) : syncStatus === null ? (
+                  // Nothing has answered yet. The tab must not mount the page
+                  // and must not state a capability either: the renderer's own
+                  // read proves nothing about what main recorded (#542), so
+                  // this window gets a load state, not a claim.
+                  <PanelLoading label="versions" />
+                ) : (
+                  // Main answered, and the answer was no recorder — or the
+                  // renderer's own read failed, which asserts nothing. One
+                  // line each, and the Next this surface really has: the tab
+                  // closes. Neither line names a cause main did not establish.
+                  <div
+                    data-testid="version-compare-off"
+                    className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                  >
+                    {statusSaysNoRecorder(syncStatus)
+                      ? "This workspace has no versions to compare. Close this tab to go back to your files."
+                      : "Versions are unavailable. dohc could not confirm whether this workspace has versions. Close this tab to go back to your files."}
+                  </div>
+                )
               ) : (
                 <VersionComparePage
                   // Remount per version AND per state change so the diff
@@ -3802,6 +3852,10 @@ export function DesktopWorkspaceShell(props: {
                 engineVersionKey={versionEpoch}
                 onOpenPath={openPathWithHeading}
                 onOpenChatMention={openChatMention}
+                // The linked-mentions panel asks main for chat mentions, which
+                // is a Chats call like any other (#615) — same gate as the
+                // panel, the tab and the graph's toggle.
+                chatMentionsAvailable={chatsEnabled}
                 scrollTarget={searchScrollTarget ?? undefined}
                 headingTarget={
                   headingTarget?.path === wb.activeTab

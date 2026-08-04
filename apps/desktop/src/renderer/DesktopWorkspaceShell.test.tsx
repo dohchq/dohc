@@ -288,7 +288,18 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       session: null,
     })),
     readWorkspaceText: vi.fn(async () => ({ text: "# Doc\n", truncated: false })),
-    readWorkspaceGraph: vi.fn(async () => ({
+    // The linked-mentions panel bails without this, and its chat-mention read
+    // is an ENGINE CAPTURE call (#615) — so a fake that omits it makes every
+    // no-call pin on that read pass for the wrong reason.
+    getBacklinks: vi.fn(async () => ({ sources: [] as never[] })),
+    listChatFileMentions: vi.fn(async () => ({ mentions: [] as never[] })),
+    // Typed to the payload the shell really sends: `includeChatMentions` is
+    // the flag that decides whether main runs this read through
+    // requireEngineCapture, so a pin on it has to be able to read it back.
+    readWorkspaceGraph: vi.fn(async (_payload: {
+      workspaceId: string;
+      includeChatMentions?: boolean;
+    }) => ({
       nodes: [
         { path: "a.md", title: "A", incoming: 0, outgoing: 1 },
         { path: "b.md", title: "B", incoming: 1, outgoing: 0 },
@@ -497,6 +508,7 @@ function makeShareBridge(
     "listChatChannels",
     "listChannelThreads",
     "listFileChats",
+    "listChatFileMentions",
     "syncDms",
   ] as const) {
     bridge[call] = vi.fn(async (): Promise<never> => {
@@ -5409,12 +5421,18 @@ describe("shared view versions surface", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The share-view clause on its own, in the window that only it covers
-  // (#614 codex review, sharpened by #620). A shared view's status also says
-  // no recorder, so the status clause the versions gate gained for #620 would
-  // hide the selector here too — and the pin above would pass with the share
-  // branch deleted. Before the FIRST status lands there is no status to
-  // reason from, and the registry fact is the only thing that answers.
+  // A shared view in the pre-status window. This test was written to isolate
+  // the share clause, and it no longer can: once the versions gate required
+  // an ANSWERED status (#620), that clause stopped being the only thing that
+  // answers here, and main gives a shared view `capture: null` — hence
+  // `historyRecordingOff: true` — for the whole of its life
+  // (`workspaceActivity.ts`: `entry.historyRecordingOff = entry.capture ===
+  // null`). So `!isShareView` inside `versionsEnabled` is now redundant with
+  // the status clause and survives deletion. It is kept, and declared
+  // unpinned, because it is the SYNCHRONOUS registry fact #614's review
+  // asked for: it does not depend on main's status shape staying this way.
+  // What this test still pins is the no-call itself, in the window where the
+  // shell knows least.
   it("asks a shared view for no versions before its first status arrives", async () => {
     const status = deferred<typeof SHARE_STATUS>();
     const bridge = makeShareBridge();
@@ -5532,6 +5550,94 @@ describe("versions surface after a failed capture build", () => {
     expect(await screen.findByTestId("version-menu-button")).toBeTruthy();
     await waitFor(() => expect(bridge.listWorkspaceVersions).toHaveBeenCalled());
   });
+
+  // The window the test above cannot see. Its status fake answers in the same
+  // microtask flush as the settings read, and PRODUCTION NEVER DOES:
+  // `getWorkspaceSettings` is one file read, while `openWorkspace` waits for
+  // main's watcher to finish its first scan — and the capture build fails
+  // inside that open, before the watcher starts. Engine-ON therefore lands
+  // first on every open, and an unanswered status used to answer "there is a
+  // recorder": the selector mounted, called, retried five times and raised
+  // #620's banner inside a window the fixture had closed.
+  //
+  // So this status does NOT resolve in the same flush.
+  it("asks for no versions before main's status has answered", async () => {
+    const status = deferred<typeof FAILED_STATUS>();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(() => status.promise);
+    bridge.getSyncStatus = vi.fn(() => status.promise);
+    bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
+      throw new Error(
+        "dohc could not start Versions for this workspace. Restart dohc to try again.",
+      );
+    });
+    renderShell(bridge);
+
+    // Both halves of the premise. The titlebar Chats button renders on the
+    // renderer's own read alone, so it proves that read answered engine-ON;
+    // `data-ready` proves no status has.
+    await screen.findByTestId("titlebar-chats-sidebar");
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+
+    expect(screen.queryByTestId("version-menu-button")).toBeNull();
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+
+    // And the answer keeps it that way — no banner from retries that never
+    // started.
+    await act(async () => {
+      status.resolve(FAILED_STATUS);
+      await status.promise;
+    });
+    expect(screen.queryByTestId("version-menu-button")).toBeNull();
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The same cause on the surface that outlives the selector. A persisted
+  // compare tab was gated on the share fact alone, so a workspace whose
+  // capture build failed still mounted VersionComparePage — which asks for
+  // the versions on mount and then says "Could not compare with Main."
+  // Reached by opening a compare tab while healthy and restarting after a
+  // failed build.
+  it("states the capability for a persisted compare tab when the recorder failed to build", async () => {
+    const comparePath = versionCompareTabPath("v-old");
+    const status = deferred<typeof FAILED_STATUS>();
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [comparePath],
+        activeTab: comparePath,
+      }),
+    );
+    bridge.openWorkspace = vi.fn(() => status.promise);
+    bridge.getSyncStatus = vi.fn(() => status.promise);
+    renderShell(bridge);
+
+    // Before the status answers, the tab mounts no page AND claims nothing:
+    // the renderer's own read proves nothing about what main recorded (#542).
+    await screen.findByTestId("titlebar-chats-sidebar");
+    expect(screen.queryByTestId("version-compare-page")).toBeNull();
+    expect(screen.queryByTestId("version-compare-off")).toBeNull();
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+
+    await act(async () => {
+      status.resolve(FAILED_STATUS);
+      await status.promise;
+    });
+
+    // One line, per the empty-state recipe (copy.md): what is missing, then
+    // the next step this surface really has — the tab closes. No cause: the
+    // History placeholder and the notice center own that.
+    const placeholder = await screen.findByTestId("version-compare-off");
+    expect(placeholder.textContent).toContain(
+      "This workspace has no versions to compare. Close this tab to go back to your files.",
+    );
+    expect(placeholder.className).toContain("text-sm");
+    expect(placeholder.className).toContain("text-muted");
+    expect(screen.queryByTestId("version-compare-page")).toBeNull();
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
 });
 
 // #615: Chats key off the same capture every other engine surface does. A
@@ -5594,6 +5700,97 @@ describe("shared view chats surface", () => {
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
     await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
+  });
+
+  // The graph's chat-mentions toggle, on its own. The test above proves the
+  // panel is gone, and the panel's own gate hides it whatever this toggle
+  // reads — so reverting THIS gate alone changed nothing any pin could see.
+  // It is the most expensive one to lose: `includeChatMentions: true` is what
+  // sends readWorkspaceGraph through requireEngineCapture, so an ungated
+  // toggle fails the WHOLE graph — a surface a shared view legitimately has.
+  it("offers no chat mentions in the graph on a shared view", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge, SHARE_VIEW);
+
+    await settleEngineOnRead(bridge);
+    await user.click(screen.getByTestId("activity-graph"));
+
+    // The graph itself still works — that is the point.
+    expect((await screen.findAllByTestId("graph-file-row")).length).toBeGreaterThan(0);
+    expect(screen.queryByTestId("graph-chat-mentions-toggle")).toBeNull();
+    expect(bridge.readWorkspaceGraph).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      includeChatMentions: false,
+    });
+    expect(bridge.readWorkspaceGraph).not.toHaveBeenCalledWith(
+      expect.objectContaining({ includeChatMentions: true }),
+    );
+  });
+
+  // Ctrl+Alt+B, on its own. The panel's gate hides it either way, so the only
+  // thing this shortcut still decides on a shared view is whether the shell
+  // CLAIMS the chord from whatever else would handle it.
+  it("does not claim Ctrl+Alt+B on a shared view", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge, SHARE_VIEW);
+    await settleEngineOnRead(bridge);
+
+    const event = new KeyboardEvent("keydown", {
+      key: "b",
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("claims Ctrl+Alt+B for a workspace that is not a shared view", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+    await screen.findByTestId("chats-panel");
+
+    const event = new KeyboardEvent("keydown", {
+      key: "b",
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  // The last ungated chat call. Linked mentions ride on every markdown open
+  // and every window refocus, and `listChatFileMentions` goes through
+  // requireEngineCapture like every other Chats call — so a shared view was
+  // still issuing one refused call per file open. Its own `.catch` swallowed
+  // the refusal, which is exactly why nothing caught it.
+  it("asks for no chat mentions when a shared view opens a file", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge, SHARE_VIEW);
+
+    // The premise: the file really opened, so the panel that issues the call
+    // really mounted.
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(bridge.getBacklinks).toHaveBeenCalled());
+    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("still asks for chat mentions when a normal workspace opens a file", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() =>
+      expect(bridge.listChatFileMentions).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        path: "b.md",
+      }),
+    );
   });
 });
 

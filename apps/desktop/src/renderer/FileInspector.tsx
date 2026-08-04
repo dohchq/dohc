@@ -649,6 +649,7 @@ function MarkdownView(props: {
   headingTarget?: HeadingTarget;
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
+  chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
@@ -1255,6 +1256,7 @@ function MarkdownView(props: {
       refreshKey={props.refreshKey}
       onOpenPath={props.onOpenPath}
       onOpenChatMention={props.onOpenChatMention}
+      chatMentionsAvailable={props.chatMentionsAvailable}
     />
   );
 
@@ -2220,6 +2222,11 @@ export function FileInspector(props: {
   refreshKey?: number;
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
+  // Whether this workspace has the capture Chats calls need (#615). The
+  // linked-mentions panel asks main for chat mentions, which goes through
+  // requireEngineCapture — so a shared view must not ask. Same name and same
+  // fact GraphView's chat-mentions toggle reads.
+  chatMentionsAvailable?: boolean;
   // A pending search-result jump (Phase E5.0). Consumed (onScrollConsumed)
   // once a mounted view applied it, so plain re-opens never re-jump.
   scrollTarget?: ScrollTarget;
@@ -2381,6 +2388,7 @@ export function FileInspector(props: {
             headingTarget={props.headingTarget}
             onOpenPath={props.onOpenPath}
             onOpenChatMention={props.onOpenChatMention}
+            chatMentionsAvailable={props.chatMentionsAvailable}
             onSharePath={props.onSharePath}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}

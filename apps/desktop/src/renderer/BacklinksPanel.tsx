@@ -43,12 +43,20 @@ export function BacklinksPanel(props: {
   path: string;
   // Bumps on workspace activity (saves, agent edits) so mentions recompute.
   refreshKey?: number;
+  // Chat mentions are a CHATS call (#615): `listChatFileMentions` goes through
+  // requireEngineCapture, so a workspace with no capture — a shared view, most
+  // visibly — can only refuse it. Opt-in, and named the way GraphView names
+  // the same fact, so both chat affordances read one word.
+  chatMentionsAvailable?: boolean;
   onOpenPath?: (path: string) => void;
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
 }) {
   const [loaded, setLoaded] = useState<LoadedBacklinks | null>(null);
   const [open, setOpen] = useState(true);
   const { workspaceId, path, refreshKey } = props;
+  // Absent reads as unavailable: a caller that has not decided must not make
+  // dohc ask for a capability it may not have.
+  const chatMentionsAvailable = props.chatMentionsAvailable === true;
   const current =
     loaded?.workspaceId === workspaceId && loaded.path === path ? loaded : null;
   const sources = current?.sources ?? [];
@@ -60,7 +68,9 @@ export function BacklinksPanel(props: {
     if (typeof getBacklinks !== "function") return;
 
     let active = true;
-    const getChatMentions = bridge().listChatFileMentions;
+    const getChatMentions = chatMentionsAvailable
+      ? bridge().listChatFileMentions
+      : undefined;
     void Promise.all([
       getBacklinks({ workspaceId, path }),
       typeof getChatMentions === "function"
@@ -82,7 +92,7 @@ export function BacklinksPanel(props: {
     return () => {
       active = false;
     };
-  }, [workspaceId, path, refreshKey]);
+  }, [chatMentionsAvailable, workspaceId, path, refreshKey]);
 
   // Recompute when the window regains focus — catches edits made in another app
   // (e.g. an agent) without polling.
@@ -97,7 +107,9 @@ export function BacklinksPanel(props: {
     const getBacklinks = bridge().getBacklinks;
     if (typeof getBacklinks !== "function") return;
     let active = true;
-    const getChatMentions = bridge().listChatFileMentions;
+    const getChatMentions = chatMentionsAvailable
+      ? bridge().listChatFileMentions
+      : undefined;
     void Promise.all([
       getBacklinks({ workspaceId, path }),
       typeof getChatMentions === "function"
@@ -113,7 +125,7 @@ export function BacklinksPanel(props: {
     return () => {
       active = false;
     };
-  }, [focusNonce, workspaceId, path]);
+  }, [chatMentionsAvailable, focusNonce, workspaceId, path]);
 
   const linkedTotal = sources.reduce((sum, source) => sum + source.snippets.length, 0);
   const total = linkedTotal + chatMentions.length;
