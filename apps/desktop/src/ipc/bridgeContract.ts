@@ -2436,6 +2436,21 @@ export const ShareChatChannelResult = z.object({
 });
 export type ShareChatChannelResult = z.infer<typeof ShareChatChannelResult>;
 
+// The per-lane row cap on a share listing, in one place because two layers
+// enforce it. readRelayChatShareLanes applies it to the RELAY lanes before
+// this schema sees them: a relay-controlled body over the cap would otherwise
+// fail the parse below, reject the IPC call, and clear every cached row on the
+// sharing surface (#608).
+//
+// The joined lane is NOT guarded here, and it is not local-only either.
+// autoJoinReceivedDms appends a sharedChannels row per received DM grant on
+// every syncDms, with no user action, and endJoinedChannel only marks
+// `ended: true` — so that lane is relay-fed and grows monotonically. Past the
+// cap the parse below throws through the same door, and the count never
+// shrinks, so it stays broken. Tracked separately; do not read this comment as
+// a claim that the lane is safe.
+export const MAX_CHAT_CHANNEL_SHARE_ROWS = 1000;
+
 export const ChatChannelShareGrantRow = z.object({
   shareId: SHARE_ID,
   channelWireId: CHANNEL_WIRE_ID,
@@ -2478,7 +2493,7 @@ export type ListChatChannelSharesPayload = z.infer<typeof ListChatChannelSharesP
 //    rows must clear — another account's invitations and recipient emails
 //    must not survive a logout.
 export const ListChatChannelSharesResult = z.object({
-  joined: z.array(JoinedSharedChannelRow).max(1000),
+  joined: z.array(JoinedSharedChannelRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
   // The account the relay lanes are scoped to (server + stable user id), or
   // null when no session exists. Cached relay rows are preservable only
   // within the SAME session: an unreachable answer under a different account
@@ -2487,8 +2502,8 @@ export const ListChatChannelSharesResult = z.object({
   relay: z.discriminatedUnion("state", [
     z.object({
       state: z.literal("answered"),
-      granted: z.array(ChatChannelShareGrantRow).max(1000),
-      received: z.array(ChatChannelShareReceivedRow).max(1000),
+      granted: z.array(ChatChannelShareGrantRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
+      received: z.array(ChatChannelShareReceivedRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
     }),
     z.object({ state: z.literal("unreachable") }),
     z.object({ state: z.literal("signed-out") }),
@@ -2508,7 +2523,7 @@ export type ListJoinedSharedChannelsPayload = z.infer<
 >;
 
 export const ListJoinedSharedChannelsResult = z.object({
-  joined: z.array(JoinedSharedChannelRow).max(1000),
+  joined: z.array(JoinedSharedChannelRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
 });
 export type ListJoinedSharedChannelsResult = z.infer<
   typeof ListJoinedSharedChannelsResult

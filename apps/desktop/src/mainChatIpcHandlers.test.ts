@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./ipc/channels";
+import {
+  ListChatChannelSharesResult,
+  MAX_CHAT_CHANNEL_SHARE_ROWS,
+} from "./ipc/bridgeContract";
 import { markPersonalFeedSeenReadOnlySafe } from "./workspaces/chatFollowAccess";
 import {
   chatShareSessionKey,
@@ -629,6 +633,135 @@ describe("readRelayChatShareLanes", () => {
       remoteWorkspaceId: null,
     });
     expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
+  });
+
+  // The row cap is the one door row-level validation does not cover. Every row
+  // below is structurally valid, so the guard used to answer "answered" and
+  // hand the contract parse a lane it cannot represent: the parse throws, the
+  // IPC call rejects, the renderer's .catch(() => null) commits a null
+  // listing, and every cached invitation and grant disappears (#608).
+  function relayRowsOverCap(lane: "granted" | "received") {
+    const over = MAX_CHAT_CHANNEL_SHARE_ROWS + 1;
+    const rows = Array.from({ length: over }, (_, index) => ({
+      shareId: `share-${index}`,
+      workspaceId: "remote-1",
+      recipientEmail: "ana@example.com",
+      granterEmail: "owner@example.com",
+      revokedAtMs: null,
+      selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+    }));
+    return { [lane]: rows };
+  }
+
+  for (const lane of ["granted", "received"] as const) {
+    it(`reports an over-cap ${lane} lane as unreachable, so cached rows survive`, async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const lanes = await readRelayChatShareLanes({
+          fetchListing: () => Promise.resolve(relayRowsOverCap(lane)),
+          remoteWorkspaceId: "remote-1",
+        });
+        expect(lanes).toEqual({ state: "unreachable" });
+        // The refusal names the constraint, the limit, the unit, and what it
+        // observed, because nobody reads this path except through this line.
+        expect(warn).toHaveBeenCalledWith(
+          `[desktop] relay share listing "${lane}" holds ${
+            MAX_CHAT_CHANNEL_SHARE_ROWS + 1
+          } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing unreachable, so cached rows survive.`,
+        );
+        // The composition is the defect: the guard's answer must survive the
+        // contract parse the IPC handler runs immediately after it. This is
+        // the parse that used to throw.
+        expect(() =>
+          ListChatChannelSharesResult.parse({
+            joined: [],
+            sessionKey: "https://relay.example|user-1",
+            relay: lanes,
+          }),
+        ).not.toThrow();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }
+
+  // Naming one of two over-cap lanes sends the reader to fix half the problem.
+  it("names every over-cap lane, not the first one it meets", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const lanes = await readRelayChatShareLanes({
+        fetchListing: () =>
+          Promise.resolve({
+            ...relayRowsOverCap("granted"),
+            ...relayRowsOverCap("received"),
+          }),
+        remoteWorkspaceId: "remote-1",
+      });
+      expect(lanes).toEqual({ state: "unreachable" });
+      expect(warn).toHaveBeenCalledWith(
+        `[desktop] relay share listing "granted" holds ${
+          MAX_CHAT_CHANNEL_SHARE_ROWS + 1
+        } rows, "received" holds ${
+          MAX_CHAT_CHANNEL_SHARE_ROWS + 1
+        } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing unreachable, so cached rows survive.`,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // The cap must not reject a listing that fits. A lane exactly at the cap is
+  // healthy work and stays authoritative.
+  it("answers a lane that sits exactly at the cap", async () => {
+    const rows = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS }, (_, index) => ({
+      shareId: `share-${index}`,
+      workspaceId: "remote-1",
+      recipientEmail: "ana@example.com",
+      revokedAtMs: null,
+      selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+    }));
+    const lanes = await readRelayChatShareLanes({
+      fetchListing: () => Promise.resolve({ granted: rows }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(lanes.state).toBe("answered");
+    expect(lanes.state === "answered" && lanes.granted).toHaveLength(
+      MAX_CHAT_CHANNEL_SHARE_ROWS,
+    );
+    expect(() =>
+      ListChatChannelSharesResult.parse({
+        joined: [],
+        sessionKey: "https://relay.example|user-1",
+        relay: lanes,
+      }),
+    ).not.toThrow();
+  });
+
+  // Filtering runs before the cap: an oversized body whose chat-channel rows
+  // fit is a listing dohc CAN represent, and treating it as unreachable would
+  // hide real shares behind rows that were never going to be listed.
+  it("counts what it will list, not what the relay sent", async () => {
+    const listed = Array.from({ length: 10 }, (_, index) => ({
+      shareId: `share-${index}`,
+      workspaceId: "remote-1",
+      recipientEmail: "ana@example.com",
+      revokedAtMs: null,
+      selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+    }));
+    const filteredOut = Array.from(
+      { length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
+      (_, index) => ({
+        shareId: `doc-${index}`,
+        workspaceId: "remote-1",
+        selector: { kind: "document" },
+      }),
+    );
+    const lanes = await readRelayChatShareLanes({
+      fetchListing: () => Promise.resolve({ granted: [...listed, ...filteredOut] }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(lanes.state).toBe("answered");
+    expect(lanes.state === "answered" && lanes.granted).toHaveLength(10);
   });
 });
 

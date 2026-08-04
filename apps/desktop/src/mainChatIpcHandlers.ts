@@ -5,6 +5,7 @@
 import {
   ChatChannelShareGrantRow,
   ChatChannelShareReceivedRow,
+  MAX_CHAT_CHANNEL_SHARE_ROWS,
 } from "./ipc/bridgeContract";
 
 interface WorkspacePayload {
@@ -346,12 +347,42 @@ export async function readRelayChatShareLanes(input: {
     return { state: "unreachable" };
   }
   // A 200 whose body is not the listing shape is NOT an authoritative
-  // answer. Mapping AND row-level validation run inside this guard: a
-  // malformed body or an invalid entry field escaping to the contract parse
-  // would reject the whole IPC call, which the renderer reads as an unknown
-  // listing and clears.
+  // answer. Mapping, row-level validation AND the size cap run inside this
+  // guard: a malformed body, an invalid entry field, or an over-cap lane
+  // escaping to the contract parse would reject the whole IPC call, which the
+  // renderer reads as an unknown listing and clears.
   try {
     const mapped = mapRelayShareListing(listing, input.remoteWorkspaceId);
+    // Size is validated HERE, not by the contract schema. Every row can be
+    // valid and the lane still be one dohc cannot list, and the schema sits
+    // outside this guard: an over-cap lane reaching it throws, the IPC call
+    // rejects, and the renderer clears every cached row -- the clobber this
+    // contract exists to prevent, through the one door row validation does
+    // not cover (#608).
+    //
+    // Before the per-row parse, not after: the filter has already run, so the
+    // lengths are final, and a relay-controlled body should not be fully
+    // zod-parsed on the main thread only to be thrown away.
+    //
+    // Over-cap resolves UNREACHABLE rather than truncating. "answered" claims
+    // authority: a truncated lane would tell the user that the shares dohc cut
+    // do not exist, and a missing grant reads as a revoked one. dohc could not
+    // read this answer, which is what unreachable means.
+    const overCap = ([
+      ["granted", mapped.granted.length],
+      ["received", mapped.received.length],
+    ] as const).filter(([, rows]) => rows > MAX_CHAT_CHANNEL_SHARE_ROWS);
+    if (overCap.length > 0) {
+      // Every over-cap lane, not the first: naming one of two sends the reader
+      // to fix half the problem.
+      const lanes = overCap
+        .map(([lane, rows]) => `"${lane}" holds ${rows} rows`)
+        .join(", ");
+      console.warn(
+        `[desktop] relay share listing ${lanes}; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing unreachable, so cached rows survive.`,
+      );
+      return { state: "unreachable" };
+    }
     return {
       state: "answered",
       granted: mapped.granted.map((row) => ChatChannelShareGrantRow.parse(row)),
