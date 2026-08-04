@@ -168,6 +168,17 @@ function requiresReconnect(error: unknown): boolean {
   );
 }
 
+// The daemon's own "retry, but wait first". It raises this for
+// DeadlineExceeded and Overloaded (dohc-engine-protocol error.rs
+// Retryability::AfterBackoff) on ANY method, including the `workspace.open`
+// this file deadlines at 2 s — so the open ladder meets it routinely, and
+// must both wait and count it against the budget.
+function requiresBackoff(error: unknown): boolean {
+  return (
+    error instanceof DaemonRefusalError && error.disposition === "afterBackoff"
+  );
+}
+
 function isTransportError(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -607,21 +618,24 @@ export class EngineWorkspaceSessions {
         if (error instanceof EngineWorkspaceRetryDeadlineError) throw error;
         lastError = error;
         this.noteBudgetAttempt();
-        const lastAttempt = attempt >= maxAttempts;
-        // A daemon-down open is the other place a caller can spend a whole
-        // backoff ladder, and it holds the same resources — so it settles
-        // through the same gates as run()'s operation retries (#564).
-        if (!daemonMayBeRelaunching(error)) {
-          if (lastAttempt) break;
-          continue;
-        }
+        // EVERY retry decision this ladder makes settles here, including the
+        // ones for errors it re-opens immediately. Gating only the
+        // "daemon may be relaunching" errors left a bare `continue` behind it,
+        // and that is the door an `afterBackoff` refusal walked through: six
+        // immediate opens, no deadline, no shutdown, and no backoff against
+        // an overload the daemon had just declared. A daemon-down open is
+        // also where a caller can spend a whole ladder holding the capture
+        // chain, which is what #564 is about.
         const next = await this.settleAttempt({
           workspaceId: workspace.workspaceId,
           retryDeadlineMs: options.retryDeadlineMs,
           startedAtMs,
           attempt,
-          lastAttempt,
-          backoff: true,
+          lastAttempt: attempt >= maxAttempts,
+          // Wait only when the error asks for it: the daemon may be
+          // relaunching, or it requested backoff itself. Anything else
+          // re-opens at once, as it always has.
+          backoff: daemonMayBeRelaunching(error) || requiresBackoff(error),
           cause: error,
         });
         if (next === "stop") break;

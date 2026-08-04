@@ -874,9 +874,13 @@ describe("EngineWorkspaceSessions", () => {
       const client = new MockClient("handle-reconnect");
       let nowMs = 0;
       let attempts = 0;
+      // A spy, not a bare stub: this test's NAME asserts "no backoff at all",
+      // and with an unobservable stub it could not tell a waiting ladder from
+      // a non-waiting one (review round 8).
+      const sleep = vi.fn(async () => {});
       const sessions = new EngineWorkspaceSessions(
         { currentClient: () => client },
-        { now: () => nowMs, sleep: async () => {} },
+        { now: () => nowMs, sleep },
       );
 
       const outcome = await sessions
@@ -902,6 +906,9 @@ describe("EngineWorkspaceSessions", () => {
       // DaemonRefusalError instead.
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(attempts).toBe(3);
+      // MUTATION: make `settleAttempt` back off unconditionally -> an
+      // afterReconnect retry waits, which this test's name says it never does.
+      expect(sleep).not.toHaveBeenCalled();
     });
 
     it("bounds an OPEN that keeps refusing with afterReconnect", async () => {
@@ -975,6 +982,93 @@ describe("EngineWorkspaceSessions", () => {
 
       // MUTATION: throw the transport error at the terminal attempt -> this
       // is `{ code: "transport-error" }` and the document downgrades.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+    });
+
+    it("bounds an OPEN the daemon keeps refusing with afterBackoff", async () => {
+      // Review round 8: `afterBackoff` is the daemon's own "retry, but wait" —
+      // it raises it for DeadlineExceeded and Overloaded on any method,
+      // including the `workspace.open` this file deadlines at 2 s. The gate
+      // recognised only transport, daemon-unavailable and afterReconnect, so
+      // the refusal took a bare `continue`: six immediate opens over ~12 s
+      // against a 5 s deadline, rejecting with the refusal (which main does
+      // NOT map to openTimedOut) and applying no backoff at all to an
+      // overload the daemon had just declared.
+      const workspace = await tempWorkspace("workspace-open-backoff");
+      let nowMs = 0;
+      let opens = 0;
+      const delays: number[] = [];
+      const client: EngineDaemonClient = {
+        close: () => undefined,
+        async sendRequest() {
+          opens += 1;
+          nowMs += 2_000;
+          throw new DaemonRefusalError(
+            {
+              code: "DEADLINE_EXCEEDED",
+              message: "workspace open exceeded its deadline",
+              retry: "afterBackoff",
+            },
+            undefined,
+          );
+        },
+      };
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          now: () => nowMs,
+          sleep: async (delayMs) => {
+            delays.push(delayMs);
+          },
+        },
+      );
+
+      const outcome = await sessions
+        .run(workspace, async () => "unreachable", {
+          retryTransportErrors: true,
+          retryDeadlineMs: 5_000,
+        })
+        .catch((error: unknown) => error);
+
+      // MUTATION: restore the bare `continue` for errors outside
+      // daemonMayBeRelaunching -> six opens and a DaemonRefusalError, so the
+      // surface downgrades to the writable plain editor.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(opens).toBe(3);
+      // MUTATION: drop requiresBackoff from the backoff decision -> the ladder
+      // re-opens immediately and amplifies the overload the daemon declared.
+      expect(delays).toEqual([100, 200]);
+    });
+
+    it("prefers the deadline to the terminal error when quit races the last attempt", async () => {
+      // Review round 8: `settleAttempt` checks the deadline BEFORE it consults
+      // `shuttingDown`, and the ordering was unpinned — swapping the two
+      // passed every test. At quit, on the last allowed attempt with a spent
+      // budget, the swap returns the ladder's own transport error, which main
+      // does not map to openTimedOut: the plain-editor downgrade, at quit.
+      const workspace = await tempWorkspace("workspace-quit-vs-deadline");
+      const client = new MockClient("handle-quit-deadline");
+      let nowMs = 0;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {}, transportRebindAttempts: 2 },
+      );
+
+      const outcome = await sessions
+        .run(
+          workspace,
+          async () => {
+            nowMs += 3_000;
+            // Quit arrives while the LAST allowed attempt is in flight.
+            if (nowMs >= 6_000) sessions.beginShutdown();
+            throw { code: "transport-error" };
+          },
+          { retryTransportErrors: true, retryDeadlineMs: 5_000 },
+        )
+        .catch((error: unknown) => error);
+
+      // MUTATION: check `shuttingDown` before the lastAttempt deadline branch
+      // -> `{ code: "transport-error" }`, and the document downgrades.
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
     });
 
@@ -1175,6 +1269,44 @@ describe("EngineWorkspaceSessions", () => {
       ).rejects.toBeInstanceOf(DaemonRefusalError);
       // MUTATION: drop requiresReconnect from the gate -> six opens while the
       // quit teardown waits on the chain behind them.
+      expect(opens).toBe(1);
+      expect(sleep).not.toHaveBeenCalled();
+    });
+
+    it("stops an OPEN the daemon keeps refusing with afterBackoff", async () => {
+      // Review round 8, the quit half of the same gap: an `afterBackoff`
+      // refusal took a bare `continue`, so beginShutdown() could not end the
+      // ladder and the quit teardown waited on the chain behind six opens.
+      const workspace = await tempWorkspace("workspace-open-backoff-quit");
+      let opens = 0;
+      const sleep = vi.fn(async () => {});
+      const client: EngineDaemonClient = {
+        close: () => undefined,
+        async sendRequest() {
+          opens += 1;
+          throw new DaemonRefusalError(
+            {
+              code: "OVERLOADED",
+              message: "engine queue is full",
+              retry: "afterBackoff",
+            },
+            undefined,
+          );
+        },
+      };
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { sleep },
+      );
+      sessions.beginShutdown();
+
+      await expect(
+        sessions.run(workspace, async () => "unreachable", {
+          retryTransportErrors: true,
+        }),
+      ).rejects.toBeInstanceOf(DaemonRefusalError);
+      // MUTATION: restore the bare `continue` -> six opens while the quit
+      // teardown waits on the capture chain behind them.
       expect(opens).toBe(1);
       expect(sleep).not.toHaveBeenCalled();
     });

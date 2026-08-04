@@ -1174,6 +1174,13 @@ function MarkdownView(props: {
    * place. On that rebase: route this draft into #579's set-aside (it gets
    * the notice and the Copy control), and fold `retryOpening` into #579's
    * opening gates.
+   *
+   * ORDER MATTERS, and getting it wrong is silent. #579 captures on the
+   * `opening` transition and gates that capture on `unsavedDraft.current`.
+   * The line below clears that flag synchronously, BEFORE `opening` flips —
+   * so a rebase that only deletes the guard leaves the capture a no-op and
+   * the draft is dropped behind an EMPTY recovery list, which is worse than
+   * today's visible "Couldn't save". Capture first, then clear.
    */
   function disarmDraftThenRetry(): void {
     const retry = props.onRetryEngineOpen;
@@ -2414,10 +2421,11 @@ export function FileInspector(props: {
   // armed autosave raced the Y.Doc bind. It ends the moment the open
   // answers, whichever way it answers.
   //
-  // NOTE for the #579 rebase: delete this and the ref above. #579 gates the
-  // armed autosave on `opening` for every reopen and sets the draft aside
-  // with a recovery notice — a superset of this window, and a better answer
-  // for the draft than dropping it.
+  // NOTE for the #579 rebase, and it is TWO steps, not one. Delete this and
+  // the ref above: #579 gates the armed autosave on `opening` for every
+  // reopen, a superset of this window. But deleting ONLY this drops the
+  // pending draft silently — see the ordering note on `disarmDraftThenRetry`,
+  // which clears `unsavedDraft.current` before #579's capture can read it.
   if (!engine.opening) engineRetryPending.current = false;
   const retryOpening = engineRetryPending.current;
   // A timed-out open (#564) is handled by `readOnly` in the document below,

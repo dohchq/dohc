@@ -1341,6 +1341,16 @@ describe("engine markdown source view", () => {
   // switch, so a later switch silently refused the draft flush at the
   // rename/move seam. One successful retry earlier in the tab must not cost
   // the user a keystroke afterwards.
+  //
+  // THIS TEST MUST CHANGE AT THE #579 REBASE, and it is the one thing here
+  // that reds the merged tree rather than either branch. The final assertion
+  // says the armed autosave LANDS on the later version switch. #579 makes
+  // that exact transition set the draft aside instead, so the merged code is
+  // right and this assertion is stale. Verified: #604 alone passes, #579
+  // alone passes, the merged tree fails only here. Assert the set-aside
+  // captured the draft, not that a write happened — the claim under test is
+  // that the retry window CLOSED, and a capture proves that as well as a
+  // write does.
   it("stops refusing writes once the retry has answered", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
