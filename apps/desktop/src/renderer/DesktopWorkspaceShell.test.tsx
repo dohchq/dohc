@@ -4380,6 +4380,41 @@ describe("history page", () => {
     expect(await screen.findByText("try state failed")).toBeTruthy();
   });
 
+  // Independent of each other's SUCCESS is only half of it. A refresh that
+  // waits for all four answers before handling any of them is hostage to the
+  // slowest lane: a history read that already failed would sit in
+  // "Loading history..." behind a sibling that never settles, with no failure
+  // and no way to ask again — worse than the batch it replaced, which at
+  // least gave up as soon as history did.
+  it("says the history read failed while a sibling read never settles", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => Promise.reject(new Error("history failed")));
+    bridge.getSyncStatus = vi.fn(() => new Promise<never>(() => {}));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByTestId("history-load-failed")).toBeTruthy();
+    // The Next has to be there too, not just the sentence.
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(screen.queryByText("Loading history...")).toBeNull();
+  });
+
+  // The mirror: a page the engine already served is nobody's hostage either.
+  it("shows the history page while a sibling read never settles", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () =>
+      historyPage([historyMoment("m-1", "Wrote the plan")]),
+    );
+    bridge.getTryInVersionState = vi.fn(() => new Promise<never>(() => {}));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText("Wrote the plan")).toBeTruthy();
+    expect(screen.queryByTestId("history-load-failed")).toBeNull();
+  });
+
   // The same rule read the other way: the history read is nobody else's
   // answer either. A try session the main process reported still reaches its
   // card while the timeline says it could not load.

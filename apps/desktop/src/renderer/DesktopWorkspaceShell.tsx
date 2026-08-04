@@ -1834,12 +1834,36 @@ export function DesktopWorkspaceShell(props: {
   // have been issued BEFORE a refresh the shell is still waiting on — and
   // superseding on it would throw away the newer answer. A run observed alive
   // just before it ended would then leave the indicator running forever.
+  //
+  // So an observation is not written at all. It carries no request token, and
+  // arrival order is not ordering: once each lane commits when its OWN read
+  // lands, a refresh answer can commit BEFORE the observation arrives, and an
+  // untimed write would then paint over an answer that is newer than it. The
+  // observation asks this lane's own reader instead — one tokened read, judged
+  // by the same rule as every other answer, and issued after the observation,
+  // so it is the freshest thing available.
+  const refreshAgentLane = useCallback(() => {
+    const token = ++engineHistoryToken.current;
+    void bridge()
+      .getAgentRunStatus({ workspaceId })
+      .then(
+        (agent) =>
+          commitSnapshotLane(committedAgentActiveToken, token, () =>
+            setAgentActive(agent.activeRun !== null),
+          ),
+        (error: unknown) => reportShellError("Could not refresh agent runs.", error),
+      );
+  }, [reportShellError, workspaceId]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
-      if (mutated) supersedeSnapshotLane(committedAgentActiveToken);
+      if (!mutated) {
+        refreshAgentLane();
+        return;
+      }
+      supersedeSnapshotLane(committedAgentActiveToken);
       setAgentActive(active);
     },
-    [supersedeSnapshotLane],
+    [refreshAgentLane, supersedeSnapshotLane],
   );
 
   const refreshHistory = useCallback(async () => {
@@ -1858,18 +1882,16 @@ export function DesktopWorkspaceShell(props: {
       // also what makes the retry control show that it is working.
       setEngineHistoryReadFailed(false);
       // Four reads ride one refresh, and they answer four different
-      // questions. Awaiting them as one batch made every answer hostage to
-      // the worst of them: a try-state failure discarded a history page the
-      // engine had already served, and the timeline then said it could not
-      // load (#610). Each read settles on its own, and each surface claims
-      // only what its own read established.
-      const [pageRead, statusRead, agentRead, tryRead] = await Promise.allSettled([
-        bridge().listEngineMoments({ workspaceId, limit: 200 }),
-        bridge().getSyncStatus({ workspaceId }),
-        bridge().getAgentRunStatus({ workspaceId }),
-        bridge().getTryInVersionState({ workspaceId }),
-      ]);
-      // The snapshots settle here and now, lane by lane: nothing can block
+      // questions. One batch made every answer hostage to the worst of them:
+      // a try-state failure discarded a history page the engine had already
+      // served, and the timeline then said it could not load (#610). An
+      // aggregate await is hostage to the SLOWEST of them the same way — a
+      // sibling that never settles would hold a failed history read in
+      // "Loading history..." forever, with no failure and no Try again.
+      // So the reads are issued together and handled apart: each lane
+      // commits its own answer when that answer arrives.
+      //
+      // The snapshots need no ordering against the page: nothing can block
       // them, and holding them for a later commit would republish a world the
       // user has already acted on — a dismissed review card, most visibly.
       // A lane that did not answer keeps the value it last had and does not
@@ -1877,29 +1899,39 @@ export function DesktopWorkspaceShell(props: {
       // read that failed proves nothing and an older read that still succeeds
       // is the only answer anyone has (#507). The banner is the only thing
       // that can say a shown value is now old, so a failed lane still reports.
-      if (statusRead.status === "fulfilled") {
-        const status = statusRead.value;
-        commitSnapshotLane(committedSyncStatusToken, token, () => setSyncStatus(status));
-      } else {
-        reportShellError("Could not refresh sync status.", statusRead.reason);
-      }
-      if (agentRead.status === "fulfilled") {
-        const agent = agentRead.value;
-        commitSnapshotLane(committedAgentActiveToken, token, () =>
-          setAgentActive(agent.activeRun !== null),
+      const pageRead = bridge().listEngineMoments({ workspaceId, limit: 200 });
+      void bridge()
+        .getSyncStatus({ workspaceId })
+        .then(
+          (status) =>
+            commitSnapshotLane(committedSyncStatusToken, token, () =>
+              setSyncStatus(status),
+            ),
+          (error: unknown) => reportShellError("Could not refresh sync status.", error),
         );
-      } else {
-        reportShellError("Could not refresh agent runs.", agentRead.reason);
-      }
-      if (tryRead.status === "fulfilled") {
-        const trySession = tryRead.value;
-        commitSnapshotLane(committedTryStateToken, token, () =>
-          setTryState(trySession.state),
+      void bridge()
+        .getAgentRunStatus({ workspaceId })
+        .then(
+          (agent) =>
+            commitSnapshotLane(committedAgentActiveToken, token, () =>
+              setAgentActive(agent.activeRun !== null),
+            ),
+          (error: unknown) => reportShellError("Could not refresh agent runs.", error),
         );
-      } else {
-        reportShellError("Could not refresh the version try run.", tryRead.reason);
-      }
-      if (pageRead.status === "rejected") {
+      void bridge()
+        .getTryInVersionState({ workspaceId })
+        .then(
+          (trySession) =>
+            commitSnapshotLane(committedTryStateToken, token, () =>
+              setTryState(trySession.state),
+            ),
+          (error: unknown) =>
+            reportShellError("Could not refresh the version try run.", error),
+        );
+      let page: Awaited<typeof pageRead>;
+      try {
+        page = await pageRead;
+      } catch (error) {
         // A failure is an answer too — about why the surface is blank, not
         // about what the timeline holds. Only the newest read may give it:
         // an older one failing while a newer is still in flight has settled
@@ -1907,9 +1939,8 @@ export function DesktopWorkspaceShell(props: {
         if (token === newestEngineHistoryRefresh.current) {
           setEngineHistoryReadFailed(true);
         }
-        throw pageRead.reason;
+        throw error;
       }
-      const page = pageRead.value;
       if (token <= committedEngineHistoryToken.current) return;
       // An answer describing the version the user left is not late — it is
       // about somewhere else.
