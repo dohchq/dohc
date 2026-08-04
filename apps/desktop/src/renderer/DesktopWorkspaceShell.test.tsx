@@ -4358,6 +4358,43 @@ describe("history page", () => {
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
   });
 
+  // #610: one refresh issues four reads, and they answer four different
+  // questions. Awaiting them as one batch made the timeline report a failure
+  // that happened somewhere else — the engine had already served the page.
+  // The failure is still reported; it is reported about the read that had it.
+  it("keeps the history page a sibling read's failure never touched", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () =>
+      historyPage([historyMoment("m-1", "Wrote the plan")]),
+    );
+    bridge.getTryInVersionState = vi.fn(() =>
+      Promise.reject(new Error("try state failed")),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText("Wrote the plan")).toBeTruthy();
+    expect(screen.queryByTestId("history-load-failed")).toBeNull();
+    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(await screen.findByText("try state failed")).toBeTruthy();
+  });
+
+  // The same rule read the other way: the history read is nobody else's
+  // answer either. A try session the main process reported still reaches its
+  // card while the timeline says it could not load.
+  it("shows the try review a failed history read did not answer for", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => Promise.reject(new Error("history failed")));
+    bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByTestId("history-load-failed")).toBeTruthy();
+    expect(await screen.findByTestId("try-review-card")).toBeTruthy();
+  });
+
   // The failure is an answer, and the same ordering rule governs it: an older
   // read falling over while a newer one is still in flight has settled
   // nothing. Calling the surface unloadable there would offer a Try again for
