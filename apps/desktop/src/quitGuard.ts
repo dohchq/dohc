@@ -71,10 +71,23 @@ export function createWorkspaceWindowRegistry<W>(
 // processes, and a queued render lands inside it. So main asks AGAIN at the
 // moment it would approve the quit.
 //
-// Fail-closed: a renderer that does not answer inside the window counts as
-// blocked. Refusing an install costs a retry; approving one destroys the only
-// copy of the user's text.
-export const RECOVERY_CHECK_TIMEOUT_MS = 2_000;
+// This window does NOT answer on the renderer's behalf (#579 review, r16).
+// It used to: two seconds of silence counted as blocked, and an update the
+// user asked for was refused whenever the renderer's main thread was merely
+// busy. No measurement justified two seconds, and none could — a busy
+// renderer and a dead one are indistinguishable from the outside, at any
+// deadline. Measuring healthy response times would only move the number, and
+// every value still rejects real work on the wrong side of it.
+//
+// So the window escalates instead of deciding, exactly as the quit ask does
+// (#579 review, r11): it asks the USER, main-side, with the loss named. The
+// bound is therefore not a rejection limit — it only decides how long the
+// user waits before being asked — and it shares the quit ask's value because
+// it asks the same question: is this renderer answering?
+//
+// A renderer that answers late still wins, and needs no ordering logic to:
+// `ask` already resolved on its answer, and resolving a promise twice does
+// nothing. Do not add sequencing here to "fix" that.
 
 export type RecoveryChecker = {
   // True when unresolved set-aside drafts must stop the quit.
@@ -86,9 +99,12 @@ export function createRecoveryChecker(options: {
   // Sends the request to the renderer; returns false when there is no
   // renderer to ask (nothing rendered means nothing to lose).
   send: (requestId: number) => boolean;
+  // Asked when the renderer misses the ACK window. Resolves true only when
+  // the user explicitly chose to install over an unresponsive renderer.
+  confirmProceed: () => Promise<boolean>;
   timeoutMs?: number;
 }): RecoveryChecker {
-  const timeoutMs = options.timeoutMs ?? RECOVERY_CHECK_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? QUIT_ASK_TIMEOUT_MS;
   let sequence = 0;
   const pending = new Map<number, (blocked: boolean) => void>();
   const settle = (requestId: number, blocked: boolean): void => {
@@ -101,7 +117,11 @@ export function createRecoveryChecker(options: {
     ask() {
       const requestId = ++sequence;
       return new Promise<boolean>((resolve) => {
-        const timer = setTimeout(() => settle(requestId, true), timeoutMs);
+        const timer = setTimeout(() => {
+          void options
+            .confirmProceed()
+            .then((proceed) => settle(requestId, !proceed));
+        }, timeoutMs);
         timer.unref?.();
         pending.set(requestId, (blocked) => {
           clearTimeout(timer);

@@ -3171,15 +3171,29 @@ const quitGuard = createQuitGuard({
 // render lands inside it. So main asks again HERE, and only then approves the
 // quit that quitAndInstall starts.
 //
-// Fail-closed: a renderer that does not answer inside the window is treated
-// as blocked. Refusing an install costs a retry; approving one destroys the
-// only copy of the user's text.
+// A renderer that misses the ACK window may be BUSY, not dead, and no
+// deadline tells those apart (#579 review, r16). Silence therefore asks the
+// USER rather than refusing the install the user just asked for — the same
+// escalation the quit ask uses, with the loss named.
 const recoveryChecker = createRecoveryChecker({
   send: (requestId) => {
     const window = liveWorkspaceWindow();
     if (!window) return false;
     window.webContents.send(CHANNELS.recoveryCheckRequested, requestId);
     return true;
+  },
+  confirmProceed: async () => {
+    const { response } = await dialog.showMessageBox({
+      type: "warning",
+      message: "dohc isn't responding.",
+      detail:
+        "Installing now can lose unsaved recovery text. Wait, or install anyway.",
+      buttons: ["Wait", "Install anyway"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    return response === 1;
   },
 });
 

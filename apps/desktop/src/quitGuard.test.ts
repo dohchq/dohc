@@ -218,6 +218,7 @@ describe("recovery boundary check", () => {
         asked = requestId;
         return true;
       },
+      confirmProceed: async () => false,
       timeoutMs: 1_000,
     });
     const pending = checker.ask();
@@ -233,6 +234,7 @@ describe("recovery boundary check", () => {
         asked = requestId;
         return true;
       },
+      confirmProceed: async () => false,
       timeoutMs: 1_000,
     });
     const pending = checker.ask();
@@ -240,21 +242,46 @@ describe("recovery boundary check", () => {
     await expect(pending).resolves.toBe(false);
   });
 
-  it("fails CLOSED when the renderer never answers", async () => {
+  // #579 review r16: the ACK window does not answer for the renderer. A busy
+  // renderer and a dead one look identical from main at ANY deadline, so
+  // silence asks the user instead of refusing the install they asked for.
+  it("asks the user when the renderer never answers, and waiting blocks", async () => {
     vi.useFakeTimers();
+    const confirmProceed = vi.fn(async () => false);
     const checker = createRecoveryChecker({
       send: () => true,
+      confirmProceed,
       timeoutMs: 1_000,
     });
     const pending = checker.ask();
-    // MUTATION (fail-closed): resolve the timeout as false. An unanswered
-    // check would approve the quit and quitAndInstall destroys the drafts.
+    // MUTATION (silent rejection): settle the timeout as blocked without
+    // asking. A merely busy renderer then refuses the install with nothing
+    // shown to the user.
     await vi.advanceTimersByTimeAsync(1_000);
+    expect(confirmProceed).toHaveBeenCalledTimes(1);
     await expect(pending).resolves.toBe(true);
   });
 
+  it("installs over an unresponsive renderer only on an explicit decision", async () => {
+    vi.useFakeTimers();
+    const checker = createRecoveryChecker({
+      send: () => true,
+      confirmProceed: async () => true,
+      timeoutMs: 1_000,
+    });
+    const pending = checker.ask();
+    // MUTATION (ignore the decision): settle as blocked regardless. The user
+    // chose "Install anyway" over a renderer that never answered, and the
+    // install is refused anyway.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(pending).resolves.toBe(false);
+  });
+
   it("does not block when there is no renderer to ask", async () => {
-    const checker = createRecoveryChecker({ send: () => false });
+    const checker = createRecoveryChecker({
+      send: () => false,
+      confirmProceed: async () => false,
+    });
     // Nothing rendered means no renderer-held drafts to lose.
     await expect(checker.ask()).resolves.toBe(false);
   });
@@ -266,6 +293,7 @@ describe("recovery boundary check", () => {
         ids.push(requestId);
         return true;
       },
+      confirmProceed: async () => false,
       timeoutMs: 1_000,
     });
     const first = checker.ask();

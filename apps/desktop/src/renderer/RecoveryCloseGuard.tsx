@@ -19,7 +19,7 @@ type UnloadKind = "close" | "reload" | "update" | "quit";
 // update installs are decided before quitAndInstall is ever called — neither
 // uses this slot.
 type PendingUnload = {
-  kind: "reload";
+  kind: "reload" | "update";
   // Re-runs the blocked action. Resolves TRUE when the action was accepted
   // and an unload should follow, FALSE when it failed without unloading —
   // the guard re-arms itself on false (#579 review, r9).
@@ -61,19 +61,54 @@ export function requestGuardedReload(): void {
 // Returns null when the dialog took over — the caller's own flow ends there.
 export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult | null> {
   if (orphanedDraftCount() === 0 || openRecoveryWarning === null) {
-    return bridge().installUpdate();
+    return beginInstall();
   }
   openRecoveryWarning({
     kind: "update",
-    resume: () =>
-      bridge()
-        .installUpdate()
-        .then(
-          (result) => result.accepted,
-          () => false,
-        ),
+    resume: () => beginInstall().then((result) => result.accepted, () => false),
   });
   return null;
+}
+
+// The install's own exit runs through beforeunload like any other unload, and
+// a draft captured between the recovery check and that exit blocks it there
+// (#579 review, r13). The warning must then name what the user was actually
+// doing — a RESTART, not a close — so the intent is claimed before the call
+// (#579 review, r16).
+//
+// The resume is the QUIT, never a second install: quitAndInstall's latch is
+// one-shot and already spent by the time beforeunload can fire, and main has
+// pre-approved the quit it started. A plain window.close() would also strand
+// the staged installer on macOS, where closing a window does not quit.
+function beginInstall(): Promise<UpdateActionResult> {
+  const attempt: PendingUnload = {
+    kind: "update",
+    resume: () =>
+      bridge()
+        .resumeQuit()
+        .then(
+          () => true,
+          () => false,
+        ),
+  };
+  pendingUnload = attempt;
+  const forget = () => {
+    // An install that never started must not label a later, unrelated close
+    // "Restart" (`requestGuardedReload` precedent).
+    if (pendingUnload === attempt) pendingUnload = null;
+  };
+  return bridge()
+    .installUpdate()
+    .then(
+      (result) => {
+        if (!result.accepted) forget();
+        return result;
+      },
+      (error: unknown) => {
+        forget();
+        throw error;
+      },
+    );
 }
 
 // Fail-safe for a bypassed unload that never happens and gives no failure

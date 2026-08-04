@@ -438,10 +438,12 @@ describe("RecoveryCloseGuard", () => {
       return { accepted, completed: false, state: readyState };
     });
     const answerRecoveryCheck = vi.fn(async () => undefined);
+    const resumeQuit = vi.fn(async () => undefined);
     let checkListener: ((requestId: number) => void) | null = null;
     stubBridge({
       installUpdate,
       answerRecoveryCheck,
+      resumeQuit,
       onRecoveryCheckRequested: (listener: (requestId: number) => void) => {
         checkListener = listener;
         return () => {
@@ -452,6 +454,7 @@ describe("RecoveryCloseGuard", () => {
     return {
       installUpdate,
       answerRecoveryCheck,
+      resumeQuit,
       askBoundaryCheck: (requestId: number) => {
         act(() => {
           checkListener?.(requestId);
@@ -622,6 +625,25 @@ describe("RecoveryCloseGuard", () => {
     const rows = await screen.findAllByTestId("recovery-list-row");
     expect(rows).toHaveLength(1);
     expect(rows[0].textContent).toContain("b.md");
+
+    // ...and it is still the RESTART the user asked for (#579 review, r16).
+    // A warning that cannot tell close from restart passes either way, so
+    // assert the action, not just its presence.
+    // MUTATION (update intent): stop claiming pendingUnload in beginInstall.
+    // The warning degrades to "Close", and confirming calls window.close()
+    // instead of resuming the quit quitAndInstall already started — whose
+    // one-shot latch is spent, so no later confirm can ever restart.
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
+      "Restart anyway",
+    );
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    await user.click(screen.getByTestId("recovery-close-anyway"));
+    await waitFor(() => expect(harness.resumeQuit).toHaveBeenCalledTimes(1));
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(harness.installUpdate).toHaveBeenCalledTimes(1);
+    closeSpy.mockRestore();
   });
 
   // #579 review r10: a native quit (Cmd+Q, tray Quit) is main-initiated —
