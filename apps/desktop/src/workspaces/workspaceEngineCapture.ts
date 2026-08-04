@@ -596,13 +596,28 @@ const LOCKED_CLOSE_RETRY_CAP_MS = 10_000;
 // settling close's own refusal, or the pre-close settle failure carried as
 // `cause` (YdocReleasedWithSettleFailureError wraps it, and wrappers above
 // may add another layer).
-function isFileLockedCause(error: unknown): boolean {
+function hasRefusalInCauseChain(
+  error: unknown,
+  refusal: (candidate: unknown) => boolean,
+): boolean {
   let candidate = error;
   for (let depth = 0; depth < 4 && candidate != null; depth += 1) {
-    if (isFileLockedRefusal(candidate)) return true;
+    if (refusal(candidate)) return true;
     candidate = (candidate as { cause?: unknown }).cause;
   }
   return false;
+}
+
+function isFileLockedCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, isFileLockedRefusal);
+}
+
+// The engine refuses a pending write whose preimage no longer matches the
+// file: the external program EDITED it before releasing its lock. No amount
+// of waiting changes that, so a retry ladder aimed at the lock has nothing
+// left to wait for.
+function isConflictStaleTargetCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, isConflictStaleTargetRefusal);
 }
 
 interface RegisteredExpectedEngineEvent extends ExpectedEngineEvent {
@@ -1234,10 +1249,12 @@ export function createWorkspaceEngineCapture(
   interface DetachedLockedDebt {
     pay: () => Promise<void>;
     arm: () => void;
-    // Release anything the debt still holds when it is discarded without
-    // being paid. A retained retry session is a DAEMON LEASE: dropping
-    // the reference strands it, and every later open of that path is
-    // refused ydoc-session-busy until the daemon restarts.
+    // Cancel the WRITE this debt owes. A retained retry session is a DAEMON
+    // LEASE and is not cancellable: dropping the reference leaves it with no
+    // owner, and every later open of that path is refused ydoc-session-busy
+    // until the daemon restarts. So discard releases the lease, and a
+    // refused release puts the debt back — release-only — rather than
+    // letting go of it. Rejects when the lease is still held.
     discard: () => Promise<void>;
   }
   const detachedLockedDebts = new Map<string, DetachedLockedDebt>();
@@ -3118,13 +3135,64 @@ export function createWorkspaceEngineCapture(
         let detachedRetryMs = LOCKED_CLOSE_RETRY_INITIAL_MS;
         // The single pending timer for this debt (#595 round 9).
         let pendingRetryTimer: ReturnType<typeof setTimeout> | null = null;
-        // A retry session whose RELEASE was refused: the daemon reinserted
-        // it and kept its lease, so only this session can complete its own
-        // release. settled records whether its settle had already landed.
-        let pendingRelease: {
-          session: WorkspaceEngineYDocProviderSession;
-          settled: boolean;
-        } | null = null;
+
+        // ── A debt owes TWO things (#595 round 11) ──────────────────────
+        //
+        //   W  the newest Y.Doc state must reach the Markdown artifact
+        //   L  a retry session whose RELEASE the daemon refused must still
+        //      be released: ydoc_close_inner reinserts that session and it
+        //      keeps its lease, so every later open of the path answers
+        //      ydoc-session-busy until the daemon restarts
+        //
+        // The registry entry lives until BOTH are discharged, and cancelling
+        // W never cancels L. Ten rounds of review findings on this block were
+        // all one of two shapes: W discharged against a proof a later update
+        // had already invalidated, or L dropped by a path that only knew it
+        // was giving up on W. Both are answered structurally below rather
+        // than by each branch remembering.
+
+        // W's proof is ASKED, never stored. Every remote update this debt
+        // sees bumps the sequence; a settle records the value it is known to
+        // carry, snapshotted before it is issued because the projection is
+        // taken inside that call. The write is proven only while the two
+        // still agree — so an update arriving after a settle succeeds
+        // withdraws the proof by itself, and no branch can act on a `settled`
+        // flag that stopped being true after it was written.
+        let updateSeq = 0;
+        let settleCovers = -1;
+        const writeIsProven = (): boolean => settleCovers === updateSeq;
+
+        // L's holder: a session the daemon refused to release. Assigned only
+        // where a close fails, cleared only where a close succeeds.
+        let pendingRelease: WorkspaceEngineYDocProviderSession | null = null;
+
+        // W is cancelled: the path is gone, or the engine will refuse this
+        // write however long anyone waits. L can still be outstanding.
+        let writeCancelled = false;
+
+        // THE ONLY way this debt lets go of a lease. Release first, forget
+        // second: a refused release keeps the session, because dropping the
+        // reference leaves the lease with no owner at all.
+        const releaseRetainedSession = async (): Promise<void> => {
+          const held = pendingRelease;
+          if (held === null) return;
+          await held.close({ settle: false });
+          pendingRelease = null;
+        };
+
+        // Give up on W and say why — the user is the last one who can act on
+        // this. L is untouched: the debt survives whenever a lease is still
+        // held, so the ladder keeps retrying the release alone.
+        const standDownFromWrite = (message: string): void => {
+          writeCancelled = true;
+          onError(`ydoc close retry of ${input.path}`, new Error(message));
+          if (pendingRelease === null) {
+            detachedLockedDebts.delete(input.path);
+            return;
+          }
+          armDetachedLockedRetry();
+        };
+
         const payDetachedLockedDebt = async (): Promise<void> => {
           // Another edge may have paid, transferred, or CANCELLED this debt
           // after the timer's own check — a destructive vacate cancels
@@ -3135,10 +3203,20 @@ export function createWorkspaceEngineCapture(
             return;
           }
           if (stopped) {
+            // A retained lease needs no release here: stop() closes the
+            // store it belongs to, which drops every session lease with it.
             detachedLockedDebts.delete(input.path);
             return;
           }
           try {
+            if (writeCancelled) {
+              // Only L is left. Never open a session here: the path this
+              // debt names is gone, or its write is refused for good, and
+              // reopening it would recreate what the user removed.
+              await releaseRetainedSession();
+              detachedLockedDebts.delete(input.path);
+              return;
+            }
             const live = liveYDocSessions.get(input.path);
             if (live) {
               // A HANDOFF, not a hand-wave (#595 round 10). Firing this
@@ -3161,12 +3239,8 @@ export function createWorkspaceEngineCapture(
             // re-arms like any other.
             const activeVersionId = await activeVersionIdOf(engine);
             if (activeVersionId !== versionId) {
-              detachedLockedDebts.delete(input.path);
-              onError(
-                `ydoc close retry of ${input.path}`,
-                new Error(
-                  `locked-write retry dropped: the workspace moved to version ${activeVersionId} while a pending write for version ${versionId} waited; the version fence replay owns pending writes across switches`,
-                ),
+              standDownFromWrite(
+                `locked-write retry dropped: the workspace moved to version ${activeVersionId} while a pending write for version ${versionId} waited; the version fence replay owns pending writes across switches`,
               );
               return;
             }
@@ -3176,22 +3250,17 @@ export function createWorkspaceEngineCapture(
             // answered ydoc-session-busy forever. Only that session can
             // finish its own release — retry its close before anything else.
             if (pendingRelease !== null) {
-              const held = pendingRelease;
-              await held.session.close({ settle: false });
-              pendingRelease = null;
-              if (held.settled) {
-                // PROOF: the write landed earlier, the session is released.
+              await releaseRetainedSession();
+              // L is discharged. W is asked, not remembered: a settle that
+              // landed before the refused release stops being proof the
+              // moment a newer update arrives on the retained session.
+              if (writeIsProven()) {
                 detachedLockedDebts.delete(input.path);
                 return;
               }
-              // The lease is back but the write never landed: a fresh
-              // attempt owes the settle.
               armDetachedLockedRetry();
               return;
             }
-            let settled = false;
-            let settleIssued = false;
-            let updateOutranSettle = false;
             const { session: retrySession } =
               await openRestartSafeRustYDocSession({
                 versionId,
@@ -3203,27 +3272,27 @@ export function createWorkspaceEngineCapture(
                 onAlive: () => undefined,
                 onRemoteUpdate: () => {
                   // An update the settle did not carry is not covered by
-                  // it (#595 round 10). The close below cancels this
-                  // update's debounce and sends settle: false, and a
-                  // REPLICATED lineage compacts and releases without the
-                  // local-only unsettled guard (durable.rs) — so the close
-                  // succeeds over a projection that never reached Markdown.
-                  //
-                  // The window opens when the settle is ISSUED, because
-                  // the projection is taken INSIDE that call: an update
-                  // delivered while it is in flight is already outside
-                  // what it carries. Erring wide costs one extra settle;
-                  // erring narrow loses the update entirely.
-                  if (settleIssued) updateOutranSettle = true;
+                  // it. The close below cancels this update's debounce and
+                  // sends settle: false, and a REPLICATED lineage compacts
+                  // and releases without the local-only unsettled guard
+                  // (durable.rs) — so the close succeeds over a projection
+                  // that never reached Markdown. Bumping the sequence is
+                  // the whole record: whether it outran a settle is
+                  // decided by comparing it to what that settle covers.
+                  updateSeq += 1;
                 },
                 onSettleStart: () => undefined,
                 onSettleError: () => undefined,
                 onSettled: () => undefined,
               });
             try {
-              settleIssued = true;
+              // Snapshot BEFORE issuing: the projection is taken inside the
+              // call, so an update delivered while it is in flight is
+              // already outside what it carries. Erring wide costs one
+              // extra settle; erring narrow loses the update entirely.
+              const covers = updateSeq;
               await retrySession.settleNow({ summary: "session close" });
-              settled = true;
+              settleCovers = covers;
             } finally {
               // The release is NOT suppressed (#595 round 8): a replicated
               // update arriving between the settle and this release makes
@@ -3236,11 +3305,11 @@ export function createWorkspaceEngineCapture(
               try {
                 await retrySession.close({ settle: false });
               } catch (closeError) {
-                pendingRelease = { session: retrySession, settled };
+                pendingRelease = retrySession;
                 throw closeError;
               }
             }
-            if (updateOutranSettle) {
+            if (!writeIsProven()) {
               // The close returned Ok, but about a projection this settle
               // never carried. That is proof of the RELEASE, not of the
               // write — the debt stands and the next attempt settles the
@@ -3253,6 +3322,19 @@ export function createWorkspaceEngineCapture(
           } catch (retryError) {
             if (isFileLockedCause(retryError)) {
               armDetachedLockedRetry();
+              return;
+            }
+            if (isConflictStaleTargetCause(retryError)) {
+              // TERMINAL, not transient: the external program EDITED the
+              // file before releasing its lock, so the pending job's
+              // preimage no longer matches and the engine will refuse this
+              // write forever. Polling it every 10 seconds reopened a
+              // session and logged the same error until the workspace
+              // closed, and never told the user the one thing they could
+              // act on. Give up on the write, keep the lease obligation.
+              standDownFromWrite(
+                `locked-write retry stopped: ${input.path} changed outside dohc while another program held it, so the pending write no longer matches the file. The edits stay in the document's history — open ${input.path} to write them again.`,
+              );
               return;
             }
             // No proof either way — a failed release leaves the session
@@ -3285,16 +3367,27 @@ export function createWorkspaceEngineCapture(
             enqueue(`ydoc close retry of ${input.path}`, payDetachedLockedDebt);
           }, delay);
         };
-        // Discarding a debt still has to release what it holds: a retained
-        // retry session is a live daemon lease on this path.
+        // Discarding a debt cancels W. It does NOT cancel L: a retained
+        // retry session is a live daemon lease on this path, and the caller
+        // that discards knows only that the path went away.
         const discardDetachedLockedDebt = async (): Promise<void> => {
+          writeCancelled = true;
           if (pendingRetryTimer !== null) {
             clearTimeout(pendingRetryTimer);
             pendingRetryTimer = null;
           }
-          const held = pendingRelease;
-          pendingRelease = null;
-          if (held !== null) await held.session.close({ settle: false });
+          if (pendingRelease === null) return;
+          try {
+            await releaseRetainedSession();
+          } catch (error) {
+            // The daemon refused the release again, and the discarding
+            // caller only logs. Hand the lease BACK to the registry —
+            // cancelled for the write, alive for the release — so the one
+            // ladder keeps trying it. Dropping it here is exactly what
+            // leaves the path at ydoc-session-busy until a daemon restart.
+            scheduleDetachedLockedSettle();
+            throw error;
+          }
         };
         const scheduleDetachedLockedSettle = (): void => {
           if (stopped) return;

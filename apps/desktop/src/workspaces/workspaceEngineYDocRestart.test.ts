@@ -2423,6 +2423,9 @@ async function lockedRebindCapture(prefix: string) {
     generation: 0,
     generationOptions: [] as EngineYdocProviderSessionOptions[],
     errors: [] as string[],
+    // The MESSAGE, not just the context: a debt that gives up has to say
+    // what the user can act on, and only the error carries that.
+    errorMessages: [] as string[],
   };
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
@@ -2527,7 +2530,12 @@ async function lockedRebindCapture(prefix: string) {
     rootPath,
     rustEngineSessions: sessions,
     openRustYDocProviderSession: openProvider,
-    onError: (context) => state.errors.push(context),
+    onError: (context, error) => {
+      state.errors.push(context);
+      state.errorMessages.push(
+        error instanceof Error ? error.message : String(error),
+      );
+    },
   });
   return { capture, state, loopback, workspaceId, rootPath };
 }
@@ -3358,3 +3366,173 @@ it("a close that raced a newer update is not proof the write landed", async () =
     .toBeGreaterThan(settlesAfterRace);
   await capture.stop();
 }, 30_000);
+
+it("a settle held through a refused release stops being proof when an update lands", async () => {
+  // #595 round 11, invariant W: the write is discharged only against proof
+  // that the artifact reflects the NEWEST Y.Doc state. Recording "this
+  // settle landed" as a flag on the retained session let a later attempt
+  // read a yes that a peer update had already invalidated: the release
+  // succeeded, the debt was deleted, and that update never reached
+  // Markdown. The proof is asked at discharge time, so the update withdraws
+  // it without any branch remembering to.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-proof-expiry-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "proof expires");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The retry settles, a peer update lands after it, and THEN the release is
+  // refused — so the debt retains the session with a settle that no longer
+  // covers the document.
+  state.locked = false;
+  state.emitUpdateAfterSettle = true;
+  state.closeFailure = new Error("ydoc-unsettled-close");
+  await expect
+    .poll(() => state.settledMarkdowns.length, { timeout: 15_000 })
+    .toBeGreaterThan(0);
+  const generationAtRetention = state.generation;
+
+  // The release now succeeds. Believing the stored flag, the debt would be
+  // deleted here and the peer update would never be written: no further
+  // session is ever opened. Asking the proof, the release discharges only
+  // the lease, and a FRESH session settles the newer state.
+  state.closeFailure = null;
+  await expect
+    .poll(() => state.generation, { timeout: 20_000 })
+    .toBeGreaterThan(generationAtRetention);
+  await capture.stop();
+}, 40_000);
+
+it("a cancelled debt whose release is refused keeps retrying that release", async () => {
+  // #595 round 11, invariant L: a session lease has exactly one owner at all
+  // times. Discarding a debt cancels the WRITE; it cannot cancel the lease.
+  // Clearing the reference before the close meant a refused release left the
+  // lease owned by nobody, and every later open of the path answered
+  // ydoc-session-busy until the daemon restarted. The debt goes back to the
+  // registry — release-only — instead.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-lease-owner-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "leased twice");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The retry settles, a peer update outruns it, and the release is refused.
+  // The debt now holds the only session that can free the lease AND still
+  // owes a write — the state where cancelling has both things to get right.
+  state.locked = false;
+  state.emitUpdateAfterSettle = true;
+  state.closeFailure = new Error("ydoc-unsettled-close");
+  await expect
+    .poll(
+      () => state.closeCalls.filter((generation) => generation === 2).length,
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(0);
+  const releasesBeforeCancel = state.closesWithSettleFalse;
+  const generationBeforeCancel = state.generation;
+  const settlesBeforeCancel = state.settledMarkdowns.length;
+
+  // The user deletes the path WHILE the release is still refused.
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+  finishDelete(true);
+  await expect
+    .poll(() => state.errors.filter((c) => c.includes("close retry")), {
+      timeout: 15_000,
+    })
+    .not.toHaveLength(0);
+
+  // The daemon accepts the release at last. Nothing is left to retry it if
+  // the discard dropped the session, so this is the whole proof of the
+  // handback.
+  state.closeFailure = null;
+  await expect
+    .poll(() => state.closesWithSettleFalse, { timeout: 20_000 })
+    .toBeGreaterThan(releasesBeforeCancel);
+
+  // And the cancelled write stays cancelled. The debt still looks unpaid —
+  // that peer update never reached Markdown — so a debt that only knew how
+  // to chase the write would reopen the DELETED path and settle the file
+  // back into existence. Long enough for two more rungs of the ladder.
+  await new Promise((resolve) => setTimeout(resolve, 12_000));
+  expect(state.generation).toBe(generationBeforeCancel);
+  expect(state.settledMarkdowns).toHaveLength(settlesBeforeCancel);
+  await capture.stop();
+}, 60_000);
+
+it("a settle the engine refuses for good stops the ladder and says why", async () => {
+  // #595 round 11: the external program EDITED the file before releasing its
+  // lock, so the pending job's preimage no longer matches and the engine
+  // refuses conflict-stale-target forever. The unconditional re-arm polled
+  // that permanent refusal every 10 seconds, reopening a session each time,
+  // and never told the user the one thing they could act on.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-terminal-conflict-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "conflicting edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The lock releases, but the file it guarded is no longer the one the
+  // pending write was built against.
+  state.locked = false;
+  state.settleFailure = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+    new Error("daemon response"),
+  );
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.filter((message) =>
+          message.includes("changed outside dohc"),
+        ),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+  const [stopMessage] = state.errorMessages.filter((message) =>
+    message.includes("changed outside dohc"),
+  );
+  expect(stopMessage).toContain("note.md");
+  expect(stopMessage).toContain("history");
+
+  // THE liveness proof: the ladder is done. Left armed, the 2s and 4s rungs
+  // both wake inside this window and reopen a session for the same
+  // permanent refusal.
+  const settlesAtStandDown = state.settleCalls.length;
+  const generationAtStandDown = state.generation;
+  await new Promise((resolve) => setTimeout(resolve, 8_000));
+  expect(state.settleCalls.length).toBe(settlesAtStandDown);
+  expect(state.generation).toBe(generationAtStandDown);
+  await capture.stop();
+}, 40_000);
