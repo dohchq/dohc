@@ -36,6 +36,179 @@ fn plaintext_base_and_delta() -> (Vec<u8>, Vec<u8>) {
 // ---- regimes ----------------------------------------------------------------
 
 #[test]
+fn another_workspaces_pending_job_cannot_block_this_close() {
+    // Every file, chat and capture is scoped to a workspace, and this guard
+    // was not: it matched a pending `resolve-mat_<moment>` /
+    // `ydoc-mat_<moment>` job by moment id alone. Moment ids are
+    // caller-supplied and keyed `(workspace_id, moment_id)`, so two
+    // workspaces may hold the same one — and workspace B's unfinished job
+    // then held workspace A's settled local-only close in UnsettledClose
+    // until B drained. One workspace's backlog blocking another is the
+    // invariant break, not the delay.
+    //
+    // The fixture is the PREDICATE, not the scenario: two rows that differ
+    // only by workspace. The job below is byte-identical to one that must
+    // block this close, except that it belongs to someone else.
+    //
+    // MUTATION: drop the `j.workspace_id` predicate from the pending-job
+    // check in `close_session` — this close returns UnsettledClose and the
+    // expect below fails.
+    let mut ts = fresh_store("cross-workspace-pending");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    let delta = doc.plaintext_insert(0, "mine");
+    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_000).expect("rec"));
+    committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+
+    // The guard joins `moments`, so this lineage needs the settle moment a
+    // domain-layer settle would have written — without it the join matches
+    // nothing and the test would pass against the bug.
+    let shared_moment = "shared-moment-id";
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            let text_sha = dohc_engine_storage::hex_sha256(b"mine");
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) \
+                 VALUES (?1, 4, 'mine')",
+                [&text_sha],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO versions \
+                 (workspace_id, version_id, kind, name, created_at_ms) \
+                 VALUES (?1, ?2, 'main', 'main', 1)",
+                rusqlite::params![key.workspace_id, key.version_id],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO moments \
+                 (workspace_id, moment_order, moment_id, version_id, object_id, path, \
+                  recorded_at_ms, operation, after_blob_sha256, before_present, \
+                  metadata_origin) \
+                 VALUES (?1, 0, ?2, ?3, ?4, 'notes/doc.md', 1, 'write', ?5, 0, 'ydoc')",
+                rusqlite::params![
+                    key.workspace_id,
+                    shared_moment,
+                    key.version_id,
+                    key.object_id,
+                    text_sha
+                ],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            // ANOTHER workspace's pending resolution job, keyed off THIS
+            // workspace's moment id — the collision the schema permits.
+            let sha = dohc_engine_storage::put_binary_blob(tx, b"other workspace bytes")?;
+            tx.execute(
+                "INSERT INTO materialization_jobs \
+                 (job_id, workspace_id, target_path, content_sha256, preimage_present, \
+                  target_generation, status, created_at_ms, operation) \
+                 VALUES (?1, 'other-workspace', 'notes/other.md', ?2, 0, 1, \
+                         'pending', 1, 'write')",
+                rusqlite::params![format!("resolve-mat_{shared_moment}"), sha],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("seed the colliding cross-workspace job");
+
+    let out = committed(
+        close_session(&mut ts.store, &key, false, &NoFaults, 1_400)
+            .expect("another workspace's backlog must not block this close"),
+    );
+    assert!(
+        matches!(out, CloseOutcome::Pruned { .. }),
+        "the settled local-only lineage prunes: {out:?}"
+    );
+
+    // The same job under THIS workspace must still block — otherwise the
+    // fix would have been "ignore pending jobs", not "scope them".
+    let mut ts2 = fresh_store("same-workspace-pending");
+    let key2 = test_key();
+    seed_parents(&mut ts2.store, &key2, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts2.store,
+            &key2,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc2 = Ydoc::wire();
+    let delta2 = doc2.plaintext_insert(0, "mine");
+    committed(record_local_update(&mut ts2.store, &key2, &delta2, &NoFaults, 1_000).expect("rec"));
+    committed(settle(&mut ts2.store, &key2, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    ts2.store
+        .write_with(&NoFaults, |tx| {
+            let text_sha = dohc_engine_storage::hex_sha256(b"mine");
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) \
+                 VALUES (?1, 4, 'mine')",
+                [&text_sha],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO versions \
+                 (workspace_id, version_id, kind, name, created_at_ms) \
+                 VALUES (?1, ?2, 'main', 'main', 1)",
+                rusqlite::params![key2.workspace_id, key2.version_id],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO moments \
+                 (workspace_id, moment_order, moment_id, version_id, object_id, path, \
+                  recorded_at_ms, operation, after_blob_sha256, before_present, \
+                  metadata_origin) \
+                 VALUES (?1, 0, ?2, ?3, ?4, 'notes/doc.md', 1, 'write', ?5, 0, 'ydoc')",
+                rusqlite::params![
+                    key2.workspace_id,
+                    shared_moment,
+                    key2.version_id,
+                    key2.object_id,
+                    text_sha
+                ],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            let sha = dohc_engine_storage::put_binary_blob(tx, b"my own bytes")?;
+            tx.execute(
+                "INSERT INTO materialization_jobs \
+                 (job_id, workspace_id, target_path, content_sha256, preimage_present, \
+                  target_generation, status, created_at_ms, operation) \
+                 VALUES (?1, ?2, 'notes/doc.md', ?3, 0, 1, 'pending', 1, 'write')",
+                rusqlite::params![
+                    format!("resolve-mat_{shared_moment}"),
+                    key2.workspace_id,
+                    sha
+                ],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("seed this workspace's own pending job");
+    assert!(
+        matches!(
+            close_session(&mut ts2.store, &key2, false, &NoFaults, 1_400),
+            Err(CollabError::UnsettledClose)
+        ),
+        "this workspace's own pending job must still hold the prune"
+    );
+}
+
+#[test]
 fn local_only_close_prunes_the_cache() {
     let mut ts = fresh_store("local-prune");
     let key = test_key();

@@ -853,6 +853,29 @@ pub fn read_marker_in_tx(
     query_marker(tx, key)
 }
 
+/// Reconstruct the persisted doc inside the caller's transaction (marker
+/// required). The conflict-resolution fold reads, rewrites, and appends under
+/// ONE transaction so the folded update extends exactly the lineage it read.
+pub fn load_doc_in_tx(tx: &Transaction<'_>, key: &DocKey) -> Result<Ydoc, CollabError> {
+    load_for_replay_gate(tx, key)
+}
+
+/// Append one locally-produced update inside the caller's transaction — the
+/// transaction-composable core of [`record_local_update`]. Validates the
+/// bytes, runs the replay-parity gate, content-dedupes, and advances the
+/// head.
+pub fn record_update_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    update: &[u8],
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
+    validate_update_bytes(update)?;
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let sha = crate::hex_sha256(update);
+    append_local_update(tx, key, &marker, update, &sha, None, now_ms)
+}
+
 /// Encode the base bytes (and their state vector) that ORIGINATE `key`'s
 /// replicated lineage, from the state persisted inside the caller's
 /// transaction.
@@ -1048,7 +1071,7 @@ pub fn close_session(
         // lands the job.
         let job_pending: bool = store.read_with(|conn| {
             conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM materialization_jobs j                    JOIN moments m ON j.job_id = 'ydoc-mat_' || m.moment_id                   WHERE m.workspace_id = ?1 AND m.version_id = ?2                     AND m.object_id = ?3 AND j.status = 'pending')",
+                "SELECT EXISTS (SELECT 1 FROM materialization_jobs j                    JOIN moments m ON j.job_id = 'ydoc-mat_' || m.moment_id                      OR j.job_id = 'resolve-mat_' || m.moment_id                   WHERE m.workspace_id = ?1 AND m.version_id = ?2                     AND m.object_id = ?3 AND j.status = 'pending'                     AND (j.workspace_id = ?1 OR j.workspace_id = ''))",
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id],
                 |row| row.get(0),
             )

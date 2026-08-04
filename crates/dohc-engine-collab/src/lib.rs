@@ -32,10 +32,10 @@ pub mod ydoc;
 
 pub use durable::{
     claim_base, claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker,
-    load_persisted, maybe_compact, read_last_settled_sha, read_marker, read_marker_in_tx,
-    record_local_update, record_local_update_creating_marker,
+    load_doc_in_tx, load_persisted, maybe_compact, read_last_settled_sha, read_marker,
+    read_marker_in_tx, record_local_update, record_local_update_creating_marker,
     record_local_update_creating_marker_guarded, record_local_update_creating_marker_with_hook,
-    record_local_update_with_origin, record_local_update_with_origin_and_hook,
+    record_local_update_with_origin, record_local_update_with_origin_and_hook, record_update_in_tx,
     rewrite_bare_marker_content_kind, settle, validate_remote_update_for,
     validate_remote_update_with_pending, AppendOutcome, ClaimOutcome, CloseOutcome, CompactOutcome,
     Marker, OriginationBase, PersistedDoc, Regime, SettleOutcome,

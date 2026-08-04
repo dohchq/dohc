@@ -432,6 +432,72 @@ impl Ydoc {
         })
     }
 
+    /// Rewrite the document's projected content to `markdown` and return one
+    /// encoded v1 update — the conflict-resolution fold. The user chose these
+    /// exact bytes over the lineage's current projection, so the update
+    /// deletes the current content and writes the choice in the lineage's own
+    /// kind, keeping CRDT convergence while making the choice durable.
+    ///
+    /// Plaintext replaces the [`ROOT_PLAINTEXT`] text. Richdoc parses the
+    /// chosen markdown SOURCE into the projection's own block schema —
+    /// frontmatter scalars, headings, blockquotes, bullet/ordered/task
+    /// lists, fenced code blocks, horizontal rules, and paragraphs — so the
+    /// folded document projects the chosen bytes back AND renders as
+    /// structure, not literal syntax. A construct the parser does not model
+    /// stays verbatim paragraph text, which the projector re-emits
+    /// byte-identically (plain text runs are never escaped on projection).
+    pub fn rewrite_content_to_markdown(
+        &self,
+        content_kind: ContentKind,
+        markdown: &str,
+    ) -> Vec<u8> {
+        match content_kind {
+            ContentKind::Plaintext => {
+                let t = self.doc.get_or_insert_text(ROOT_PLAINTEXT);
+                self.with_delta(|txn| {
+                    let len = t.len(txn);
+                    if len > 0 {
+                        t.remove_range(txn, 0, len);
+                    }
+                    t.insert(txn, 0, markdown);
+                })
+            }
+            ContentKind::Richdoc => {
+                let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+                let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+                let (frontmatter, body) = split_markdown_frontmatter(markdown);
+                let blocks = parse_markdown_blocks(body);
+                self.with_delta(|txn| {
+                    let keys: Vec<String> = map.iter(txn).map(|(key, _)| key.to_string()).collect();
+                    for key in keys {
+                        map.remove(txn, &key);
+                    }
+                    for (key, value) in &frontmatter {
+                        match value {
+                            MdFrontmatter::Scalar(value) => {
+                                map.insert(txn, key.as_str(), value.as_str());
+                            }
+                            MdFrontmatter::Map(children) => {
+                                let nested: std::collections::HashMap<String, Any> = children
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), Any::from(v.as_str())))
+                                    .collect();
+                                map.insert(txn, key.as_str(), Any::from(nested));
+                            }
+                        }
+                    }
+                    let len = frag.len(txn);
+                    if len > 0 {
+                        frag.remove_range(txn, 0, len);
+                    }
+                    for (index, block) in blocks.iter().enumerate() {
+                        insert_md_block(txn, &frag, index as u32, block);
+                    }
+                })
+            }
+        }
+    }
+
     /// Set a top-level [`ROOT_FRONTMATTER`] scalar and return the encoded delta.
     pub fn frontmatter_set(&self, key: &str, value: &str) -> Vec<u8> {
         let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
@@ -460,6 +526,366 @@ impl Ydoc {
             edit(&mut txn);
         }
         self.doc.transact().encode_state_as_update_v1(&before)
+    }
+}
+
+/// One block of the conflict-resolution fold's markdown parse — the subset
+/// of the projection schema the fold reconstructs. Anything else stays a
+/// verbatim [`MdBlock::Paragraph`], which the projector re-emits
+/// byte-identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MdBlock {
+    Heading { level: i64, text: String },
+    Paragraph(String),
+    Quote(Vec<MdBlock>),
+    BulletList(Vec<String>),
+    OrderedList { start: i64, items: Vec<String> },
+    TaskList(Vec<(bool, String)>),
+    CodeBlock { language: String, content: String },
+    Rule,
+}
+
+/// Split a leading `---` frontmatter block of flat `key: value` scalars off
+/// the chosen markdown. Only the exact shape the projector emits is claimed;
+/// anything else stays in the body and parses as blocks.
+/// A parsed frontmatter entry: the scalar and one-level-map shapes the
+/// projector itself emits (`scalar_line`). Anything else bails to the body
+/// parser rather than guessing at YAML.
+enum MdFrontmatter {
+    Scalar(String),
+    Map(Vec<(String, String)>),
+}
+
+fn split_markdown_frontmatter(markdown: &str) -> (Vec<(String, MdFrontmatter)>, &str) {
+    let Some(rest) = markdown.strip_prefix("---\n") else {
+        return (Vec::new(), markdown);
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (Vec::new(), markdown);
+    };
+    let after = &rest[end + "\n---".len()..];
+    let body = after
+        .strip_prefix("\n\n")
+        .or_else(|| after.strip_prefix('\n'))
+        .unwrap_or(after);
+    if !after.is_empty() && !after.starts_with('\n') {
+        return (Vec::new(), markdown);
+    }
+    let lines: Vec<&str> = rest[..end].lines().collect();
+    let mut entries: Vec<(String, MdFrontmatter)> = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.starts_with(' ') || line.trim().is_empty() {
+            return (Vec::new(), markdown);
+        }
+        if let Some((key, value)) = line.split_once(": ") {
+            if key.trim().is_empty() {
+                return (Vec::new(), markdown);
+            }
+            entries.push((key.to_string(), MdFrontmatter::Scalar(value.to_string())));
+            index += 1;
+            continue;
+        }
+        // `key:` alone opens the projector's one-level nested map: two-space
+        // indented `child: value` scalars, sorted on projection.
+        let Some(key) = line.strip_suffix(':') else {
+            return (Vec::new(), markdown);
+        };
+        if key.trim().is_empty() || key.contains(':') {
+            return (Vec::new(), markdown);
+        }
+        index += 1;
+        let mut children = Vec::new();
+        while index < lines.len() {
+            let Some(child) = lines[index].strip_prefix("  ") else {
+                break;
+            };
+            // Deeper nesting than the projector emits: bail to the body
+            // parser rather than mangling metadata.
+            if child.starts_with(' ') {
+                return (Vec::new(), markdown);
+            }
+            let Some((child_key, child_value)) = child.split_once(": ") else {
+                return (Vec::new(), markdown);
+            };
+            if child_key.trim().is_empty() {
+                return (Vec::new(), markdown);
+            }
+            children.push((child_key.to_string(), child_value.to_string()));
+            index += 1;
+        }
+        entries.push((key.to_string(), MdFrontmatter::Map(children)));
+    }
+    (entries, body)
+}
+
+fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
+    parse_markdown_blocks_at(body, 0)
+}
+
+/// How many nested blockquote levels the fold will build before it stops
+/// recursing and keeps the remaining quoted lines as verbatim paragraph text.
+///
+/// This is a RECURSION BUDGET against hostile input, not a fidelity ceiling —
+/// the earlier comment here claimed the latter and was wrong on both counts.
+/// `markdown_node` increments projection depth by one per level, not two, and
+/// the projector renders far deeper than 60: measured in-tree, a fold
+/// round-trips byte-exactly at 40, 100 and 120 levels.
+///
+/// The overflow is also NOT lossless, which the old comment asserted and the
+/// fold relied on: a paragraph holding `> > …` re-projects with its leading
+/// markers escaped as `&gt;`. That is why the caller
+/// (`fold_resolution_into_ydoc_in_tx`) re-projects and compares before it
+/// commits anything — past this bound a resolution is REFUSED, never silently
+/// stored as bytes the user did not choose.
+///
+/// 120 sits under the projector's own `MAX_PROJECTION_DEPTH`, so a document
+/// the projection can render is one the fold can rebuild, and the refusal
+/// above it costs no representable content. Real prose nests single digits
+/// deep; the budget exists so a megabyte of `> ` prefixes inside one resolve
+/// frame cannot exhaust the parser stack or the actor thread.
+const QUOTE_FOLD_MAX_DEPTH: usize = 120;
+
+/// `depth` bounds blockquote recursion at [`QUOTE_FOLD_MAX_DEPTH`].
+fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let mut blocks = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.is_empty() {
+            index += 1;
+            continue;
+        }
+        if let Some(fence_language) = line.strip_prefix("```") {
+            let mut content = Vec::new();
+            let mut cursor = index + 1;
+            let mut closed = false;
+            while cursor < lines.len() {
+                if lines[cursor] == "```" {
+                    closed = true;
+                    break;
+                }
+                content.push(lines[cursor]);
+                cursor += 1;
+            }
+            if closed {
+                blocks.push(MdBlock::CodeBlock {
+                    language: fence_language.to_string(),
+                    content: content.join("\n"),
+                });
+                index = cursor + 1;
+                continue;
+            }
+            // An unclosed fence is not a code block: fall through to text.
+        }
+        if line == "---" {
+            blocks.push(MdBlock::Rule);
+            index += 1;
+            continue;
+        }
+        if let Some((level, text)) = parse_heading(line) {
+            blocks.push(MdBlock::Heading { level, text });
+            index += 1;
+            continue;
+        }
+        if line == ">" || line.starts_with("> ") {
+            let mut inner = Vec::new();
+            let start = index;
+            while index < lines.len() {
+                let quoted = lines[index];
+                if quoted == ">" {
+                    inner.push("");
+                } else if let Some(stripped) = quoted.strip_prefix("> ") {
+                    inner.push(stripped);
+                } else {
+                    break;
+                }
+                index += 1;
+            }
+            if depth >= QUOTE_FOLD_MAX_DEPTH {
+                blocks.push(MdBlock::Paragraph(lines[start..index].join("\n")));
+            } else {
+                blocks.push(MdBlock::Quote(parse_markdown_blocks_at(
+                    &inner.join("\n"),
+                    depth + 1,
+                )));
+            }
+            continue;
+        }
+        if parse_task_item(line).is_some() {
+            let mut items = Vec::new();
+            while let Some(item) = lines.get(index).and_then(|line| parse_task_item(line)) {
+                items.push(item);
+                index += 1;
+            }
+            blocks.push(MdBlock::TaskList(items));
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("- ") {
+            let mut items = vec![item.to_string()];
+            index += 1;
+            while let Some(next) = lines.get(index).and_then(|line| {
+                (parse_task_item(line).is_none())
+                    .then(|| line.strip_prefix("- "))
+                    .flatten()
+            }) {
+                items.push(next.to_string());
+                index += 1;
+            }
+            blocks.push(MdBlock::BulletList(items));
+            continue;
+        }
+        if let Some((start, item)) = parse_ordered_item(line) {
+            let mut items = vec![item];
+            // A parsed ordinal can be i64::MAX, and the successor it implies
+            // cannot be represented: unchecked `+ 1` panics the workspace
+            // actor in debug and test builds and wraps in release, where the
+            // wrapped value then mis-parses every following line. The list
+            // simply ends when no successor exists.
+            let mut expected = start.checked_add(1);
+            index += 1;
+            while let Some(next_expected) = expected {
+                let Some((ordinal, next)) =
+                    lines.get(index).and_then(|line| parse_ordered_item(line))
+                else {
+                    break;
+                };
+                if ordinal != next_expected {
+                    break;
+                }
+                items.push(next);
+                expected = next_expected.checked_add(1);
+                index += 1;
+            }
+            blocks.push(MdBlock::OrderedList { start, items });
+            continue;
+        }
+        // Paragraph: consecutive lines until a blank line or a structural
+        // line. Interior single newlines stay inside one text run, which the
+        // projector re-emits verbatim.
+        let mut para = vec![line];
+        index += 1;
+        while index < lines.len() {
+            let next = lines[index];
+            if next.is_empty()
+                || next == "---"
+                || next.starts_with("```")
+                || next == ">"
+                || next.starts_with("> ")
+                || next.starts_with("- ")
+                || parse_heading(next).is_some()
+                || parse_ordered_item(next).is_some()
+            {
+                break;
+            }
+            para.push(next);
+            index += 1;
+        }
+        blocks.push(MdBlock::Paragraph(para.join("\n")));
+    }
+    blocks
+}
+
+fn parse_heading(line: &str) -> Option<(i64, String)> {
+    let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let rest = line[hashes..].strip_prefix(' ')?;
+    if rest.is_empty() {
+        return None;
+    }
+    Some((hashes as i64, rest.to_string()))
+}
+
+fn parse_task_item(line: &str) -> Option<(bool, String)> {
+    line.strip_prefix("- [x] ")
+        .map(|text| (true, text.to_string()))
+        .or_else(|| {
+            line.strip_prefix("- [ ] ")
+                .map(|text| (false, text.to_string()))
+        })
+}
+
+fn parse_ordered_item(line: &str) -> Option<(i64, String)> {
+    let (ordinal, rest) = line.split_once(". ")?;
+    let ordinal = ordinal.parse::<i64>().ok()?;
+    if ordinal < 0 || rest.is_empty() {
+        return None;
+    }
+    Some((ordinal, rest.to_string()))
+}
+
+fn insert_md_paragraph<F: XmlFragment>(
+    txn: &mut yrs::TransactionMut<'_>,
+    parent: &F,
+    index: u32,
+    text: &str,
+) {
+    let el = parent.insert(txn, index, XmlElementPrelim::empty("paragraph"));
+    if !text.is_empty() {
+        el.insert(txn, 0, XmlTextPrelim::new(text));
+    }
+}
+
+fn insert_md_block<F: XmlFragment>(
+    txn: &mut yrs::TransactionMut<'_>,
+    parent: &F,
+    index: u32,
+    block: &MdBlock,
+) {
+    match block {
+        MdBlock::Paragraph(text) => insert_md_paragraph(txn, parent, index, text),
+        MdBlock::Heading { level, text } => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("heading"));
+            el.insert_attribute(txn, "level", *level);
+            el.insert(txn, 0, XmlTextPrelim::new(text.as_str()));
+        }
+        MdBlock::Quote(children) => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("blockquote"));
+            for (child_index, child) in children.iter().enumerate() {
+                insert_md_block(txn, &el, child_index as u32, child);
+            }
+        }
+        MdBlock::BulletList(items) => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("bulletList"));
+            for (item_index, item) in items.iter().enumerate() {
+                let li = el.insert(txn, item_index as u32, XmlElementPrelim::empty("listItem"));
+                insert_md_paragraph(txn, &li, 0, item);
+            }
+        }
+        MdBlock::OrderedList { start, items } => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("orderedList"));
+            if *start != 1 {
+                el.insert_attribute(txn, "start", *start);
+            }
+            for (item_index, item) in items.iter().enumerate() {
+                let li = el.insert(txn, item_index as u32, XmlElementPrelim::empty("listItem"));
+                insert_md_paragraph(txn, &li, 0, item);
+            }
+        }
+        MdBlock::TaskList(items) => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("taskList"));
+            for (item_index, (checked, item)) in items.iter().enumerate() {
+                let li = el.insert(txn, item_index as u32, XmlElementPrelim::empty("taskItem"));
+                li.insert_attribute(txn, "checked", *checked);
+                insert_md_paragraph(txn, &li, 0, item);
+            }
+        }
+        MdBlock::CodeBlock { language, content } => {
+            let el = parent.insert(txn, index, XmlElementPrelim::empty("codeBlock"));
+            if !language.is_empty() {
+                el.insert_attribute(txn, "language", language.as_str());
+            }
+            if !content.is_empty() {
+                el.insert(txn, 0, XmlTextPrelim::new(content.as_str()));
+            }
+        }
+        MdBlock::Rule => {
+            parent.insert(txn, index, XmlElementPrelim::empty("horizontalRule"));
+        }
     }
 }
 
@@ -3010,5 +3436,177 @@ mod projection_tests {
                 max_nodes: MAX_PROJECTION_NODES
             })
         ));
+    }
+
+    #[test]
+    fn resolution_fold_reconstructs_rich_structure_and_projection() {
+        // The fold must parse the chosen markdown into the projection's own
+        // schema: the projection reproduces the chosen bytes AND the body
+        // holds real nodes, not literal syntax inside paragraphs. MUTATION:
+        // flattening the fold back to plain paragraphs keeps the projection
+        // equal for most constructs but fails every structure assertion.
+        let doc = Ydoc::wire();
+        doc.richdoc_append_paragraph("old content");
+        let chosen = "---
+title: Chosen
+---
+
+# Heading
+
+plain para
+second line
+
+> quoted para
+
+- one
+- two
+
+1. first
+2. second
+
+- [x] done
+- [ ] todo
+
+```rust
+fn main() {}
+```
+
+---
+
+| a | b |
+|---|---|";
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen);
+        let projected = doc.project(ContentKind::Richdoc).expect("projection");
+        assert_eq!(
+            projected.markdown, chosen,
+            "the folded document projects the chosen bytes back"
+        );
+        let body = serde_json::to_string(&doc.canonical_content()["body"]).expect("body json");
+        for tag in [
+            "heading",
+            "blockquote",
+            "bulletList",
+            "orderedList",
+            "taskList",
+            "codeBlock",
+            "horizontalRule",
+        ] {
+            assert!(
+                body.contains(tag),
+                "the fold must rebuild {tag} nodes, got {body}"
+            );
+        }
+        let frontmatter =
+            serde_json::to_string(&doc.canonical_content()["frontmatter"]).expect("fm json");
+        assert!(
+            frontmatter.contains("Chosen"),
+            "frontmatter scalars are parsed, got {frontmatter}"
+        );
+    }
+
+    #[test]
+    fn resolution_fold_parses_the_projectors_nested_frontmatter() {
+        // Codex #596 round 4: the projector itself emits one-level nested
+        // maps (`scalar_line`), and the fold must accept its own output.
+        // MUTATION: bail on `key:` lines again - the delimiters parse as
+        // horizontal rules, the projection diverges, and this fails.
+        let doc = Ydoc::wire();
+        doc.richdoc_append_paragraph("old");
+        let chosen = "---\nmeta:\n  owner: ice\n  team: dohc\ntitle: Chosen\n---\n\nbody text";
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen);
+        let projected = doc.project(ContentKind::Richdoc).expect("projection");
+        assert_eq!(
+            projected.markdown, chosen,
+            "the nested frontmatter roundtrips byte-identically"
+        );
+        let frontmatter =
+            serde_json::to_string(&doc.canonical_content()["frontmatter"]).expect("fm json");
+        assert!(
+            frontmatter.contains("owner") && frontmatter.contains("ice"),
+            "the nested map is real metadata, not body text: {frontmatter}"
+        );
+    }
+
+    #[test]
+    fn resolution_fold_bounds_blockquote_depth() {
+        // An adversarial run of `> ` prefixes must not recurse without bound
+        // inside the resolve frame. MUTATION: drop the depth bound — the
+        // adversarial arm builds one blockquote per prefix and this count
+        // assertion fails.
+        let adversarial = Ydoc::wire();
+        let hostile = format!("{}deep", "> ".repeat(1_000));
+        adversarial.rewrite_content_to_markdown(ContentKind::Richdoc, &hostile);
+        let body =
+            serde_json::to_string(&adversarial.canonical_content()["body"]).expect("body json");
+        let blockquotes = body.matches("\"blockquote\"").count();
+        assert_eq!(
+            blockquotes, QUOTE_FOLD_MAX_DEPTH,
+            "nesting stops at the recursion budget: {blockquotes}"
+        );
+    }
+
+    #[test]
+    fn a_fold_past_the_quote_budget_is_detectably_lossy_not_silently_wrong() {
+        // The overflow is NOT lossless: the leftover `> ` markers become
+        // paragraph text, which the projector escapes to `&gt;`. The previous
+        // comment asserted losslessness and the fold trusted it, so a
+        // resolution past the budget would have been stored as bytes the user
+        // never chose. This pins the real behaviour — the divergence is
+        // OBSERVABLE — which is what `fold_resolution_into_ydoc_in_tx`
+        // re-projects to catch before it commits anything.
+        let overflowed = Ydoc::wire();
+        let hostile = format!("{}deep", "> ".repeat(QUOTE_FOLD_MAX_DEPTH + 5));
+        overflowed.rewrite_content_to_markdown(ContentKind::Richdoc, &hostile);
+        let projected = overflowed
+            .project(ContentKind::Richdoc)
+            .expect("projection");
+        assert_ne!(
+            projected.markdown, hostile,
+            "past the budget the fold cannot reproduce the chosen bytes"
+        );
+        assert!(
+            projected.markdown.contains("&gt;"),
+            "and the loss is the projector's escaping"
+        );
+    }
+
+    #[test]
+    fn an_ordered_list_ordinal_at_the_integer_ceiling_does_not_overflow() {
+        // A parsed ordinal can be i64::MAX, and the successor it implies
+        // cannot be represented: unchecked `+ 1` panics the workspace actor
+        // in debug and test builds, and wraps in release, where the wrapped
+        // value then mis-parses every following line. A resolution body is
+        // user-supplied text, so this is reachable from a tiny input.
+        //
+        // MUTATION: restore `Some(start + 1)` — this test panics with
+        // 'attempt to add with overflow'.
+        let doc = Ydoc::wire();
+        let chosen = format!("{}. item\n\nafter", i64::MAX);
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen);
+        let projected = doc.project(ContentKind::Richdoc).expect("projection");
+        assert!(
+            projected.markdown.contains("item") && projected.markdown.contains("after"),
+            "the list ends where no successor exists and the rest still parses: {}",
+            projected.markdown
+        );
+    }
+
+    #[test]
+    fn a_fold_within_the_quote_budget_roundtrips_byte_exactly() {
+        // MUTATION: lower QUOTE_FOLD_MAX_DEPTH below 100 — the 100-level arm
+        // overflows into escaped paragraph text and this fails. The bound's
+        // previous derivation claimed 60 was the projector's ceiling; it is
+        // not, and a budget set from that false reading would refuse
+        // documents the projection renders happily.
+        for levels in [1_usize, 40, 100, QUOTE_FOLD_MAX_DEPTH] {
+            let doc = Ydoc::wire();
+            let chosen = format!("{}deep", "> ".repeat(levels));
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen);
+            let projected = doc.project(ContentKind::Richdoc).expect("projection");
+            assert_eq!(
+                projected.markdown, chosen,
+                "a {levels}-level quote must roundtrip byte-identically"
+            );
+        }
     }
 }

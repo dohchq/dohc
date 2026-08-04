@@ -2594,7 +2594,9 @@ pub fn capture_manifest_seed(
                             AND NOT EXISTS ( \
                                 SELECT 1 FROM materialization_jobs j \
                                 WHERE j.job_id = 'ydoc-mat_' || s.latest_moment_id \
-                                  AND j.status = 'pending'))) \
+                                  AND j.status = 'pending' \
+                                  AND (j.workspace_id = ?1 \
+                                       OR j.workspace_id = '')))) \
                    AND NOT EXISTS ( \
                        SELECT 1 FROM materialization_jobs j \
                         WHERE j.status = 'pending' AND j.operation = 'write' \
