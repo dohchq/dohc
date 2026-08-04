@@ -1467,6 +1467,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         .map(BlobContent::Text)
                         .map_err(|_| RelayError::BlobInvalid)?,
                     BlobKind::Binary => BlobContent::Binary(response.bytes.clone()),
+                    BlobKind::Ydoc => BlobContent::Ydoc(response.bytes.clone()),
                 };
                 match hydrate_blob_content(
                     store,
@@ -1566,10 +1567,13 @@ fn collect_blob_refs(
                 }
             }
             "ydoc.update" => {
+                // Its OWN kind, not `Binary`: a Y.Doc delta or full-state base
+                // rides the collab layer's measured payload cap, never the
+                // captured-file cap (#549).
                 insert_optional_ref(
                     &mut refs,
                     op.payload.get("updateBlobSha256"),
-                    BlobKind::Binary,
+                    BlobKind::Ydoc,
                 )?;
             }
             "secret.file.put" => {
@@ -1629,7 +1633,7 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn local_blob_bytes(
+pub(crate) fn local_blob_bytes(
     store: &EngineStore,
     sha256: &str,
     kind: BlobKind,
@@ -1658,7 +1662,7 @@ fn local_blob_bytes(
                 }
                 Ok(Some(bytes))
             }
-            BlobKind::Binary => {
+            BlobKind::Binary | BlobKind::Ydoc => {
                 let row = conn
                     .query_row(
                         "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",
@@ -1670,8 +1674,13 @@ fn local_blob_bytes(
                 let Some((byte_length, bytes)) = row else {
                     return Ok(None);
                 };
+                // The ceiling comes from the REFERENCED kind, never a literal.
+                // A restated number here read a Y.Doc base against the
+                // captured-file cap and called a valid oversized blob
+                // `BlobInvalid` — the wrong constraint and the wrong error
+                // (#549).
                 if usize::try_from(byte_length).ok() != Some(bytes.len())
-                    || bytes.len() > 5 * 1024 * 1024
+                    || bytes.len() > blob_ceiling(kind).1
                     || hex_sha256(&bytes) != sha256
                 {
                     return Err(SyncError::BlobInvalid);
@@ -1702,25 +1711,54 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
     })
 }
 
+/// Is this digest already hydrated AND valid for the kind being asked for?
+///
+/// Both questions, because they stopped being the same one. `Binary` and
+/// `Ydoc` share `binary_blobs` and no longer share a ceiling, so bare table
+/// membership would let a caller route around the tighter cap by referencing
+/// bytes some other kind already admitted: a Y.Doc base up to
+/// `MAX_YDOC_UPDATE_BYTES` hydrates legitimately, and a later `moment.append`
+/// naming the same sha as `binary` would be reported satisfied — skipping
+/// `hydrate_blob_content`, the only place `MAX_CAPTURE_BINARY_FILE_BYTES` is
+/// enforced — and materialize as an oversized captured file.
+///
+/// So stored bytes over the REQUESTED kind's ceiling are refused here, by
+/// name, rather than reported present. Refused rather than re-fetched: the
+/// length is already known, and downloading identical bytes to reject them
+/// would only make the observed size less exact.
 fn local_blob_present(
     store: &EngineStore,
     sha256: &str,
     kind: BlobKind,
 ) -> Result<bool, RelayError> {
-    store
+    let (constraint, limit_bytes) = blob_ceiling(kind);
+    let stored: Option<i64> = store
         .read_with(|conn| {
             let table = match kind {
                 BlobKind::Text => "blobs",
-                BlobKind::Binary => "binary_blobs",
+                BlobKind::Binary | BlobKind::Ydoc => "binary_blobs",
             };
             conn.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE sha256=?1)"),
+                &format!("SELECT byte_length FROM {table} WHERE sha256=?1"),
                 [sha256],
                 |row| row.get(0),
             )
+            .optional()
             .map_err(SyncError::corrupt)
         })
-        .map_err(local)
+        .map_err(local)?;
+    let Some(byte_length) = stored else {
+        return Ok(false);
+    };
+    let observed = usize::try_from(byte_length).map_err(|_| RelayError::BlobInvalid)?;
+    if observed > limit_bytes {
+        return Err(RelayError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed: ObservedBytes::Exact(observed),
+        });
+    }
+    Ok(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

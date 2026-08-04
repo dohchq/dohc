@@ -773,12 +773,17 @@ async fn closing_a_session_that_originated_mid_flight_keeps_the_base() {
 /// valid edit back with it, permanently: `base_claimed` stays false, so every
 /// later edit takes the same branch and fails the same way.
 ///
-/// Origination declines instead. The document keeps working, keeps markdown as
-/// its artifact, and #549 owns the measured base bound that lets it replicate.
+/// Origination declines instead. The document keeps working and keeps markdown
+/// as its artifact.
+///
+/// #549 measured the bound this lineage has to clear, so the size here is now
+/// far past any real document: 22.5 MB of state, against a cap that covers a
+/// rich document at `MAX_TEXT_BYTES` with churn headroom. The branch stays
+/// because churn has no upper bound, not because ordinary documents reach it.
 ///
 /// Mutation check: drop the size check in `ydoc_originate_base_in_tx` and the
 /// promoting edit itself fails, before any assertion runs —
-/// `Collab(UpdateTooLarge { actual: 5400043, max: 5242880 })`.
+/// `Collab(UpdateTooLarge { actual: 22500047, max: 20971520 })`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     const WS: &str = "ws-originate-oversize";
@@ -794,8 +799,8 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     // Grow the lineage past the cap while the workspace is still private. Each
     // update stays well under it; only the accumulated full state passes it.
     let doc = Ydoc::wire();
-    let chunk = "x".repeat(2_700_000);
-    for (index, now) in [200, 300].into_iter().enumerate() {
+    let chunk = "x".repeat(4_500_000);
+    for (index, now) in [200, 300, 400, 410, 420].into_iter().enumerate() {
         let update =
             doc.plaintext_insert(u32::try_from(index * chunk.len()).expect("offset"), &chunk);
         handle
@@ -846,5 +851,106 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
         marker_state(&db, &key),
         (Regime::LocalOnly, false),
         "and it stays local-only, with markdown as its artifact"
+    );
+}
+
+/// The defect #549 names, from the other side: a document whose Y.Doc state is
+/// larger than the OLD inherited cap must originate now.
+///
+/// 5 MiB of full state is reached by a rich document holding roughly 3.5 MiB of
+/// markdown — a third of what the store accepts as a body. Under the old cap
+/// that document silently stopped being shareable the moment its workspace
+/// synced. This grows a lineage past that number, turns sync on, and asserts
+/// the base is claimed and journaled.
+///
+/// Mutation check: put `MAX_YDOC_UPDATE_BYTES` back to `5 * 1024 * 1024` and
+/// origination declines — `base_ops_in_log` is 0 and the marker stays
+/// `(LocalOnly, false)`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lineage_past_the_old_inherited_cap_originates() {
+    const WS: &str = "ws-originate-past-old-cap";
+    const PATH: &str = "notes/long-design-doc.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+
+    // Past the old 5 MiB cap, far inside the measured one.
+    let doc = Ydoc::wire();
+    let chunk = "y".repeat(3_000_000);
+    for (index, now) in [200, 300].into_iter().enumerate() {
+        let update =
+            doc.plaintext_insert(u32::try_from(index * chunk.len()).expect("offset"), &chunk);
+        handle
+            .ydoc_record_update(
+                key.clone(),
+                PATH.to_owned(),
+                ContentKind::Plaintext,
+                Regime::LocalOnly,
+                update,
+                None,
+                false,
+                None,
+                now,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("a local-only append");
+    }
+
+    enable_sync(&db, WS);
+
+    let update = doc.plaintext_insert(0, "tiny");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            false,
+            None,
+            500,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the promoting edit is accepted");
+    supervisor.close(&db).expect("close actor");
+
+    assert_eq!(
+        marker_state(&db, &key),
+        (Regime::Replicated, true),
+        "a document this size must promote to a shared lineage"
+    );
+    assert_eq!(base_ops_in_log(&db), 1, "and journal exactly one base");
+
+    let ops = local_ops(&db);
+    let base = ops
+        .iter()
+        .find(|op| op.is_base())
+        .expect("the base op is journaled");
+    let bytes = blob_bytes(&db, &base.blob_sha());
+    assert!(
+        bytes.len() > 5 * 1024 * 1024,
+        "the base is genuinely past the old cap ({} bytes)",
+        bytes.len()
+    );
+    assert!(
+        bytes.len() <= dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
+        "and inside the measured one"
+    );
+    // The base a peer bootstraps from must carry the whole document.
+    let peer = Ydoc::wire();
+    peer.apply(&bytes).expect("a clean peer replays the base");
+    assert_eq!(
+        peer.plaintext_string().len(),
+        doc.plaintext_string().len(),
+        "the base reconstructs the document"
     );
 }

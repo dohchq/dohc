@@ -125,10 +125,13 @@ with no schema change.
 Four properties, all load-bearing:
 
 **1. Cap the base before writing anything.** An oversized base would journal
-locally and then be rejected by every peer on hydrate
-(`MAX_VERSIONED_BINARY_FILE_BYTES`), leaving a document that can never replicate
-and no local signal that anything is wrong. Reject it locally *before* the blob
-put and before the journal write.
+locally and then be rejected by every peer on hydrate, leaving a document that
+can never replicate and no local signal that anything is wrong. Reject it
+locally *before* the blob put and before the journal write.
+
+The cap is `MAX_YDOC_UPDATE_BYTES` and it is now **measured** — see
+[Sizing the base](#sizing-the-base) below. It was not, and the inherited number
+rejected ordinary documents.
 
 **2. Re-check inside the claim transaction — on `base_claimed`, not on row
 existence.** A pre-read that says "no lineage" is not enough: another process can
@@ -278,6 +281,57 @@ exist, or a blob no peer is ever told about.
 **4. Exactly-once falls out of structure, not vigilance.** The claim runs only
 on first creation, and step 2 makes concurrent first-creation collapse to one
 winner. There is no counter to maintain and no idempotency check downstream.
+
+## Sizing the base
+
+**Observed.** A base is a full state, so its size tracks the whole document, not
+one edit. The cap it rode was 5 MiB, copied from the deleted TypeScript engine's
+binary-FILE limit and justified as a bound on a single update. Nobody had
+measured it against a document.
+
+`crates/dohc-engine-collab/tests/ydoc_full_state_size.rs` measures it. At
+`MAX_TEXT_BYTES` — the largest body the store accepts, 10 MiB — the encoded
+full state was:
+
+| document | markdown | full state | ratio |
+| --- | ---: | ---: | ---: |
+| plaintext | 10,486,884 | 10,486,912 | 1.000 |
+| rich, 700 B paragraphs | 10,486,321 | 11,263,557 | 1.074 |
+| rich, 400 B paragraphs | 10,486,020 | 11,836,040 | 1.129 |
+| rich, 120 B paragraphs (82,591 blocks) | 10,485,835 | 14,747,923 | 1.406 |
+
+Two things the numbers say. Plaintext is free — its state is its text. Rich
+documents pay per BLOCK, not per byte: the same 10 MiB costs 1.07x as long-form
+prose and 1.41x as a heavily broken outline, because every block costs an XML
+element plus its text item. The ratio is stable across document size (1.123 at
+1 MiB, 1.129 at 10 MiB for one shape), which is why the shipped check measures a
+small corpus and projects it.
+
+So the old cap rejected a rich document holding roughly **3.5 MiB of markdown** —
+a third of what the store accepts, and unmistakably healthy work.
+
+**Required.** `MAX_YDOC_UPDATE_BYTES` is twice `MAX_TEXT_BYTES` (20 MiB): past
+the worst measured document, with roughly 100,000 revisions of churn above it at
+the measured ~60 bytes of state per interior edit.
+
+It is a measured limit with headroom, not a theorem. Churn has no upper bound, so
+a document can still exceed it, and the branch that declines to originate stays
+for that case.
+
+**Required.** The number governs the whole path or it governs nothing. A Y.Doc
+payload is its own blob kind (`BlobKind::Ydoc`) with its own ceiling; while it
+was classified `BlobKind::Binary` it inherited `MAX_CAPTURE_BINARY_FILE_BYTES`,
+a cap about user uploads, and a base over 5 MiB was refused on hydrate whatever
+the collab layer allowed. `MAX_INGEST_BLOB_BYTES` derives from that ceiling, and
+the relay's `MAX_BLOB_BYTES` must stay at or above the result —
+`the_relay_transport_cap_covers_the_widest_engine_ingest_ceiling` fails if the
+two languages drift.
+
+**Still open.** A lineage that genuinely exceeds the bound declines to originate
+silently. The edit commits and markdown stays its artifact, but nothing tells
+the user the document is not shared. That needs a per-document sharing surface,
+which does not exist yet and cannot be exercised while #356 keeps replication
+unreachable — see #632.
 
 ## The single-canonical reservation is process-global
 
@@ -505,13 +559,11 @@ daemons cannot share a relay workspace yet (#356).
   encoder declines while a pending row would be dropped, and only a later local
   append asks again. The drain that resolves the dependency must ask too.
 
-One size question is open too. #549 — the base inherits `MAX_YDOC_UPDATE_BYTES`,
-a cap written for a single update, so a document past 5 MiB of Y.Doc state
-cannot originate. Its edits no longer fail with it: `ydoc_originate_base_in_tx`
-measures the encoded base and declines BEFORE it claims, so the edit commits
-and the lineage stays local-only. The issue's own account of a rolled-back edit
-describes the code before that guard. #549 still owns the measured
-base-specific bound that replaces the guard.
+The size question is settled. #549 measured the base and gave it a bound that
+covers a rich document at `MAX_TEXT_BYTES`, honored from the collab layer
+through the relay — see [Sizing the base](#sizing-the-base). The guard that
+declines to originate stays, because churn has no upper bound; what is left is
+#632, which is that the decline tells nobody.
 
 **One open item is not dormant. #558 — the gate reads past contact, and it
 never reads false again.** `workspace_replicates_with_relay_in_tx` asks whether
@@ -523,7 +575,7 @@ remote stops matching the signed-in account — and the next eligible rich `.md`
 edit promotes a private lineage to `Replicated`. **Eligible is narrower than
 every edit.** `ydoc_originate_base_in_tx` declines while the document has an
 unresolved dependency, and declines while its encoded base is over
-`MAX_YDOC_UPDATE_BYTES` — the two branches #548 and #549 own. Those edits
+`MAX_YDOC_UPDATE_BYTES` — the two branches #548 and #632 own. Those edits
 commit and leave the lineage local-only. Every other edit promotes it, and a
 promoted lineage never prunes on close: its deltas queue in `replication_log`
 for whoever binds the workspace next. The desktop can already tell bound-and-credentialed from

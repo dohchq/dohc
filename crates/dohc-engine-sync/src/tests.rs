@@ -15228,6 +15228,274 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
     );
 }
 
+/// A Y.Doc payload is its OWN blob kind, and `ydoc.update` must reference it.
+/// While it referenced `BlobKind::Binary` the lineage inherited the
+/// captured-file ceiling — 5 MiB, a number about user uploads — and a base
+/// larger than that was refused on hydrate no matter what the collab layer
+/// allowed (#549).
+///
+/// MUTATION: put `BlobKind::Binary` back in `collect_blob_refs` for
+/// `ydoc.update` and the pull fails with
+/// `BlobTooLarge { constraint: "MAX_CAPTURE_BINARY_FILE_BYTES" }` before the
+/// blob ever reaches the store.
+#[test]
+fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let (ydoc_constraint, ydoc_limit) = blob_ceiling(BlobKind::Ydoc);
+    let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);
+    assert_eq!(ydoc_constraint, "MAX_YDOC_UPDATE_BYTES");
+    assert_ne!(
+        ydoc_constraint, binary_constraint,
+        "the two ceilings must stay separately named"
+    );
+    assert!(
+        ydoc_limit > binary_limit,
+        "the measured Y.Doc bound ({ydoc_limit}) must exceed the captured-file \
+         cap ({binary_limit}) it used to inherit; otherwise the documents this \
+         issue is about are still refused"
+    );
+
+    // Between the two ceilings: the size that used to be unreachable.
+    let base = vec![7u8; binary_limit + 1];
+    let sha256 = dohc_engine_storage::hex_sha256(&base);
+    let op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-oversize-base",
+            "path": "notes/oversize.md",
+            "contentKind": "richdoc",
+            "updateBlobSha256": sha256,
+            "isBaseState": true
+        }),
+    );
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![op],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha256.clone(), base);
+
+    // These bytes are not a Y.Doc, so the APPLY refuses them — but hydration
+    // runs first, and that is what this test is about. The refusal must not be
+    // a ceiling refusal.
+    let outcome = RelaySyncClient::new(relay)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("the pull completes: an oversized-for-binary Y.Doc base is not a transport error");
+    assert!(
+        matches!(outcome, SyncPassOutcome::Complete { .. }),
+        "unexpected pass outcome: {outcome:?}"
+    );
+    assert!(
+        engine.has_binary_blob(&sha256).expect("blob presence"),
+        "the base blob hydrated under the Y.Doc ceiling"
+    );
+}
+
+/// Splitting the ceiling split presence from validation, and only one half
+/// moved. `Binary` and `Ydoc` share `binary_blobs`, so once a Y.Doc base over
+/// the captured-file cap has hydrated legitimately, a LATER `moment.append`
+/// naming the same digest as `binary` was reported already-satisfied — skipping
+/// `hydrate_blob_content`, the only place `MAX_CAPTURE_BINARY_FILE_BYTES` is
+/// enforced. `require_binary_blob` applies no ceiling at all, so an authorized
+/// peer could materialize a 20 MiB Y.Doc payload as an oversized captured file.
+///
+/// The inverse of the defect #549 fixed: there a Y.Doc payload inherited a cap
+/// about user uploads; here a user upload borrows the Y.Doc payload's cap.
+///
+/// The bytes must ALREADY be stored for the hole to open, and one batch cannot
+/// do it: a pass accumulates every page into a single `ops` list and hydrates
+/// once, so both kinds come up missing together and the binary half refuses on
+/// its own ceiling. The precondition here is this machine's OWN origination —
+/// `ydoc_originate_base_in_tx` writes the base through `put_binary_blob`,
+/// bounded only by the 64 MiB store — so no peer is needed to create it.
+///
+/// MUTATION: restore the bare `EXISTS(...)` presence check in
+/// `local_blob_present` and the pull returns `Ok`, the snapshot lands, and the
+/// over-cap binary is materialized.
+#[test]
+fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);
+    let (_, ydoc_limit) = blob_ceiling(BlobKind::Ydoc);
+
+    // A REAL Y.Doc full state, so the first pass genuinely applies and the
+    // lineage really exists. Bytes that merely look like a base would be
+    // refused by the apply, and then the second pass would be running against
+    // a precondition no honest peer could produce.
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, &"x".repeat(binary_limit + 40_000));
+    let payload = doc.encode_full_state();
+    assert!(
+        payload.len() > binary_limit && payload.len() <= ydoc_limit,
+        "the base must sit between the two ceilings: {} bytes",
+        payload.len()
+    );
+    let sha256 = dohc_engine_storage::hex_sha256(&payload);
+
+    let steal = envelope(
+        "peer",
+        0,
+        "moment.append",
+        json!({
+            "momentId": "peer-steal",
+            "versionId": "main",
+            "objectId": "object-steal",
+            "objectCreatedAtMs": 1,
+            "path": "notes/steal.bin",
+            "recordedAtMs": 2_000,
+            "operation": "write",
+            "payloadBeforeBlobSha256": null,
+            "payloadBeforePath": null,
+            "payloadAfterBlobSha256": sha256,
+            "payloadAfterPath": "notes/steal.bin",
+            "payloadAfterContentKind": "binary",
+            "payloadAfterByteLength": payload.len(),
+            "metadata": {"origin": "sync"},
+            "beforePresent": "absent"
+        }),
+    );
+
+    // Pass one: the Y.Doc base hydrates legitimately under its own ceiling.
+    // The precondition: these bytes are already in `binary_blobs`. This is
+    // exactly what `ydoc_originate_base_in_tx` writes when THIS machine starts
+    // a shared lineage — `put_binary_blob`, bounded only by the 64 MiB store —
+    // so the state is one the engine produces itself, with no peer involved.
+    let stored = engine.put_binary_blob(&payload).expect("store the base");
+    assert_eq!(stored, sha256);
+
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![steal],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha256.clone(), payload.clone());
+
+    assert_eq!(
+        RelaySyncClient::new(relay).pull_chat_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Err(RelayError::BlobTooLarge {
+            constraint: binary_constraint,
+            limit_bytes: binary_limit,
+            observed: ObservedBytes::Exact(payload.len()),
+        }),
+        "referencing a stored Y.Doc payload as a captured binary must be refused \
+         by the captured-file ceiling, not admitted because the bytes are in the \
+         shared table"
+    );
+
+    // And nothing of the theft persisted.
+    let snapshots: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE path='notes/steal.bin'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("snapshot count");
+    assert_eq!(snapshots, 0, "no over-cap binary snapshot may materialize");
+}
+
+/// The PUSH side of the same mistake. `upload_missing_blobs` reads the blob out
+/// of the local store before it sends it, and that reader carried the binary
+/// ceiling as a `5 * 1024 * 1024` literal — so a Y.Doc base this engine had just
+/// originated read back as `BlobInvalid`. Wrong constraint, wrong error, and it
+/// would have made the widened bound unusable in the direction that matters
+/// first (#549).
+///
+/// MUTATION: put the literal back in `local_blob_bytes` and the Y.Doc read
+/// fails with `BlobInvalid`.
+#[test]
+fn the_local_blob_reader_measures_against_the_referenced_kind() {
+    let (_scratch, _path, engine) = store();
+    let (_, binary_limit) = blob_ceiling(BlobKind::Binary);
+    let bytes = vec![4u8; binary_limit + 1];
+    let sha256 = engine.put_binary_blob(&bytes).expect("store the blob");
+
+    assert_eq!(
+        crate::relay::local_blob_bytes(&engine, &sha256, BlobKind::Ydoc),
+        Ok(Some(bytes)),
+        "a Y.Doc payload past the captured-file cap is readable for push"
+    );
+    assert_eq!(
+        crate::relay::local_blob_bytes(&engine, &sha256, BlobKind::Binary),
+        Err(RelayError::BlobInvalid),
+        "the same bytes referenced as a captured file are still over ITS ceiling"
+    );
+}
+
+/// The Y.Doc half of the ingest chokepoint. Text and binary are pinned above.
+///
+/// MUTATION: route `BlobContent::Ydoc` through the binary ceiling in
+/// `blob_ceiling` and the at-cap half stops hydrating.
+#[test]
+fn a_ydoc_blob_at_the_ydoc_ceiling_hydrates_and_one_byte_over_is_refused() {
+    let (_scratch, _path, mut engine) = store();
+    let (constraint, limit_bytes) = blob_ceiling(BlobKind::Ydoc);
+    assert_eq!(
+        (constraint, limit_bytes),
+        (
+            "MAX_YDOC_UPDATE_BYTES",
+            dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+        ),
+        "the Y.Doc ingest ceiling is the collab layer's measured payload bound"
+    );
+
+    let at_cap = vec![9u8; limit_bytes];
+    let accepted = BlobHydration {
+        sha256: dohc_engine_storage::hex_sha256(&at_cap),
+        content: BlobContent::Ydoc(at_cap),
+    };
+    assert_eq!(
+        hydrate_blob_content(&mut engine, &accepted, &NoFaults).expect("at-cap Y.Doc hydrates"),
+        TxnOutcome::Committed(())
+    );
+    assert!(
+        engine
+            .has_binary_blob(&accepted.sha256)
+            .expect("blob presence"),
+        "a Y.Doc payload shares the content-addressed binary table"
+    );
+
+    let over_cap = vec![9u8; limit_bytes + 1];
+    let refused = BlobHydration {
+        sha256: dohc_engine_storage::hex_sha256(&over_cap),
+        content: BlobContent::Ydoc(over_cap),
+    };
+    let error = hydrate_blob_content(&mut engine, &refused, &NoFaults)
+        .expect_err("over-cap Y.Doc is refused");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "blob exceeds MAX_YDOC_UPDATE_BYTES: limit {limit_bytes} bytes, observed {} bytes",
+            limit_bytes + 1
+        )
+    );
+    assert!(
+        !engine
+            .has_binary_blob(&refused.sha256)
+            .expect("blob presence"),
+        "an over-cap Y.Doc payload must not persist"
+    );
+}
+
 /// The binary half of the same chokepoint. The text half is pinned above; this
 /// one was not, so the ceiling could be deleted for `BlobKind::Binary` alone
 /// and every other test stayed green.
