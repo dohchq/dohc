@@ -5,6 +5,7 @@ import {
   type PushSharedChannelResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { MAX_CHAT_CHANNEL_SHARE_ROWS } from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 
 // MU-C4 shared channels — the desktop's refresh pass over every shared
@@ -53,6 +54,25 @@ export function relayFetchWithTimeout(
     baseFetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) });
 }
 
+// The joined lane is relay-fed: autoJoinReceivedDms appends a row per received
+// DM grant on every syncDms, with no user action on this machine. So the bound
+// on it belongs HERE, at the one write, where a refusal can name what it
+// refused. A read-side cap could only reject rows dohc itself wrote, and that
+// rejection locks every channel read-only for good (#617).
+//
+// Ended rows are NOT reaped to make room. An ended row is the write gate:
+// assertSharedChannelWritable reads it to keep a revoked channel's local copy
+// read-only, and receivedNotJoined reads it to keep the invitation on offer so
+// Leave has a reverse path. Reaping one would silently re-open writes into a
+// channel whose share is gone.
+export class JoinedSharedChannelLimitError extends Error {
+  constructor(observed: number) {
+    super(
+      `This workspace holds ${observed} shared chat channels; the limit is ${MAX_CHAT_CHANNEL_SHARE_ROWS} channels. Leave a shared channel to join another.`,
+    );
+  }
+}
+
 // Registry merge for the join flow (CodeRabbit Data Integrity): a re-join of
 // the SAME channel under a NEW share id (revoked + re-granted) must replace
 // the stale row, not sit beside it — matching on shareId alone left the
@@ -61,13 +81,20 @@ export function mergeJoinedChannel(
   existing: readonly JoinedSharedChannel[],
   joined: JoinedSharedChannel,
 ): JoinedSharedChannel[] {
-  return [
+  const merged = [
     ...existing.filter(
       (channel) =>
         channel.shareId !== joined.shareId && channel.channelWireId !== joined.channelWireId,
     ),
     joined,
   ];
+  // Only a merge that GROWS the lane past the bound is refused. A re-join that
+  // replaces a row leaves the count where it was, so an account already at (or
+  // over) the bound can still repair its own rows.
+  if (merged.length > MAX_CHAT_CHANNEL_SHARE_ROWS && merged.length > existing.length) {
+    throw new JoinedSharedChannelLimitError(existing.length);
+  }
+  return merged;
 }
 
 // Member leave stops sync but keeps a durable provenance tombstone. The local

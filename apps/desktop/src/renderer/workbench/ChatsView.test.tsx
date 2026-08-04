@@ -655,6 +655,115 @@ describe("ChatsView panel navigator unread badges", () => {
     });
   });
 
+  // #618: keeping the cached rows is only half of honest. An unreachable
+  // listing with NOTHING cached committed no rows and said nothing, so the
+  // section that lists invitations disappeared and the surface read as "you
+  // have no shares".
+  it("says dohc could not read the shares when the relay is unreachable, and offers a retry", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: "session-a",
+      relay: { state: "unreachable" as const },
+    });
+    const user = userEvent.setup();
+    render(navigator(0));
+
+    const notice = await screen.findByTestId("chats-shares-unreadable");
+    expect(notice.textContent).toContain("dohc could not read your shares.");
+    // Nothing is cached, so nothing on screen is stale — saying so would be
+    // false.
+    expect(notice.textContent).not.toContain("out of date");
+    // The section itself must survive: hiding it was the defect.
+    expect(screen.getByTestId("chats-shared-with-you")).toBeTruthy();
+
+    // The Next has to work on this surface: the retry asks again.
+    const before = bridgeMock.listChatChannelShares.mock.calls.length;
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    await user.click(screen.getByTestId("chats-shares-unreadable-retry"));
+    await waitFor(() => {
+      expect(bridgeMock.listChatChannelShares.mock.calls.length).toBeGreaterThan(before);
+    });
+    // A reached relay takes the notice down and lists the invitation.
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-shares-unreadable")).toBeNull();
+    });
+    expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+  });
+
+  // The cached rows stay (that is #551), and now they are labelled: they are
+  // real, they are just older than this failure.
+  it("marks cached invitations as possibly out of date while the relay is unreachable", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 2 })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: [
+          {
+            shareId: "share-received",
+            channelWireId: "wire-received",
+            granterEmail: "owner@example.com",
+            access: "read-write",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    const view = render(navigator(0));
+    expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
+    expect(screen.queryByTestId("chats-shares-unreadable")).toBeNull();
+
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: "session-a",
+      relay: { state: "unreachable" as const },
+    });
+    view.rerender(navigator(1));
+
+    const notice = await screen.findByTestId("chats-shares-unreadable");
+    expect(notice.textContent).toContain("dohc could not read your shares.");
+    expect(notice.textContent).toContain("This list may be out of date.");
+    expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
+  });
+
+  // Signed-out is not an outage either: dohc read the answer, and the answer
+  // is that this machine has no account-scoped rows. Claiming it could not
+  // read them would send the user to retry something that already worked.
+  it("says nothing about reachability when the listing resolves signed-out", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: null,
+      relay: { state: "signed-out" as const },
+    });
+    render(navigator(0));
+    await waitFor(() => expect(bridgeMock.listChatChannelShares).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-shares-unreadable")).toBeNull();
+    });
+    expect(screen.queryByTestId("chats-shared-with-you")).toBeNull();
+  });
+
   // Signed-out is the third fact, and it is NOT an outage: the cached relay
   // rows are account-scoped, so another account's invitations and recipient
   // emails must not survive a logout or account switch.
@@ -4101,7 +4210,13 @@ describe("ChatsView shared channels (MU-C4)", () => {
     bridgeMock.listChatChannelShares.mockRejectedValue(new Error("signed out"));
     renderView();
     await screen.findByTestId("chats-channel-name");
-    expect(screen.queryByTestId("chats-shared-with-you")).toBeNull();
+    // Failing closed is about AUTHORITY, not silence. A listing that did not
+    // answer at all locks every affordance below, and it says so — an
+    // unexplained blank surface with every channel read-only was #618.
+    expect((await screen.findByTestId("chats-shares-unreadable")).textContent).toContain(
+      "dohc could not read your shares.",
+    );
+    expect(screen.queryByTestId("chats-join-shared")).toBeNull();
     expect(screen.queryByTestId("chats-channel-shared")).toBeNull();
     // Entering the channel offers no share button either.
     await userEvent.click(screen.getByTestId("chats-channel"));
@@ -4257,6 +4372,47 @@ describe("ChatsView shared channels (MU-C4)", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("chats-share-member")).toBeNull();
     });
+  });
+
+  // The owner side of #618: an unreachable listing left this panel showing no
+  // members, which reads as "nobody has this channel" — the opposite of the
+  // truth for a channel that IS shared.
+  it("says dohc could not read the shares in the share panel instead of listing nobody", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: "session-a",
+      relay: { state: "unreachable" as const },
+    });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-share-channel"));
+    const notice = await screen.findByTestId("chats-share-members-unreadable");
+    expect(notice.textContent).toContain("dohc could not read your shares.");
+    expect(screen.queryByTestId("chats-share-member")).toBeNull();
+    // The retry works from here too.
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        granted: [
+          {
+            shareId: "share-1",
+            channelWireId: "wire-team",
+            access: "read-write",
+            recipientEmail: "ana@example.com",
+            revokedAtMs: null,
+          },
+        ],
+      }),
+    );
+    await userEvent.click(screen.getByTestId("chats-share-members-unreadable-retry"));
+    expect((await screen.findByTestId("chats-share-member")).textContent).toContain(
+      "ana@example.com",
+    );
+    expect(screen.queryByTestId("chats-share-members-unreadable")).toBeNull();
   });
 
   // A revoke that STARTED under the old session must not spend a commit

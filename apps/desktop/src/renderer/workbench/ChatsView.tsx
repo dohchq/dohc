@@ -123,7 +123,7 @@ type OverviewState =
 // The independently committed parts of the Chats overview surfaces. Several
 // readers write them, each authoritative for a different subset, so each part
 // carries its own commit watermark (see commitTicket).
-type CommitLane = "overview" | "joinedShares" | "relayShares";
+type CommitLane = "overview" | "joinedShares" | "relayShares" | "relayReach";
 
 // What the view keeps: the flat merged share listing. This is NOT the contract
 // result — that one may answer "the relay was unreachable", which is not
@@ -742,6 +742,39 @@ function UnreadPill(props: { count: number; testId: string }) {
   );
 }
 
+// What the sharing surface says when dohc could not read the share listing.
+// An unreachable listing commits no rows, so without this the surface renders
+// an empty list — which reads as "you have no shares" (#618). It states what
+// dohc could not do, whether what is on screen may be stale, and offers the
+// one thing that helps.
+function SharesUnreadableNotice(props: {
+  testId: string;
+  // True when rows are still on screen from an earlier read: they are real,
+  // they are just older than this failure.
+  stale: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      data-testid={props.testId}
+      className="flex items-start gap-1.5 border-b border-line px-3 py-2"
+    >
+      <span className="min-w-0 flex-1 text-[11px] leading-4 text-muted">
+        dohc could not read your shares.
+        {props.stale ? " This list may be out of date." : ""}
+      </span>
+      <button
+        type="button"
+        data-testid={`${props.testId}-retry`}
+        onClick={props.onRetry}
+        className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+      >
+        Try again
+      </button>
+    </div>
+  );
+}
+
 function BackHeader(props: {
   label: string;
   testId: string;
@@ -980,6 +1013,13 @@ export function ChatsView(props: {
   // out / listing failed) and every sharing affordance stays hidden — the
   // solo view is unchanged.
   const [channelShares, setChannelShares] = useState<ShareListing | null>(null);
+  // Whether the last share read this workspace committed could NOT be read.
+  // The rows above are what dohc knows; this is whether dohc could ask. They
+  // are separate facts: an unreachable relay commits no rows AND keeps the
+  // cached ones, so without this the surface renders an empty list that reads
+  // as "no shares" (#618). Its own commit lane, because it answers its own
+  // question and an older response must not overwrite a newer one.
+  const [sharesUnreadable, setSharesUnreadable] = useState(false);
   // The workspace `channelShares` was last DEFINITIVELY resolved for (even when
   // that resolution is `null` — signed out / listing failed). Presence stays
   // dormant until this equals the current workspaceId, so a conversation's
@@ -1079,6 +1119,7 @@ export function ChatsView(props: {
     overview: 0,
     joinedShares: 0,
     relayShares: 0,
+    relayReach: 0,
   });
   const takeCommitTicket = useCallback(() => ++commitTicket.current, []);
   // Claim every lane in `lanes`, or none of them. A response writes exactly
@@ -1132,6 +1173,7 @@ export function ChatsView(props: {
           committedLane.current.relayShares > 0;
         if (answered) return;
         setChannelShares(null);
+        if (claimLanes(["relayReach"], ticket)) setSharesUnreadable(true);
         setSharesWorkspaceId(workspaceId);
         return;
       }
@@ -1141,8 +1183,18 @@ export function ChatsView(props: {
       if (value === null) {
         if (!claimLanes(["joinedShares", "relayShares"], ticket)) return;
         setChannelShares(null);
+        // The listing did not answer at all, so the surface says so. Without
+        // this the user sees an empty sharing surface and every channel
+        // read-only, with nothing naming either.
+        if (claimLanes(["relayReach"], ticket)) setSharesUnreadable(true);
         setSharesWorkspaceId(workspaceId);
         return;
+      }
+      // Whether dohc could READ the relay is its own answer, and every
+      // resolved listing carries it — including the unreachable one, which
+      // claims no row lane at all.
+      if (claimLanes(["relayReach"], ticket)) {
+        setSharesUnreadable(value.relay.state === "unreachable");
       }
       // The relay lanes are only this answer's to write when it learned an
       // account-scoped fact: the relay's rows, or that no session exists
@@ -1490,6 +1542,7 @@ export function ChatsView(props: {
     setNewThreadBody("");
     setCreatingChannel(null);
     setChannelShares(null);
+    setSharesUnreadable(false);
     setSharesWorkspaceId(null);
     // Nothing is committed for the new workspace yet. Tickets stay monotonic:
     // an in-flight response from the old workspace holds an older ticket AND
@@ -1497,7 +1550,12 @@ export function ChatsView(props: {
     // refreshShares commits under IT rather than the nav token — an old
     // workspace's share listing must be refused at the commit point.
     sessionGeneration.current += 1;
-    committedLane.current = { overview: 0, joinedShares: 0, relayShares: 0 };
+    committedLane.current = {
+      overview: 0,
+      joinedShares: 0,
+      relayShares: 0,
+      relayReach: 0,
+    };
     setSharePanelOpen(false);
     setShareEmail("");
     setShareReadOnly(false);
@@ -4325,6 +4383,16 @@ export function ChatsView(props: {
             data-testid="chats-share-panel"
             className="shrink-0 border-b border-line bg-panel-2/40 px-3 py-2"
           >
+            {/* Same honesty on the owner side: an unreadable listing left this
+                panel showing no members, which reads as "nobody has this
+                channel". */}
+            {sharesUnreadable ? (
+              <SharesUnreadableNotice
+                testId="chats-share-members-unreadable"
+                stale={channelGrants.length > 0}
+                onRetry={() => void refreshShares()}
+              />
+            ) : null}
             {channelGrants.length > 0 ? (
               <ul className="m-0 mb-2 list-none p-0">
                 {channelGrants.map((grant) => (
@@ -4714,11 +4782,22 @@ export function ChatsView(props: {
             ) : null}
           </div>
         ) : null}
-        {receivedNotJoined.length > 0 ? (
+        {receivedNotJoined.length > 0 || sharesUnreadable ? (
           <div data-testid="chats-shared-with-you">
             <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
               Shared with you
             </p>
+            {/* The section stays even with nothing to list. Hiding it on an
+                unreadable listing was the whole of #618: the invitations
+                vanished with no copy anywhere saying dohc could not read
+                them. */}
+            {sharesUnreadable ? (
+              <SharesUnreadableNotice
+                testId="chats-shares-unreadable"
+                stale={receivedNotJoined.length > 0}
+                onRetry={() => void refreshShares()}
+              />
+            ) : null}
             <ul className="m-0 list-none p-0">
               {receivedNotJoined.map((row) => (
                 <li key={row.shareId} className="border-b border-line">

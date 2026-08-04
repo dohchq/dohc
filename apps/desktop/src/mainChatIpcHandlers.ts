@@ -331,6 +331,13 @@ export async function readRelayChatShareLanes(input: {
     received?: Array<Record<string, unknown>>;
   }>;
   remoteWorkspaceId: string | null;
+  // Received shares that belong to ANOTHER local workspace: already joined
+  // there, or pinned there by the DM home map. A received grant is
+  // account-wide, so without this the lane is the same in every workspace —
+  // one account-wide problem with it blanks a workspace that has shares of its
+  // own, and an invitation already accepted in Work keeps offering Join in
+  // Personal (#618).
+  shareIdsClaimedElsewhere: ReadonlySet<string>;
 }): Promise<RelayChatShareLanes> {
   let listing: Awaited<ReturnType<typeof input.fetchListing>>;
   try {
@@ -352,7 +359,11 @@ export async function readRelayChatShareLanes(input: {
   // escaping to the contract parse would reject the whole IPC call, which the
   // renderer reads as an unknown listing and clears.
   try {
-    const mapped = mapRelayShareListing(listing, input.remoteWorkspaceId);
+    const mapped = mapRelayShareListing(
+      listing,
+      input.remoteWorkspaceId,
+      input.shareIdsClaimedElsewhere,
+    );
     // Size is validated HERE, not by the contract schema. Every row can be
     // valid and the lane still be one dohc cannot list, and the schema sits
     // outside this guard: an over-cap lane reaching it throws, the IPC call
@@ -401,6 +412,7 @@ function mapRelayShareListing(
     received?: Array<Record<string, unknown>>;
   },
   remoteWorkspaceId: string | null,
+  shareIdsClaimedElsewhere: ReadonlySet<string>,
 ): {
   granted: Array<Record<string, unknown>>;
   received: Array<Record<string, unknown>>;
@@ -443,6 +455,12 @@ function mapRelayShareListing(
   for (const row of receivedRows) {
     const selector = chatSelector(row);
     if (!selector) continue;
+    // Scoped to THIS workspace: a share another local workspace already
+    // claimed is managed there, and listing it here would offer a Join that
+    // contradicts the claim.
+    if (typeof row.shareId === "string" && shareIdsClaimedElsewhere.has(row.shareId)) {
+      continue;
+    }
     received.push({
       shareId: row.shareId,
       ...selector,

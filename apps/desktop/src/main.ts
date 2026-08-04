@@ -310,6 +310,7 @@ import {
   assertSharedChannelWritable,
   createKeyedSerializer,
   endJoinedChannel,
+  JoinedSharedChannelLimitError,
   mergeJoinedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
@@ -337,7 +338,7 @@ import {
   type ShareLogPage,
 } from "./workspaces/dmChats";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
-import { claimDmHome, readDmHome } from "./workspaces/dmHomeStore";
+import { claimDmHome, readDmHome, readDmHomes } from "./workspaces/dmHomeStore";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import {
   adoptCompletedCloudLoginSession,
@@ -4310,6 +4311,23 @@ function registerIpcHandlers(
     });
   });
 
+  // Received shares another local workspace already claimed — joined into its
+  // registry, or pinned to it by the account-level DM home map. A received
+  // grant is account-wide, so the relay answers the same lane in every
+  // workspace; scoping it here is what keeps one workspace's sharing surface
+  // independent of another's (#618).
+  function shareIdsClaimedByOtherWorkspaces(workspaceId: string): Set<string> {
+    const claimed = new Set<string>();
+    for (const entry of listWorkspaces()) {
+      if (entry.workspaceId === workspaceId) continue;
+      for (const channel of entry.sharedChannels ?? []) claimed.add(channel.shareId);
+    }
+    for (const [shareId, homeWorkspaceId] of Object.entries(readDmHomes(dmHomeFile()))) {
+      if (homeWorkspaceId !== workspaceId) claimed.add(shareId);
+    }
+    return claimed;
+  }
+
   ipcMain.handle(CHANNELS.listChatChannelShares, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatChannelSharesPayload.parse(payload);
@@ -4334,6 +4352,7 @@ function registerIpcHandlers(
         }>(credentials, "/sync/shares");
       },
       remoteWorkspaceId: entry.remote?.remoteWorkspaceId ?? null,
+      shareIdsClaimedElsewhere: shareIdsClaimedByOtherWorkspaces(input.workspaceId),
     });
     return ListChatChannelSharesResult.parse({
       joined,
@@ -6850,6 +6869,14 @@ function registerIpcHandlers(
         // unavailable — skip it; the next pass reconciles. Never blocks the
         // other grants.
         if (error instanceof ShareUnavailableError) continue;
+        // The joined lane is full. Auto-join is the relay-fed writer, so this
+        // is where the bound bites: stop the pass instead of retrying the same
+        // refusal for every remaining grant. Everything already joined keeps
+        // working; the user makes room by leaving a shared channel.
+        if (error instanceof JoinedSharedChannelLimitError) {
+          console.warn(`[desktop] DM auto-join stopped: ${error.message}`);
+          return;
+        }
         throw error;
       }
     }

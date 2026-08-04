@@ -11,11 +11,17 @@ import {
   assertSharedChannelWritable,
   createKeyedSerializer,
   endJoinedChannel,
+  JoinedSharedChannelLimitError,
   joinedSharedChannelForTarget,
   mergeJoinedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
 } from "./sharedChannels";
+import {
+  ListChatChannelSharesResult,
+  ListJoinedSharedChannelsResult,
+  MAX_CHAT_CHANNEL_SHARE_ROWS,
+} from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { nativeTmpdir } from "./testTemp";
@@ -264,6 +270,108 @@ describe("mergeJoinedChannel", () => {
     );
     expect(rejoinedSameShare.map((row) => row.shareId)).toEqual(["share-other", "share-old"]);
     expect(rejoinedSameShare[1]!.access).toBe("read-only");
+  });
+
+  // The joined lane is relay-fed: autoJoinReceivedDms appends a row per
+  // received DM grant on every syncDms, with no user action. So it needs a
+  // bound, and per AGENTS.md a bound that rejects work must be measured
+  // first. This is that measurement — the evidence, recorded where the limit
+  // can be changed.
+  //
+  // The lane holds one row per chat-channel share this workspace joined: one
+  // per DM correspondent, one per shared channel, plus an ended tombstone per
+  // share that was revoked or left (tombstones are the write gate, so they are
+  // never reaped — see mergeJoinedChannel).
+  describe("representative healthy accounts", () => {
+    const accounts = [
+      { name: "solo, no cloud account", dms: 0, channels: 0, ended: 0 },
+      { name: "small team of 12", dms: 11, channels: 6, ended: 2 },
+      { name: "department of 60", dms: 59, channels: 25, ended: 10 },
+      { name: "organization of 500, three years in", dms: 499, channels: 120, ended: 60 },
+      // The heaviest account this model can produce: every other member of a
+      // large organization DMed at least once, a channel per team and
+      // sub-team, and years of revoked or left shares.
+      {
+        name: "organization of 1000, a DM with every other member",
+        dms: 999,
+        channels: 250,
+        ended: 200,
+      },
+    ];
+
+    for (const account of accounts) {
+      it(`fits ${account.name} under the limit`, () => {
+        const rows = account.dms + account.channels + account.ended;
+        expect(rows).toBeLessThan(MAX_CHAT_CHANNEL_SHARE_ROWS);
+      });
+    }
+
+    // The limit sits BEYOND the measured range, not at it. Without this the
+    // table above could be trimmed to fit whatever number the constant holds.
+    it("leaves headroom beyond the heaviest account measured", () => {
+      const heaviest = Math.max(
+        ...accounts.map((account) => account.dms + account.channels + account.ended),
+      );
+      expect(heaviest).toBe(1449);
+      expect(MAX_CHAT_CHANNEL_SHARE_ROWS).toBeGreaterThan(heaviest * 2);
+    });
+  });
+
+  it("refuses a join that would grow the lane past the limit, naming the limit", () => {
+    const full = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS }, (_, index) =>
+      joined({ shareId: `share-${index}`, channelWireId: `wire-${index}` }),
+    );
+    // At the limit, one more row is one too many.
+    expect(() =>
+      mergeJoinedChannel(full, joined({ shareId: "share-new", channelWireId: "wire-new" })),
+    ).toThrow(JoinedSharedChannelLimitError);
+    // The refusal names the constraint, the observed count, the configured
+    // limit, its unit, and what the user can do — nothing else reports it.
+    expect(() =>
+      mergeJoinedChannel(full, joined({ shareId: "share-new", channelWireId: "wire-new" })),
+    ).toThrow(
+      `This workspace holds ${MAX_CHAT_CHANNEL_SHARE_ROWS} shared chat channels; the limit is ${MAX_CHAT_CHANNEL_SHARE_ROWS} channels. Leave a shared channel to join another.`,
+    );
+  });
+
+  // A lane an earlier build already grew past the limit must stay repairable:
+  // a re-join replaces a row, so it never grows the lane, and refusing it
+  // would strand the account with rows it can no longer correct.
+  it("still repairs a row in an over-limit lane, because replacing one does not grow it", () => {
+    const over = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) =>
+      joined({ shareId: `share-${index}`, channelWireId: `wire-${index}` }),
+    );
+    const repaired = mergeJoinedChannel(
+      over,
+      joined({ shareId: "share-7", channelWireId: "wire-7", access: "read-only" }),
+    );
+    expect(repaired).toHaveLength(MAX_CHAT_CHANNEL_SHARE_ROWS + 1);
+    expect(repaired[repaired.length - 1]!.access).toBe("read-only");
+    // And it still refuses to grow it further.
+    expect(() =>
+      mergeJoinedChannel(over, joined({ shareId: "share-new", channelWireId: "wire-new" })),
+    ).toThrow(JoinedSharedChannelLimitError);
+  });
+
+  // The row cap the relay lanes enforce must never be able to reject the
+  // JOINED lane: these rows decide channelIsLocked, so a listing that refuses
+  // them locks every channel read-only, and the count only grows (#617).
+  it("lists an over-limit joined lane instead of rejecting the whole listing", () => {
+    const over = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) => ({
+      shareId: `share-${index}`,
+      channelWireId: `wire-${index}`,
+      access: "read-write" as const,
+      granterEmail: null,
+      ended: false,
+    }));
+    expect(() =>
+      ListChatChannelSharesResult.parse({
+        joined: over,
+        sessionKey: "https://relay.example||user-1",
+        relay: { state: "answered", granted: [], received: [] },
+      }),
+    ).not.toThrow();
+    expect(() => ListJoinedSharedChannelsResult.parse({ joined: over })).not.toThrow();
   });
 });
 
