@@ -15,9 +15,13 @@ const MAX_RUN_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 // Windows refuses to unlink a file whose handle is still open, and a just-closed
 // SQLite handle (engine.db plus its -wal and -shm) can hold one for a beat after
 // the store is dropped. The desktop e2e helper this replaces waited
-// `100ms * attempt` over 8 attempts and that budget was enough; a shorter one is
-// not. At 50ms the gate's own leak check caught four engine.db trees surviving a
-// `--workspace` run under a loaded machine.
+// `100ms * attempt` over 8 attempts; halving that to 50ms cost real cleanup, and
+// the gate's leak row caught it as four surviving engine.db trees.
+//
+// This budget does not win the race outright and cannot: the handle is released
+// when the test binary exits, which is after this guard has run. Under a full
+// `--workspace` run a few trees still survive, and the gate reclaims them and
+// holds the count to a measured limit. See `scratch-leak-report.mjs`.
 const WINDOWS_CLEANUP_ATTEMPTS: usize = 8;
 const WINDOWS_CLEANUP_DELAY: Duration = Duration::from_millis(100);
 
