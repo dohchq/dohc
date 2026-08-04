@@ -20,7 +20,16 @@ moved between two readings reports `tree provenance=FAIL`, names the step that
 straddled the change, and stamps `UNATTRIBUTABLE` instead of a commit.
 
 The read count is not a claim that the tree was watched. A change made and
-undone inside a single step is invisible to any number of readings.
+undone inside a single step is invisible to any number of readings, and the
+step named in a failure is where the change was seen, which is not always the
+step that caused it.
+
+`clean` and `dirty(N)` are different strengths of claim. From a clean tree, a
+PASS says no path changed between readings. From a dirty tree it says that
+about every path except the ones already listed: a reading records paths and
+status codes, not contents, so a file that was already modified can be
+rewritten under the run and read the same. Gate uncommitted work freely — just
+do not read `dirty(N) … PASS` as covering the paths in that count.
 
 ## Focused checks
 

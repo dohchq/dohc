@@ -19,7 +19,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, existsSync, chmodSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  existsSync,
+  chmodSync,
+} from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -202,17 +209,47 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
       );
 
     // The real function, against the real repo: it resolves, and the stamp
-    // matches.
+    // matches. Returning null unconditionally is fail-CLOSED — it refuses
+    // every valid verdict, so this catches it.
     const real = verify(null);
     assert.equal(real.status, 0, real.stderr);
     assert.match(real.stdout, /on this checkout's commit/);
 
+    // What the resolver actually answered, read back in production form:
+    // stamp a different commit and the refusal prints the commit this
+    // checkout is on. It must be `git rev-parse HEAD`, all forty characters.
+    const head = spawnSync("git rev-parse HEAD", {
+      cwd: repoRoot,
+      shell: true,
+      encoding: "utf8",
+    }).stdout.trim();
+    const elsewhere = join(dirname(log), "elsewhere.log");
+    writeFileSync(
+      elsewhere,
+      readFileSync(log, "utf8").replace(
+        ` head ${head.slice(0, 8)} `,
+        " head deadbeef ",
+      ),
+    );
+    const wrong = spawnSync(
+      process.execPath,
+      ["tools/rust-engine-program/require-ci-pass-verdict.mjs", elsewhere],
+      { cwd: repoRoot, encoding: "utf8", env: withPath(null) },
+    );
+    assert.notEqual(wrong.status, 0);
+    assert.match(
+      wrong.stderr,
+      new RegExp(`this checkout is at \`${head.slice(0, 8)}\` \\(${head}\\)`),
+    );
+
     // A git that answers with something that is not a commit is not an
-    // answer. Without that guard the junk flows into the comparison and the
-    // verdict is refused for looking like the wrong commit, which tells a
-    // reader to re-run the gate instead of to fix their git.
+    // answer. Dropping that guard is fail-OPEN: the junk flows into
+    // `head.startsWith(sha)` and the verdict is refused for looking like the
+    // wrong commit, which tells a reader to re-run the gate instead of to fix
+    // their git.
     const junk = stubCommand("git", "not-a-sha", 0);
-    // A git that cannot answer at all.
+    // A git that cannot answer at all — what a cwd outside any repository
+    // looks like from here, since the resolver only ever sees the failure.
     const broken = stubCommand("git", "fatal: not a git repository", 1);
     // And a git that failed while printing something that reads like an
     // answer. A commit-shaped string from a command that failed is not this

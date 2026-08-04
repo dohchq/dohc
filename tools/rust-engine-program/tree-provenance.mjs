@@ -71,13 +71,25 @@ function nameSome(entries) {
  * forbids it just gets removed. It is recorded instead, so the reader knows
  * the commit does not describe everything that ran.
  *
- * Two limits, and neither is assumed away. Nothing observes the tree BETWEEN
- * two readings, so a change made and undone inside one step is invisible
- * (#644); that is why the stamp reports how many readings agreed rather than
- * saying the run was clean throughout. And a reading is a list of paths and
- * their status codes, not their contents, so a second edit to a path that was
- * already dirty leaves the reading identical — there the stamp already says
- * `dirty(N)`, which already says the commit does not describe what ran.
+ * Three limits, and none is assumed away.
+ *
+ * Nothing observes the tree BETWEEN two readings, so a change made and undone
+ * inside one step is invisible (#644); that is why the stamp reports how many
+ * readings agreed rather than saying the run was clean throughout.
+ *
+ * A reading is a list of paths and their status codes, not their contents, so
+ * a second edit to a path that was already dirty leaves the reading
+ * identical. This is why a PASS means two different things: from a clean
+ * start it is a claim about paths, and from a dirty start it is that claim
+ * about every path except the ones already listed. The stamp carries
+ * `dirty(N)` so the difference is on the face of the artifact.
+ *
+ * The named step can be off by one. A reading is taken when the step's own
+ * process exits, so work outliving it lands in the next step's interval and
+ * is attributed there, and a skipped optional step takes no reading, so its
+ * probe folds into the following one. The verdict is unaffected — the run is
+ * refused either way — but the step in the reason is where the change was
+ * SEEN, not always where it was caused.
  *
  * The gate's own steps can write tracked files — `cargo build` rewrites a
  * stale `Cargo.lock` — and that FAILS this row, correctly: that step did

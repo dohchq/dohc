@@ -54,6 +54,13 @@ readings agreed. It is not a claim that the tree was watched between them: a
 change made and undone inside one step is invisible to any number of readings.
 A run whose tree moved between two readings reports `tree provenance=FAIL`,
 names the step that straddled the change, and stamps `head UNATTRIBUTABLE`.
+The named step is where the change was seen — work outliving a step's own
+process is attributed to the next one.
+
+`clean` and `dirty(N)` are different strengths of claim. A reading lists paths
+and status codes, not contents, so a PASS over a dirty tree covers every path
+except the `N` already listed: one of those can be rewritten under the run and
+read the same. A PASS over a clean tree covers every path.
 
 Copy that line into `EXECUTION_LOG.md` under the relevant shard entry.
 
