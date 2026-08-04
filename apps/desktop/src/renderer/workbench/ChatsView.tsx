@@ -755,17 +755,27 @@ function UnreadPill(props: { count: number; testId: string }) {
   );
 }
 
-// One sentence per over-limit lane, in the user's nouns. "granted" and
-// "received" are internal words; the surface calls them channels you share and
-// channels shared with you.
+// One sentence per over-limit lane, counting what the lane actually holds.
+//
+// The unit is SHARES, not channels. A relay lane carries one row per grant and
+// nothing deduplicates the channel — mapRelayShareListing keeps every row,
+// because each carries its own recipient — so one channel shared with 4097
+// people is 4097 rows. Saying "you share 4097 channels" names the wrong thing
+// and sends the user to reduce channels when the excess is grants on a single
+// channel they own. It is the same unit slip that made the deleted account
+// fixture wrong, arriving at the surface.
+//
+// The joined lane is different and its refusal is not: mergeJoinedChannel
+// matches on channelWireId as well as shareId, so those rows really are one
+// per channel, and "leave a shared channel" is the action that shrinks them.
 function overLimitSentences(failure: {
   lanes: ReadonlyArray<{ lane: "granted" | "received"; rows: number }>;
   limit: number;
 }): string[] {
   return failure.lanes.map(({ lane, rows }) =>
     lane === "granted"
-      ? `You share ${rows} channels; the limit is ${failure.limit}.`
-      : `${rows} channels are shared with you; the limit is ${failure.limit}.`,
+      ? `You have ${rows} shares of your channels; the limit is ${failure.limit}.`
+      : `You have ${rows} shares from other people; the limit is ${failure.limit}.`,
   );
 }
 

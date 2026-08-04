@@ -789,10 +789,15 @@ describe("ChatsView panel navigator unread badges", () => {
     // The constraint, what it observed, and the configured limit — in the
     // nouns the surface already uses, not the lane names main uses.
     expect(notice.textContent).toContain("dohc cannot list this many shares.");
-    expect(notice.textContent).toContain("You share 4097 channels; the limit is 4096.");
     expect(notice.textContent).toContain(
-      "5000 channels are shared with you; the limit is 4096.",
+      "You have 4097 shares of your channels; the limit is 4096.",
     );
+    expect(notice.textContent).toContain(
+      "You have 5000 shares from other people; the limit is 4096.",
+    );
+    // The unit is shares, not channels: a relay lane holds one row per grant,
+    // so one channel shared with 4097 people is 4097 rows.
+    expect(notice.textContent).not.toMatch(/d+ channels/);
     // A retry repeats the identical request, so there is no button to press.
     expect(screen.queryByTestId("chats-shares-unreadable-retry")).toBeNull();
     // And it never poses as the outage it is not.
@@ -820,7 +825,7 @@ describe("ChatsView panel navigator unread badges", () => {
     render(navigator(0));
     expect(
       (await screen.findByTestId("chats-shares-unreadable")).textContent,
-    ).toContain("You share 4097 channels");
+    ).toContain("You have 4097 shares of your channels");
 
     // The user switches accounts, and the new account's listing never
     // arrives — the window in which a retained failure lies loudest.
