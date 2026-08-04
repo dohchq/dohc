@@ -199,6 +199,40 @@ describe("DocumentMenu", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
+  // #564: an engine-backed document whose editor has not mounted (or failed
+  // to) cannot be serialized — the markdown cache beside it is EMPTY on the
+  // failed-read recovery path, and falling back to it copied and exported an
+  // empty document while telling the user it worked. Every action refuses.
+  it("refuses to copy or export a document it cannot serialize", async () => {
+    const user = userEvent.setup();
+    stubClipboard();
+    render(
+      <DocumentMenu
+        workspaceId="ws-1"
+        suggestedName="Plan"
+        getMarkdown={() => null}
+      />,
+    );
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    // Same settle the copy test uses: let the component's own await chain
+    // finish and React repaint before reading the label.
+    await act(async () => {});
+    // MUTATION: fall back to the empty cache -> "Copied", and the clipboard
+    // holds nothing.
+    expect(screen.getByText("Not ready yet")).toBeTruthy();
+    expect(writeText).not.toHaveBeenCalled();
+
+    // The refusal leaves the menu open, so the export item is right there.
+    await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+    await act(async () => {});
+    expect(screen.getAllByText("Not ready yet").length).toBeGreaterThan(0);
+    // MUTATION: the same fallback -> a .md file containing one newline,
+    // written as if it were the user's document.
+    expect(exportDocumentFile).not.toHaveBeenCalled();
+  });
+
   it("exports as PDF through the bridge with kind: pdf", async () => {
     const user = userEvent.setup();
     renderMenu();

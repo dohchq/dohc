@@ -945,6 +945,81 @@ describe("EngineWorkspaceSessions", () => {
       expect(opens).toBe(3);
     });
 
+    it("calls an exhausted ladder past its budget a DEADLINE, not a transport failure", async () => {
+      // codex round 5: the LAST allowed attempt can start inside the budget
+      // and finish outside it. That branch threw the transport error, and
+      // main maps only EngineWorkspaceRetryDeadlineError to `openTimedOut` —
+      // so an exhausted ladder downgraded an engine-owned document to the
+      // writable plain editor. Same failure as the unbounded-task blocker,
+      // through a different door.
+      const workspace = await tempWorkspace("workspace-exhausted");
+      const client = new MockClient("handle-exhausted");
+      let nowMs = 0;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {}, transportRebindAttempts: 2 },
+      );
+
+      const outcome = await sessions
+        .run(
+          workspace,
+          async () => {
+            // Each attempt STARTS inside the 5 s budget; the last one ends
+            // outside it, and it is also the last the ladder allows.
+            nowMs += 3_000;
+            throw { code: "transport-error" };
+          },
+          { retryTransportErrors: true, retryDeadlineMs: 5_000 },
+        )
+        .catch((error: unknown) => error);
+
+      // MUTATION: throw the transport error at the terminal attempt -> this
+      // is `{ code: "transport-error" }` and the document downgrades.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+    });
+
+    it("counts attempts across the whole budget, not one ladder's share", async () => {
+      // codex round 5: the refusal reported the LOCAL ladder's counter, which
+      // each `run` resets — so a wait covering several daemon attempts could
+      // say "across 1 attempts". False diagnostic data in an error whose job
+      // is to tell an agent what happened.
+      const workspace = await tempWorkspace("workspace-cumulative");
+      const client = new MockClient("handle-cumulative");
+      let nowMs = 0;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .withRetryBudget(6_000, async () => {
+          // TWO runs inside one budget. The first is not a retry ladder, so
+          // it spends one attempt and rejects on its own; the second retries
+          // and trips the budget on its second attempt. Three attempts have
+          // happened by then — one ladder can only see two.
+          await sessions
+            .run(workspace, async () => {
+              nowMs += 2_000;
+              throw { code: "transport-error" };
+            })
+            .catch(() => undefined);
+          return await sessions.run(
+            workspace,
+            async () => {
+              nowMs += 2_000;
+              throw { code: "transport-error" };
+            },
+            { retryTransportErrors: true },
+          );
+        })
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      // MUTATION: report the local `attempt` -> "across 1 attempts", a
+      // number the reader would take for the whole wait.
+      expect((outcome as Error).message).toContain("across 3 attempts");
+    });
+
     it("rejects an invalid deadline instead of quietly voiding it", async () => {
       const workspace = await tempWorkspace("workspace-bad-deadline");
       const client = new MockClient("handle-bad-deadline");

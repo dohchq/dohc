@@ -21,6 +21,14 @@ const ITEMS: ReadonlyArray<{ id: DocumentMenuItemId; label: string }> = [
   { id: "export-pdf", label: "Export as PDF…" },
 ];
 
+function exportItemId(kind: "markdown" | "html" | "pdf"): DocumentMenuItemId {
+  return kind === "markdown"
+    ? "export-markdown"
+    : kind === "html"
+      ? "export-html"
+      : "export-pdf";
+}
+
 // How long a quiet inline confirmation ("Copied") replaces an item's label —
 // mirrors the code-block copy button's "copy" → "copied" swap
 // (editor/codeBlockChrome.tsx).
@@ -33,7 +41,13 @@ export function DocumentMenu(props: {
   suggestedName: string;
   // Called fresh on every action: always the CURRENT document markdown
   // (frontmatter included), matching the code editor's own save path.
-  getMarkdown: () => string;
+  //
+  // NULL when the document cannot be serialized yet — an engine-backed
+  // document whose editor has not mounted (or failed to). Every action here
+  // REFUSES on null rather than falling back to a stale or empty body: a
+  // copy or an export that silently produces nothing is a file the user
+  // believes is their document (#564).
+  getMarkdown: () => string | null;
 }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState(0);
@@ -85,7 +99,12 @@ export function DocumentMenu(props: {
   }
 
   async function copyAsMarkdown() {
-    const write = navigator.clipboard?.writeText(props.getMarkdown());
+    const markdown = props.getMarkdown();
+    if (markdown === null) {
+      showFeedback("copy-markdown", "Not ready yet");
+      return;
+    }
+    const write = navigator.clipboard?.writeText(markdown);
     if (!write) return;
     try {
       await write;
@@ -96,6 +115,14 @@ export function DocumentMenu(props: {
   }
 
   async function exportDocument(kind: "markdown" | "html" | "pdf") {
+    const documentMarkdown = props.getMarkdown();
+    if (documentMarkdown === null) {
+      // BEFORE closing: the feedback replaces the item's label, so a refusal
+      // shown into a closed menu is a refusal the user never sees — the
+      // export would just appear to do nothing.
+      showFeedback(exportItemId(kind), "Not ready yet");
+      return;
+    }
     setOpen(false);
     try {
       let content: string;
@@ -103,8 +130,7 @@ export function DocumentMenu(props: {
         // The text-first export: the raw document source, written verbatim
         // to a .md file. A brand-new empty document still exports one
         // newline — the IPC contract requires non-empty content.
-        const markdown = props.getMarkdown();
-        content = markdown.length > 0 ? markdown : "\n";
+        content = documentMarkdown.length > 0 ? documentMarkdown : "\n";
       } else {
         // Imported on demand, not at module load: documentExport statically
         // pulls in the Tiptap MarkdownManager/schema stack and KaTeX, which
@@ -114,7 +140,7 @@ export function DocumentMenu(props: {
           "./editor/documentExport"
         );
         content = buildStandaloneDocumentHtml(
-          props.getMarkdown(),
+          documentMarkdown,
           props.suggestedName,
         );
       }

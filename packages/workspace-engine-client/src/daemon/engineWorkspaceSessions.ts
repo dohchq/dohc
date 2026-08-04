@@ -229,6 +229,10 @@ export class EngineWorkspaceSessions {
   private readonly retryBudgets = new AsyncLocalStorage<{
     budgetMs: number;
     startedAtMs: number;
+    // Failed attempts across every run the region made, because the region
+    // is what the budget spans: a per-run counter resets on each `run` and
+    // would report "across 1 attempts" for a wait that covered six.
+    attempts: number;
   }>();
 
   constructor(
@@ -308,10 +312,26 @@ export class EngineWorkspaceSessions {
           ) {
             entry.binding = null;
           }
-          if (
-            (!retryAfterReconnect && !retryAfterTransport) ||
-            attempt >= maxAttempts
-          ) {
+          const retryable = retryAfterReconnect || retryAfterTransport;
+          this.noteBudgetAttempt();
+          if (!retryable || attempt >= maxAttempts) {
+            // An EXHAUSTED ladder on a spent budget is a deadline, not a
+            // transport failure. The last allowed attempt can start inside
+            // the budget and finish outside it, and this branch used to
+            // throw the transport error — which the surface reads as an
+            // ordinary refusal and answers with the writable plain editor,
+            // the exact outcome the budget exists to prevent. Only a
+            // retryable failure converts: a permission refusal is not a
+            // timeout however long the caller waited.
+            if (retryable) {
+              this.throwPastRetryDeadline(
+                workspace.workspaceId,
+                retryDeadlineMs,
+                startedAtMs,
+                attempt,
+                error,
+              );
+            }
             throw error;
           }
           rebindStarted = true;
@@ -385,9 +405,16 @@ export class EngineWorkspaceSessions {
       );
     }
     return await this.retryBudgets.run(
-      { budgetMs, startedAtMs: this.now() },
+      { budgetMs, startedAtMs: this.now(), attempts: 0 },
       task,
     );
+  }
+
+  // One failed daemon attempt, counted on the ambient budget so the refusal
+  // can report what the WAIT actually cost rather than one ladder's share.
+  private noteBudgetAttempt(): void {
+    const budget = this.retryBudgets.getStore();
+    if (budget !== undefined) budget.attempts += 1;
   }
 
   // The one deadline gate every retry ladder consults, on both sides of its
@@ -410,7 +437,9 @@ export class EngineWorkspaceSessions {
           workspaceId,
           budget.budgetMs,
           spentMs,
-          attempt,
+          // The REGION's count, not this ladder's: the budget spans several
+          // runs, each of which restarts `attempt` at 1.
+          budget.attempts,
           cause,
         );
       }
@@ -554,7 +583,23 @@ export class EngineWorkspaceSessions {
         if (error instanceof EngineWorkspaceRebindError) throw error;
         if (error instanceof EngineWorkspaceRetryDeadlineError) throw error;
         lastError = error;
-        if (attempt >= maxAttempts) break;
+        this.noteBudgetAttempt();
+        if (attempt >= maxAttempts) {
+          // Same shape as run()'s terminal branch: a last open that starts
+          // inside the budget and ends outside it is a deadline, and only
+          // that error keeps the document read-only instead of downgrading
+          // it to the writable plain editor.
+          if (daemonMayBeRelaunching(error)) {
+            this.throwPastRetryDeadline(
+              workspace.workspaceId,
+              options.retryDeadlineMs,
+              startedAtMs,
+              attempt,
+              error,
+            );
+          }
+          break;
+        }
         if (daemonMayBeRelaunching(error)) {
           // The same waiting gates as run()'s operation retries (#564): a
           // daemon-down open is the other place a caller can spend the whole
