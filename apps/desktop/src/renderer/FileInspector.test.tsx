@@ -763,6 +763,125 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
+  // #579 adversarial review F1: the opening gate lived inside MarkdownView, so
+  // every NON-markdown editable view carried #567's exact mechanism unfixed —
+  // three write seams, none of them gated, reached by the same version switch.
+  // A pending .csv edit plus a version bump landed pre-switch text on the
+  // post-switch tree, with no capture, no notice and no recovery entry.
+  it("sets a pending CSV edit aside on a version switch instead of writing it", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "date,amount\n2026-06-10,42",
+      truncated: false,
+    });
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+
+    await screen.findByTestId("view-csv");
+    const cells = screen.getAllByTestId("csv-cell") as HTMLInputElement[];
+    await user.clear(cells[3]!);
+    await user.type(cells[3]!, "43");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    // The version switch: same mount, same pending draft, same armed timer.
+    // MUTATION (F1 gate): drop reopenKey/writesRefusedRef from CsvView, or the
+    // writesBlocked() checks from useAutosavedTextDraft's three seams. The
+    // armed timer then lands "43" — the previous version's text — on the tree
+    // the switch just bound.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    // Cancelled is not dropped: the edit is recoverable, on the same surface
+    // markdown drafts use.
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "date,amount\n2026-06-10,43",
+      ),
+    );
+
+    // ...and unmounting mid-switch does not write it either.
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  // ...and the window stays honest while the reread is still in flight. Typing
+  // here is NOT swallowed — swallowing it would lose the keystroke silently
+  // when the reread lands and repaints — so it arms as normal, the write seams
+  // refuse it, and the capture takes it when the refusal lifts.
+  it("refuses a CSV write typed while the switch reread is in flight, and sets it aside", async () => {
+    let releaseReread!: (value: { text: string; truncated: boolean }) => void;
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "date,amount\n2026-06-10,42",
+        truncated: false,
+      })
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          releaseReread = resolve;
+        }),
+      );
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+    await screen.findByTestId("view-csv");
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+
+    // The reread is held, so the body on screen still belongs to the version
+    // the user just left.
+    const cells = screen.getAllByTestId("csv-cell") as HTMLInputElement[];
+    await user.clear(cells[3]!);
+    await user.type(cells[3]!, "99");
+    // MUTATION (window guard): drop `writesBlocked()` from writeDraftNow. The
+    // armed timer lands "99" — built on the pre-switch body — on the tree the
+    // switch just bound.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    // MUTATION (refusal-lift capture): drop `refusalLifted` from the capture's
+    // condition. The keystroke is then silently repainted away by the sync
+    // effect with nothing set aside.
+    await act(async () => {
+      releaseReread({ text: "date,amount\n2026-06-10,42", truncated: false });
+      await Promise.resolve();
+    });
+    const notices = await screen.findAllByTestId("orphaned-draft-copy");
+    await user.click(notices[notices.length - 1]!);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "date,amount\n2026-06-10,99",
+      ),
+    );
+  });
+
   it("can start editing an empty CSV as a table", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",

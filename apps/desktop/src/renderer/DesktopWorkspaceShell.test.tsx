@@ -6362,11 +6362,20 @@ describe("set-aside draft recovery", () => {
   //
   // What this test pins is the OUTCOME: one switch, one reopen. It does not
   // pin the `announced` guard that also enforces it — removing that guard
-  // still passes, because a successful switch re-keys the version panel and
-  // the unmount advances `operationToken`, so the catch path's liveness check
-  // returns before it can announce twice. That masking is a remount RACE, not
-  // a guarantee, which is why the guard stays; it is defence in depth, and it
-  // becomes load-bearing the moment the re-keying changes.
+  // still passes.
+  //
+  // An earlier round claimed that was because a successful switch re-keys this
+  // panel. That was WRONG: `<VersionMenu>` is mounted without a key
+  // (DesktopWorkspaceShell.tsx), so it is not re-keyed, exactly as
+  // WorkspaceVersions.tsx:105-115 intends. What actually absorbs the second
+  // announcement is not established — measured on the mutated build, the
+  // catch path's recovery read DOES run (four listWorkspaceVersions calls) and
+  // the reopen count still stays at two.
+  //
+  // So: unpinned, and reachable under an order these tests do not produce —
+  // two liveness checks sit between the recovery read and the announcement,
+  // and passing them is a scheduling order, not a structural barrier. The
+  // guard stays because it makes the outcome hold regardless of that order.
   it("reopens once when a successful switch's selector refresh fails", async () => {
     const user = userEvent.setup();
     const bridge = makeEngineBridge(
