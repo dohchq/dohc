@@ -11,7 +11,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 const SCRATCH_PARENT: &str = "dohc-test-scratch";
-const MAX_RUN_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+/// How long a run root must be untouched before the sweep may remove it.
+///
+/// This is a limit that destroys work, so it is set past the longest run this
+/// repo asks for. `tools/rust-engine-program/soak-config.json` declares
+/// `postCutoverContinuous.durationsHours: [6, 24]`, so a soak legitimately runs
+/// for a day, holding an engine workspace open the whole time. Double the
+/// longest declared soak.
+const MAX_RUN_AGE: Duration = Duration::from_secs(48 * 60 * 60);
 // Windows refuses to unlink a file whose handle is still open, and a just-closed
 // SQLite handle (engine.db plus its -wal and -shm) can hold one for a beat after
 // the store is dropped. The desktop e2e helper this replaces waited
@@ -103,10 +110,37 @@ impl Drop for ScratchDir {
     }
 }
 
+/// The run root, preferring an absolute path handed down by the caller.
+///
+/// A runner that also inspects this tree must not re-derive it. Node's
+/// `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
+/// agree only by luck: under WSL, inherited `TEMP`/`TMP` point at a `/mnt/c`
+/// path that Node returns while Rust, with `TMPDIR` unset, returns `/tmp`. The
+/// tests would write one tree and the runner would count another, absent one,
+/// and report it clean. `DOHC_TEST_SCRATCH_ROOT` removes the second derivation
+/// so the two cannot disagree.
 fn current_run_root() -> io::Result<PathBuf> {
-    let run_id = match std::env::var("DOHC_TEST_SCRATCH_RUN") {
-        Ok(value) if !value.is_empty() => safe_component_checked(&value)?,
-        _ => PROCESS_RUN_ID
+    resolve_run_root(
+        std::env::var("DOHC_TEST_SCRATCH_ROOT").ok().as_deref(),
+        std::env::var("DOHC_TEST_SCRATCH_RUN").ok().as_deref(),
+        &std::env::temp_dir(),
+    )
+}
+
+fn resolve_run_root(root: Option<&str>, run_id: Option<&str>, temp: &Path) -> io::Result<PathBuf> {
+    if let Some(root) = root.filter(|value| !value.is_empty()) {
+        let root = PathBuf::from(root);
+        if !root.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DOHC_TEST_SCRATCH_ROOT must be an absolute path",
+            ));
+        }
+        return Ok(root);
+    }
+    let run_id = match run_id.filter(|value| !value.is_empty()) {
+        Some(value) => safe_component_checked(value)?,
+        None => PROCESS_RUN_ID
             .get_or_init(|| {
                 format!(
                     "process-{}-{:016x}",
@@ -116,7 +150,7 @@ fn current_run_root() -> io::Result<PathBuf> {
             })
             .clone(),
     };
-    Ok(std::env::temp_dir().join(SCRATCH_PARENT).join(run_id))
+    Ok(temp.join(SCRATCH_PARENT).join(run_id))
 }
 
 fn safe_component_checked(value: &str) -> io::Result<String> {
@@ -167,11 +201,10 @@ fn sweep_old_runs(parent: &Path, current_run: &Path, now: SystemTime) -> io::Res
         if path == current_run || !entry.file_type()?.is_dir() {
             continue;
         }
-        let modified = entry.metadata()?.modified()?;
-        let old_enough = now
-            .duration_since(modified)
-            .is_ok_and(|age| age > MAX_RUN_AGE);
-        if old_enough && let Err(error) = remove_tree_with_retry(&path) {
+        if !is_idle_since(&path, now, MAX_RUN_AGE) {
+            continue;
+        }
+        if let Err(error) = remove_tree_with_retry(&path) {
             eprintln!(
                 "scratch sweep could not remove aged run {} after {} attempts: {error}",
                 path.display(),
@@ -180,6 +213,37 @@ fn sweep_old_runs(parent: &Path, current_run: &Path, now: SystemTime) -> io::Res
         }
     }
     Ok(())
+}
+
+/// Whether nothing anywhere under `path` has been touched inside `max_age`.
+///
+/// The run root's own mtime is not the run's liveness. A directory's mtime
+/// changes when its own entries are added or removed, not when a file deeper
+/// inside is written — so a soak that spends a day writing into a workspace it
+/// created in its first minute leaves the root looking untouched. Reading the
+/// whole tree, and stopping at the first recent thing found, asks the question
+/// the sweep actually means: is anyone still working here.
+fn is_idle_since(path: &Path, now: SystemTime, max_age: Duration) -> bool {
+    let Ok(metadata) = path.symlink_metadata() else {
+        return false;
+    };
+    if let Ok(modified) = metadata.modified()
+        && now.duration_since(modified).is_ok_and(|age| age <= max_age)
+    {
+        return false;
+    }
+    if !metadata.is_dir() {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if !is_idle_since(&entry.path(), now, max_age) {
+            return false;
+        }
+    }
+    true
 }
 
 fn cleanup_attempts() -> usize {
@@ -247,6 +311,75 @@ mod tests {
         assert!(
             !path.exists(),
             "a panicking test must still remove its scratch directory"
+        );
+    }
+
+    /// The runner that inspects this tree hands the root down instead of
+    /// deriving it a second time. Node's `os.tmpdir()` and Rust's
+    /// `std::env::temp_dir()` disagree under WSL, and a runner that counted its
+    /// own guess would report an absent tree as clean.
+    #[test]
+    fn an_explicit_root_wins_over_every_derived_one() {
+        let handed_down = if cfg!(windows) {
+            PathBuf::from(r"C:\handed\down\root")
+        } else {
+            PathBuf::from("/handed/down/root")
+        };
+        let derived_temp = Path::new(if cfg!(windows) {
+            r"C:\other\temp"
+        } else {
+            "/other/temp"
+        });
+
+        let resolved = resolve_run_root(
+            Some(&handed_down.to_string_lossy()),
+            Some("ignored-run-id"),
+            derived_temp,
+        )
+        .expect("an absolute root resolves");
+
+        assert_eq!(
+            resolved, handed_down,
+            "the handed-down root must be used verbatim, never re-derived"
+        );
+    }
+
+    #[test]
+    fn a_relative_root_is_refused_by_name() {
+        let error = resolve_run_root(Some("relative/root"), None, Path::new("/tmp"))
+            .expect_err("a relative root cannot be trusted to point anywhere");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("DOHC_TEST_SCRATCH_ROOT"),
+            "the refusal must name the variable, got: {error}"
+        );
+    }
+
+    /// A soak writes into a workspace it created in its first minute. The run
+    /// root's own mtime never moves, so an mtime-of-the-root sweep would delete
+    /// a live day-long run.
+    #[test]
+    fn sweep_keeps_a_run_whose_only_recent_write_is_deep_inside() {
+        let harness = ScratchDir::new_named("deep-activity").expect("scratch");
+        let parent = harness.join("runs");
+        let live = parent.join("live-soak");
+        let deep = live.join("workspace").join(".dohc").join("engine");
+        fs::create_dir_all(&deep).expect("deep tree");
+        fs::write(deep.join("engine.db"), b"live").expect("recent deep write");
+
+        let now = SystemTime::now();
+        let stale = FileTime::from_system_time(now - MAX_RUN_AGE - Duration::from_secs(60));
+        // Everything except the deep file looks long abandoned.
+        set_file_mtime(&live, stale).expect("age the run root");
+        set_file_mtime(live.join("workspace"), stale).expect("age the workspace");
+        set_file_mtime(live.join("workspace").join(".dohc"), stale).expect("age .dohc");
+        set_file_mtime(&deep, stale).expect("age the engine dir");
+
+        sweep_old_runs(&parent, &parent.join("current-run"), now).expect("sweep");
+
+        assert!(
+            live.exists(),
+            "a run with recent work deep inside is live and must survive the sweep"
         );
     }
 

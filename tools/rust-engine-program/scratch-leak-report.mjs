@@ -25,17 +25,47 @@ import { join } from "node:path";
 // ignore the row.
 const LEAK_ENTRY_LIMIT = 32;
 
+// #605 was 196 GB, not 191,851 directories — the directories were the symptom
+// and the bytes were the outage. A row that bounds only the count would pass
+// one workspace whose engine.db grew without limit, which is the same failure
+// wearing a different shape. Measured healthy: a full `--workspace` run left
+// 7,612,907 bytes, then 4,201,818, and every single-package run left 0. The
+// ceiling is 256 MiB — about 35x the largest healthy run seen here, and still
+// three orders of magnitude below the incident.
+const LEAK_BYTE_LIMIT = 256 * 1024 * 1024;
+
+// Written into the run root before the tests start and required after they
+// finish. Its absence means this module never reached the tree the tests used.
+export const SCRATCH_SENTINEL = ".dohc-gate-sentinel";
+
 export async function inspectScratchRun(runRoot) {
   let names;
   try {
     names = await readdir(runRoot);
   } catch (error) {
     if (errorCode(error) === "ENOENT") {
-      return { status: "PASS", reason: "0 entries, 0 bytes", entryCount: 0, bytes: 0, leaked: [] };
+      return {
+        status: "FAIL",
+        reason: `scratch run root ${runRoot} does not exist, so nothing was inspected; the tests wrote somewhere else and this row would otherwise report a clean run it never looked at`,
+        entryCount: 0,
+        bytes: 0,
+        leaked: [],
+      };
     }
     throw error;
   }
 
+  if (!names.includes(SCRATCH_SENTINEL)) {
+    return {
+      status: "FAIL",
+      reason: `scratch run root ${runRoot} has no ${SCRATCH_SENTINEL}, so this is not the tree the run used; "0 entries" here would mean nothing was looked at, not that nothing leaked`,
+      entryCount: 0,
+      bytes: 0,
+      leaked: names.slice(0, 5),
+    };
+  }
+
+  names = names.filter((name) => name !== SCRATCH_SENTINEL);
   let bytes = 0;
   for (const name of names) {
     bytes += await treeBytes(join(runRoot, name));
@@ -70,10 +100,17 @@ export async function inspectScratchRun(runRoot) {
     };
   }
 
-  if (entryCount > LEAK_ENTRY_LIMIT) {
+  // Two independent bounds on two independent failure modes: many directories
+  // means a harness stopped cleaning up, many bytes means one workspace grew
+  // without limit. Either alone fills a disk.
+  if (entryCount > LEAK_ENTRY_LIMIT || bytes > LEAK_BYTE_LIMIT) {
+    const breached =
+      entryCount > LEAK_ENTRY_LIMIT
+        ? `entry limit ${LEAK_ENTRY_LIMIT} entries`
+        : `byte limit ${LEAK_BYTE_LIMIT} bytes`;
     return {
       status: "FAIL",
-      reason: `scratch entry limit ${LEAK_ENTRY_LIMIT} entries; observed ${entryCount} entries and ${bytes} bytes; leaked directories: ${leaked.join(", ")}; run root reclaimed after measurement`,
+      reason: `scratch ${breached}; observed ${entryCount} entries and ${bytes} bytes; leaked directories: ${leaked.join(", ")}; run root reclaimed after measurement`,
       entryCount,
       bytes,
       leaked,
@@ -84,8 +121,8 @@ export async function inspectScratchRun(runRoot) {
     status: "PASS",
     reason:
       entryCount === 0
-        ? "0 entries, 0 bytes"
-        : `${entryCount} entries and ${bytes} bytes left by shutdown races, within the ${LEAK_ENTRY_LIMIT}-entry limit; run root reclaimed`,
+        ? `0 entries, 0 bytes (${SCRATCH_SENTINEL} confirmed the tree was walked)`
+        : `${entryCount} entries and ${bytes} bytes left by shutdown races, within the ${LEAK_ENTRY_LIMIT}-entry and ${LEAK_BYTE_LIMIT}-byte limits; run root reclaimed`,
     entryCount,
     bytes,
     leaked,

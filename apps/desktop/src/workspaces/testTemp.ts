@@ -16,10 +16,17 @@ import {
 } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 const SCRATCH_PARENT = "dohc-test-scratch";
-const MAX_RUN_AGE_MS = 6 * 60 * 60 * 1_000;
+// How long a run root must be untouched before this sweep may remove it.
+//
+// This sweep walks the parent every runtime shares, so it can reach a live Rust
+// soak's workspace, not just an abandoned vitest run. It is a limit that
+// destroys work, so it is set past the longest run this repo asks for:
+// `tools/rust-engine-program/soak-config.json` declares
+// `postCutoverContinuous.durationsHours: [6, 24]`. Double the longest.
+const MAX_RUN_AGE_MS = 48 * 60 * 60 * 1_000;
 // Windows refuses to unlink a file whose handle is still open, and a just-closed
 // SQLite handle can hold one for a beat. This is the budget the e2e helper this
 // replaces already used: `100ms * attempt` over 8 attempts.
@@ -28,6 +35,12 @@ const WINDOWS_CLEANUP_DELAY_MS = 100;
 
 const testScratch = new Set<string>();
 const suiteScratch = new Set<string>();
+// Paths whose removal lost to an open handle. They stay here so the final
+// drain retries them and, failing that, fails the suite. Dropping them and
+// logging instead would leave the tree behind under a green run, and the only
+// run-level scratch reporter in this repo runs from the Rust gate — it never
+// sees a JS run at all.
+const unresolvedScratch = new Set<string>();
 let startup: Promise<void> | undefined;
 let syncStartupDone = false;
 let processRunId: string | undefined;
@@ -40,6 +53,17 @@ function nativeTmpdir(): string {
 }
 
 export function testScratchRunRoot(): string {
+  // A caller that also inspects this tree hands the absolute root down rather
+  // than deriving it again. `nativeTmpdir()` here and `std::env::temp_dir()` in
+  // Rust do not agree under WSL, and a runner counting its own guess would
+  // report an absent tree as clean.
+  const handedDown = process.env.DOHC_TEST_SCRATCH_ROOT;
+  if (handedDown) {
+    if (!isAbsolute(handedDown)) {
+      throw new Error("DOHC_TEST_SCRATCH_ROOT must be an absolute path");
+    }
+    return handedDown;
+  }
   return join(nativeTmpdir(), SCRATCH_PARENT, scratchRunId());
 }
 
@@ -70,7 +94,18 @@ export async function cleanupTestScratch(): Promise<void> {
 
 export async function cleanupSuiteTestScratch(): Promise<void> {
   await cleanupRegistered(suiteScratch);
+  // Last chance for anything an earlier drain could not remove. Every server
+  // and database this suite opened is closed by now, so the handles that beat
+  // those attempts are gone.
+  await cleanupRegistered(unresolvedScratch);
   await removeEmptyRunRoot();
+  if (unresolvedScratch.size > 0) {
+    const remaining = [...unresolvedScratch].sort();
+    unresolvedScratch.clear();
+    throw new Error(
+      `scratch cleanup failed after ${cleanupAttempts()} attempts for ${remaining.length} director${remaining.length === 1 ? "y" : "ies"}, which would leak: ${remaining.join(", ")}`,
+    );
+  }
 }
 
 export async function removeTestScratch(path: string): Promise<void> {
@@ -78,10 +113,13 @@ export async function removeTestScratch(path: string): Promise<void> {
   suiteScratch.delete(path);
   const error = await removeTreeWithRetry(path);
   if (error) {
+    unresolvedScratch.add(path);
     console.error(
-      `scratch cleanup failed after ${cleanupAttempts()} attempts for ${path}: ${error.message}; the run-level scratch leak check will report this directory`,
+      `scratch cleanup failed after ${cleanupAttempts()} attempts for ${path}: ${error.message}; retrying when the suite ends, and failing the suite if it still cannot go`,
     );
+    return;
   }
+  unresolvedScratch.delete(path);
 }
 
 export async function sweepOldTestScratch(): Promise<void> {
@@ -111,7 +149,7 @@ export async function sweepScratchParent(
       if (errorCode(error) === "ENOENT") continue;
       throw error;
     }
-    if (!metadata.isDirectory() || nowMs - metadata.mtimeMs <= MAX_RUN_AGE_MS) {
+    if (!metadata.isDirectory() || !(await isIdleSince(path, nowMs))) {
       continue;
     }
     const error = await removeTreeWithRetry(path);
@@ -139,6 +177,53 @@ function scratchRunId(): string {
   }
   processRunId ??= `process-${process.pid}-${randomBytes(8).toString("hex")}`;
   return processRunId;
+}
+
+/// Whether nothing anywhere under `path` has been touched inside the max age.
+///
+/// A directory's mtime moves when its own entries change, not when a file
+/// deeper inside is written. A soak that spends a day writing into a workspace
+/// it created in its first minute leaves the root looking untouched, so reading
+/// only the root would delete live work. Stop at the first recent thing found.
+export async function isIdleSince(path: string, nowMs: number): Promise<boolean> {
+  let metadata;
+  try {
+    metadata = await stat(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return true;
+    return false;
+  }
+  if (nowMs - metadata.mtimeMs <= MAX_RUN_AGE_MS) return false;
+  if (!metadata.isDirectory()) return true;
+  let names: string[];
+  try {
+    names = await readdir(path);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (!(await isIdleSince(join(path, name), nowMs))) return false;
+  }
+  return true;
+}
+
+function isIdleSinceSync(path: string, nowMs: number): boolean {
+  let metadata;
+  try {
+    metadata = statSync(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return true;
+    return false;
+  }
+  if (nowMs - metadata.mtimeMs <= MAX_RUN_AGE_MS) return false;
+  if (!metadata.isDirectory()) return true;
+  let names: string[];
+  try {
+    names = readdirSync(path);
+  } catch {
+    return false;
+  }
+  return names.every((name) => isIdleSinceSync(join(path, name), nowMs));
 }
 
 function safePrefix(prefix: string): string {
@@ -182,7 +267,7 @@ function sweepOldTestScratchSync(): void {
       if (errorCode(error) === "ENOENT") continue;
       throw error;
     }
-    if (!metadata.isDirectory() || nowMs - metadata.mtimeMs <= MAX_RUN_AGE_MS) {
+    if (!metadata.isDirectory() || !isIdleSinceSync(path, nowMs)) {
       continue;
     }
     try {

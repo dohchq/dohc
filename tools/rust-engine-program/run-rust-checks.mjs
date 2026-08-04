@@ -40,19 +40,30 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { arch, platform, release, tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
   classifyTreeProvenance,
   formatTreeState,
   readTreeState,
 } from "./tree-provenance.mjs";
-import { inspectScratchRun } from "./scratch-leak-report.mjs";
+import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
+// Hand the tests the absolute root instead of a name they would re-derive.
+// `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
+// agree only by luck: under WSL the inherited TEMP/TMP point at /mnt/c, which
+// Node returns, while Rust with TMPDIR unset returns /tmp. Deriving it twice
+// let this row count an absent tree and call the run clean.
 const scratchRunId = `rust-gate-${process.pid}-${randomBytes(8).toString("hex")}`;
 const scratchRunRoot = join(tmpdir(), "dohc-test-scratch", scratchRunId);
-process.env.DOHC_TEST_SCRATCH_RUN = scratchRunId;
+process.env.DOHC_TEST_SCRATCH_ROOT = scratchRunRoot;
+// The sentinel is how the row tells "nothing leaked" from "nothing looked".
+// It is written before the tests and required afterwards; if it is missing the
+// row never reached the tree the tests used, whatever the entry count says.
+mkdirSync(scratchRunRoot, { recursive: true });
+writeFileSync(join(scratchRunRoot, SCRATCH_SENTINEL), scratchRunId);
 
 function run(cmd) {
   // shell:true so `cargo`/`cargo.exe` resolve identically under PowerShell,
