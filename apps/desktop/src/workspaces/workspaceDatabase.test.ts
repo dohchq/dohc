@@ -1,15 +1,15 @@
 import { databaseOpLogPath } from "@dohc/workspace-core";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { applyDatabaseEdit, importToDatabase, readDatabaseSnapshot } from "./workspaceDatabase";
+import { createTestScratch } from "./testTemp";
 
 let root: string;
 const AUTHOR = { kind: "user", userId: "local" } as const;
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "dohc-db-"));
+  root = await createTestScratch("dohc-db-");
   await mkdir(join(root, ".dohc"), { recursive: true });
   await mkdir(join(root, "imports"), { recursive: true });
   await writeFile(

@@ -6,11 +6,11 @@ import {
   type Request,
 } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import {
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
@@ -25,7 +25,7 @@ import {
 const roots: string[] = [];
 
 async function root(): Promise<string> {
-  const value = await mkdtemp(join(nativeTmpdir(), "dohc-generated-text-"));
+  const value = await createTestScratch("dohc-generated-text-");
   roots.push(value);
   return value;
 }

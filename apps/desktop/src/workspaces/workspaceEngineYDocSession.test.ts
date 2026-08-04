@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -31,7 +31,7 @@ import {
   YDocPathNotInVersionError,
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
 const PATH = "notes/solo.md";
@@ -167,7 +167,7 @@ function wireRefusal(
 }
 
 beforeEach(async () => {
-  root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-ydoc-session-"));
+  root = await createTestScratch("dohc-engine-ydoc-session-");
   await mkdir(join(root, "notes"), { recursive: true });
   await writeFile(join(root, PATH), INITIAL_MARKDOWN, "utf8");
   requests = [];

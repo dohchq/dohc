@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -13,6 +12,7 @@ import {
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
 } from "./sharedView";
 import type { ShareViewRefusal } from "@dohc/workspace-contracts/relay";
+import { createTestScratch } from "./testTemp";
 
 // These tests drive the pull with the selector a share record pins. It is a
 // REAL selector — no paths and no version selects nothing at all, which the
@@ -59,7 +59,7 @@ afterEach(async () => {
 });
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-shared-view-desktop-"));
+  const root = await createTestScratch("dohc-shared-view-desktop-");
   roots.push(root);
   return root;
 }

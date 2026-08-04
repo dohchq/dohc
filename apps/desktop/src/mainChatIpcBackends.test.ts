@@ -1,5 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import {
   ChatsLoopbackEngine,
   type Request,
@@ -19,7 +18,7 @@ import {
 import type { AwaitableLinkedChatStore } from "./workspaces/awaitableLinkedChatStore";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "./workspaces/liveLinkedChatStore";
-import { nativeTmpdir } from "./workspaces/testTemp";
+import { createTestScratch } from "./workspaces/testTemp";
 
 interface TestEvent {
   trusted: boolean;
@@ -291,9 +290,7 @@ afterEach(async () => {
 
 describe("main chat IPC live backend", () => {
     it("round_trips_channels_threads_messages_read_decision_reaction_bookmark_and_follow", async () => {
-      const rootPath = await mkdtemp(
-        join(nativeTmpdir(), "dohc-main-chat-live-"),
-      );
+      const rootPath = await createTestScratch("dohc-main-chat-live-");
       roots.push(rootPath);
       const workspace = {
         workspaceId: "workspace-live",
@@ -444,9 +441,7 @@ describe("main chat IPC live backend", () => {
 
 describe("desktop linked chat factory", () => {
   it("keeps_file_thread_path_hints_on_the_live_list_threads_shape", async () => {
-    const rootPath = await mkdtemp(
-      join(nativeTmpdir(), "dohc-live-chat-hint-"),
-    );
+    const rootPath = await createTestScratch("dohc-live-chat-hint-");
     roots.push(rootPath);
     const workspace = {
       workspaceId: "workspace-live-hint",
@@ -489,9 +484,7 @@ describe("desktop linked chat factory", () => {
   });
 
   it("bounds_file_thread_path_hint_enrichment_requests", async () => {
-    const rootPath = await mkdtemp(
-      join(nativeTmpdir(), "dohc-live-chat-hint-bound-"),
-    );
+    const rootPath = await createTestScratch("dohc-live-chat-hint-bound-");
     roots.push(rootPath);
     const workspace = {
       workspaceId: "workspace-live-hint-bound",
@@ -578,9 +571,7 @@ describe("desktop linked chat factory", () => {
   });
 
   it("rebinds_read_calls_after_transport_loss_without_retrying_writes", async () => {
-    const rootPath = await mkdtemp(
-      join(nativeTmpdir(), "dohc-live-chat-read-retry-"),
-    );
+    const rootPath = await createTestScratch("dohc-live-chat-read-retry-");
     roots.push(rootPath);
     const workspace = {
       workspaceId: "workspace-live-read-retry",

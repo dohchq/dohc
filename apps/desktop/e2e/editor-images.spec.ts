@@ -1,5 +1,4 @@
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import type { ElectronApplication } from "playwright";
@@ -14,6 +13,10 @@ import {
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
+import {
+  cleanupTestScratch,
+  createTestScratch,
+} from "../src/workspaces/testTemp";
 
 // A real 2x2 PNG (green/blue pixels). Bytes must decode to a paintable image so
 // the assertions below (naturalWidth > 0) exercise the whole serve→decode path,
@@ -21,6 +24,10 @@ import {
 const PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAwAAi/gMJABvyA/1NQqYrAAAAAElFTkSuQmCC";
 const PNG_BYTES = Buffer.from(PNG_BASE64, "base64");
+
+test.afterEach(async () => {
+  await cleanupTestScratch();
+});
 
 async function openMarkdownDoc(
   page: import("@playwright/test").Page,
@@ -177,7 +184,7 @@ test("in-editor image: a link escaping the workspace root does NOT render", asyn
 // Writes a real PNG to a temp dir OUTSIDE the workspace — the OS location a
 // user actually drags from — and returns its absolute path.
 async function pngOutsideWorkspace(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "dohc-drag-"));
+  const dir = await createTestScratch("dohc-drag-");
   const path = join(dir, "Dragged Shot.png");
   await writeFile(path, PNG_BYTES);
   return path;

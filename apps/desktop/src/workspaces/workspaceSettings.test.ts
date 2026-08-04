@@ -1,13 +1,4 @@
-import {
-  mkdir,
-  mkdtemp,
-  readdir,
-  readFile,
-  rm,
-  symlink,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
@@ -30,6 +21,7 @@ import {
   writeWorkspaceSettingsFile,
 } from "./workspaceSettingsFile";
 import { startWorkspaceWatch } from "./workspaceWatcher";
+import { createTestScratch } from "./testTemp";
 
 // A seam for the write-ordering test below: every settings read and write
 // resolves the metadata directory first, so a gate here can hold ONE of them
@@ -54,7 +46,7 @@ const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(tempBase, "dohc-workspace-settings-"));
+  const root = await createTestScratch("dohc-workspace-settings-");
   roots.push(root);
   return root;
 }

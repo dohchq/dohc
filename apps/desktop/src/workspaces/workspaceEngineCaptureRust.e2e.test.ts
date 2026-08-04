@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
@@ -18,7 +18,7 @@ import {
 import { createWorkspaceActivity } from "./workspaceActivity";
 import { YdocReleasedWithSettleFailureError } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 
 // This suite looked only under the repo root, so it SKIPPED everywhere from the
 // day it was written and its coverage came and went with whoever last ran
@@ -64,7 +64,7 @@ afterEach(async () => {
 it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
-    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-e2e-"));
+    const root = await createTestScratch("dohc-capture-rust-e2e-");
     roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
@@ -157,7 +157,7 @@ it.skipIf(engine.missing)(
 it.skipIf(engine.missing)(
   "keeps an edit made outside dohc when the open document closes",
   async () => {
-    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-drift-"));
+    const root = await createTestScratch("dohc-capture-rust-drift-");
     roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
@@ -233,7 +233,7 @@ it.skipIf(engine.missing)(
 it.skipIf(engine.missing)(
   "preserves a settled watcher capture across stopAll and a new daemon process",
   async () => {
-    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-stop-"));
+    const root = await createTestScratch("dohc-capture-rust-stop-");
     roots.push(root);
     const workspace: CreatedWorkspace = {
       workspaceId: "capture-rust-stop",
@@ -333,7 +333,7 @@ it.skipIf(engine.missing)(
 it.skipIf(engine.missing)(
   "reports refusals from the real daemon under their domain error codes",
   async () => {
-    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-codes-"));
+    const root = await createTestScratch("dohc-capture-rust-codes-");
     roots.push(root);
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
@@ -372,7 +372,7 @@ it.skipIf(engine.missing)(
 it.skipIf(engine.missing)(
   "closes clean when the daemon's capture reached an outside edit first",
   async () => {
-    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-race-"));
+    const root = await createTestScratch("dohc-capture-rust-race-");
     roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
@@ -493,7 +493,7 @@ async function holdWithoutShareDelete(absolute: string): Promise<() => Promise<v
 it.skipIf(engine.missing || process.platform !== "win32")(
   "surfaces a blocked save while a file is locked and recovers on the next settle",
   async () => {
-    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-lock-"));
+    const root = await createTestScratch("dohc-capture-rust-lock-");
     roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
@@ -594,7 +594,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
 it.skipIf(engine.missing)(
   "keeps the close loud when unsettled edits meet an already-moved head",
   async () => {
-    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-loud-"));
+    const root = await createTestScratch("dohc-capture-rust-loud-");
     roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
@@ -685,7 +685,7 @@ it.skipIf(engine.missing)(
 it.skipIf(engine.missing)(
   "refuses a live session for a path the version does not have, and still opens a new file",
   async () => {
-    const root = await mkdtemp(join(nativeTmpdir(), "dohc-capture-rust-absent-"));
+    const root = await createTestScratch("dohc-capture-rust-absent-");
     roots.push(root);
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),

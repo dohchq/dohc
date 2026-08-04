@@ -1,5 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import {
   ShareUnavailableError,
@@ -25,7 +24,7 @@ import {
 } from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 
 // MU-C4: the desktop's best-effort refresh pass over joined shared channels.
 // The engine client is injected; these tests pin the pass's CONTAINMENT
@@ -39,7 +38,7 @@ async function makeChats(workspaceId: string): Promise<{
   root: string;
   seed: (request: Omit<Request, "id" | "workspace">) => Promise<void>;
 }> {
-  const root = await mkdtemp(join(nativeTmpdir(), "dohc-shared-channel-"));
+  const root = await createTestScratch("dohc-shared-channel-");
   const loopback = new ChatsLoopbackEngine();
   const client = {
     close: () => undefined,

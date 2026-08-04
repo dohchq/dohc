@@ -1,12 +1,4 @@
-import {
-  mkdtemp,
-  mkdir,
-  readFile,
-  symlink,
-  truncate,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, symlink, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -17,6 +9,7 @@ import {
   restoreWorkspaceText,
   writeWorkspaceText,
 } from "./workspaceAssets";
+import { createTestScratch } from "./testTemp";
 
 // The asset/text serving path is the renderer's ONLY window into workspace
 // bytes, so its negative paths are security boundaries: traversal and symlink
@@ -24,7 +17,7 @@ import {
 // must never freeze the main process or stream unbounded bytes over IPC).
 
 async function makeWorkspace(): Promise<string> {
-  const root = join(await mkdtemp(join(tmpdir(), "dohc-assets-")), "ws");
+  const root = join(await createTestScratch("dohc-assets-"), "ws");
   await mkdir(join(root, "notes"), { recursive: true });
   await writeFile(join(root, "notes", "a.md"), "# A\n");
   return root;
@@ -42,7 +35,7 @@ describe("resolveWorkspaceFile containment", () => {
 
   it("refuses a symlink that points outside the workspace (real-path containment)", async () => {
     const root = await makeWorkspace();
-    const outside = await mkdtemp(join(tmpdir(), "dohc-assets-outside-"));
+    const outside = await createTestScratch("dohc-assets-outside-");
     await writeFile(join(outside, "secret.txt"), "top secret");
     await symlink(join(outside, "secret.txt"), join(root, "notes", "link.txt"));
     await expect(resolveWorkspaceFile(root, "notes/link.txt")).rejects.toThrow(
@@ -114,7 +107,7 @@ describe("restoreWorkspaceText", () => {
 
   it("refuses to restore through a symlinked ancestor outside the workspace", async () => {
     const root = await makeWorkspace();
-    const outside = await mkdtemp(join(tmpdir(), "dohc-assets-outside-"));
+    const outside = await createTestScratch("dohc-assets-outside-");
     await symlink(outside, join(root, "notes", "outside"));
 
     await expect(

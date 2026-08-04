@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { createTestScratchSync } from "./workspaces/testTemp";
 
 // These assertions belong to the desktop app, not to the daemon client package.
 // The lifecycle suite they came from moved into @dohc/workspace-engine-client,
@@ -22,9 +22,7 @@ afterEach(() => {
 
 describe("Rust engine packaging gate", () => {
   it("fails the packaging gate when the staged engine binary is missing", () => {
-    const emptyResourceDir = mkdtempSync(
-      join(tmpdir(), "dohc-missing-engine-resource-"),
-    );
+    const emptyResourceDir = createTestScratchSync("dohc-missing-engine-resource-");
     scratchPaths.push(emptyResourceDir);
 
     const gate = spawnSync(

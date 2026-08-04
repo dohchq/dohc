@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
@@ -25,7 +25,7 @@ import {
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
   type EngineDiskWriter,
@@ -48,7 +48,7 @@ const WORKSPACE_ID = "version-ops-test";
 const roots: string[] = [];
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(nativeTmpdir(), "dohc-version-ops-"));
+  const root = await createTestScratch("dohc-version-ops-");
   roots.push(root);
   return root;
 }

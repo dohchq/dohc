@@ -4420,26 +4420,7 @@ mod tests {
         assert_eq!(completed, Some(4_000));
     }
 
-    fn tempdir() -> std::path::PathBuf {
-        // The counter is what makes this unique, NOT the clock: Windows'
-        // SystemTime granularity is coarse (~0.5-15ms), so two tests entering
-        // this function in the same tick used to get the SAME directory and
-        // share one engine.db. That produced a rare "table engine_migrations
-        // already exists" failure that only ever reproduced under the full
-        // parallel suite, never in isolation.
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let mut base = std::env::temp_dir();
-        let unique = format!(
-            "dohc-r04-mig-{}-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        base.push(unique);
-        std::fs::create_dir_all(&base).expect("mkdir");
-        base
+    fn tempdir() -> dohc_test_scratch::ScratchDir {
+        dohc_test_scratch::ScratchDir::new_named("r04-mig").expect("mkdir")
     }
 }

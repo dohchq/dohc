@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   EngineDaemonLifecycle,
@@ -19,6 +18,7 @@ import {
 } from "../workspaces/engineRelayClient";
 import { requireEngineBinaryOrSkip } from "./engineBinary";
 import { RelayFilePeer } from "./relayFilePeer";
+import { createTestScratch } from "../workspaces/testTemp";
 
 interface RecordedRequest {
   url: string;
@@ -290,7 +290,7 @@ describe("RelayFilePeer receiver contract", () => {
     async () => {
       const workspaceId = `relay-file-conflict-${process.pid}-${Date.now()}`;
       const token = "test:relay-file-conflict";
-      const baseDir = await mkdtemp(join(tmpdir(), "relay-file-conflict-"));
+      const baseDir = await createTestScratch("relay-file-conflict-");
       const rootPath = join(baseDir, "receiver");
       const relayDb = join(baseDir, "relay.sqlite");
       let relay: SyncRelayHandle | null = null;

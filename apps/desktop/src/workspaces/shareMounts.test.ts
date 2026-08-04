@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -26,6 +25,7 @@ import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStor
 // version selects nothing at all, which the engine refuses.
 const PINNED_SELECTOR = { paths: [], versionId: "shared-version" };
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
+import { createTestScratch } from "./testTemp";
 
 const SHARE_ID = "share-1";
 const HOST_WORKSPACE = "host-workspace-1";
@@ -45,7 +45,7 @@ afterEach(async () => {
 });
 
 async function tempHostRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-share-mounts-"));
+  const root = await createTestScratch("dohc-share-mounts-");
   roots.push(root);
   return root;
 }

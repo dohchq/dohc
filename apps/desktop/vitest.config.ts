@@ -13,7 +13,8 @@ export default defineConfig({
     include: ["src/**/*.test.{ts,tsx}"],
     // Fills jsdom's missing hit-testing APIs. See the file for why an absent
     // document.elementFromPoint failed whole runs rather than single tests.
-    setupFiles: ["./vitest.setup.ts"],
+    // `testSetup.ts` registers the scratch-directory cleanup every suite needs.
+    setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
     maxWorkers: WORKER_CAP,
     minWorkers: 1,
     // Without this vitest stubs every *.css import to "" — including the
