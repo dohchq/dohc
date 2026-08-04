@@ -11024,7 +11024,12 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::IdentityNotRecognized => ErrorCode::IdentityNotRecognized,
         RelayError::ShareReadOnly => ErrorCode::ShareReadOnly,
         RelayError::ShareOperationRejected => ErrorCode::ShareOperationRejected,
-        RelayError::PayloadTooLarge | RelayError::BlobTooLarge { .. } => ErrorCode::PayloadTooLarge,
+        RelayError::PayloadTooLarge
+        | RelayError::BlobTooLarge { .. }
+        // The same class as the two above — content past a size limit — and it
+        // reaches this mapping only through a caller that chooses to surface
+        // it, because the share-view pull records it as a skipped op instead.
+        | RelayError::ShareBlobOverCeiling { .. } => ErrorCode::PayloadTooLarge,
         RelayError::QuotaExceeded => ErrorCode::QuotaExceeded,
         RelayError::NoProgress => ErrorCode::RelayNoProgress,
         RelayError::BlobMissing => ErrorCode::BlobMissing,

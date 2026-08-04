@@ -211,16 +211,17 @@ impl RelayError {
     /// variant must answer the question rather than inherit an answer.
     pub(crate) const fn share_replay_refusal_code(&self) -> Option<&'static str> {
         match self {
-            // PERMANENT. The body is over a ceiling this recipient enforces on
-            // every ingest, so re-fetching it returns the same bytes and the
-            // same refusal, forever.
+            // PERMANENT. These bytes hashed to the sha the op named, so they
+            // ARE the granter's file, and it is over a ceiling this recipient
+            // enforces on every ingest. Asking again returns the same file and
+            // the same refusal, forever.
             //
             // Advancing is not merely safe here, it is REQUIRED for the only
             // repair there is. A granter who re-shares the file under the
             // ceiling produces a NEW op at a LATER cursor. Holding the cursor
             // on the oversized op would keep that replacement from ever
             // arriving — the repair would be unreachable by construction.
-            RelayError::BlobTooLarge { .. }
+            RelayError::ShareBlobOverCeiling { .. }
             // PERMANENT. The op describes its own content wrongly. No blob the
             // relay could serve makes it replayable.
             | RelayError::ShareOpInvalid { .. } => Some("invalid-input"),
@@ -229,6 +230,14 @@ impl RelayError {
             // and this same op applies — so the cursor must not pass it. This
             // is `BlobMissing`'s claim in a different tense.
             RelayError::BlobInvalid
+            // REPAIRABLE for the same reason, and easy to mistake for the
+            // permanent class above. This is raised on bytes NOBODY has
+            // authenticated: a transport that stopped at its own read bound
+            // (`blob_body_overflow`, which cannot even report an exact size),
+            // or an oversized body served for the wrong blob. The op may name
+            // a perfectly small file, so skipping past it would drop content
+            // the relay can still serve correctly.
+            | RelayError::BlobTooLarge { .. }
             // PENDING, and the reason to keep reading: the relay does not have
             // the blob YET and the sender can still upload it.
             | RelayError::BlobMissing
@@ -293,6 +302,23 @@ pub enum RelayError {
     BlobReferenceMissing,
     #[error("relay blob content failed integrity validation")]
     BlobInvalid,
+    /// The granter's file, AUTHENTICATED against the sha256 its op named, is
+    /// larger than the ceiling this recipient enforces for that content kind.
+    ///
+    /// Deliberately not `BlobTooLarge`. That one is raised on bytes nobody has
+    /// checked — a transport that stopped at its own read bound, or a body the
+    /// relay served for the wrong blob — so it says nothing about the file the
+    /// op actually names, and the op may well succeed once the relay serves
+    /// the right body. This one is measured on bytes already proven to be the
+    /// granter's, so no repair anywhere makes them fit.
+    #[error(
+        "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {observed_bytes} bytes"
+    )]
+    ShareBlobOverCeiling {
+        constraint: &'static str,
+        limit_bytes: usize,
+        observed_bytes: usize,
+    },
     /// A served share op that describes its own content wrongly: a blob
     /// reference that is not a sha256, or a body that is authentically the
     /// one the op named and still not the kind the op claimed.

@@ -2644,27 +2644,81 @@ struct ShareViewReplayContext<'a, T> {
 /// blobs in the same op are ALL applied. Never a prefix.
 fn refuse_replay_unit<T>(
     context: &mut ShareViewReplayContext<'_, T>,
-    envelope: &ReplicationEnvelope,
+    refused: &mut Vec<RefusedBlob>,
+    path: &str,
     error: RelayError,
 ) -> Result<(), RelayError> {
     let Some(code) = error.share_replay_refusal_code() else {
         return Err(error);
     };
     *context.skipped += 1;
+    refused.push(RefusedBlob {
+        code,
+        reason: format!("{path} — {error}"),
+    });
+    Ok(())
+}
+
+/// One blob an op named that this recipient will never apply, and why. The
+/// path is carried because the reason alone cannot say WHICH file went
+/// missing, and an op can lose several.
+struct RefusedBlob {
+    code: &'static str,
+    reason: String,
+}
+
+/// Turn an op's refused blobs into ONE durable record.
+///
+/// The recipient's record is keyed by origin coordinate and by nothing else
+/// (`mergeShareSkippedOps` in `apps/desktop/src/workspaces/registryStore.ts`),
+/// because a re-fetched page must not stack the same op up twice. Every blob
+/// in one op shares that coordinate, so emitting a refusal per blob does not
+/// give the reader more detail — the record keeps the first and drops the
+/// rest, uncounted. Two files would go missing and the notice would say one.
+///
+/// So the op is the record and the blobs are its contents. The count leads,
+/// because `ShareViewRefusal::new` bounds the detail and a truncated list must
+/// still say how many files it is short.
+fn record_refused_blobs<T>(
+    context: &mut ShareViewReplayContext<'_, T>,
+    envelope: &ReplicationEnvelope,
+    refused: &[RefusedBlob],
+) {
+    let Some(first) = refused.first() else {
+        return;
+    };
+    let detail = if refused.len() == 1 {
+        first.reason.clone()
+    } else {
+        format!(
+            "{} files in this operation were not applied: {}",
+            refused.len(),
+            refused
+                .iter()
+                .map(|blob| blob.reason.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    };
+    // The first blob's code speaks for the record. Every class
+    // `share_replay_refusal_code` skips reports `invalid-input`, and that
+    // function is exhaustive, so a future class that needs its own code has to
+    // pass through it and will surface here.
     context.refusals.push(ShareViewRefusal::new(
         envelope.origin_id.clone(),
         envelope.origin_seq,
         &envelope.op_kind,
-        code,
-        error.to_string(),
+        first.code,
+        detail,
     ));
-    Ok(())
 }
 
 fn replay_share_view_op<T: RelayTransport>(
     context: &mut ShareViewReplayContext<'_, T>,
     envelope: &ReplicationEnvelope,
 ) -> Result<(), RelayError> {
+    // Every blob this op loses, gathered so the op can be recorded ONCE.
+    let mut refused = Vec::new();
     let main_version_id = {
         let mut versioned = VersionedTextStore::new(&mut *context.store);
         versioned
@@ -2715,11 +2769,12 @@ fn replay_share_view_op<T: RelayTransport>(
                         &mut *context.applied,
                         &mut *context.changed,
                     ) {
-                        refuse_replay_unit(context, envelope, error)?;
+                        refuse_replay_unit(context, &mut refused, after, error)?;
                         // The rename's delete does NOT run. Removing the old
                         // path when its replacement was refused would lose the
                         // file outright — the one outcome worse than not
                         // renaming it.
+                        record_refused_blobs(context, envelope, &refused);
                         return Ok(());
                     }
                     if before != after {
@@ -2755,7 +2810,7 @@ fn replay_share_view_op<T: RelayTransport>(
                         &mut *context.applied,
                         &mut *context.changed,
                     ) {
-                        refuse_replay_unit(context, envelope, error)?;
+                        refuse_replay_unit(context, &mut refused, after, error)?;
                     }
                 }
             }
@@ -2788,11 +2843,12 @@ fn replay_share_view_op<T: RelayTransport>(
                     &mut *context.applied,
                     &mut *context.changed,
                 ) {
-                    refuse_replay_unit(context, envelope, error)?;
+                    refuse_replay_unit(context, &mut refused, path, error)?;
                 }
             }
         }
     }
+    record_refused_blobs(context, envelope, &refused);
     Ok(())
 }
 
@@ -2857,15 +2913,26 @@ fn replay_share_write<T: RelayTransport>(
         })
         .map_err(|error| relabel_ceiling(error, constraint, limit_bytes))?
         .bytes;
-    if bytes.len() > limit_bytes {
-        return Err(RelayError::BlobTooLarge {
-            constraint,
-            limit_bytes,
-            observed: ObservedBytes::Exact(bytes.len()),
-        });
-    }
+    // INTEGRITY BEFORE SIZE, and the order is the whole point. "Too large" is
+    // a permanent refusal that commits the cursor past the op, and that is only
+    // honest about bytes proven to be the ones this op named. Measured first,
+    // a relay serving oversized junk for an op naming a small file would be
+    // read as the granter's file being too big — permanently dropping content
+    // the relay can still serve correctly.
+    //
+    // Hashing first costs nothing that matters: the body is already wholly in
+    // memory and bounded by the transport's own read limit, and the ceiling
+    // still refuses before anything reaches the store, which is the floor this
+    // check exists to hold.
     if hex_sha256(&bytes) != sha256 {
         return Err(RelayError::BlobInvalid);
+    }
+    if bytes.len() > limit_bytes {
+        return Err(RelayError::ShareBlobOverCeiling {
+            constraint,
+            limit_bytes,
+            observed_bytes: bytes.len(),
+        });
     }
     let deduped = {
         let mut versioned = VersionedTextStore::new(store);

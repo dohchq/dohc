@@ -5728,6 +5728,11 @@ struct PagedShareRelay {
     shared_pushes: Mutex<Vec<SharedChannelRequest>>,
     view_pulls: Mutex<Vec<(i64, usize)>>,
     view_blobs: BTreeMap<String, Vec<u8>>,
+    /// What the TRANSPORT answers for a blob instead of serving it. The real
+    /// HTTP transport stops reading at its own bound and reports
+    /// `BlobTooLarge` on a body it never finished (`blob_body_overflow`), and
+    /// nothing else in this file can produce that shape.
+    view_blob_errors: BTreeMap<String, RelayError>,
     share_blob_calls: Mutex<Vec<String>>,
 }
 
@@ -5743,12 +5748,21 @@ impl PagedShareRelay {
             shared_pushes: Mutex::new(Vec::new()),
             view_pulls: Mutex::new(Vec::new()),
             view_blobs: BTreeMap::new(),
+            view_blob_errors: BTreeMap::new(),
             share_blob_calls: Mutex::new(Vec::new()),
         }
     }
 
     fn with_view_blobs(mut self, blobs: impl IntoIterator<Item = (String, Vec<u8>)>) -> Self {
         self.view_blobs = blobs.into_iter().collect();
+        self
+    }
+
+    fn with_view_blob_errors(
+        mut self,
+        errors: impl IntoIterator<Item = (String, RelayError)>,
+    ) -> Self {
+        self.view_blob_errors = errors.into_iter().collect();
         self
     }
 }
@@ -5853,6 +5867,9 @@ impl RelayTransport for PagedShareRelay {
             .lock()
             .expect("share blob calls")
             .push(req.sha256.clone());
+        if let Some(error) = self.view_blob_errors.get(&req.sha256) {
+            return Err(error.clone());
+        }
         self.view_blobs
             .get(&req.sha256)
             .cloned()
@@ -15222,7 +15239,7 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
         [(
             "invalid-input",
             format!(
-                "relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
+                "docs/over-cap.bin — shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
                 limit_bytes + 1
             )
             .as_str()
@@ -15409,7 +15426,7 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
             "moment.append",
             "invalid-input",
             format!(
-                "relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
+                "docs/over-cap.bin — shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
                 limit_bytes + 1
             )
             .as_str()
@@ -15567,7 +15584,7 @@ fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
         [(
             0,
             "invalid-input",
-            "share op is not replayable: share write names a blob reference that is not a sha256"
+            "docs/unusable.md — share op is not replayable: share write names a blob reference that is not a sha256"
         )],
         "MUTATION: the skip is counted but the reason never reaches the recipient"
     );
@@ -15690,7 +15707,7 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
             "version.create",
             "invalid-input",
             format!(
-                "relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
+                "docs/over-cap.bin — shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
                 limit_bytes + 1
             )
             .as_str()
@@ -15760,5 +15777,230 @@ fn a_rename_whose_replacement_is_refused_keeps_the_old_path() {
             .map(|snapshot| snapshot.text),
         None,
         "the refused replacement must not land either"
+    );
+}
+
+/// "Too large" is a PERMANENT refusal that commits the cursor past the op, so
+/// it may only ever be said about bytes proven to be the ones the op named.
+///
+/// A relay serving oversized junk for an op that names a small file is the
+/// counter-case: measured before the hash, it reads as the granter's file
+/// being too big, and the skip drops content the relay can still serve
+/// correctly. The transport's own overflow (`blob_body_overflow`, which cannot
+/// even report an exact size) is the same claim with even less evidence.
+///
+/// MUTATION: check the size before the hash in `replay_share_write` and this
+/// pull reports success, advancing past a repairable op.
+#[test]
+fn an_oversized_body_that_is_not_the_named_blob_stops_the_pull() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    // The op names a SMALL file. The relay serves an oversized body for it, so
+    // the size is the served junk's and says nothing about the granter's file.
+    let named = b"the small file the op actually names".to_vec();
+    let named_sha = dohc_engine_storage::hex_sha256(&named);
+    let junk = vec![8u8; limit_bytes + 1];
+    assert_ne!(
+        dohc_engine_storage::hex_sha256(&junk),
+        named_sha,
+        "the fixture only tests authentication if the served body is not the named one"
+    );
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![share_view_binary_write_op(0, "docs/small.bin", &named_sha)],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(named_sha, junk)]),
+    );
+
+    assert_eq!(
+        client
+            .pull_share_view(
+                &mut engine,
+                "ws",
+                "share",
+                &tracked_grant(["docs"]),
+                &NoFaults
+            )
+            .expect_err("MUTATION: an unauthenticated oversized body is skipped as permanent"),
+        RelayError::BlobInvalid,
+        "an oversized body that is not the named blob is an integrity failure, not a ceiling one"
+    );
+}
+
+/// The record unit must match the cursor unit.
+///
+/// The recipient's durable record is keyed by origin coordinate and by nothing
+/// else (`mergeShareSkippedOps` in `apps/desktop/src/workspaces/registryStore.ts`
+/// — membership in `counted` is the ONLY duplicate test). Every blob in one
+/// `version.create` shares that coordinate, so one refusal per blob meant the
+/// record kept the first and dropped the rest UNCOUNTED: two files gone, a
+/// notice saying one, and the cursor already past both.
+///
+/// So the op is the record. The count leads the detail, because the detail is
+/// bounded and a truncated list must still say how many files it is short.
+///
+/// MUTATION: emit one refusal per blob instead of one per op and this reports
+/// two refusals sharing a coordinate — which the recipient's recorder collapses
+/// back to one, losing the second file silently.
+#[test]
+fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    let kept = b"the snapshot that survives".to_vec();
+    let kept_sha = dohc_engine_storage::hex_sha256(&kept);
+    let first_over = vec![1u8; limit_bytes + 1];
+    let second_over = vec![2u8; limit_bytes + 2];
+    let first_sha = dohc_engine_storage::hex_sha256(&first_over);
+    let second_sha = dohc_engine_storage::hex_sha256(&second_over);
+    let op = ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({
+            "versionId": "shared-version",
+            "forkSnapshots": [
+                { "path": "docs/first.bin", "blobSha256": first_sha, "contentKind": "binary" },
+                { "path": "docs/kept.md", "blobSha256": kept_sha, "contentKind": "text" },
+                { "path": "docs/second.bin", "blobSha256": second_sha, "contentKind": "binary" },
+            ]
+        }),
+        recorded_at_ms: 10,
+    };
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![op],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([
+            (first_sha, first_over),
+            (kept_sha, kept),
+            (second_sha, second_over),
+        ]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "shared-version"),
+            &NoFaults,
+        )
+        .expect("two refused snapshots do not fail the page");
+    // Two blobs lost, so `skipped` counts two — the tally is per blob because
+    // two files really are missing.
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (1, 1, 2)
+    );
+    // ONE durable record, because the recipient can hold only one per
+    // coordinate. Emitting two would silently become one.
+    assert_eq!(
+        outcome.refusals.len(),
+        1,
+        "MUTATION: a second refusal shares this op's coordinate and the recipient drops it"
+    );
+    let refusal = &outcome.refusals[0];
+    assert_eq!(
+        (refusal.origin_id.as_str(), refusal.origin_seq, refusal.code),
+        ("peer", 0, "invalid-input")
+    );
+    // The count leads, then every lost file by name with its own measurements.
+    // A reader must be able to see that TWO files are missing and which.
+    assert_eq!(
+        refusal.detail,
+        format!(
+            "2 files in this operation were not applied: \
+             docs/first.bin — shared blob exceeds {constraint}: \
+             limit {limit_bytes} bytes, observed {} bytes; \
+             docs/second.bin — shared blob exceeds {constraint}: \
+             limit {limit_bytes} bytes, observed {} bytes",
+            limit_bytes + 1,
+            limit_bytes + 2
+        ),
+        "MUTATION: the record names one file, or loses the count, or loses a measurement"
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "docs/kept.md")
+            .expect("share-view path read is answerable")
+            .map(|snapshot| snapshot.text),
+        Some("the snapshot that survives".to_owned()),
+        "the healthy snapshot between two refused ones still lands"
+    );
+}
+
+/// The transport's own overflow is the weakest evidence of all: it stops at its
+/// read bound, so it cannot even report an exact size, and the bytes it
+/// abandoned were never checked against the sha the op named
+/// (`blob_body_overflow`, `crates/dohc-engine-sync-http/src/lib.rs`). Treating
+/// that as the granter's file being too big would commit the cursor past an op
+/// the relay can still serve correctly.
+///
+/// MUTATION: return `Some("invalid-input")` for `BlobTooLarge` in
+/// `RelayError::share_replay_refusal_code` and this pull reports success,
+/// permanently dropping a file on the strength of a body nobody read.
+#[test]
+fn a_transport_overflow_stops_the_pull_rather_than_skipping_the_op() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+
+    let named = b"a perfectly small shared file".to_vec();
+    let named_sha = dohc_engine_storage::hex_sha256(&named);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![share_view_write_op(0, "docs/small.md", &named_sha)],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blob_errors([(
+            named_sha,
+            // Exactly what the HTTP transport raises: no exact size, because it
+            // never finished reading the body.
+            RelayError::BlobTooLarge {
+                constraint: "MAX_INGEST_BLOB_BYTES",
+                limit_bytes: 64 * 1024 * 1024,
+                observed: ObservedBytes::AtLeast(64 * 1024 * 1024 + 1),
+            },
+        )]),
+    );
+
+    let error = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect_err("MUTATION: an unread oversized body is skipped as if it were permanent");
+    assert!(
+        matches!(error, RelayError::BlobTooLarge { .. }),
+        "unexpected refusal: {error:?}"
     );
 }
