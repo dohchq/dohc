@@ -20,8 +20,11 @@ import { join } from "node:path";
 
 const SCRATCH_PARENT = "dohc-test-scratch";
 const MAX_RUN_AGE_MS = 6 * 60 * 60 * 1_000;
+// Windows refuses to unlink a file whose handle is still open, and a just-closed
+// SQLite handle can hold one for a beat. This is the budget the e2e helper this
+// replaces already used: `100ms * attempt` over 8 attempts.
 const WINDOWS_CLEANUP_ATTEMPTS = 8;
-const WINDOWS_CLEANUP_DELAY_MS = 50;
+const WINDOWS_CLEANUP_DELAY_MS = 100;
 
 const testScratch = new Set<string>();
 const suiteScratch = new Set<string>();
