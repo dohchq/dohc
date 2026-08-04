@@ -206,38 +206,54 @@ export function chatsNavigationChangesDestination(
   );
 }
 
-// One lane of the snapshot group, and the only thing that writes one from an
-// answer. It takes the whole read, so BOTH ways a read can settle face the
-// same question: is this answer newer than whatever last wrote the lane — a
-// response, or a local action by the user, which counts as newer than every
-// request already issued.
+// One lane of the snapshot group. Two facts, because the two questions a lane
+// is asked are different ones:
+//
+// - `committed` — what this lane last WROTE. A response, or a local action by
+//   the user, which counts as newer than every request already issued.
+// - `issued` — the newest request this lane has ASKED. Not the same fact: a
+//   request in flight has written nothing, and "is anything newer coming"
+//   cannot be answered from what was last written.
+type SnapshotLane = { committed: number; issued: number };
+
+// The only thing that writes a lane from an answer. It takes the whole read,
+// so BOTH ways a read can settle face the same rule, and it registers the
+// request itself, so no caller can issue a read the lane does not know about.
+//
+// A value writes the lane when it is newer than what the lane last wrote.
 //
 // A failure is an answer too, and asking it separately is how the rule leaks.
 // It may report, because a lane with no failure surface of its own has only
-// the banner to say a shown value is now old. It may not report over a NEWER
-// answer that already succeeded — a stale failure outranking a fresh success
-// is a banner about nothing the user can see. And it never advances the
-// watermark: a read that failed proves nothing, and an older read that still
-// succeeds is the only answer anyone has (#507).
+// the banner to say a shown value is now old. It may report only when it is
+// still the newest thing this lane asked — which covers BOTH orderings of a
+// stale failure against a fresher request. The newer answer may already have
+// committed (then `committed` outranks it), or it may still be in flight (then
+// `issued` does). Both are the same fact: a failure whose question someone has
+// already asked again has nothing to say, and a banner it raised would claim
+// the value on screen could not be read.
+//
+// A failure never advances either mark. A read that failed proves nothing, and
+// an older read that still succeeds is the only answer anyone has (#507).
 //
 // The history page is not a lane here. It carries its own admission rules —
 // version staleness, a pagination that may hold it — and the refresh returns
 // it, so it is judged where those rules live.
 function settleSnapshotLane<T>(
-  lane: { current: number },
+  lane: { current: SnapshotLane },
   token: number,
   read: Promise<T>,
   apply: (value: T) => void,
   report: (error: unknown) => void,
 ): void {
+  if (token > lane.current.issued) lane.current.issued = token;
   void read.then(
     (value) => {
-      if (token <= lane.current) return;
-      lane.current = token;
+      if (token <= lane.current.committed) return;
+      lane.current.committed = token;
       apply(value);
     },
     (error: unknown) => {
-      if (token <= lane.current) return;
+      if (token <= lane.current.committed || token < lane.current.issued) return;
       report(error);
     },
   );
@@ -1750,9 +1766,9 @@ export function DesktopWorkspaceShell(props: {
   // write only ever knows about the lane it wrote — dismissing a review says
   // nothing about sync state, and rejecting all three would strand a status
   // bar that has no other source (the dismiss emits no activity event).
-  const committedSyncStatusToken = useRef(0);
-  const committedAgentActiveToken = useRef(0);
-  const committedTryStateToken = useRef(0);
+  const syncStatusLane = useRef<SnapshotLane>({ committed: 0, issued: 0 });
+  const agentActiveLane = useRef<SnapshotLane>({ committed: 0, issued: 0 });
+  const tryStateLane = useRef<SnapshotLane>({ committed: 0, issued: 0 });
   // The version the DISPLAYED timeline describes, so a pagination can prove
   // its page extends the same timeline it is appending to.
   const committedEngineVersionId = useRef<string | null>(null);
@@ -1813,8 +1829,10 @@ export function DesktopWorkspaceShell(props: {
   // answers lose by construction whenever they land. Dismissing a review is
   // the case that bites: it emits no replacement activity, so a restored card
   // would sit there until something unrelated refreshed.
-  const supersedeSnapshotLane = useCallback((lane: { current: number }) => {
-    lane.current = engineHistoryToken.current;
+  // It writes `committed` and not `issued`: the user asked nothing. A failure
+  // from the request they superseded is judged by `committed`, and stays quiet.
+  const supersedeSnapshotLane = useCallback((lane: { current: SnapshotLane }) => {
+    lane.current.committed = engineHistoryToken.current;
   }, []);
   useEffect(
     () => () => {
@@ -1826,9 +1844,9 @@ export function DesktopWorkspaceShell(props: {
       engineHistoryToken.current += 1;
       committedEngineHistoryToken.current = engineHistoryToken.current;
       newestEngineHistoryRefresh.current = engineHistoryToken.current;
-      committedSyncStatusToken.current = engineHistoryToken.current;
-      committedAgentActiveToken.current = engineHistoryToken.current;
-      committedTryStateToken.current = engineHistoryToken.current;
+      syncStatusLane.current.committed = engineHistoryToken.current;
+      agentActiveLane.current.committed = engineHistoryToken.current;
+      tryStateLane.current.committed = engineHistoryToken.current;
       blockedEngineHistoryRefresh.current = null;
     },
     [],
@@ -1848,7 +1866,7 @@ export function DesktopWorkspaceShell(props: {
   // here, and that IS the user acting: it supersedes whatever a request issued
   // earlier will eventually say.
   const onTryReviewDismissed = useCallback(() => {
-    supersedeSnapshotLane(committedTryStateToken);
+    supersedeSnapshotLane(tryStateLane);
     setTryState(null);
   }, [supersedeSnapshotLane]);
   // Settings reports the agent lane two different ways, and only one of them
@@ -1869,7 +1887,7 @@ export function DesktopWorkspaceShell(props: {
   const refreshAgentLane = useCallback(() => {
     const token = ++engineHistoryToken.current;
     settleSnapshotLane(
-      committedAgentActiveToken,
+      agentActiveLane,
       token,
       bridge().getAgentRunStatus({ workspaceId }),
       (agent) => setAgentActive(agent.activeRun !== null),
@@ -1882,7 +1900,7 @@ export function DesktopWorkspaceShell(props: {
         refreshAgentLane();
         return;
       }
-      supersedeSnapshotLane(committedAgentActiveToken);
+      supersedeSnapshotLane(agentActiveLane);
       setAgentActive(active);
     },
     [refreshAgentLane, supersedeSnapshotLane],
@@ -1920,21 +1938,21 @@ export function DesktopWorkspaceShell(props: {
       // settle.
       const pageRead = bridge().listEngineMoments({ workspaceId, limit: 200 });
       settleSnapshotLane(
-        committedSyncStatusToken,
+        syncStatusLane,
         token,
         bridge().getSyncStatus({ workspaceId }),
         (status) => setSyncStatus(status),
         (error) => reportShellError("Could not refresh sync status.", error),
       );
       settleSnapshotLane(
-        committedAgentActiveToken,
+        agentActiveLane,
         token,
         bridge().getAgentRunStatus({ workspaceId }),
         (agent) => setAgentActive(agent.activeRun !== null),
         (error) => reportShellError("Could not refresh agent runs.", error),
       );
       settleSnapshotLane(
-        committedTryStateToken,
+        tryStateLane,
         token,
         bridge().getTryInVersionState({ workspaceId }),
         (trySession) => setTryState(trySession.state),

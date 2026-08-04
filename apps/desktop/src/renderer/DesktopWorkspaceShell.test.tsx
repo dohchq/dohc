@@ -5362,6 +5362,170 @@ describe("history page", () => {
     );
   });
 
+  // What `committed` is FOR, on the success path: latest-committed-wins. Two
+  // refreshes overlap, the newer answers first, and the older must not paint
+  // its stale value over it when it finally lands.
+  it("keeps an older answer from overwriting a newer one on the same lane", async () => {
+    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
+    const olderRead = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
+    let nextRead: "older" | null = null;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(() => {
+      if (nextRead === "older") {
+        nextRead = null;
+        return olderRead.promise;
+      }
+      return Promise.resolve(syncingStatus);
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+
+    // The older refresh's read is still in flight when a newer one answers.
+    nextRead = "older";
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(nextRead).toBeNull());
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+    );
+
+    // The older answer lands last and says something the workspace has left.
+    await act(async () => {
+      olderRead.resolve(SYNC_STATUS);
+      await olderRead.promise;
+    });
+    expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing");
+  });
+
+  // The third way a failure can be superseded, and the one only `committed`
+  // catches. The user acted, so this lane holds a value newer than every
+  // request in flight — but the lane ASKED nothing, so its newest issued read
+  // is still the one now failing. A banner about a card the user dismissed
+  // describes nothing on screen.
+  it("keeps a failed read from reporting after the user superseded its lane", async () => {
+    const first = deferred<ListEngineMomentsResult>();
+    const refreshed = deferred<ListEngineMomentsResult>();
+    const responses: Promise<ListEngineMomentsResult>[] = [
+      first.promise,
+      refreshed.promise,
+    ];
+    let issued = 0;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    let failSecondTryRead!: (error: Error) => void;
+    const secondTryRead = new Promise<never>((_resolve, reject) => {
+      failSecondTryRead = reject;
+    });
+    let tryReads = 0;
+    bridge.getTryInVersionState = vi.fn(() => {
+      tryReads += 1;
+      if (tryReads === 1) return Promise.resolve({ state: REVIEW_STATE });
+      return secondTryRead;
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await act(async () => {
+      first.resolve(historyPage([historyMoment("m-first", "Added the launch checklist")]));
+      await first.promise;
+    });
+    expect(await screen.findByTestId("try-review-card")).toBeTruthy();
+
+    // A refresh is in flight, and its try read has not answered.
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(2));
+
+    // The user dismisses the review. That is newer than every request issued.
+    await user.click(screen.getByTestId("try-review-keep-working"));
+    await waitFor(() => expect(screen.queryByTestId("try-review-card")).toBeNull());
+
+    // The read the user superseded now fails. It has nothing to report.
+    await act(async () => {
+      failSecondTryRead(new Error("try state failed"));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      refreshed.resolve(historyPage([historyMoment("m-refreshed", "Rewrote the plan")]));
+      await refreshed.promise;
+    });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId("try-review-card")).toBeNull();
+  });
+
+  // The same rule, the other ordering. Above, the newer answer had already
+  // committed when the older read failed. Here it has not answered yet — so
+  // "what did this lane last write" cannot see it, and the failure looks like
+  // the newest thing there is. It is not: the lane has already ASKED again.
+  // Reporting raises a banner that the newer answer will not take down, and it
+  // then sits over a value the user can see is current.
+  it("keeps a failed read from reporting while a newer one is in flight", async () => {
+    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
+    let failOlderRead!: (error: Error) => void;
+    const olderRead = new Promise<never>((_resolve, reject) => {
+      failOlderRead = reject;
+    });
+    const newerRead = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
+    let nextRead: "older" | "newer" | null = null;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(() => {
+      if (nextRead === "older") {
+        nextRead = null;
+        return olderRead;
+      }
+      if (nextRead === "newer") {
+        nextRead = null;
+        return newerRead.promise;
+      }
+      return Promise.resolve(SYNC_STATUS);
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    // Two refreshes overlap on this lane. Neither has answered.
+    nextRead = "older";
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(nextRead).toBeNull());
+    nextRead = "newer";
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(nextRead).toBeNull());
+
+    // The older one fails first. The lane has already asked again, so this
+    // failure has nothing to say.
+    await act(async () => {
+      failOlderRead(new Error("sync status failed"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    // The newer one answers, and its value stands with no banner beside it.
+    await act(async () => {
+      newerRead.resolve(syncingStatus);
+      await newerRead.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   // The twin of the test above, on the other way a read settles. The lane's
   // own reader answers the observation, and that read can FAIL — after a newer
   // refresh already committed the lane. A failure judged without the token
