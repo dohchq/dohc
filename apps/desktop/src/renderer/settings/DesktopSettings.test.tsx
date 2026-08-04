@@ -1106,6 +1106,41 @@ describe("DesktopSettings", () => {
     ).toBeNull();
   });
 
+  // #329 on this branch: a shared view replaces the engine ROW, and nothing
+  // else. An unreadable settings file must still say so — that warning is the
+  // one surface telling the user their file is damaged, and a share view is
+  // not a reason to swallow it.
+  it("still warns a shared view about an unreadable settings file", async () => {
+    const warning =
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/settings.local.json. Then restart dohc.";
+    bridge.getWorkspaceSettings.mockResolvedValue({
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: { workspaceEngineAlpha: false },
+      },
+      source: "recovered" as const,
+      warning,
+    });
+
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        sharedView
+        initialSection="advanced"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId("settings-warning").map((node) => node.textContent),
+      ).toContain(warning),
+    );
+    // Still the capability row, not the toggle: the warning rides beside it.
+    expect(screen.getByTestId("settings-workspace-engine-share-view")).toBeTruthy();
+  });
+
   it("keeps the engine toggle for a workspace that is not a shared view", async () => {
     render(
       <DesktopSettings

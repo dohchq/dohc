@@ -5130,8 +5130,10 @@ describe("shared view versions surface", () => {
     // this assertion rests on, not a race with the retry window.
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
-    // A content-changing share refresh bumps versionEpoch — the re-key that
-    // made the banner recur for the rest of the session.
+    // The share refresh is what made the banner RECUR: its versionEpoch bump
+    // re-keys the selector's mount effect. With the selector gone there is no
+    // key to bump, so this drives the whole refresh path (pull → file listing
+    // → epoch) and pins that nothing along it asks main for versions.
     const pulls = bridge.refreshSharedView.mock.calls.length;
     await user.click(screen.getByTestId("shared-view-refresh"));
     await waitFor(() =>
@@ -5139,6 +5141,25 @@ describe("shared view versions surface", () => {
     );
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The other half of that branch: a workspace that is NOT a shared view must
+  // still get the real page. Without this, replacing VersionComparePage with
+  // the placeholder for EVERY workspace keeps this suite green, and only an
+  // e2e — which the javascript gate does not run — would catch it.
+  it("keeps the real compare page for a persisted compare tab outside a shared view", async () => {
+    const comparePath = versionCompareTabPath("v-old");
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [comparePath],
+        activeTab: comparePath,
+      }),
+    );
+    renderShell(bridge);
+
+    expect(await screen.findByTestId("version-compare-page")).toBeTruthy();
+    expect(screen.queryByTestId("version-compare-share-view")).toBeNull();
   });
 
   it("states the capability for a persisted compare tab instead of a page that can only fail", async () => {
@@ -5158,6 +5179,10 @@ describe("shared view versions surface", () => {
     expect(placeholder.textContent).toContain(
       "A shared view has no versions to compare. Close this tab to go back to the shared files.",
     );
+    // The empty-state recipe's tone, not the neighbouring legacy note's
+    // (copy.md: one text-sm text-muted line).
+    expect(placeholder.className).toContain("text-sm");
+    expect(placeholder.className).toContain("text-muted");
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });

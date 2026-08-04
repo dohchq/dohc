@@ -3604,7 +3604,7 @@ export function DesktopWorkspaceShell(props: {
                 // banner. The tab stays closeable and states the capability.
                 <div
                   data-testid="version-compare-share-view"
-                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle"
+                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
                 >
                   A shared view has no versions to compare. Close this tab to
                   go back to the shared files.
