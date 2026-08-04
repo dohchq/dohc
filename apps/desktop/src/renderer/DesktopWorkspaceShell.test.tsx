@@ -30,6 +30,7 @@ import type {
   ListEngineMomentsResult,
   ListWorkspaceVersionsResult,
   McpConfigResult,
+  ReadEngineMomentResult,
   RefreshSharedViewResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
@@ -64,6 +65,7 @@ import {
   CHATS_TAB_PATH,
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
+  momentDiffTabPath,
   versionCompareTabPath,
 } from "./workbench/workbenchState";
 
@@ -427,6 +429,11 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         activeVersionId: "main",
       }),
     ),
+    // Typed to the contract as well: the moment-diff page mounts on it, and
+    // a shared view's bridge overrides it with main's refusal.
+    readEngineMoment: vi.fn(
+      async (): Promise<ReadEngineMomentResult> => ({ moment: null }),
+    ),
     listChatChannels: vi.fn(
       async (): Promise<{
         channels: ChatChannelRecord[];
@@ -455,6 +462,62 @@ function renderShell(
       onSwitchWorkspace={() => {}}
     />,
   );
+}
+
+// The status a real shared view carries (capture === null, share cause) and
+// the workspace identity that rides the capture decision.
+const SHARE_STATUS = {
+  ...SYNC_STATUS,
+  historyRecordingOff: true,
+  historyShareView: true,
+};
+const SHARE_VIEW: Workspace = {
+  ...WORKSPACE,
+  shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+};
+
+// A bridge that answers the way MAIN answers for a shared view: the capture
+// gate short-circuits before the settings read, so requireEngineCapture has
+// no capture and every engine call is refused with engineOffRefusal copy. A
+// fake that resolved these would model more than main can do, and every
+// no-call pin below would pass even after the fix was reverted.
+function makeShareBridge(
+  uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null),
+) {
+  const bridge = makeEngineBridge(uiState);
+  bridge.openWorkspace = vi.fn(async () => SHARE_STATUS);
+  bridge.getSyncStatus = vi.fn(async () => SHARE_STATUS);
+  bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
+    throw new Error("Versions are not enabled for this workspace.");
+  });
+  bridge.readEngineMoment = vi.fn(async (): Promise<never> => {
+    throw new Error("Engine history is not enabled for this workspace.");
+  });
+  for (const call of [
+    "listChatChannels",
+    "listChannelThreads",
+    "listFileChats",
+    "syncDms",
+  ] as const) {
+    bridge[call] = vi.fn(async (): Promise<never> => {
+      throw new Error("Chats are not enabled for this workspace.");
+    });
+  }
+  return bridge;
+}
+
+// The non-vacuity probe for a shared view (#615). Every engine surface is
+// hidden there now — the version selector, the Chats panel, the titlebar
+// Chats button — so no rendered control can prove the renderer's capability
+// read resolved engine-ON, and a no-call pin asserted before that read lands
+// would pass for the wrong reason. The read itself carries the proof: wait
+// until the shell asked, confirm the answer is engine-ON, then flush the
+// state update that answer commits.
+async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
+  await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
+  const read = await bridge.getWorkspaceSettings();
+  expect(read.settings.experimental.workspaceEngineAlpha).toBe(true);
+  await act(async () => {});
 }
 
 afterEach(() => {
@@ -5309,32 +5372,6 @@ describe("history page", () => {
 // naming a Settings toggle nobody touched, and it came back on every share
 // refresh (the selector re-keys on versionEpoch).
 describe("shared view versions surface", () => {
-  const SHARE_STATUS = {
-    ...SYNC_STATUS,
-    historyRecordingOff: true,
-    historyShareView: true,
-  };
-  const SHARE_VIEW: Workspace = {
-    ...WORKSPACE,
-    shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
-  };
-
-  function makeShareBridge(
-    uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null),
-  ) {
-    const bridge = makeEngineBridge(uiState);
-    // The status a real shared view carries (capture === null, share cause).
-    bridge.openWorkspace = vi.fn(async () => SHARE_STATUS);
-    bridge.getSyncStatus = vi.fn(async () => SHARE_STATUS);
-    // Main's REAL answer for a workspace with no capture (requireEngineCapture
-    // → engineOffRefusal): a fake that resolved would model less than main
-    // does and would hide the banner this lane exists to kill.
-    bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
-      throw new Error("Versions are not enabled for this workspace.");
-    });
-    return bridge;
-  }
-
   it("never asks a shared view for versions, and raises no banner across a share refresh", async () => {
     const bridge = makeShareBridge();
     bridge.refreshSharedView = vi.fn(async () => ({
@@ -5346,10 +5383,9 @@ describe("shared view versions surface", () => {
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
 
-    // Prove the renderer's read really said engine-ON first: this control
-    // exists only once that read resolved the flag true. Without it the pins
-    // below pass vacuously in the pre-read window.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    // Prove the renderer's read really said engine-ON first. Without it the
+    // pins below pass vacuously in the pre-read window.
+    await settleEngineOnRead(bridge);
     // The selector is the surface that made the call, and it carries the
     // Try-in-version and compare entry points inside its menu — all three go
     // with it.
@@ -5371,6 +5407,35 @@ describe("shared view versions surface", () => {
     );
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The share-view clause on its own, in the window that only it covers
+  // (#614 codex review, sharpened by #620). A shared view's status also says
+  // no recorder, so the status clause the versions gate gained for #620 would
+  // hide the selector here too — and the pin above would pass with the share
+  // branch deleted. Before the FIRST status lands there is no status to
+  // reason from, and the registry fact is the only thing that answers.
+  it("asks a shared view for no versions before its first status arrives", async () => {
+    const status = deferred<typeof SHARE_STATUS>();
+    const bridge = makeShareBridge();
+    bridge.openWorkspace = vi.fn(() => status.promise);
+    bridge.getSyncStatus = vi.fn(() => status.promise);
+    renderShell(bridge, SHARE_VIEW);
+
+    await settleEngineOnRead(bridge);
+    // The premise: no status has answered, so the shell knows nothing about
+    // the recorder yet.
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    expect(screen.queryByTestId("version-menu-button")).toBeNull();
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+
+    // And it stays gone once the status agrees.
+    await act(async () => {
+      status.resolve(SHARE_STATUS);
+      await status.promise;
+    });
+    expect(screen.queryByTestId("version-menu-button")).toBeNull();
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
   });
 
   // The other half of that branch: a workspace that is NOT a shared view must
@@ -5415,6 +5480,170 @@ describe("shared view versions surface", () => {
     expect(placeholder.className).toContain("text-muted");
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+});
+
+// #620: the same error loop from the other cause, on a workspace that is NOT
+// a shared view. After a failed capture build main has no capture, so every
+// version call is refused — while the renderer's own settings read still says
+// engine-on. History has carried main's status override since #601; versions
+// did not, so the selector rendered, retried, and raised the danger banner.
+describe("versions surface after a failed capture build", () => {
+  const FAILED_STATUS = {
+    ...SYNC_STATUS,
+    historyRecordingOff: true,
+    historyRecordingUnavailable: true,
+  };
+
+  it("renders no version surface and never asks for versions when the recorder failed to build", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => FAILED_STATUS);
+    bridge.getSyncStatus = vi.fn(async () => FAILED_STATUS);
+    // Main's REAL answer once the capture build failed (#541 copy).
+    bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
+      throw new Error(
+        "dohc could not start Versions for this workspace. Restart dohc to try again.",
+      );
+    });
+    renderShell(bridge);
+
+    // Both halves of the premise, before anything is pinned: the renderer's
+    // own read said engine-ON (this control renders on that read alone), and
+    // main's status has landed carrying the failure. Without them the no-call
+    // below passes vacuously in the pre-read window.
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    expect(screen.queryByTestId("version-menu-button")).toBeNull();
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+    // The banner is that call's consequence, five failed attempts later.
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The other half of the branch: a healthy engine workspace must still get
+  // the selector. Without this, dropping the version surface for EVERY
+  // workspace keeps the suite above green.
+  it("keeps the version selector when main's status reports a live recorder", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    expect(await screen.findByTestId("version-menu-button")).toBeTruthy();
+    await waitFor(() => expect(bridge.listWorkspaceVersions).toHaveBeenCalled());
+  });
+});
+
+// #615: Chats key off the same capture every other engine surface does. A
+// shared view gets none, so main refuses listChatChannels, listFileChats and
+// syncDms — the panel, the tab and the titlebar button all offered a
+// capability the share never had, and showed the refusal as an error.
+describe("shared view chats surface", () => {
+  it("offers no Chats on a shared view and never asks main for them", async () => {
+    // The stored state opens with the Chats panel visible, so an ungated
+    // shell mounts it immediately.
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge, SHARE_VIEW);
+
+    await settleEngineOnRead(bridge);
+    expect(screen.queryByTestId("chats-panel")).toBeNull();
+    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+    expect(bridge.listFileChats).not.toHaveBeenCalled();
+    expect(bridge.syncDms).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    // The two ways back in that outlive the titlebar button.
+    await user.keyboard("{Control>}{Alt>}b{/Alt}{/Control}");
+    expect(screen.queryByTestId("chats-panel")).toBeNull();
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    expect(within(palette).queryByText("Toggle chats panel")).toBeNull();
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+  });
+
+  it("states the capability for a persisted Chats tab instead of a page that can only fail", async () => {
+    const bridge = makeShareBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [CHATS_TAB_PATH],
+        activeTab: CHATS_TAB_PATH,
+      }),
+    );
+    renderShell(bridge, SHARE_VIEW);
+
+    // One line, per the empty-state recipe (copy.md): what is missing, then
+    // the next step this surface really has — the tab closes.
+    const placeholder = await screen.findByTestId("chats-page-share-view");
+    expect(placeholder.textContent).toContain(
+      "A shared view has no chats. Close this tab to go back to the shared files.",
+    );
+    expect(placeholder.className).toContain("text-sm");
+    expect(placeholder.className).toContain("text-muted");
+    // The neighbouring line blames a Settings flag the share never touched.
+    expect(screen.queryByTestId("chats-page-off")).toBeNull();
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("keeps Chats for a workspace that is not a shared view", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+
+    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+    expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
+    await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
+  });
+});
+
+// #621: virtual tabs survive restore, so a moment-diff tab outlives the
+// History surface that opened it — and a shared view has no History surface
+// at all (#540). The page asked main for a moment the share has none of and
+// fell into its own error state.
+describe("shared view moment-diff tab", () => {
+  const MOMENT_TAB = momentDiffTabPath("m-1");
+
+  it("states the capability for a persisted moment-diff tab instead of a page that can only fail", async () => {
+    const bridge = makeShareBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [MOMENT_TAB],
+        activeTab: MOMENT_TAB,
+      }),
+    );
+    renderShell(bridge, SHARE_VIEW);
+
+    const placeholder = await screen.findByTestId("moment-diff-share-view");
+    // The same sentence the History placeholder states for a shared view, plus
+    // the next step this surface really has.
+    expect(placeholder.textContent).toContain(
+      "A shared view records no history. Close this tab to go back to the shared files.",
+    );
+    expect(placeholder.className).toContain("text-sm");
+    expect(placeholder.className).toContain("text-muted");
+    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("keeps the real diff page for a persisted moment-diff tab outside a shared view", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [MOMENT_TAB],
+        activeTab: MOMENT_TAB,
+      }),
+    );
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(bridge.readEngineMoment).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        momentId: "m-1",
+      }),
+    );
+    expect(screen.queryByTestId("moment-diff-share-view")).toBeNull();
   });
 });
 
@@ -5783,64 +6012,6 @@ describe("chats panel (right side)", () => {
       workspaceId: WORKSPACE.workspaceId,
       channelId: "channel-2",
     });
-  });
-
-  it("keeps both shared-view Chats mounts read-only", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
-    const startChannelThread = vi.fn();
-    Object.assign(bridge, { startChannelThread });
-    const sharedWorkspace: Workspace = {
-      ...WORKSPACE,
-      shareView: {
-        shareId: "share-view-1",
-        granterEmail: "owner@example.com",
-      },
-    };
-    bridge.listChatChannels.mockResolvedValue({
-      channels: [
-        {
-          id: "channel-1",
-          wireId: "wire-1",
-          name: "general",
-          slug: "general",
-          kind: "channel",
-          createdAtMs: 1_700_000_000_000,
-          updatedAtMs: 1_700_000_000_000,
-          threadCount: 0,
-          unreadCount: 0,
-        },
-      ],
-      fileThreads: [],
-    });
-    bridge.listFileChats.mockResolvedValue({
-      fileObjectId: null,
-      threads: [],
-    });
-    const user = userEvent.setup();
-    renderShell(bridge, sharedWorkspace);
-
-    const panel = await screen.findByTestId("chats-panel");
-    expect(
-      await within(panel).findByTestId("chats-workspace-readonly-note"),
-    ).toBeTruthy();
-    expect(within(panel).queryByTestId("chats-new-channel")).toBeNull();
-    expect(within(panel).queryByTestId("chats-channel-follow")).toBeNull();
-    expect(bridge.syncDms).not.toHaveBeenCalled();
-
-    await user.click(within(panel).getByTestId("chats-channel"));
-    const page = await screen.findByTestId("chats-channel-view");
-    expect(page.dataset.variant).toBe("page");
-    expect(within(page).getByTestId("chats-readonly-note")).toBeTruthy();
-    expect(within(page).queryByTestId("chats-new-thread-composer")).toBeNull();
-    expect(within(page).queryByTestId("chats-share-channel")).toBeNull();
-    expect(startChannelThread).not.toHaveBeenCalled();
-
-    await user.click(screen.getByTestId("tab-b.md"));
-    await user.click(within(panel).getByTestId("chats-panel-tab-file"));
-    expect(
-      await within(panel).findByTestId("linked-chat-readonly-note"),
-    ).toBeTruthy();
-    expect(within(panel).queryByTestId("linked-chat-new")).toBeNull();
   });
 
   it("restores the stored width and can be resized from its left edge", async () => {

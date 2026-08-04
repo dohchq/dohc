@@ -1671,8 +1671,8 @@ export function DesktopWorkspaceShell(props: {
   // but the share's open deliberately installed no capture, and every
   // engine-moments call could only error. Capability identity comes from
   // main's registry summary. This gates the HISTORY surface and, below, the
-  // VERSIONS surface (#589), for the same reason and from the same fact.
-  // Chats keep their own share-aware gating.
+  // VERSIONS surface (#589) and CHATS (#615), for the same reason and from
+  // the same fact.
   const isShareView = Boolean(props.workspace.shareView);
   // Engine history page state (flagged workspaces): newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
@@ -2022,7 +2022,20 @@ export function DesktopWorkspaceShell(props: {
   // danger banner about a Settings toggle nobody touched — again on each
   // share refresh, which re-keys the selector. Same branch as the history
   // surface above: capability identity comes from main's registry summary.
-  const versionsEnabled = engineEnabled && !isShareView;
+  //
+  // The third clause is the one the history surface already carries (#542):
+  // after a failed capture build the renderer's own read still says engine-on
+  // for a perfectly NORMAL workspace, and every version call is refused the
+  // same way — the same retries and the same danger banner, from a different
+  // cause (#620). Main's status is the single answer to "does anything record
+  // here", so it overrides that read here exactly as it does for history.
+  const versionsEnabled =
+    engineEnabled && !isShareView && !statusSaysNoRecorder(syncStatus);
+  // Chats key off the same capture (#615). A shared view gets no capture, so
+  // main refuses every Chats call — the panel, the tab, and the graph's chat
+  // mentions all reached requireEngineCapture and showed an error for a
+  // capability the share never had. Same fact, same branch.
+  const chatsEnabled = engineEnabled && !isShareView;
   // Bumped after a version switch/merge/conflict resolution so open editors
   // re-read their file content immediately (FileInspector refreshKey).
   const [versionEpoch, setVersionEpoch] = useState(0);
@@ -2087,7 +2100,16 @@ export function DesktopWorkspaceShell(props: {
         // conflict resolution names the version the page already describes,
         // so nothing is dropped for them.
         dropContradictedEngineHistory();
-      } else {
+      } else if (
+        // The versions gate again, off the status MIRROR for the same reason
+        // refreshHistory uses it (#620): this callback also runs from the
+        // conflict review dialog, which the notice center opens with no
+        // version surface on screen. Not asking leaves the previous statement
+        // standing — what the catch below already does.
+        engineEnabled &&
+        !isShareView &&
+        !statusSaysNoRecorder(syncStatusRef.current)
+      ) {
         // Nobody could name it: the operation changed no version, or it failed
         // and left an unknown one active. Ask. This read is the only remaining
         // asynchronous boundary, and a failure leaves the previous statement
@@ -2124,6 +2146,8 @@ export function DesktopWorkspaceShell(props: {
     },
     [
       dropContradictedEngineHistory,
+      engineEnabled,
+      isShareView,
       noteActiveEngineVersion,
       refreshFiles,
       refreshHistory,
@@ -2922,8 +2946,9 @@ export function DesktopWorkspaceShell(props: {
         setQuickOpenOpen((open) => !open);
       } else if (event.key === "b" && event.altKey) {
         // Ctrl+Alt+B mirrors VS Code's secondary-sidebar toggle. No-op for
-        // unflagged workspaces (they have no Chats panel to show).
-        if (engineEnabled) {
+        // unflagged workspaces and shared views (they have no Chats panel to
+        // show).
+        if (chatsEnabled) {
           event.preventDefault();
           mutateWb(toggleChats);
         }
@@ -2939,7 +2964,7 @@ export function DesktopWorkspaceShell(props: {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeActiveTab, engineEnabled, mutateWb, openSettings, reportShellError]);
+  }, [chatsEnabled, closeActiveTab, mutateWb, openSettings, reportShellError]);
 
   const openWorkspaceFolder = useCallback(async () => {
     try {
@@ -3010,9 +3035,9 @@ export function DesktopWorkspaceShell(props: {
             },
           ]
         : []),
-      // The Chats panel exists only for workspace-engine-flagged workspaces —
-      // no flag, no command.
-      ...(engineEnabled
+      // The Chats panel exists only for workspace-engine-flagged workspaces
+      // that are not shared views — no capability, no command.
+      ...(chatsEnabled
         ? [
             {
               id: "toggle-chats",
@@ -3071,7 +3096,7 @@ export function DesktopWorkspaceShell(props: {
       requestExplorerCreate,
       checkForDesktopUpdates,
       installDesktopUpdate,
-      engineEnabled,
+      chatsEnabled,
       openSettings,
       reportShellError,
       workspaceId,
@@ -3340,7 +3365,7 @@ export function DesktopWorkspaceShell(props: {
           visible: wb.sidebarVisible,
           onToggle: () => mutateWb(toggleSidebar),
         }}
-        {...(engineEnabled
+        {...(chatsEnabled
           ? {
               chatsSidebar: {
                 visible: wb.chatsVisible,
@@ -3528,7 +3553,7 @@ export function DesktopWorkspaceShell(props: {
                   refreshKey={graphKey}
                   onOpenPath={openPathWithHeading}
                   onOpenChatThread={openGraphChatThread}
-                  chatMentionsAvailable={engineEnabled}
+                  chatMentionsAvailable={chatsEnabled}
                   variant="panel"
                 />
               </Suspense>
@@ -3645,7 +3670,7 @@ export function DesktopWorkspaceShell(props: {
                   refreshKey={graphKey}
                   onOpenPath={openPathWithHeading}
                   onOpenChatThread={openGraphChatThread}
-                  chatMentionsAvailable={engineEnabled}
+                  chatMentionsAvailable={chatsEnabled}
                   variant="page"
                 />
               </Suspense>
@@ -3657,14 +3682,30 @@ export function DesktopWorkspaceShell(props: {
                 {historyTimeline}
               </div>
             ) : isMomentDiffTabPath(wb.activeTab) ? (
-              <EngineMomentDiffPage
-                workspaceId={workspaceId}
-                tabPath={wb.activeTab ?? ""}
-                onBeforeRestore={flushActiveDraft}
-                onOpenFile={openFile}
-                registerActiveUndo={registerActiveUndo}
-                onRestored={refreshAfterHistoryRestore}
-              />
+              isShareView ? (
+                // A persisted moment-diff tab on a shared view (#621).
+                // Virtual tabs survive restore, so this tab outlives the
+                // History surface that opened it — and that surface no longer
+                // exists here (#540). The page would ask main for a moment a
+                // shared view has none of. It states the same capability the
+                // History placeholder states, and the tab stays closeable.
+                <div
+                  data-testid="moment-diff-share-view"
+                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                >
+                  A shared view records no history. Close this tab to go back
+                  to the shared files.
+                </div>
+              ) : (
+                <EngineMomentDiffPage
+                  workspaceId={workspaceId}
+                  tabPath={wb.activeTab ?? ""}
+                  onBeforeRestore={flushActiveDraft}
+                  onOpenFile={openFile}
+                  registerActiveUndo={registerActiveUndo}
+                  onRestored={refreshAfterHistoryRestore}
+                />
+              )
             ) : isHistoryDiffTabPath(wb.activeTab) ? (
               // A persisted pre-flip tab (legacy change-set diff). The legacy
               // history store is retired; the tab stays closeable but renders
@@ -3699,7 +3740,7 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             ) : isChatsTabPath(wb.activeTab) ? (
-              engineEnabled ? (
+              chatsEnabled ? (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
                   <LazyChatsView
                     key={`${workspaceId}:${chatsPageRevision}`}
@@ -3707,6 +3748,19 @@ export function DesktopWorkspaceShell(props: {
                     variant="page"
                   />
                 </Suspense>
+              ) : isShareView ? (
+                // A persisted Chats tab on a shared view (#615). The
+                // neighbouring line blames the Settings flag, and a share
+                // never touched it: the share's open installs no capture, so
+                // main refuses every Chats call. State the capability, and
+                // name the next step the tab really has.
+                <div
+                  data-testid="chats-page-share-view"
+                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                >
+                  A shared view has no chats. Close this tab to go back to the
+                  shared files.
+                </div>
               ) : (
                 <div
                   data-testid="chats-page-off"
@@ -3800,11 +3854,11 @@ export function DesktopWorkspaceShell(props: {
         </main>
 
         {/* Chats panel — the right-hand secondary sidebar (flagged
-            workspaces only). Hidden entirely while collapsed; the
-            titlebar Chats button, Ctrl+Alt+B, or the toggle-chats
-            command bring it back. History lives in the left History view
-            and the history tab — never here. */}
-        {engineEnabled && wb.chatsVisible ? (
+            workspaces that are not shared views). Hidden entirely while
+            collapsed; the titlebar Chats button, Ctrl+Alt+B, or the
+            toggle-chats command bring it back. History lives in the left
+            History view and the history tab — never here. */}
+        {chatsEnabled && wb.chatsVisible ? (
           <ChatsPanel
             width={wb.chatsWidth}
             onWidthChange={(width) => mutateWb((state) => setChatsWidth(state, width))}
