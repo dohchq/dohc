@@ -14,8 +14,9 @@ verdict.
 
 The block opens with the commit the run examined and whether the tree was
 dirty. Check it against the commit you meant to gate: a verdict that names a
-different tree describes different code. A run whose HEAD moved mid-way
-reports `tree provenance=FAIL`.
+different tree describes different code. A run whose HEAD moved mid-way, or
+whose worktree was edited under it, reports `tree provenance=FAIL` and stamps
+`UNATTRIBUTABLE` instead of a commit.
 
 ## Focused checks
 

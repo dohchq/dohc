@@ -24,7 +24,8 @@
 // the evidence line. A verdict that cannot name the tree it examined is not
 // evidence — two concurrent runs sharing one worktree produced PASS and FAIL
 // for the same commit, and neither log could say which tree it had read. HEAD
-// moving mid-run FAILS the verdict; a dirty tree is recorded, not failed,
+// moving mid-run FAILS the verdict, and so does the worktree changing under
+// it; a tree already dirty when the run starts is recorded, not failed,
 // because running the gate over uncommitted work is the normal local loop and
 // a check that forbids it just gets removed. Recorded is the point: the
 // reader learns the sha does not describe everything that ran.
@@ -122,11 +123,7 @@ const treeBefore = readTreeState(captureGit);
 console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
 console.log(`repo: ${repoRoot}`);
-console.log(
-  `tree: ${treeBefore.head ?? "UNVERIFIED"}${
-    treeBefore.dirtyPaths ? ` (dirty: ${treeBefore.dirtyPaths} path(s))` : ""
-  }\n`,
-);
+console.log(`tree at start: ${formatTreeStamp(treeBefore)}\n`);
 
 console.log(`\n--- native target ---`);
 const native = verifyNativeTarget();
@@ -185,9 +182,9 @@ for (const step of native.ok ? optional : []) {
   results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL" });
 }
 
-// Provenance closes the run: HEAD is read again, and a tree that moved makes
-// every row above unattributable — the checks straddled two commits, so the
-// verdict describes neither.
+// Provenance closes the run: the tree is read again, and a HEAD or a worktree
+// that moved makes every row above unattributable — the checks straddled two
+// trees, so the verdict describes neither.
 const treeAfter = readTreeState(captureGit);
 const provenance = classifyTreeProvenance(treeBefore, treeAfter);
 if (provenance.status === "FAIL") failed = true;
@@ -198,11 +195,14 @@ results.unshift({
   reason: provenance.reason,
 });
 
+// The stamp comes from the judgement, not from the opening reading: a run the
+// classifier refused must not print a commit it cannot stand behind.
+//
 // The commit rides the platform field rather than a sixth `|` column: the
 // evidence line's five fields are a parsed contract
 // (`require-ci-pass-verdict.mjs`), and a FAIL row's free-form reason can
 // already carry a `|`, so a trailing field could not be read back reliably.
-const treeStamp = formatTreeStamp(treeBefore);
+const treeStamp = provenance.stamp;
 
 // Summary + pasteable evidence line.
 const stamp = new Date().toISOString();

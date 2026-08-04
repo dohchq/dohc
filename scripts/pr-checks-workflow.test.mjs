@@ -201,6 +201,72 @@ test("the gate name is required in its own field, not anywhere in the line", () 
   );
 });
 
+test("the verdict must name the commit its gate examined", () => {
+  // The `tree provenance` row says a check ran. It does not say which tree it
+  // read — a producer that drops or mangles the stamp keeps a green row over
+  // a verdict that names no commit, which is the decorative-row defect this
+  // checker exists to refuse, one level up.
+  assert.throws(
+    () => requireCiPassVerdict(passVerdict.replace(", head 1f47af31 clean", "")),
+    /does not name the commit the run examined/,
+  );
+  // What a refused run stamps. The row could still read PASS in a forged or
+  // regressed line; the stamp is what names the tree, so it is checked.
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        passVerdict.replace("head 1f47af31 clean", "head UNATTRIBUTABLE"),
+      ),
+    /does not name the commit the run examined/,
+  );
+  // Not a commit.
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        passVerdict.replace("head 1f47af31 clean", "head zzzzzzzz clean"),
+      ),
+    /does not name the commit the run examined/,
+  );
+  // A sha with no tree state does not say whether the commit describes what
+  // ran, which is half the claim.
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        passVerdict.replace("head 1f47af31 clean", "head 1f47af31"),
+      ),
+    /does not name the commit the run examined/,
+  );
+  // The stamp closes the field, where the producer writes it. Text after it
+  // rewrites the claim it makes: `head 1f47af31 clean, then reset to 700f1cfc`
+  // names two trees and stands behind neither.
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        passVerdict.replace(
+          "head 1f47af31 clean)",
+          "head 1f47af31 clean, then reset to 700f1cfc)",
+        ),
+      ),
+    /does not name the commit the run examined/,
+  );
+  // The stamp answers from the platform field, not from anywhere in the line:
+  // a step's reason quoting a stamp is not the gate naming its tree.
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        passVerdict
+          .replace(", head 1f47af31 clean", "")
+          .replace("cargo-audit=PASS", "cargo-audit=PASS head 1f47af31 clean)"),
+      ),
+    /does not name the commit the run examined/,
+  );
+  // Uncommitted work is recorded, not refused: the gate runs over a dirty
+  // tree in the normal local loop, and the stamp says so.
+  assert.doesNotThrow(() =>
+    requireCiPassVerdict(passVerdict.replace("clean)", "dirty(2))")),
+  );
+});
+
 test("the verdict line a real gate run printed passes as written", () => {
   // Verbatim from a passing local run of
   // tools/rust-engine-program/run-rust-checks.mjs, 2026-08-04, on the commit
@@ -262,52 +328,121 @@ test("a run whose HEAD moved cannot claim either commit", () => {
   // The failure this row exists for: two runs shared one worktree, and a
   // `git checkout` moved the tree under the checks. Both logs looked like
   // verdicts; neither described a commit.
-  const before = { head: "1f47af31ed00", dirtyPaths: 0 };
-  const after = { head: "700f1cfc3e00", dirtyPaths: 0 };
+  const before = { head: "1f47af31ed00", dirty: [] };
+  const after = { head: "700f1cfc3e00", dirty: [] };
   const moved = classifyTreeProvenance(before, after);
   assert.equal(moved.status, "FAIL");
   assert.match(moved.reason, /HEAD moved during the run/);
   // Both commits are named: a reader must be able to see what it straddled.
   assert.match(moved.reason, /1f47af31/);
   assert.match(moved.reason, /700f1cfc/);
+  // The stamp is the judgement's, not the opening reading's: a run that
+  // straddled two commits must not print one of them beside `clean`.
+  assert.equal(moved.stamp, "UNATTRIBUTABLE");
 
   assert.equal(classifyTreeProvenance(before, before).status, "PASS");
 });
 
+test("a worktree edited under the run is never stamped clean", () => {
+  // The defect this row exists for, minus the `git checkout`: an agent edits
+  // the shared tree while the gate runs. HEAD never moves, so a check that
+  // compares only commits reports PASS and stamps `<sha> clean` over checks
+  // that read two different trees.
+  const head = "1f47af31ed00";
+  const appeared = classifyTreeProvenance(
+    { head, dirty: [] },
+    { head, dirty: [" M crates/engine/src/lib.rs"] },
+  );
+  assert.equal(appeared.status, "FAIL");
+  assert.match(appeared.reason, /worktree changed during the run/);
+  assert.match(appeared.reason, /crates\/engine\/src\/lib\.rs/);
+  assert.equal(appeared.stamp, "UNATTRIBUTABLE");
+
+  // Reverting an edit mid-run straddles two trees just as much as making one.
+  const vanished = classifyTreeProvenance(
+    { head, dirty: [" M crates/engine/src/lib.rs"] },
+    { head, dirty: [] },
+  );
+  assert.equal(vanished.status, "FAIL");
+  assert.equal(vanished.stamp, "UNATTRIBUTABLE");
+
+  // A staged path is a different entry from an unstaged one: `git add` under
+  // the run changes the status code, not the path.
+  assert.equal(
+    classifyTreeProvenance(
+      { head, dirty: [" M a.rs"] },
+      { head, dirty: ["M  a.rs"] },
+    ).status,
+    "FAIL",
+  );
+
+  // Dirt that was already there and stayed there is the recorded case, not
+  // the corrupted one.
+  assert.equal(
+    classifyTreeProvenance(
+      { head, dirty: [" M a.rs"] },
+      { head, dirty: [" M a.rs"] },
+    ).status,
+    "PASS",
+  );
+});
+
 test("a tree git cannot resolve fails rather than reading as green", () => {
-  const unknown = { head: null, dirtyPaths: null };
-  const known = { head: "1f47af31ed00", dirtyPaths: 0 };
+  const unknown = { head: null, dirty: null };
+  const known = { head: "1f47af31ed00", dirty: [] };
   assert.equal(classifyTreeProvenance(unknown, known).status, "FAIL");
   assert.equal(classifyTreeProvenance(known, unknown).status, "FAIL");
-  assert.equal(formatTreeStamp(unknown), "UNVERIFIED");
+  assert.equal(formatTreeStamp(unknown), "UNATTRIBUTABLE");
+
+  // A worktree status git did not answer is not an empty worktree status. A
+  // run that reads `clean` off silence is inventing the fact it exists to
+  // report.
+  const unread = { head: "1f47af31ed00", dirty: null };
+  const unreadable = classifyTreeProvenance(unread, known);
+  assert.equal(unreadable.status, "FAIL");
+  assert.match(unreadable.reason, /could not read the worktree status/);
+  assert.equal(formatTreeStamp(unread), "UNATTRIBUTABLE");
+  assert.equal(classifyTreeProvenance(known, unread).status, "FAIL");
 });
 
 test("a dirty tree is recorded, not failed", () => {
   // Running the gate over uncommitted work is the normal local loop. Failing
   // it would get the check removed; recording it tells the reader the commit
   // does not describe everything that ran.
-  const dirty = { head: "1f47af31ed00", dirtyPaths: 3 };
-  assert.equal(classifyTreeProvenance(dirty, dirty).status, "PASS");
+  const dirty = {
+    head: "1f47af31ed00",
+    dirty: [" M a.rs", " M b.rs", "?? c.rs"],
+  };
+  const recorded = classifyTreeProvenance(dirty, dirty);
+  assert.equal(recorded.status, "PASS");
+  assert.equal(recorded.stamp, "1f47af31 dirty(3)");
   assert.equal(formatTreeStamp(dirty), "1f47af31 dirty(3)");
   assert.equal(
-    formatTreeStamp({ head: "1f47af31ed00", dirtyPaths: 0 }),
+    formatTreeStamp({ head: "1f47af31ed00", dirty: [] }),
     "1f47af31 clean",
   );
 });
 
-test("the tree state counts changed paths, and survives a silent git", () => {
+test("the tree state lists changed paths, and survives a silent git", () => {
   const capture = (cmd) =>
     cmd === "git rev-parse HEAD"
       ? "1f47af31ed00\n"
       : " M a.rs\n?? b.rs\n\n";
+  // The entries are kept whole, status codes and all: the comparison that
+  // catches an edit mid-run needs to tell ` M a.rs` from `M  a.rs`.
   assert.deepEqual(readTreeState(capture), {
     head: "1f47af31ed00",
-    dirtyPaths: 2,
+    dirty: [" M a.rs", "?? b.rs"],
   });
   // A repo that cannot answer must not read as a clean tree at an unknown
   // commit — that is the shape of evidence with no subject.
   assert.deepEqual(readTreeState(() => null), {
     head: null,
-    dirtyPaths: null,
+    dirty: null,
   });
+  // rev-parse answered, status did not. Half an answer is not a clean tree.
+  assert.deepEqual(
+    readTreeState((cmd) => (cmd === "git rev-parse HEAD" ? "1f47af31\n" : null)),
+    { head: "1f47af31", dirty: null },
+  );
 });

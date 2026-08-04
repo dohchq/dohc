@@ -50,6 +50,12 @@ const requiredSteps = [
 // step that never ran.
 const ROW_HEAD = /(?<name>[^=]+)=(?<status>PASS|FAIL|SKIP)/y;
 
+// The gate stamps the commit it examined at the end of the platform field:
+// `win32/x64 (rust cfg x86_64/windows/msvc, head 38050894 clean)`. It is
+// anchored to the field's end, where the producer writes it, so text that
+// merely looks like a stamp elsewhere in the field cannot answer for it.
+const HEAD_STAMP = / head [0-9a-f]{8,40} (?:clean|dirty\(\d+\))\)$/;
+
 /** `name -> [status, ...]`, one entry per row, or a throw if this is no list. */
 function parseStepRows(summary) {
   const rows = new Map();
@@ -127,6 +133,21 @@ export function requireCiPassVerdict(log) {
   if (fields[3] !== "PASS") {
     throw new Error(
       `run-rust-checks did not report PASS, its verdict field reads \`${fields[3]}\``,
+    );
+  }
+
+  // The platform field ends with the commit the run examined. Requiring the
+  // `tree provenance` row alone does not require the commit: a producer that
+  // dropped or mangled the stamp still reports the row, and the verdict names
+  // no tree at all — the same decorative-row defect one level up.
+  //
+  // `dirty(N)` is accepted for the reason the gate records rather than fails
+  // it: the local loop runs over uncommitted work, and the stamp says so. What
+  // is refused is a stamp that names no commit, such as the `UNATTRIBUTABLE`
+  // a refused run writes.
+  if (!HEAD_STAMP.test(fields[2])) {
+    throw new Error(
+      `verdict line's platform field does not name the commit the run examined: expected it to end with \`head <sha> clean\` or \`head <sha> dirty(N)\`, found \`${fields[2]}\``,
     );
   }
 

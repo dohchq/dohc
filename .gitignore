@@ -30,6 +30,10 @@ target-*/
 # keeping goes to docs/ under a real name instead of sitting at the repo root.
 /.agent-artifacts/
 /codex-*.log
+# The canonical gate tees its log here. Ignoring it keeps the gate out of the
+# worktree it measures: the provenance row fails a tree that changes mid-run,
+# and `node run-rust-checks.mjs | tee` creates this file as the run starts.
+/pr-engine-gate.log
 
 # Read-only external source clones for agent exploration.
 /.agent-sources/
