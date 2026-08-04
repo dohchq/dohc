@@ -5340,6 +5340,8 @@ describe("shared view versions surface", () => {
     bridge.refreshSharedView = vi.fn(async () => ({
       status: "updated" as const,
       changedPaths: 1,
+      refusedOps: 0,
+      refusedDetail: null,
     }));
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
