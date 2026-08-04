@@ -3032,6 +3032,10 @@ export function ChatsView(props: {
 
   const submitShare = useCallback(async () => {
     if (readOnly) return;
+    // The disabled control is honesty; this is the gate. A submit that slips
+    // past it (a stale enter key, a re-render race) would still grow the lane
+    // dohc already cannot list.
+    if (shareReadFailure?.kind === "over-limit") return;
     if (nav.level !== "channel" || shareBusy) return;
     const recipientEmail = shareEmail.trim();
     if (recipientEmail.length === 0) return;
@@ -3054,7 +3058,17 @@ export function ChatsView(props: {
     } finally {
       setShareBusy(false);
     }
-  }, [nav, props, readOnly, refreshShares, shareBusy, shareEmail, shareReadOnly, workspaceId]);
+  }, [
+    nav,
+    props,
+    readOnly,
+    refreshShares,
+    shareBusy,
+    shareEmail,
+    shareReadFailure,
+    shareReadOnly,
+    workspaceId,
+  ]);
 
   const revokeShare = useCallback(
     async (shareId: string) => {
@@ -4341,6 +4355,14 @@ export function ChatsView(props: {
       : [];
     // Sharing an OWNED channel needs the sharing surface up; a joined channel
     // is never re-shareable from here (only its owner manages members).
+    // Over the cap, a NEW grant only deepens the state: the relay's create
+    // path has no matching cap, so each one grows the lane dohc already
+    // cannot list, and the granted rows are empty on an over-limit read so
+    // the user cannot remove any to make room. A refusal has to leave a way
+    // to retry or degrade; offering the one control that moves retry further
+    // away is the opposite. Removal and paging belong to the lane-scoping
+    // work, not here.
+    const shareGrantsBlocked = shareReadFailure?.kind === "over-limit";
     const canShare =
       !readOnly &&
       nav.channel.kind !== "agent" &&
@@ -4518,6 +4540,7 @@ export function ChatsView(props: {
                 data-testid="chats-share-email"
                 type="email"
                 value={shareEmail}
+                disabled={shareGrantsBlocked}
                 maxLength={320}
                 placeholder="teammate@example.com"
                 onChange={(event) => setShareEmail(event.target.value)}
@@ -4535,7 +4558,9 @@ export function ChatsView(props: {
               <button
                 type="submit"
                 data-testid="chats-share-submit"
-                disabled={shareBusy || shareEmail.trim().length === 0}
+                disabled={
+                  shareBusy || shareGrantsBlocked || shareEmail.trim().length === 0
+                }
                 className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-50"
               >
                 Share

@@ -4321,7 +4321,17 @@ function registerIpcHandlers(
     const claimed = new Set<string>();
     for (const entry of listWorkspaces()) {
       if (entry.workspaceId === workspaceId) continue;
-      for (const channel of entry.sharedChannels ?? []) claimed.add(channel.shareId);
+      for (const channel of entry.sharedChannels ?? []) {
+        // ENDED rows claim nothing. The tombstone is workspace A's own write
+        // gate and stays for that, but it was never an argument for
+        // cross-workspace exclusivity: once A has left, A is not managing the
+        // share, and filtering the invitation out of every OTHER workspace
+        // makes leaving irreversible everywhere except A — where the only
+        // offered action is to rejoin. Leaving is presented as reversible, so
+        // it has to be reversible somewhere.
+        if (channel.ended === true) continue;
+        claimed.add(channel.shareId);
+      }
     }
     for (const [shareId, homeWorkspaceId] of Object.entries(readDmHomes(dmHomeFile()))) {
       if (homeWorkspaceId !== workspaceId) claimed.add(shareId);
@@ -4429,18 +4439,27 @@ function registerIpcHandlers(
       mergeJoinedChannel(findWorkspace(input.workspaceId)?.sharedChannels ?? [], joined),
     );
     try {
-      const daemonRelay = relayClientForWorkspace({
-        workspaceId: workspace.workspaceId,
-        rootPath: workspace.rootPath,
-        relay,
+      // The initial pull runs under the SAME per-workspace serializer as
+      // runSharedChannelSyncPass. Reserving the row before the pull makes it
+      // visible to any pass that starts meanwhile — a relay cadence,
+      // listChatChannels, a syncDms refresh — and that pass would pull this
+      // same share concurrently, racing the per-share cursor and peer updates
+      // the serializer exists to protect. Neither join path runs inside a
+      // pass, so this queues rather than deadlocking.
+      await serializeSharedChannelSync(input.workspaceId, async () => {
+        const daemonRelay = relayClientForWorkspace({
+          workspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath,
+          relay,
+        });
+        const pulled = await daemonRelay.pullSharedChannel({
+          shareId: info.shareId,
+          channelWireId: info.channelWireId,
+        });
+        if (pulled.applied > 0) {
+          await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
+        }
       });
-      const pulled = await daemonRelay.pullSharedChannel({
-        shareId: info.shareId,
-        channelWireId: info.channelWireId,
-      });
-      if (pulled.applied > 0) {
-        await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
-      }
     } catch (error) {
       // The reservation STAYS. A pull is multi-page and durable, so a failure
       // proves nothing about what already landed: an earlier page can be
@@ -6906,18 +6925,24 @@ function registerIpcHandlers(
         // multi-page pull can land data before it fails, and a row removed
         // under landed data is a channel that reads as locally owned. The
         // reservation stays and the next pass finishes or ends it.
-        const daemonRelay = relayClientForWorkspace({
-          workspaceId: workspace.workspaceId,
-          rootPath: workspace.rootPath,
-          relay,
+        //
+        // Under the same per-workspace serializer as the sync pass, for the
+        // reason joinSharedChannel states: the reserved row is visible to a
+        // pass that starts during this pull.
+        await serializeSharedChannelSync(workspace.workspaceId, async () => {
+          const daemonRelay = relayClientForWorkspace({
+            workspaceId: workspace.workspaceId,
+            rootPath: workspace.rootPath,
+            relay,
+          });
+          const pulled = await daemonRelay.pullSharedChannel({
+            shareId: info.shareId,
+            channelWireId: info.channelWireId,
+          });
+          if (pulled.applied > 0) {
+            await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
+          }
         });
-        const pulled = await daemonRelay.pullSharedChannel({
-          shareId: info.shareId,
-          channelWireId: info.channelWireId,
-        });
-        if (pulled.applied > 0) {
-          await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
-        }
       } catch (error) {
         // A share revoked between the listing and the fetch surfaces as
         // unavailable — skip it; the next pass reconciles. Never blocks the

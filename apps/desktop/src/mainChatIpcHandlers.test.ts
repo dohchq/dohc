@@ -822,6 +822,43 @@ describe("readRelayChatShareLanes", () => {
     ]);
   });
 
+  // #618 codex round 4: an ENDED row in another workspace claims nothing. The
+  // tombstone is that workspace's own write gate and stays for that, but it
+  // was never an argument for cross-workspace exclusivity — once A has left,
+  // filtering the invitation out of every other workspace makes leaving
+  // irreversible everywhere except A, where the only offered action is to
+  // rejoin. The caller builds the set; this pins what the guard does with it.
+  it("lists a received share again once the workspace holding it has left", async () => {
+    const listing = () =>
+      Promise.resolve({
+        received: [
+          {
+            shareId: "share-left-elsewhere",
+            granterEmail: "owner@example.com",
+            selector: { kind: "chat-channel", channelWireId: "wire-left" },
+          },
+        ],
+      });
+    // While workspace A still holds it live, this workspace does not offer it.
+    const whileHeld = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set(["share-left-elsewhere"]),
+      fetchListing: listing,
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(whileHeld.state === "answered" && whileHeld.received).toHaveLength(0);
+
+    // Once A leaves, its row is ended and claims nothing, so the invitation
+    // comes back here and the share can move.
+    const afterLeave = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
+      fetchListing: listing,
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(
+      afterLeave.state === "answered" && afterLeave.received.map((row) => row.shareId),
+    ).toEqual(["share-left-elsewhere"]);
+  });
+
   // The acceptance case for #618: another workspace's received lane being
   // unreadable must not blank a workspace that has shares of its own. The
   // scoping runs BEFORE the cap, so the rows homed elsewhere never count

@@ -280,6 +280,54 @@ describe("main-process chat authorization", () => {
     }
     // The helper itself is gone, so no caller can reintroduce it by name.
     expect(mainSource).not.toContain("releaseJoinedSharedChannel");
+  });
+
+  // An ENDED row claims nothing across workspaces. The tombstone stays as its
+  // own workspace's write gate, but leaving is presented as reversible and
+  // silently was not: the invitation stayed filtered out of every other
+  // workspace, and the only offered action in the holder was to rejoin.
+  it("lets an ended row stop claiming a share for every other workspace", () => {
+    const claimStart = mainSource.indexOf(
+      "function shareIdsClaimedByOtherWorkspaces(",
+    );
+    const claimEnd = mainSource.indexOf(
+      "ipcMain.handle(CHANNELS.listChatChannelShares",
+      claimStart,
+    );
+    expect(claimStart).toBeGreaterThan(-1);
+    expect(claimEnd).toBeGreaterThan(claimStart);
+    const claim = mainSource.slice(claimStart, claimEnd);
+    const skipAt = claim.indexOf("if (channel.ended === true) continue;");
+    const addAt = claim.indexOf("claimed.add(channel.shareId);");
+    expect(skipAt).toBeGreaterThan(-1);
+    expect(addAt).toBeGreaterThan(-1);
+    // The skip guards the add, rather than sitting anywhere in the function.
+    expect(skipAt).toBeLessThan(addAt);
+  });
+
+  // Reserving the row before the pull makes it VISIBLE to any sync pass that
+  // starts meanwhile — a relay cadence, listChatChannels, a syncDms refresh —
+  // and that pass pulls every live row. Without the shared serializer two
+  // pulls of the same share run concurrently and race the per-share cursor and
+  // peer updates the serializer exists to protect. Both join paths run outside
+  // a pass, so this queues rather than deadlocking.
+  it("runs each join's first pull under the same per-workspace serializer as the sync pass", () => {
+    expect(mainSource).toContain(
+      "return serializeSharedChannelSync(workspaceId, () =>\n    runSharedChannelSyncPass(workspaceId),",
+    );
+
+    const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");
+    const autoJoinEnd = mainSource.indexOf("ipcMain.handle(", autoJoinStart);
+    for (const [label, source] of [
+      ["joinSharedChannel", handlerSource("joinSharedChannel")],
+      ["autoJoinReceivedDms", mainSource.slice(autoJoinStart, autoJoinEnd)],
+    ] as const) {
+      const serializeAt = source.indexOf("serializeSharedChannelSync(");
+      const pullAt = source.indexOf("pullSharedChannel({");
+      expect(serializeAt, label).toBeGreaterThan(-1);
+      // The pull happens INSIDE the serialized run, not beside it.
+      expect(serializeAt, label).toBeLessThan(pullAt);
+    }
 
     // The cheap early-out still runs ahead of the DM home claim: a claim left
     // behind for a join that never happened pins the share to a workspace that

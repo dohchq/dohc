@@ -4560,6 +4560,49 @@ describe("ChatsView shared channels (MU-C4)", () => {
     });
   });
 
+  // #618 codex round 4. Over the cap, a NEW grant only deepens the state: the
+  // relay's create path has no matching cap, and the granted rows are empty on
+  // an over-limit read so nothing can be removed to make room. A surface that
+  // names the constraint and still offers the one action that worsens it is
+  // not an honest refusal.
+  it("stops offering new grants while the listing is over the limit", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      joined: [],
+      sessionKey: "session-a",
+      relay: {
+        state: "over-limit" as const,
+        lanes: [{ lane: "granted" as const, rows: 4097 }],
+        limit: 4096,
+      },
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-share-channel"));
+
+    // The panel says what is wrong...
+    expect(
+      (await screen.findByTestId("chats-share-members-unreadable")).dataset.failure,
+    ).toBe("over-limit");
+    // ...and the control that would make it worse is off.
+    expect(
+      (screen.getByTestId("chats-share-submit") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect((screen.getByTestId("chats-share-email") as HTMLInputElement).disabled).toBe(
+      true,
+    );
+
+    // Even typing an address does not enable it.
+    await userEvent.type(screen.getByTestId("chats-share-email"), "bo@example.com");
+    expect(
+      (screen.getByTestId("chats-share-submit") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(bridgeMock.shareChatChannel).not.toHaveBeenCalled();
+  });
+
   // The owner side of #618: an unreachable listing left this panel showing no
   // members, which reads as "nobody has this channel" — the opposite of the
   // truth for a channel that IS shared.
