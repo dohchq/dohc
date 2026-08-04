@@ -1078,6 +1078,87 @@ describe("DesktopSettings", () => {
     ).toBe("global-folder");
   });
 
+  // #589: a shared view is fed by the share's pull and gets no capture, so it
+  // records nothing. It also materializes no settings file, so this read
+  // returns the schema default — ON. The toggle would assert both a choice
+  // nobody made and a recording that never happens.
+  it("states the capability for a shared view instead of the engine toggle", async () => {
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        sharedView
+        initialSection="advanced"
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-workspace-engine-alpha");
+    expect(row.textContent).toContain("This workspace is a shared view.");
+    expect(row.textContent).toContain("dohc records nothing here.");
+    expect(
+      screen.getByTestId("settings-workspace-engine-share-view").textContent,
+    ).toContain("no recording");
+    expect(
+      screen.queryByRole("switch", {
+        name: "Use the workspace engine (default on)",
+      }),
+    ).toBeNull();
+  });
+
+  // #329 on this branch: a shared view replaces the engine ROW, and nothing
+  // else. An unreadable settings file must still say so — that warning is the
+  // one surface telling the user their file is damaged, and a share view is
+  // not a reason to swallow it.
+  it("still warns a shared view about an unreadable settings file", async () => {
+    const warning =
+      "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/settings.local.json. Then restart dohc.";
+    bridge.getWorkspaceSettings.mockResolvedValue({
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: { workspaceEngineAlpha: false },
+      },
+      source: "recovered" as const,
+      warning,
+    });
+
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        sharedView
+        initialSection="advanced"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId("settings-warning").map((node) => node.textContent),
+      ).toContain(warning),
+    );
+    // Still the capability row, not the toggle: the warning rides beside it.
+    expect(screen.getByTestId("settings-workspace-engine-share-view")).toBeTruthy();
+  });
+
+  it("keeps the engine toggle for a workspace that is not a shared view", async () => {
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("switch", {
+        name: "Use the workspace engine (default on)",
+      }),
+    ).toBeTruthy();
+    expect(screen.queryByTestId("settings-workspace-engine-share-view")).toBeNull();
+  });
+
   it("persists an edited attachment folder name", async () => {
     const user = userEvent.setup();
     render(

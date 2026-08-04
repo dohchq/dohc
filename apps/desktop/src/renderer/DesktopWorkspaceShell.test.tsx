@@ -64,6 +64,7 @@ import {
   CHATS_TAB_PATH,
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
+  versionCompareTabPath,
 } from "./workbench/workbenchState";
 
 const WORKSPACE: Workspace = {
@@ -5298,6 +5299,120 @@ describe("history page", () => {
       expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
     );
     expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
+  });
+});
+
+// #589: a shared view materializes no settings file, so the renderer's
+// capability read comes back with the schema default ON — but its open
+// deliberately installed no capture, and main refuses every version call.
+// The selector retried five times and then raised a danger-tone shell error
+// naming a Settings toggle nobody touched, and it came back on every share
+// refresh (the selector re-keys on versionEpoch).
+describe("shared view versions surface", () => {
+  const SHARE_STATUS = {
+    ...SYNC_STATUS,
+    historyRecordingOff: true,
+    historyShareView: true,
+  };
+  const SHARE_VIEW: Workspace = {
+    ...WORKSPACE,
+    shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+  };
+
+  function makeShareBridge(
+    uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null),
+  ) {
+    const bridge = makeEngineBridge(uiState);
+    // The status a real shared view carries (capture === null, share cause).
+    bridge.openWorkspace = vi.fn(async () => SHARE_STATUS);
+    bridge.getSyncStatus = vi.fn(async () => SHARE_STATUS);
+    // Main's REAL answer for a workspace with no capture (requireEngineCapture
+    // → engineOffRefusal): a fake that resolved would model less than main
+    // does and would hide the banner this lane exists to kill.
+    bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
+      throw new Error("Versions are not enabled for this workspace.");
+    });
+    return bridge;
+  }
+
+  it("never asks a shared view for versions, and raises no banner across a share refresh", async () => {
+    const bridge = makeShareBridge();
+    bridge.refreshSharedView = vi.fn(async () => ({
+      status: "updated" as const,
+      changedPaths: 1,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge, SHARE_VIEW);
+
+    // Prove the renderer's read really said engine-ON first: this control
+    // exists only once that read resolved the flag true. Without it the pins
+    // below pass vacuously in the pre-read window.
+    await screen.findByTestId("titlebar-chats-sidebar");
+    // The selector is the surface that made the call, and it carries the
+    // Try-in-version and compare entry points inside its menu — all three go
+    // with it.
+    expect(screen.queryByTestId("version-menu-button")).toBeNull();
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+    // The banner is that call's consequence — the selector raises it after
+    // five failed attempts over ~5 seconds — so the no-call pin above is what
+    // this assertion rests on, not a race with the retry window.
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    // The share refresh is what made the banner RECUR: its versionEpoch bump
+    // re-keys the selector's mount effect. With the selector gone there is no
+    // key to bump, so this drives the whole refresh path (pull → file listing
+    // → epoch) and pins that nothing along it asks main for versions.
+    const pulls = bridge.refreshSharedView.mock.calls.length;
+    await user.click(screen.getByTestId("shared-view-refresh"));
+    await waitFor(() =>
+      expect(bridge.refreshSharedView.mock.calls.length).toBeGreaterThan(pulls),
+    );
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The other half of that branch: a workspace that is NOT a shared view must
+  // still get the real page. Without this, replacing VersionComparePage with
+  // the placeholder for EVERY workspace keeps this suite green, and only an
+  // e2e — which the javascript gate does not run — would catch it.
+  it("keeps the real compare page for a persisted compare tab outside a shared view", async () => {
+    const comparePath = versionCompareTabPath("v-old");
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [comparePath],
+        activeTab: comparePath,
+      }),
+    );
+    renderShell(bridge);
+
+    expect(await screen.findByTestId("version-compare-page")).toBeTruthy();
+    expect(screen.queryByTestId("version-compare-share-view")).toBeNull();
+  });
+
+  it("states the capability for a persisted compare tab instead of a page that can only fail", async () => {
+    const comparePath = versionCompareTabPath("v-old");
+    const bridge = makeShareBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [comparePath],
+        activeTab: comparePath,
+      }),
+    );
+    renderShell(bridge, SHARE_VIEW);
+
+    // One line, per the empty-state recipe (copy.md): what is missing, then
+    // the next step this surface really has — the tab closes.
+    const placeholder = await screen.findByTestId("version-compare-share-view");
+    expect(placeholder.textContent).toContain(
+      "A shared view has no versions to compare. Close this tab to go back to the shared files.",
+    );
+    // The empty-state recipe's tone, not the neighbouring legacy note's
+    // (copy.md: one text-sm text-muted line).
+    expect(placeholder.className).toContain("text-sm");
+    expect(placeholder.className).toContain("text-muted");
+    expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 });
 
