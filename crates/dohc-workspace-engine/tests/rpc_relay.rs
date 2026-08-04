@@ -1955,41 +1955,27 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
             }),
         ));
 
-    // The corrupt replacement is SKIPPED, not fatal: one op the recipient
-    // will never apply must not freeze the share. The refusal says which op
-    // and why, and the caller decides what to do with the cursor — this test
-    // does not commit it, so the retry below re-fetches the same op.
-    let rename = call(
-        &transport,
-        &handle,
-        &mut id,
-        "share.view.pull",
-        json!({
-            "workspaceId": workspace_id,
-            "shareId": share_id,
-            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
-        }),
-    )
-    .await;
-    assert_eq!(
-        (
-            rename["fetched"].as_i64(),
-            rename["applied"].as_i64(),
-            rename["skipped"].as_i64()
-        ),
-        (Some(1), Some(0), Some(1))
-    );
-    assert_eq!(
-        rename["refusals"],
-        json!([{
-            "originId": "granter",
-            "originSeq": 1,
-            "opKind": "moment.append",
-            "code": "invalid-input",
-            "detail": "relay blob content failed integrity validation",
-        }]),
-        "the skip must name the op it dropped and why"
-    );
+    // A body that does not hash to the sha its op named is REPAIRABLE at the
+    // relay, so the pull stops rather than committing past content that is
+    // still coming. The retry below is the recovery, and it works because the
+    // cursor never moved.
+    let rename = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "share.view.pull",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": workspace_id,
+                    "shareId": share_id,
+                    "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
+                }),
+            ),
+        )
+        .await
+        .expect_err("corrupt replacement must reject the rename");
+    assert_eq!(rename.code, ErrorCode::BlobInvalid);
 
     let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
         .expect("open engine db");

@@ -11039,7 +11039,14 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::AmbiguousSelector => ErrorCode::AmbiguousSelector,
         RelayError::InvalidChannel => ErrorCode::InvalidChannel,
         RelayError::MethodNotAllowed => ErrorCode::RelayMethodNotAllowed,
-        RelayError::InvalidResponse => ErrorCode::RelayInvalidResponse,
+        // A served share op the engine cannot replay is the relay's response
+        // failing validation, which is the code that already says so. The
+        // share-view pull never returns this — it records it as a skipped op
+        // and keeps reading — so this arm exists for exhaustiveness and for
+        // any later caller that chooses to surface it instead.
+        RelayError::ShareOpInvalid { .. } | RelayError::InvalidResponse => {
+            ErrorCode::RelayInvalidResponse
+        }
         RelayError::WorkspaceUnavailable | RelayError::Partitioned => {
             ErrorCode::WorkspaceUnavailable
         }

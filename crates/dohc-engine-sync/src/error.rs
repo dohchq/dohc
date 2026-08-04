@@ -179,15 +179,28 @@ impl SyncError {
 }
 
 impl RelayError {
-    /// The machine code a share-view pull records when it SKIPS an op because
-    /// of this failure, or `None` when the failure belongs to the pull itself
-    /// and the pull must abort.
+    /// The machine code a share-view pull records when it SKIPS a served op
+    /// because of this failure, or `None` when the pull must abort instead.
     ///
     /// `SyncError::share_disposition` answers this question for the boundary,
     /// which refuses an op before replay. This answers it for the REPLAY,
-    /// where the failures come back from the transport. The two halves must
-    /// agree: a served op the recipient will never apply wedges the share
-    /// exactly as hard whether the boundary or the blob fetch refuses it.
+    /// where the failures come back from the transport.
+    ///
+    /// ONE question decides it: **can this op ever succeed?**
+    ///
+    /// - PERMANENT — no. The op will be refused identically forever, so the
+    ///   cursor must move past it or the share freezes on it. Skipping loses
+    ///   nothing that was ever going to arrive.
+    /// - REPAIRABLE — yes, once someone fixes the thing that is wrong. The
+    ///   cursor must NOT move past it: advancing would drop content that was
+    ///   still coming, and nothing would bring it back.
+    /// - PENDING — yes, once the sender finishes. `BlobMissing`. Same
+    ///   disposition as repairable, named apart because the fix is a normal
+    ///   step rather than a failure.
+    ///
+    /// Only the permanent class is skipped. That is what keeps this change
+    /// from trading a frozen share for silently dropped data: an op the
+    /// recipient could still receive is never advanced past.
     ///
     /// The code travels with the decision instead of coming from a total
     /// `RelayError::code`. `map_relay_code` in the runtime crate already owns
@@ -195,26 +208,30 @@ impl RelayError {
     /// would be a second naming authority for the same thing.
     ///
     /// No wildcard arm, for the reason the boundary's twin has none: a new
-    /// variant must decide here rather than inherit "abort" and freeze a
-    /// share.
+    /// variant must answer the question rather than inherit an answer.
     pub(crate) const fn share_replay_refusal_code(&self) -> Option<&'static str> {
         match self {
-            // The relay served an op whose content this recipient will never
-            // accept, and asking again returns the same answer: the size is
-            // the body's own, and the hash is the relay's own record. Aborting
-            // re-fetches that identical refusal on every pull forever, and
-            // every later op in the share never arrives.
+            // PERMANENT. The body is over a ceiling this recipient enforces on
+            // every ingest, so re-fetching it returns the same bytes and the
+            // same refusal, forever.
             //
-            // The code is `SyncError::code`'s for the same two conditions —
-            // one name for one thing — and it is deliberately NOT the boundary
-            // code: the share may well cover this path, and no granter can
-            // repair a blob.
-            RelayError::BlobTooLarge { .. } | RelayError::BlobInvalid => Some("invalid-input"),
-            // Failures of the pull, not of the op. `BlobMissing` is the one
-            // worth naming: the relay does not have the blob YET, the sender
-            // can still upload it, and skipping past it would report a healthy
-            // share as damaged and drop content that was still coming.
-            RelayError::BlobMissing
+            // Advancing is not merely safe here, it is REQUIRED for the only
+            // repair there is. A granter who re-shares the file under the
+            // ceiling produces a NEW op at a LATER cursor. Holding the cursor
+            // on the oversized op would keep that replacement from ever
+            // arriving — the repair would be unreachable by construction.
+            RelayError::BlobTooLarge { .. }
+            // PERMANENT. The op describes its own content wrongly. No blob the
+            // relay could serve makes it replayable.
+            | RelayError::ShareOpInvalid { .. } => Some("invalid-input"),
+            // REPAIRABLE. The relay served a body that is not the one this op
+            // named. The op is fine; the relay's copy is wrong. Fix the blob
+            // and this same op applies — so the cursor must not pass it. This
+            // is `BlobMissing`'s claim in a different tense.
+            RelayError::BlobInvalid
+            // PENDING, and the reason to keep reading: the relay does not have
+            // the blob YET and the sender can still upload it.
+            | RelayError::BlobMissing
             | RelayError::BlobReferenceMissing
             | RelayError::Unauthorized
             | RelayError::BadRequest
@@ -276,6 +293,17 @@ pub enum RelayError {
     BlobReferenceMissing,
     #[error("relay blob content failed integrity validation")]
     BlobInvalid,
+    /// A served share op that describes its own content wrongly: a blob
+    /// reference that is not a sha256, or a body that is authentically the
+    /// one the op named and still not the kind the op claimed.
+    ///
+    /// Deliberately NOT `BlobInvalid`. That one means the relay served a body
+    /// which is not the one the op asked for — repairable at the relay, and
+    /// the same op succeeds once it is. This one means the op itself is
+    /// unusable, so no repair anywhere makes it replayable. The two classes
+    /// were one variant, and one variant cannot hold two dispositions.
+    #[error("share op is not replayable: {reason}")]
+    ShareOpInvalid { reason: &'static str },
     #[error("relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {observed}")]
     BlobTooLarge {
         constraint: &'static str,

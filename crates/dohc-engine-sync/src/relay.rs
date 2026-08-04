@@ -1347,30 +1347,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 share_id,
                 faults,
                 applied: &mut applied,
+                skipped: &mut skipped,
+                refusals: &mut refusals,
                 changed: &mut changed,
             };
-            if let Err(error) = replay_share_view_op(&mut replay, &envelope) {
-                // The replay's half of the rule the boundary applies above.
-                // Aborting here froze the whole share on one refused blob: the
-                // cursor never committed, the identical refusal came back on
-                // every later pull, and every op behind it never arrived.
-                //
-                // A skip can leave an op PARTLY applied — a `version.create`
-                // refused at its third snapshot keeps the first two. `applied`
-                // counts what landed and the refusal names the op, so neither
-                // number claims the other's fact.
-                let Some(code) = error.share_replay_refusal_code() else {
-                    return Err(error);
-                };
-                skipped += 1;
-                refusals.push(ShareViewRefusal::new(
-                    envelope.origin_id,
-                    envelope.origin_seq,
-                    &envelope.op_kind,
-                    code,
-                    error.to_string(),
-                ));
-            }
+            // Replay refusals are recorded INSIDE, one per refused blob, by
+            // `refuse_replay_unit`. What reaches here is only what must abort.
+            replay_share_view_op(&mut replay, &envelope)?;
         }
         Ok(ShareViewPullOutcome {
             fetched,
@@ -2642,7 +2625,40 @@ struct ShareViewReplayContext<'a, T> {
     share_id: &'a str,
     faults: &'a dyn FaultInjector,
     applied: &'a mut usize,
+    skipped: &'a mut usize,
+    refusals: &'a mut Vec<ShareViewRefusal>,
     changed: &'a mut BTreeMap<String, ShareViewChangedPath>,
+}
+
+/// Record ONE refused replay unit, or abort the pull.
+///
+/// The skip unit is the refusal unit, and the unit is a blob. A
+/// `version.create` carries one blob per fork snapshot: refusing one of them
+/// says nothing about the others, which are healthy files this recipient can
+/// hold. Skipping the whole OP instead dropped every snapshot behind the
+/// refused one — permanently, because the cursor commits past the op either
+/// way, and silently, because one refusal was recorded for many lost files.
+///
+/// So each unit is refused on its own and the caller keeps going. What that
+/// buys is a property worth stating: after a refused blob, the remaining
+/// blobs in the same op are ALL applied. Never a prefix.
+fn refuse_replay_unit<T>(
+    context: &mut ShareViewReplayContext<'_, T>,
+    envelope: &ReplicationEnvelope,
+    error: RelayError,
+) -> Result<(), RelayError> {
+    let Some(code) = error.share_replay_refusal_code() else {
+        return Err(error);
+    };
+    *context.skipped += 1;
+    context.refusals.push(ShareViewRefusal::new(
+        envelope.origin_id.clone(),
+        envelope.origin_seq,
+        &envelope.op_kind,
+        code,
+        error.to_string(),
+    ));
+    Ok(())
 }
 
 fn replay_share_view_op<T: RelayTransport>(
@@ -2685,7 +2701,7 @@ fn replay_share_view_op<T: RelayTransport>(
                 let after = string_field(&envelope.payload, "payloadAfterPath").or(path);
                 let sha = string_field(&envelope.payload, "payloadAfterBlobSha256");
                 if let (Some(before), Some(after), Some(sha)) = (before, after, sha) {
-                    replay_share_write(
+                    if let Err(error) = replay_share_write(
                         context.transport,
                         &mut *context.store,
                         context.workspace_id,
@@ -2698,7 +2714,14 @@ fn replay_share_view_op<T: RelayTransport>(
                         context.faults,
                         &mut *context.applied,
                         &mut *context.changed,
-                    )?;
+                    ) {
+                        refuse_replay_unit(context, envelope, error)?;
+                        // The rename's delete does NOT run. Removing the old
+                        // path when its replacement was refused would lose the
+                        // file outright — the one outcome worse than not
+                        // renaming it.
+                        return Ok(());
+                    }
                     if before != after {
                         replay_share_delete(
                             &mut *context.store,
@@ -2718,7 +2741,7 @@ fn replay_share_view_op<T: RelayTransport>(
                 let after = string_field(&envelope.payload, "payloadAfterPath").or(path);
                 let sha = string_field(&envelope.payload, "payloadAfterBlobSha256");
                 if let (Some(after), Some(sha)) = (after, sha) {
-                    replay_share_write(
+                    if let Err(error) = replay_share_write(
                         context.transport,
                         &mut *context.store,
                         context.workspace_id,
@@ -2731,7 +2754,9 @@ fn replay_share_view_op<T: RelayTransport>(
                         context.faults,
                         &mut *context.applied,
                         &mut *context.changed,
-                    )?;
+                    ) {
+                        refuse_replay_unit(context, envelope, error)?;
+                    }
                 }
             }
             _ => {}
@@ -2747,7 +2772,9 @@ fn replay_share_view_op<T: RelayTransport>(
             let path = string_field(snapshot, "path");
             let sha = string_field(snapshot, "blobSha256");
             if let (Some(path), Some(sha)) = (path, sha) {
-                replay_share_write(
+                // Per SNAPSHOT, so one refused file in a shared version does
+                // not take its siblings with it. The loop continues.
+                if let Err(error) = replay_share_write(
                     context.transport,
                     &mut *context.store,
                     context.workspace_id,
@@ -2760,7 +2787,9 @@ fn replay_share_view_op<T: RelayTransport>(
                     context.faults,
                     &mut *context.applied,
                     &mut *context.changed,
-                )?;
+                ) {
+                    refuse_replay_unit(context, envelope, error)?;
+                }
             }
         }
     }
@@ -2782,8 +2811,12 @@ fn replay_share_write<T: RelayTransport>(
     applied: &mut usize,
     changed: &mut BTreeMap<String, ShareViewChangedPath>,
 ) -> Result<(), RelayError> {
+    // The OP is wrong, not the relay's copy of the blob: this reference is not
+    // a sha256, so there is no blob to ask for and no repair that produces one.
     if !valid_sha256(sha256) {
-        return Err(RelayError::BlobInvalid);
+        return Err(RelayError::ShareOpInvalid {
+            reason: "share write names a blob reference that is not a sha256",
+        });
     }
     let key = replay_id(share_id, envelope, "write", path);
     let request_id = format!("share-view:{key}");
@@ -2858,7 +2891,12 @@ fn replay_share_write<T: RelayTransport>(
                 .map_err(domain)?
                 .deduped
         } else {
-            let text = String::from_utf8(bytes).map_err(|_| RelayError::BlobInvalid)?;
+            // These bytes already matched the sha the op named, so they ARE
+            // the content the granter shared. The op calling them text is the
+            // defect, and no repair at the relay changes that.
+            let text = String::from_utf8(bytes).map_err(|_| RelayError::ShareOpInvalid {
+                reason: "share write claims text content the shared bytes cannot be",
+            })?;
             versioned
                 .write_text(
                     &WriteText {

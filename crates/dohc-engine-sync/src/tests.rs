@@ -15418,16 +15418,20 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
     );
 }
 
-/// `BlobInvalid`'s twin of the same freeze. A relay that serves a body which
-/// does not hash to the sha its own op claimed answers identically on every
-/// retry, so aborting wedged the share exactly as the ceiling did. This shape
-/// predates the ceiling refusal; it is the same bug and it takes the same
-/// path.
+/// The other half of the disposition, and the one that keeps this fix from
+/// trading a frozen share for silently dropped data.
 ///
-/// MUTATION: return `None` for `BlobInvalid` in
-/// `RelayError::share_replay_refusal_code` and the pull aborts again.
+/// A body that does not hash to the sha its op named is the RELAY's copy being
+/// wrong, not the op. Repair the blob and this same op applies — so the pull
+/// stops rather than committing past content that is still coming. This is
+/// `BlobMissing`'s claim in a different tense, and it gets `BlobMissing`'s
+/// answer.
+///
+/// MUTATION: return `Some("invalid-input")` for `BlobInvalid` in
+/// `RelayError::share_replay_refusal_code` and the pull reports success,
+/// advancing the cursor past an op the relay could still serve correctly.
 #[test]
-fn a_shared_blob_that_fails_integrity_does_not_freeze_the_share() {
+fn a_repairable_blob_integrity_failure_stops_the_pull_instead_of_skipping() {
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");
 
@@ -15459,6 +15463,65 @@ fn a_shared_blob_that_fails_integrity_does_not_freeze_the_share() {
         .with_view_blobs([(claimed_sha, served), (later_sha, later)]),
     );
 
+    assert_eq!(
+        client
+            .pull_share_view(
+                &mut engine,
+                "ws",
+                "share",
+                &tracked_grant(["docs"]),
+                &NoFaults
+            )
+            .expect_err("MUTATION: a repairable integrity failure is skipped and lost"),
+        RelayError::BlobInvalid
+    );
+    // No cursor is returned at all, so nothing can commit past the refused op
+    // and the retry after a repair re-fetches it. That is the reverse path.
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "docs/corrupt.md")
+            .expect("share-view path read is answerable")
+            .map(|snapshot| snapshot.text),
+        None,
+        "a body that fails its integrity check must not land"
+    );
+}
+
+/// The permanent twin that USED to share `BlobInvalid`'s variant and therefore
+/// its disposition. An op naming a blob reference that is not a sha256 asks
+/// for nothing the relay could serve, so no repair makes it replayable and
+/// holding the cursor on it would freeze the share forever.
+///
+/// MUTATION: return `None` for `ShareOpInvalid` in
+/// `RelayError::share_replay_refusal_code` and the pull aborts, wedging the
+/// share on an op that can never succeed. Restore the site to plain
+/// `RelayError::BlobInvalid` and the two classes collapse back into one
+/// disposition — this test then aborts as well.
+#[test]
+fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+
+    let later = b"the update behind the unusable reference".to_vec();
+    let later_sha = dohc_engine_storage::hex_sha256(&later);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        share_view_write_op(0, "docs/unusable.md", "not-a-sha256"),
+                        share_view_write_op(1, "docs/later.md", &later_sha),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(later_sha.clone(), later)]),
+    );
+
     let outcome = client
         .pull_share_view(
             &mut engine,
@@ -15467,7 +15530,7 @@ fn a_shared_blob_that_fails_integrity_does_not_freeze_the_share() {
             &tracked_grant(["docs"]),
             &NoFaults,
         )
-        .expect("MUTATION: one corrupt blob aborts the pull and freezes the share");
+        .expect("MUTATION: an unusable blob reference freezes the share forever");
     assert_eq!(
         (
             outcome.fetched,
@@ -15477,20 +15540,23 @@ fn a_shared_blob_that_fails_integrity_does_not_freeze_the_share() {
         ),
         (2, 1, 1, 2)
     );
-    let text = VersionedTextStore::new(&mut engine);
     assert_eq!(
-        text.read_text("ws", "main", "docs/corrupt.md")
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "docs/later.md")
             .expect("share-view path read is answerable")
             .map(|snapshot| snapshot.text),
-        None,
-        "a body that fails its integrity check must not land"
+        Some("the update behind the unusable reference".to_owned()),
+        "MUTATION: the op behind the unusable reference never arrives"
     );
+    // The blob was never requested: there is no sha to request.
     assert_eq!(
-        text.read_text("ws", "main", "docs/later.md")
-            .expect("share-view path read is answerable")
-            .map(|snapshot| snapshot.text),
-        Some("the update behind the corrupt one".to_owned()),
-        "MUTATION: the op behind the corrupt one never arrives"
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        [later_sha],
+        "an unusable reference must not reach the transport"
     );
     assert_eq!(
         outcome
@@ -15501,8 +15567,198 @@ fn a_shared_blob_that_fails_integrity_does_not_freeze_the_share() {
         [(
             0,
             "invalid-input",
-            "relay blob content failed integrity validation"
+            "share op is not replayable: share write names a blob reference that is not a sha256"
         )],
         "MUTATION: the skip is counted but the reason never reaches the recipient"
+    );
+}
+
+/// The skip unit must be the refusal unit.
+///
+/// A `version.create` carries one blob per fork snapshot. Refusing one of them
+/// says nothing about the others, but skipping the whole OP dropped every
+/// snapshot behind the refused one — permanently, because the cursor commits
+/// past the op either way. One oversized file silently cost its siblings.
+///
+/// The invariant: after a refused blob, the remaining blobs in that op are ALL
+/// applied. Never a prefix. So the refused file is second of three here — a
+/// per-op skip keeps the first and loses the third, which is exactly the shape
+/// a first-only or last-only fixture cannot see.
+///
+/// MUTATION: move the refusal handling in `replay_share_view_op` back out to
+/// the op level (propagate with `?` and record one refusal per op) and
+/// `docs/third.md` never lands.
+#[test]
+fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    let first = b"first snapshot".to_vec();
+    let over_cap = vec![4u8; limit_bytes + 1];
+    let third = b"third snapshot".to_vec();
+    let first_sha = dohc_engine_storage::hex_sha256(&first);
+    let over_cap_sha = dohc_engine_storage::hex_sha256(&over_cap);
+    let third_sha = dohc_engine_storage::hex_sha256(&third);
+    let op = ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({
+            "versionId": "shared-version",
+            "forkSnapshots": [
+                { "path": "docs/first.md", "blobSha256": first_sha, "contentKind": "text" },
+                {
+                    "path": "docs/over-cap.bin",
+                    "blobSha256": over_cap_sha,
+                    "contentKind": "binary"
+                },
+                { "path": "docs/third.md", "blobSha256": third_sha, "contentKind": "text" },
+            ]
+        }),
+        recorded_at_ms: 10,
+    };
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![op],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([
+            (first_sha, first),
+            (over_cap_sha.clone(), over_cap),
+            (third_sha, third),
+        ]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "shared-version"),
+            &NoFaults,
+        )
+        .expect("one refused snapshot does not fail the page");
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (1, 2, 1),
+        "two snapshots applied and exactly the refused one is counted skipped"
+    );
+    let text = VersionedTextStore::new(&mut engine);
+    // BOTH survivors, asserted apart. The one AFTER the refusal is the whole
+    // point: a per-op skip keeps the first and silently loses this one.
+    assert_eq!(
+        text.read_text("ws", "main", "docs/first.md")
+            .expect("share-view path read is answerable")
+            .map(|snapshot| snapshot.text),
+        Some("first snapshot".to_owned()),
+        "the snapshot before the refused one must land"
+    );
+    assert_eq!(
+        text.read_text("ws", "main", "docs/third.md")
+            .expect("share-view path read is answerable")
+            .map(|snapshot| snapshot.text),
+        Some("third snapshot".to_owned()),
+        "MUTATION: refusing per op drops every snapshot behind the refused one"
+    );
+    assert!(
+        !engine
+            .has_binary_blob(&over_cap_sha)
+            .expect("binary blob presence"),
+        "the refused snapshot itself must not persist"
+    );
+    // One refusal, naming the blob that was actually dropped — not one refusal
+    // standing in for however many files went with it.
+    assert_eq!(
+        outcome
+            .refusals
+            .iter()
+            .map(|refusal| (
+                refusal.op_kind.as_str(),
+                refusal.code,
+                refusal.detail.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [(
+            "version.create",
+            "invalid-input",
+            format!(
+                "relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
+                limit_bytes + 1
+            )
+            .as_str()
+        )]
+    );
+}
+
+/// A rename replays as a write of the new path then a delete of the old one.
+/// Skipping per blob must not let the delete run alone: the old path would go
+/// while its replacement never arrived, which loses the file outright — worse
+/// than not renaming it and worse than the freeze this change removes.
+///
+/// MUTATION: drop the `return Ok(())` after `refuse_replay_unit` in the rename
+/// arm and `docs/old.md` disappears.
+#[test]
+fn a_rename_whose_replacement_is_refused_keeps_the_old_path() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    let original = b"the file that already exists".to_vec();
+    let original_sha = dohc_engine_storage::hex_sha256(&original);
+    let over_cap = vec![5u8; limit_bytes + 1];
+    let over_cap_sha = dohc_engine_storage::hex_sha256(&over_cap);
+    let mut rename = share_view_binary_write_op(1, "docs/new.bin", &over_cap_sha);
+    rename.payload["operation"] = json!("rename");
+    rename.payload["payloadBeforePath"] = json!("docs/old.md");
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![share_view_write_op(0, "docs/old.md", &original_sha), rename],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(original_sha, original), (over_cap_sha, over_cap)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a refused replacement does not fail the page");
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (2, 1, 1)
+    );
+    let text = VersionedTextStore::new(&mut engine);
+    assert_eq!(
+        text.read_text("ws", "main", "docs/old.md")
+            .expect("share-view path read is answerable")
+            .map(|snapshot| snapshot.text),
+        Some("the file that already exists".to_owned()),
+        "MUTATION: the rename's delete ran after its write was refused, losing the file"
+    );
+    assert_eq!(
+        text.read_text("ws", "main", "docs/new.bin")
+            .expect("share-view path read is answerable")
+            .map(|snapshot| snapshot.text),
+        None,
+        "the refused replacement must not land either"
     );
 }
