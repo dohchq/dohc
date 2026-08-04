@@ -20,6 +20,11 @@ import {
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
   packageManagerFromFiles,
+  nameUnitFor,
+  sameFsEntry,
+  entryCharBudget,
+  trashEntryPlan,
+  WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
   validateUserReadPath,
   type ChangeAuthor,
@@ -66,6 +71,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { hasLegacyAppImport } from "./sourceScanner";
 
@@ -266,6 +272,98 @@ async function recordedChangeFields(
 
 function failureReason(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+// What a failed delete can say about the path afterwards.
+//
+// It cannot say "unchanged". Three rounds of review walked that claim from
+// presence to identity to identity-plus-reuse, and the answer is that no
+// comparison of two lstat results supports it: an entry can be deleted and
+// recreated with the SAME inode on the same device, and content can be
+// rewritten in place without touching identity at all. This is a probe on a
+// filesystem dohc holds no lock on, so every "same" reading is evidence, never
+// proof. Holding a handle across the operation does not rescue it either -- on
+// POSIX an open descriptor pins the inode but not the NAME, so a replacement
+// can still land at the path, and the Windows share-mode that would prevent it
+// means locking a user's file for the length of a delete, which dohc does not
+// do.
+//
+// What IS provable comes from rename, not from a probe: rename is atomic, so a
+// rename that failed moved nothing. That sentence is in every refusal below.
+// The probe is demoted to raising a WARNING when it has positive evidence of
+// change. A missed warning leaves a true message; there is no reading of the
+// probe that makes a false one.
+type Aftermath = "replaced" | "gone" | "unchecked" | "undetermined";
+
+// Positive evidence only, for the warning after a failed move: "unknown" is
+// not evidence of a replacement and must not read as one. The rule itself is
+// shared with the desktop, which runs the same ladder over the same trash.
+function replacedSince(before: Stats, after: Stats): boolean {
+  return sameFsEntry(before, after) === "replaced";
+}
+
+// Is the source still the entry the ladder started on? Asked BEFORE every
+// attempt after the first, because a rename that failed for length leaves a
+// window in which another MCP call, the desktop, or any local process can
+// replace the path -- and the next rung would then move the replacement into
+// the trash and report success for a file the agent never named.
+//
+// "unknown" stops the ladder too. A filesystem with no inode to give cannot
+// prove sameness, and the costs are not symmetric: a wrong refusal costs a
+// retry, a wrong success trashes the wrong file and says it is done.
+async function sourceUnchangedSince(absolute: string, before: Stats): Promise<Aftermath> {
+  return lstat(absolute).then(
+    (now) => {
+      const identity = sameFsEntry(before, now);
+      return identity === "same" ? "undetermined" : identity === "replaced" ? "replaced" : "unchecked";
+    },
+    (probe: unknown) => (errnoCode(probe) === "ENOENT" ? "gone" : "unchecked"),
+  );
+}
+
+// The half of a delete refusal that warns about the path. The agent's question
+// is "can I retry?", so each case answers that and nothing more.
+function deleteAftermath(path: string, aftermath: Aftermath): string {
+  switch (aftermath) {
+    case "replaced":
+      // The observation, not a consequence drawn from it. An atomic save
+      // replaces the entry too -- writeFileAtomicallyForTool does exactly
+      // that, and so does most editors' save -- so "a retry deletes the
+      // replacement, not the entry you asked for" was wrong whenever the
+      // replacement was the same document, one revision newer. What is at the
+      // path changed; who put it there, and whether the agent still wants it
+      // deleted, is not this sentence's to decide.
+      return ` A different entry is at ${path} now: something replaced it while dohc worked.`;
+    case "gone":
+      return ` ${path} is no longer in this workspace: something else moved or deleted it.`;
+    case "unchecked":
+      // The look itself failed. That dohc could not check is ITSELF provable,
+      // and it is a different state from "the entry looks the same" -- the two
+      // used to render byte-identical, which told an agent the second when the
+      // truth was the first.
+      return ` dohc could not check ${path} afterwards.`;
+    case "undetermined":
+      // The look succeeded and found no evidence of change. Nothing about what
+      // ELSE touched the path is provable, and the refusal already says what
+      // dohc did, which is what a retry decision needs.
+      return "";
+  }
+}
+
+// The errno code alone, for refusals that translate a filesystem failure. An
+// agent can act on "EACCES"; it cannot act on a sentence that hides which
+// failure happened.
+//
+// null means "this is not an errno at all", which is a different fact and has
+// to stay one: it is how a guard refusal this code wrote is told apart from a
+// failure the platform reported, and rendering it as "(unknown)" would put a
+// non-code in a slot that is documented to hold one.
+function errnoCode(error: unknown): string | null {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const { code } = error as { code?: unknown };
+    if (typeof code === "string") return code;
+  }
+  return null;
 }
 
 async function ensureRecordable(ctx: ToolContext) {
@@ -977,26 +1075,135 @@ export async function deleteWorkspacePath(
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
-  try {
-    await lstat(resolved.absolute);
-    const trashDir = await safeTrashDir(ctx);
-    const trashedTo = join(
-      trashDir,
-      `${Date.now()}-${randomUUID()}-${basename(resolved.normalized)}`,
-    );
-    await rename(resolved.absolute, trashedTo);
-    return {
-      ok: true as const,
-      path: resolved.normalized,
-      trashed: true,
-      ...(await recordedChangeFields(ctx)),
-    };
-  } catch (error) {
+  // "Nothing is there" answered on its own, before anything can fail: it is a
+  // different fact from "the move failed", and an lstat errno naming an
+  // absolute host path told the agent neither (#613).
+  //
+  // ONLY ENOENT is absence. A parent directory without search permission
+  // answers EACCES for a file that is right there, and an agent told that file
+  // is gone would stop looking for it -- the same lie in the opposite
+  // direction. Every other code keeps its own failure.
+  const source = await lstat(resolved.absolute).then(
+    (stats) => ({ found: true as const, stats }),
+    (error: unknown) => ({ found: false as const, code: errnoCode(error) ?? "no errno" }),
+  );
+  if (!source.found) {
     return {
       ok: false as const,
-      reason: failureReason(error, `failed to delete: ${args.path}`),
+      reason:
+        source.code === "ENOENT"
+          ? `dohc could not delete ${resolved.normalized}. Nothing is at that path in this workspace. List the folder to see what is there.`
+          : `dohc could not delete ${resolved.normalized}. The check on that path failed (${source.code}). dohc did not move it.`,
     };
   }
+  // The guard refusals name their own constraint (#585) and pass through as
+  // they are. Everything else here is an errno from mkdir or lstat, and it
+  // used to reach the agent raw, absolute host path and all -- the very defect
+  // this tool's other arms were fixed for. A guard refusal is an Error this
+  // code wrote and carries no `code`; an errno does.
+  let trashDir: string;
+  try {
+    trashDir = await safeTrashDir(ctx);
+  } catch (error) {
+    const code = errnoCode(error);
+    return {
+      ok: false as const,
+      reason:
+        code === null
+          ? failureReason(error, `failed to delete: ${resolved.normalized}`)
+          : `dohc could not delete ${resolved.normalized}. Preparing the workspace trash folder failed (${code}). dohc did not move it.`,
+    };
+  }
+  // Renaming down a ladder, not predicting which limit applies. Rung 1 is the
+  // file's real name: a name that fits is never shortened, which matters
+  // because the trash keeps no record of the original and a dropped character
+  // cannot be recovered. Rung 2 fits the per-component limit, rung 3 also fits
+  // the legacy MAX_PATH limit -- and each is only reached because the platform
+  // actually refused the one above it.
+  //
+  // Predicting went wrong twice: assuming the component limit was the only one
+  // (#613, a rename past MAX_PATH answering ENOENT about a file that was right
+  // there), then assuming MAX_PATH always binds, which took deletion away from
+  // deep workspaces on hosts where long paths work.
+  const prefix = `${Date.now()}-${randomUUID()}-`;
+  const plan = trashEntryPlan(basename(resolved.normalized), prefix, {
+    unit: nameUnitFor(process.platform),
+    maxEntryChars: entryCharBudget(trashDir, process.platform),
+  });
+
+  let moveError: unknown = null;
+  let trashed = false;
+  // Set when the ladder stopped because the path stopped being the entry the
+  // agent named. The identity comes from the preflight, captured ONCE before
+  // the first rename -- re-reading it per rung would compare the source with
+  // itself and reopen the window it exists to close.
+  let aborted: Aftermath | null = null;
+  for (const [rung, candidate] of plan.candidates.entries()) {
+    if (rung > 0) {
+      const still = await sourceUnchangedSince(resolved.absolute, source.stats);
+      if (still !== "undetermined") {
+        aborted = still;
+        break;
+      }
+    }
+    try {
+      await rename(resolved.absolute, join(trashDir, candidate));
+      trashed = true;
+      break;
+    } catch (error) {
+      moveError = error;
+      // Only a length failure earns another attempt with a shorter name.
+      // ENAMETOOLONG says so outright; Windows says ENOENT, because Win32
+      // normalization rejects an over-long path as ERROR_PATH_NOT_FOUND --
+      // which is exactly how #613 disguised itself. Anything else (EACCES,
+      // EBUSY, EXDEV) is not about length and must not be retried into a
+      // truncation.
+      const code = errnoCode(error);
+      if (code !== "ENAMETOOLONG" && code !== "ENOENT") break;
+    }
+  }
+
+  if (!trashed) {
+    // The ladder ran out. When a composed-path limit left no room even for the
+    // unique prefix there was never a shorter name to try, so say that and
+    // name the limit -- unless the ladder stopped for a changed path instead,
+    // which is the truer reason and is reported below.
+    if (plan.exhausted && aborted === null) {
+      return {
+        ok: false as const,
+        reason: `dohc could not delete ${resolved.normalized}. The workspace trash folder is ${trashDir.length} characters deep, and this platform allows ${WINDOWS_MAX_PATH_CHARS} characters for a whole path, which leaves no room for a trash entry name. Move the workspace to a shorter path. dohc did not move it.`,
+      };
+    }
+    // Name the outcome, not just the failure: an agent that cannot tell a
+    // refused delete from a silent one cannot decide what to do next.
+    //
+    // "dohc did not move it" is the rename contract, not a guess: rename is
+    // atomic, so a failed one moved nothing. That holds whatever else touched
+    // the path, and it is what an agent needs to decide whether to retry.
+    //
+    // The probe only ADDS a warning, and only on positive evidence that the
+    // path changed under the tool. Nothing serializes these mutations, so the
+    // desktop, another MCP call, or any local process can empty or replace the
+    // path between the check above and this rename.
+    const after =
+      aborted ??
+      (await lstat(resolved.absolute).then(
+        (stats) => (replacedSince(source.stats, stats) ? "replaced" : "undetermined"),
+        (probe: unknown) => (errnoCode(probe) === "ENOENT" ? "gone" : "unchecked"),
+      ));
+    return {
+      ok: false as const,
+      reason:
+        `dohc could not delete ${resolved.normalized}. The move to the workspace trash failed (${errnoCode(moveError) ?? "no errno"}). dohc did not move it.` +
+        deleteAftermath(resolved.normalized, after),
+    };
+  }
+  return {
+    ok: true as const,
+    path: resolved.normalized,
+    trashed: true,
+    ...(await recordedChangeFields(ctx)),
+  };
 }
 
 // --- dohc_list_workspaces / cloud binding helpers ---------------------------
