@@ -22,6 +22,8 @@ import {
   EngineWorkspaceRebindError,
   EngineWorkspaceRetryDeadlineError,
   EngineWorkspaceSessions,
+  EngineWorkspaceShuttingDownError,
+  isEngineWorkspaceOpenRefusedError,
   WORKSPACE_OPEN_DEADLINE_MS,
 } from "./engineWorkspaceSessions";
 
@@ -1324,6 +1326,13 @@ describe("EngineWorkspaceSessions", () => {
     // that is what marks work as abandonable: the document open, which holds
     // no edit (#533). A budget far past anything these ladders can spend, so
     // the only thing that can stop them is the shutdown gate under test.
+    //
+    // Quit arrives from INSIDE the first failure, because a region is now
+    // refused outright if it tries to start after shutdown began (see
+    // `refuses a bounded region that tries to START after shutdown began`).
+    // That is also the realistic sequence: the ladder is already running when
+    // `will-quit` fires.
+    //
     // `keeps retrying work outside a bounded region at quit` is the other
     // half of this contract.
     const ABANDONABLE = 60_000;
@@ -1405,6 +1414,8 @@ describe("EngineWorkspaceSessions", () => {
         close: () => undefined,
         async sendRequest() {
           opens += 1;
+          // Quit lands while the first open is in flight.
+          if (opens === 1) sessions.beginShutdown();
           throw new DaemonRefusalError(
             {
               code: "CONFLICT",
@@ -1419,7 +1430,6 @@ describe("EngineWorkspaceSessions", () => {
         { currentClient: () => client },
         { sleep },
       );
-      sessions.beginShutdown();
 
       await expect(
         sessions.withRetryBudget(
@@ -1447,6 +1457,8 @@ describe("EngineWorkspaceSessions", () => {
         close: () => undefined,
         async sendRequest() {
           opens += 1;
+          // Quit lands while the first open is in flight.
+          if (opens === 1) sessions.beginShutdown();
           throw new DaemonRefusalError(
             {
               code: "OVERLOADED",
@@ -1461,7 +1473,6 @@ describe("EngineWorkspaceSessions", () => {
         { currentClient: () => client },
         { sleep },
       );
-      sessions.beginShutdown();
 
       await expect(
         sessions.withRetryBudget(
@@ -1488,7 +1499,6 @@ describe("EngineWorkspaceSessions", () => {
       const sessions = new EngineWorkspaceSessions({
         currentClient: () => client,
       });
-      sessions.beginShutdown();
 
       await expect(
         sessions.withRetryBudget(
@@ -1496,6 +1506,8 @@ describe("EngineWorkspaceSessions", () => {
           async () =>
             await sessions.run(workspace, async () => {
               attempts += 1;
+              // Quit lands while the first attempt is in flight.
+              if (attempts === 1) sessions.beginShutdown();
               throw new DaemonRefusalError(
                 {
                   code: "CONFLICT",
@@ -1521,7 +1533,6 @@ describe("EngineWorkspaceSessions", () => {
         { currentClient: () => client },
         { sleep },
       );
-      sessions.beginShutdown();
 
       await expect(
         sessions.withRetryBudget(
@@ -1531,6 +1542,8 @@ describe("EngineWorkspaceSessions", () => {
               workspace,
               async () => {
                 attempts += 1;
+                // Quit lands while the first attempt is in flight.
+                if (attempts === 1) sessions.beginShutdown();
                 throw { code: "transport-error" };
               },
               { retryTransportErrors: true },
@@ -1540,6 +1553,40 @@ describe("EngineWorkspaceSessions", () => {
       // MUTATION: drop the shutdown gate -> six attempts with backoff.
       expect(attempts).toBe(1);
       expect(sleep).not.toHaveBeenCalled();
+    });
+
+    it("refuses a bounded region that tries to START after shutdown began", async () => {
+      // codex on the round-9 head, and the other half of the backoff finding:
+      // `shuttingDown` was consulted on the FAILURE path only, so a task that
+      // never fails never checks it. A document open still queued on the
+      // capture chain when `will-quit` fires would enter the region
+      // afterwards, SUCCEED at its first workspace call, and proceed into a
+      // `ydoc.open` that carries no deadline — holding the chain through the
+      // 3 s forced-exit timer.
+      const workspace = await tempWorkspace("workspace-region-after-quit");
+      const client = new MockClient("handle-region-after-quit");
+      let ran = 0;
+      const sessions = new EngineWorkspaceSessions({
+        currentClient: () => client,
+      });
+      sessions.beginShutdown();
+
+      const outcome = await sessions
+        .withRetryBudget(6_000, async () => {
+          ran += 1;
+          return await sessions.run(workspace, async () => "opened");
+        })
+        .catch((error: unknown) => error);
+
+      // MUTATION: start the task unconditionally -> the region runs, the open
+      // succeeds, and the chain is held into the forced-exit timer.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      expect(ran).toBe(0);
+      // It must keep the document READ-ONLY, never downgrade it to the
+      // writable plain editor: main answers both open refusals with
+      // `openTimedOut`. MUTATION: drop it from the predicate -> the surface
+      // takes the disk path #533 closed.
+      expect(isEngineWorkspaceOpenRefusedError(outcome)).toBe(true);
     });
 
     it("keeps retrying work outside a bounded region at quit", async () => {

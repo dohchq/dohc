@@ -1440,6 +1440,75 @@ describe("engine markdown source view", () => {
     await waitFor(() => expect(opens).toBe(2));
   });
 
+  // codex on the round-9 head: the SAME failed-read branch, but reached with a
+  // draft already pending. `openTimedOut` was carried only by the child's
+  // `readOnly` — and this branch unmounts the child in the commit that would
+  // have set it, so its unmount flush ran on the pre-refusal value and wrote
+  // the draft to disk while the engine may still own the document. That is the
+  // Y.Doc-canonical boundary being walked around, which is the invariant this
+  // PR exists to hold.
+  it("refuses the unmount flush when the read fails and the open timed out", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      let reads = 0;
+      let opens = 0;
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        readWorkspaceText: vi.fn(async () => {
+          reads += 1;
+          // Read 1 succeeds, so the plain editor mounts and takes a draft.
+          // The refresh's read FAILS, which hands the surface to the
+          // loading/error branch and unmounts that editor.
+          if (reads === 1) return await bridgeMock.readWorkspaceText();
+          throw new Error("read failed");
+        }),
+        openEngineYDocSession: vi.fn(async () => {
+          opens += 1;
+          // Open 1: not engine-backed, so the plain editor is writable.
+          // Open 2 (the refresh): times out, arriving with the failed read.
+          if (opens === 1) return { available: false };
+          return { available: false, openTimedOut: true };
+        }),
+      });
+
+      const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+      await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
+
+      // Both keys, as a version switch bumps them: `refreshKey` re-reads the
+      // file (which fails) and `engineVersionKey` reopens (which times out).
+      view.rerender(
+        <FileInspector
+          workspaceId="ws-1"
+          path="a.md"
+          refreshKey={1}
+          engineVersionKey={1}
+        />,
+      );
+      await screen.findByTestId(
+        "engine-open-timeout-notice",
+        {},
+        { timeout: 5_000 },
+      );
+      expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
+
+      // The armed autosave must not land either.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      // MUTATION: drop `engine.openTimedOut` from `writesRefusedRef` -> the
+      // unmount flush writes the draft over a document the engine may own.
+      view.unmount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // THE P1 the review reproduced. Typing during the open wait arms an 800ms
   // autosave AND leaves a pending draft. When the refusal arrived, `readOnly`
   // flipped false->true; `readOnly` was a dependency of the unmount-flush

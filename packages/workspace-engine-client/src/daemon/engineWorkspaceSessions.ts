@@ -171,6 +171,29 @@ export function isEngineWorkspaceRetryDeadlineError(
   return error instanceof EngineWorkspaceRetryDeadlineError;
 }
 
+// A bounded region was asked to START after `beginShutdown`. It is refused
+// before the first daemon call, because the app is quitting and the work is
+// abandonable by construction (#564, codex).
+export class EngineWorkspaceShuttingDownError extends Error {
+  constructor() {
+    super(
+      "Rust engine refused a bounded retry region: the app is quitting. " +
+        "Nothing new starts during teardown; retry after the next launch.",
+    );
+    this.name = "EngineWorkspaceShuttingDownError";
+  }
+}
+
+// The refusals a document open must NOT answer with the writable plain editor.
+// Both mean the same thing to the surface — the engine did not open this
+// document, and may still own it — so both keep it read-only (#533/#564).
+export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
+  return (
+    error instanceof EngineWorkspaceRetryDeadlineError ||
+    error instanceof EngineWorkspaceShuttingDownError
+  );
+}
+
 function requiresReconnect(error: unknown): boolean {
   return (
     error instanceof DaemonRefusalError &&
@@ -401,6 +424,15 @@ export class EngineWorkspaceSessions {
         `withRetryBudget budgetMs must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}, received ${String(budgetMs)}.`,
       );
     }
+    // Checked where the work BEGINS, not only where it retries. `shuttingDown`
+    // was consulted on the failure path alone, so a task that never failed
+    // never saw it: a document open still queued on the capture chain when
+    // `will-quit` fired would enter here afterwards, succeed at its first
+    // workspace call, and proceed into a `ydoc.open` that carries no deadline
+    // — holding the chain through the 3 s forced-exit timer (#564, codex).
+    // Nothing user-visible is lost: a bounded region is the abandonable kind
+    // by construction, and an opening document is read-only (#533).
+    if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();
     return await this.retryBudgets.run(
       { budgetMs, failedAtMs: null, attempts: 0 },
       task,

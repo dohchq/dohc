@@ -2428,12 +2428,22 @@ export function FileInspector(props: {
   // which clears `unsavedDraft.current` before #579's capture can read it.
   if (!engine.opening) engineRetryPending.current = false;
   const retryOpening = engineRetryPending.current;
-  // A timed-out open (#564) is handled by `readOnly` in the document below,
-  // which renders in the same commit that learns of it. This ref carries the
-  // two refusals that have no such render: the path-not-in-version
-  // replacement (#534), and the retry window above.
+  // Every refusal the CHILD might never get to render. This component has
+  // exactly two branches that replace the document — path-not-in-version
+  // (#534) and the failed read below — and a refusal that coincides with
+  // either one never reaches the child's own `readOnlyRef`, because the child
+  // unmounts in the same commit that would have set it. Its unmount flush
+  // then runs on the PRE-refusal value and writes.
+  //
+  // `openTimedOut` is in `readOnly` below too, and that was assumed to be
+  // enough: the document renders in the same commit that learns of the
+  // timeout. It does not when the READ failed first — the branch below owns
+  // the surface then, MarkdownView unmounts, and the draft went to disk while
+  // the engine may still own the document (#564, codex). A guard that works
+  // because a child observes a state is defeated by unmounting that child.
   const writesRefusedRef = useRef(false);
-  writesRefusedRef.current = notInVersion || retryOpening;
+  writesRefusedRef.current =
+    notInVersion || retryOpening || engine.openTimedOut;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText

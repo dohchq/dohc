@@ -429,7 +429,7 @@ import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLive
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
-  isEngineWorkspaceRetryDeadlineError,
+  isEngineWorkspaceOpenRefusedError,
   type EngineDaemonLifecycle,
 } from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
@@ -7770,10 +7770,11 @@ function registerIpcHandlers(
         // indistinguishable from intended fallback (it hid a dead engine editor
         // for weeks). Two flags below refuse that downgrade instead:
         // path-not-in-version (#534, the plain editor would write the phantom
-        // back) and the open retry deadline (#564, the engine may still bind
-        // this document — a writable plain editor now would take the disk path
-        // #533 closed). An uncaptured artifact is really on disk, so claiming
-        // the version does not have it would be false.
+        // back) and an open the engine refused while it may still bind this
+        // document (#564) — a spent retry budget, or a region refused because
+        // the app is quitting. A writable plain editor for either would take
+        // the disk path #533 closed. An uncaptured artifact is really on disk,
+        // so claiming the version does not have it would be false.
         console.error(
           `[desktop] engine Y.Doc open refused for ${input.path}:`,
           error,
@@ -7781,7 +7782,7 @@ function registerIpcHandlers(
         return OpenEngineYDocSessionResult.parse({
           available: false,
           ...(isYDocPathNotInVersionError(error) ? { notInVersion: true } : {}),
-          ...(isEngineWorkspaceRetryDeadlineError(error)
+          ...(isEngineWorkspaceOpenRefusedError(error)
             ? { openTimedOut: true }
             : {}),
         });
