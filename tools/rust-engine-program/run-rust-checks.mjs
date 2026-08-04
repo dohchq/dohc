@@ -36,18 +36,23 @@
 // fail the run).
 
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-import { arch, platform, release } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { arch, platform, release, tmpdir } from "node:os";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
   classifyTreeProvenance,
   formatTreeState,
   readTreeState,
 } from "./tree-provenance.mjs";
+import { inspectScratchRun } from "./scratch-leak-report.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
+const scratchRunId = `rust-gate-${process.pid}-${randomBytes(8).toString("hex")}`;
+const scratchRunRoot = join(tmpdir(), "dohc-test-scratch", scratchRunId);
+process.env.DOHC_TEST_SCRATCH_RUN = scratchRunId;
 
 function run(cmd) {
   // shell:true so `cargo`/`cargo.exe` resolve identically under PowerShell,
@@ -198,6 +203,24 @@ for (const step of native.ok ? optional : []) {
   readTreeAfter(step.name);
   if (!r.ok) failed = true;
   results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL" });
+}
+
+console.log(`\n--- scratch leak ---`);
+try {
+  const scratch = await inspectScratchRun(scratchRunRoot);
+  if (scratch.status === "FAIL") failed = true;
+  results.push({
+    name: "scratch leak",
+    status: scratch.status,
+    reason: scratch.reason,
+  });
+} catch (error) {
+  failed = true;
+  results.push({
+    name: "scratch leak",
+    status: "FAIL",
+    reason: `scratch leak measurement failed: ${error instanceof Error ? error.message : String(error)}`,
+  });
 }
 
 // Provenance closes the run: the series of readings is judged, and a step

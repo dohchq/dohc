@@ -1,0 +1,13 @@
+[package]
+name = "dohc-test-scratch"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+publish = false
+description = "Run-scoped scratch directories for dohc test harnesses."
+
+[dev-dependencies]
+filetime = "0.2"
+
+[lints]
+workspace = true

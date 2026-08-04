@@ -15,6 +15,7 @@ members = [
     "crates/dohc-engine-files",
     "crates/dohc-engine-runtime",
     "crates/dohc-engine-testkit",
+    "crates/dohc-test-scratch",
     "crates/dohc-engine-crypto",
     "crates/dohc-engine-collab",
     "crates/dohc-engine-sync",
