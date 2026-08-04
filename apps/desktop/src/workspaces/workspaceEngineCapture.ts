@@ -29,6 +29,7 @@ import {
 import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
 import {
   openEngineYdocProviderSession,
+  DaemonRefusalError,
   isConflictStaleTargetRefusal,
   isFileLockedRefusal,
   isYdocSessionNotFoundRefusal,
@@ -618,6 +619,19 @@ function isFileLockedCause(error: unknown): boolean {
 // left to wait for.
 function isConflictStaleTargetCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isConflictStaleTargetRefusal);
+}
+
+// The wire's own "do not try again" (`retry: no`). Read from a SETTLE, that is
+// a definite answer that this write cannot land — a preimage that no longer
+// matches, a target turned read-only, an ACL that denies the replace. It is
+// the opposite of a busy engine or a dropped transport, which answer nothing
+// about the write and must keep retrying.
+//
+// Read from a CLOSE it would mean something else entirely (a refused release
+// is terminal on the wire and still has to be retried), so every caller must
+// know which call raised it.
+function isTerminalRefusal(error: unknown): boolean {
+  return error instanceof DaemonRefusalError && error.disposition === "terminal";
 }
 
 interface RegisteredExpectedEngineEvent extends ExpectedEngineEvent {
@@ -3158,6 +3172,14 @@ export function createWorkspaceEngineCapture(
         // still agree — so an update arriving after a settle succeeds
         // withdraws the proof by itself, and no branch can act on a `settled`
         // flag that stopped being true after it was written.
+        //
+        // Only a MATERIALIZED settle records anything. A settle resolving is
+        // the adjacent operation, not the write: the engine commits the
+        // lineage and answers `materialized: false` for a target it declines
+        // to write — a symlinked path or ancestor — so the artifact is still
+        // stale when the call comes back clean. The field is part of what
+        // proof MEANS; a guard beside the call would only move the hole to
+        // the next discharge path.
         let updateSeq = 0;
         let settleCovers = -1;
         const writeIsProven = (): boolean => settleCovers === updateSeq;
@@ -3208,6 +3230,30 @@ export function createWorkspaceEngineCapture(
             detachedLockedDebts.delete(input.path);
             return;
           }
+          // WHERE a failure came from decides which obligation it answers: a
+          // settle refusal answers W, a close refusal answers L. They share
+          // one catch, and "terminal" means opposite things for the two — a
+          // refused write must stop, a refused release must keep retrying —
+          // so the settle's own failure is tagged here rather than guessed
+          // at from the wire code alone.
+          let settleFailure: unknown = null;
+          const settleForProof = async (
+            session: WorkspaceEngineYDocProviderSession,
+          ): Promise<void> => {
+            // Snapshot BEFORE issuing: the projection is taken inside the
+            // call, so an update delivered while it is in flight is already
+            // outside what it carries. Erring wide costs one extra settle;
+            // erring narrow loses the update entirely.
+            const covers = updateSeq;
+            let result;
+            try {
+              result = await session.settleNow({ summary: "session close" });
+            } catch (error) {
+              settleFailure = error;
+              throw error;
+            }
+            if (result.materialized) settleCovers = covers;
+          };
           try {
             if (writeCancelled) {
               // Only L is left. Never open a session here: the path this
@@ -3227,8 +3273,14 @@ export function createWorkspaceEngineCapture(
               // it — success IS this write landing, and a failure keeps the
               // debt (a still-held lock re-arms; anything else reports and
               // re-arms like every other unproven attempt).
-              await live.session.settleNow({ summary: "session close" });
-              detachedLockedDebts.delete(input.path);
+              await settleForProof(live.session);
+              if (writeIsProven()) {
+                detachedLockedDebts.delete(input.path);
+                return;
+              }
+              // The handoff settled without writing the artifact. Nothing
+              // moved, so nothing is discharged.
+              armDetachedLockedRetry();
               return;
             }
             // The active-version read lives INSIDE the guarded block (#595
@@ -3286,13 +3338,7 @@ export function createWorkspaceEngineCapture(
                 onSettled: () => undefined,
               });
             try {
-              // Snapshot BEFORE issuing: the projection is taken inside the
-              // call, so an update delivered while it is in flight is
-              // already outside what it carries. Erring wide costs one
-              // extra settle; erring narrow loses the update entirely.
-              const covers = updateSeq;
-              await retrySession.settleNow({ summary: "session close" });
-              settleCovers = covers;
+              await settleForProof(retrySession);
             } finally {
               // The release is NOT suppressed (#595 round 8): a replicated
               // update arriving between the settle and this release makes
@@ -3324,16 +3370,23 @@ export function createWorkspaceEngineCapture(
               armDetachedLockedRetry();
               return;
             }
-            if (isConflictStaleTargetCause(retryError)) {
-              // TERMINAL, not transient: the external program EDITED the
-              // file before releasing its lock, so the pending job's
-              // preimage no longer matches and the engine will refuse this
-              // write forever. Polling it every 10 seconds reopened a
-              // session and logged the same error until the workspace
-              // closed, and never told the user the one thing they could
-              // act on. Give up on the write, keep the lease obligation.
+            if (retryError === settleFailure && isTerminalRefusal(retryError)) {
+              // TERMINAL, not transient — and it came from the SETTLE, so it
+              // answers the write. The preimage no longer matches (the
+              // external program EDITED the file before releasing its lock),
+              // or materialization failed for good (the target turned
+              // read-only, an ACL denies the replace). Polling that every 10
+              // seconds reopened a session and logged the same error until
+              // the workspace closed, and never told the user the one thing
+              // they could act on. Give up on the write, keep the lease.
+              //
+              // The identity check is what keeps this narrow: a refused
+              // RELEASE is terminal on the wire too, says nothing about the
+              // write, and must keep retrying.
               standDownFromWrite(
-                `locked-write retry stopped: ${input.path} changed outside dohc while another program held it, so the pending write no longer matches the file. The edits stay in the document's history — open ${input.path} to write them again.`,
+                isConflictStaleTargetCause(retryError)
+                  ? `locked-write retry stopped: ${input.path} changed outside dohc while another program held it, so the pending write no longer matches the file. The edits stay in the document's history — open ${input.path} to write them again.`
+                  : `locked-write retry stopped: the engine cannot write ${input.path} (${String((retryError as Error).message)}). Retrying cannot change that. The edits stay in the document's history — open ${input.path} to write them again.`,
               );
               return;
             }

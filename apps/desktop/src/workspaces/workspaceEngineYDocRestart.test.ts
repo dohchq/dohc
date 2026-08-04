@@ -2415,6 +2415,10 @@ async function lockedRebindCapture(prefix: string) {
     // after a settle resolves.
     settleFailure: null as Error | null,
     emitUpdateAfterSettle: false,
+    // #595 round 12: the engine COMMITS the settle and declines to write the
+    // target (a symlinked path or ancestor), so the call resolves clean while
+    // the artifact stays stale.
+    unmaterialized: false,
     closesWithSettleFalse: 0,
     journal: [] as Uint8Array[],
     settleCalls: [] as number[],
@@ -2468,7 +2472,7 @@ async function lockedRebindCapture(prefix: string) {
           path: options.path,
           markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
-          materialized: true,
+          materialized: !state.unmaterialized,
           projection: {
             contentKind: "plaintext" as const,
             sourceStateVectorSha256: "a".repeat(64),
@@ -2476,7 +2480,9 @@ async function lockedRebindCapture(prefix: string) {
           },
         };
         await options.onSettled?.(result, token);
-        state.settledMarkdowns.push(markdown);
+        // The array is what LANDED on disk. An unmaterialized settle
+        // committed the lineage and wrote nothing.
+        if (!state.unmaterialized) state.settledMarkdowns.push(markdown);
         if (state.emitUpdateAfterSettle) {
           // A peer's update lands after this settle resolved: the close
           // that follows cannot vouch for it. It must be a REAL update —
@@ -3536,3 +3542,160 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
   expect(state.generation).toBe(generationAtStandDown);
   await capture.stop();
 }, 40_000);
+
+it("a settle that never reached the artifact is not proof the write landed", async () => {
+  // #595 round 12: a settle RESOLVING is the adjacent operation, not the
+  // write. The engine commits the lineage and answers materialized: false
+  // for a target it declines to write — a symlinked path or ancestor — so
+  // the call comes back clean while the .md stays stale. Discharging the
+  // debt there stranded the closed document's durable edit with no retry.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-unmaterialized-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "never written");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The lock releases, but the target became unsafe: every settle now
+  // commits and writes nothing.
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.settleCalls.filter((generation) => generation >= 2).length,
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(0);
+  expect(state.settledMarkdowns).toHaveLength(0);
+
+  // THE proof of retention: the target becomes writable and the debt is
+  // still there to pay. Discharged on the clean resolve, nothing would be.
+  state.unmaterialized = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 20_000 })
+    .toEqual(["never written"]);
+  await capture.stop();
+}, 40_000);
+
+it("a materialization the engine refuses for good stops the ladder and says why", async () => {
+  // #595 round 12: a locked file that turns read-only stops answering
+  // file-locked and answers a terminal materialization failure instead. The
+  // conflict-only stop let that re-arm every ten seconds forever. The class
+  // is "the wire said do not retry", not "the failure was a conflict".
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-terminal-io-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "unwritable target");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.settleFailure = new DaemonRefusalError(
+    { code: "INTERNAL", message: "workspace operation failed", retry: "no" },
+    new Error("daemon response"),
+  );
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.filter((message) =>
+          message.includes("cannot write"),
+        ),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+  const [stopMessage] = state.errorMessages.filter((message) =>
+    message.includes("cannot write"),
+  );
+  // The constraint is named, not just the fact of failure.
+  expect(stopMessage).toContain("note.md");
+  expect(stopMessage).toContain("workspace operation failed");
+  expect(stopMessage).toContain("history");
+
+  const settlesAtStandDown = state.settleCalls.length;
+  const generationAtStandDown = state.generation;
+  await new Promise((resolve) => setTimeout(resolve, 8_000));
+  expect(state.settleCalls.length).toBe(settlesAtStandDown);
+  expect(state.generation).toBe(generationAtStandDown);
+  await capture.stop();
+}, 40_000);
+
+it("a release the daemon refuses terminally still keeps the write ladder alive", async () => {
+  // #595 round 12, the boundary the widened stop must NOT cross. A refused
+  // release (`ydoc-unsettled-close`) is INVALID_PARAMS / retry: no — as
+  // terminal on the wire as a refused write — but it says nothing about the
+  // write, and the daemon kept the session's lease. Stopping there strands
+  // both obligations. What separates them is which CALL raised it.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-terminal-release-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "release refused hard");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The lock releases; a peer update outruns the settle, and THEN the
+  // retry's own RELEASE is refused terminally. The write is genuinely still
+  // owed, so treating the release's refusal as an answer about the write
+  // loses it.
+  state.locked = false;
+  state.emitUpdateAfterSettle = true;
+  state.closeFailure = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "ydoc-unsettled-close", retry: "no" },
+    new Error("daemon response"),
+  );
+  await expect
+    .poll(
+      () => state.closeCalls.filter((generation) => generation === 2).length,
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(0);
+
+  // The ladder is still alive, and it retries the RETAINED session rather
+  // than opening new ones.
+  const closesAtRefusal = state.closeCalls.length;
+  const generationAtRefusal = state.generation;
+  await expect
+    .poll(() => state.closeCalls.length, { timeout: 20_000 })
+    .toBeGreaterThan(closesAtRefusal);
+  expect(state.generation).toBe(generationAtRefusal);
+
+  // THE proof the write survived the release's refusal: once the daemon
+  // accepts the release, the debt is still owed, so a FRESH session opens
+  // and settles the state that peer update left behind. Read as an answer
+  // about the write, the debt would have been cancelled and this generation
+  // would never exist.
+  state.closeFailure = null;
+  await expect
+    .poll(() => state.generation, { timeout: 25_000 })
+    .toBeGreaterThan(generationAtRefusal);
+  await capture.stop();
+}, 60_000);
