@@ -21,6 +21,7 @@ import {
   outsideWorkspaceRefusal,
   packageManagerFromFiles,
   nameUnitFor,
+  sameFsEntry,
   trashEntryCharBudget,
   trashEntryPlan,
   WINDOWS_MAX_PATH_CHARS,
@@ -294,12 +295,30 @@ function failureReason(error: unknown, fallback: string): string {
 // probe that makes a false one.
 type Aftermath = "replaced" | "gone" | "unchecked" | "undetermined";
 
-// Positive evidence only. A different inode, or the same inode on a different
-// device, proves a different entry. Equal values prove nothing, and an inode
-// of 0 is a filesystem saying it has none to give -- neither raises a warning.
+// Positive evidence only, for the warning after a failed move: "unknown" is
+// not evidence of a replacement and must not read as one. The rule itself is
+// shared with the desktop, which runs the same ladder over the same trash.
 function replacedSince(before: Stats, after: Stats): boolean {
-  if (before.ino === 0 || after.ino === 0) return false;
-  return before.ino !== after.ino || before.dev !== after.dev;
+  return sameFsEntry(before, after) === "replaced";
+}
+
+// Is the source still the entry the ladder started on? Asked BEFORE every
+// attempt after the first, because a rename that failed for length leaves a
+// window in which another MCP call, the desktop, or any local process can
+// replace the path -- and the next rung would then move the replacement into
+// the trash and report success for a file the agent never named.
+//
+// "unknown" stops the ladder too. A filesystem with no inode to give cannot
+// prove sameness, and the costs are not symmetric: a wrong refusal costs a
+// retry, a wrong success trashes the wrong file and says it is done.
+async function sourceUnchangedSince(absolute: string, before: Stats): Promise<Aftermath> {
+  return lstat(absolute).then(
+    (now) => {
+      const identity = sameFsEntry(before, now);
+      return identity === "same" ? "undetermined" : identity === "replaced" ? "replaced" : "unchecked";
+    },
+    (probe: unknown) => (errnoCode(probe) === "ENOENT" ? "gone" : "unchecked"),
+  );
 }
 
 // The half of a delete refusal that warns about the path. The agent's question
@@ -1114,7 +1133,19 @@ export async function deleteWorkspacePath(
 
   let moveError: unknown = null;
   let trashed = false;
-  for (const candidate of plan.candidates) {
+  // Set when the ladder stopped because the path stopped being the entry the
+  // agent named. The identity comes from the preflight, captured ONCE before
+  // the first rename -- re-reading it per rung would compare the source with
+  // itself and reopen the window it exists to close.
+  let aborted: Aftermath | null = null;
+  for (const [rung, candidate] of plan.candidates.entries()) {
+    if (rung > 0) {
+      const still = await sourceUnchangedSince(resolved.absolute, source.stats);
+      if (still !== "undetermined") {
+        aborted = still;
+        break;
+      }
+    }
     try {
       await rename(resolved.absolute, join(trashDir, candidate));
       trashed = true;
@@ -1135,8 +1166,9 @@ export async function deleteWorkspacePath(
   if (!trashed) {
     // The ladder ran out. When a composed-path limit left no room even for the
     // unique prefix there was never a shorter name to try, so say that and
-    // name the limit -- otherwise report the failure itself.
-    if (plan.exhausted) {
+    // name the limit -- unless the ladder stopped for a changed path instead,
+    // which is the truer reason and is reported below.
+    if (plan.exhausted && aborted === null) {
       return {
         ok: false as const,
         reason: `dohc could not delete ${resolved.normalized}. The workspace trash folder is ${trashDir.length} characters deep, and this platform allows ${WINDOWS_MAX_PATH_CHARS} characters for a whole path, which leaves no room for a trash entry name. Move the workspace to a shorter path. dohc did not move it.`,
@@ -1153,10 +1185,12 @@ export async function deleteWorkspacePath(
     // path changed under the tool. Nothing serializes these mutations, so the
     // desktop, another MCP call, or any local process can empty or replace the
     // path between the check above and this rename.
-    const after = await lstat(resolved.absolute).then(
-      (stats) => (replacedSince(source.stats, stats) ? "replaced" : "undetermined"),
-      (probe: unknown) => (errnoCode(probe) === "ENOENT" ? "gone" : "unchecked"),
-    );
+    const after =
+      aborted ??
+      (await lstat(resolved.absolute).then(
+        (stats) => (replacedSince(source.stats, stats) ? "replaced" : "undetermined"),
+        (probe: unknown) => (errnoCode(probe) === "ENOENT" ? "gone" : "unchecked"),
+      ));
     return {
       ok: false as const,
       reason:

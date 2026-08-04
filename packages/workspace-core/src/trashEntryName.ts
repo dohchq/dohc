@@ -63,10 +63,34 @@ function measure(value: string, unit: NameUnit): number {
   return unit === "utf16" ? value.length : utf8Encoder.encode(value).length;
 }
 
-// A UTF-16 slice can land between a surrogate pair. A lone surrogate is not
-// something to hand a filesystem, so the half goes.
-function withoutTrailingHalfPair(value: string): string {
-  return /[\uD800-\uDBFF]$/.test(value) ? value.slice(0, -1) : value;
+// Where to cut a UTF-16 string so the cut does not SPLIT a surrogate pair.
+//
+// Not "does it end in a high surrogate" -- that confuses a pair this cut broke
+// with a lone surrogate the name already carried, and drops the second. A cut
+// splits a pair only when the unit just past it is the low half of the pair
+// that starts just before it.
+function utf16CutAt(value: string, budget: number): number {
+  const end = Math.min(budget, value.length);
+  if (end <= 0 || end >= value.length) return Math.max(0, end);
+  const before = value.charCodeAt(end - 1);
+  const after = value.charCodeAt(end);
+  const splitsPair =
+    before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
+  return splitsPair ? end - 1 : end;
+}
+
+// Where to cut a UTF-8 byte array so the cut does not split a multibyte
+// sequence: back up over continuation bytes to the start of the character the
+// cut landed inside.
+//
+// The old rule decoded first and stripped every trailing U+FFFD, which cannot
+// tell a sequence this cut broke from a U+FFFD that is genuinely IN the
+// filename -- and deleted the second. Backing up distinguishes them by
+// construction, so a real U+FFFD whose bytes fit is kept.
+function utf8CutAt(bytes: Uint8Array, budget: number): number {
+  let end = Math.min(budget, bytes.length);
+  while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return end;
 }
 
 // Truncates a (decorative) name so that `${prefix}${result}` fits the
@@ -86,13 +110,10 @@ export function fitWithinNameMax(
   let fitted = name;
   if (measure(fitted, unit) > budget) {
     if (unit === "utf16") {
-      fitted = withoutTrailingHalfPair(fitted.slice(0, budget));
+      fitted = fitted.slice(0, utf16CutAt(fitted, budget));
     } else {
-      // Byte-accurate: a multibyte sequence split at the cut decodes to
-      // U+FFFD, which is trimmed so the entry never carries a dangling
-      // replacement character.
       const bytes = utf8Encoder.encode(fitted);
-      fitted = utf8Decoder.decode(bytes.subarray(0, budget)).replace(/�+$/, "");
+      fitted = utf8Decoder.decode(bytes.subarray(0, utf8CutAt(bytes, budget)));
     }
   }
 
@@ -100,7 +121,7 @@ export function fitWithinNameMax(
   // cannot serve both, so the narrower one is applied second.
   const charBudget = maxEntryChars - prefix.length;
   if (fitted.length > charBudget) {
-    fitted = withoutTrailingHalfPair(fitted.slice(0, Math.max(0, charBudget)));
+    fitted = fitted.slice(0, utf16CutAt(fitted, Math.max(0, charBudget)));
   }
   return fitted;
 }

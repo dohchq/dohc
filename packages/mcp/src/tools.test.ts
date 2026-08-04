@@ -612,6 +612,42 @@ describe("mcp tool path containment", () => {
     }
   });
 
+  // The ladder is several renames, and nothing serializes them. A rename that
+  // failed for length leaves a window in which another process can REPLACE the
+  // source -- and the next rung would move the replacement into the trash and
+  // report success for a file the agent never named.
+  //
+  // The identity check that guarded the failure path now guards each retry
+  // too, against the identity captured before the FIRST attempt. A wrong
+  // refusal costs a retry; a wrong success trashes the wrong file and says it
+  // is done.
+  it("refuses rather than trashing a file that replaced the source mid-ladder", async () => {
+    await withWorkspace(async (ctx) => {
+      // Long enough that the first rung cannot fit and a second is tried.
+      const name = `${"a".repeat(226)}.txt`;
+      await writeFile(join(ctx.root, name), "the entry the agent asked about");
+      await writeFile(join(ctx.root, "replacement.md"), "a different entry entirely");
+      // The race lands inside the first rename, which then fails for length.
+      renameRace.path = join(ctx.root, name);
+      renameRace.replaceWith = join(ctx.root, "replacement.md");
+      try {
+        const result = await deleteWorkspacePath(ctx, { path: name });
+
+        expect(result).toMatchObject({ ok: false });
+        expect(refusalReason(result)).toContain("something replaced it while dohc worked");
+        // The point: the replacement is still where it was, NOT in the trash.
+        expect(await readFile(join(ctx.root, name), "utf8")).toBe(
+          "a different entry entirely",
+        );
+        const trashed = await readdir(join(ctx.root, ".dohc", "trash")).catch(() => []);
+        expect(trashed).toEqual([]);
+      } finally {
+        renameRace.path = null;
+        renameRace.replaceWith = null;
+      }
+    });
+  });
+
   it("keeps every character of a name the filesystem accepts", async () => {
     await withWorkspace(async (ctx) => {
       // 40 CJK characters: 40 UTF-16 units, but 120 UTF-8 bytes. With the

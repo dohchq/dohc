@@ -187,12 +187,52 @@ describe("truncation decodes filename bytes, not a text stream", () => {
     expect(fitted).toBe(`\uFEFF${"a".repeat(budget - 3)}`);
   });
 
-  // Checked THROUGH the module rather than beside it: the prefix is sized so
-  // the module's own cut lands at each byte offset in turn, with
-  // Buffer#toString as the oracle. Malformed input is deliberately absent --
-  // the module takes a STRING and encodes it itself, so the only invalid
-  // sequence it can decode is one its own cut produced.
-  it("cuts and decodes exactly as Buffer#toString does, at every offset", () => {
+  // A genuine U+FFFD in a filename is a CHARACTER, and the old rule deleted it
+  // whenever the cut landed right after its complete encoding: it stripped
+  // every trailing U+FFFD, which cannot tell a sequence the cut broke from one
+  // the name already carried. The trash keeps no record of the original name,
+  // so that character was gone for good.
+  it("keeps a real U+FFFD whose own bytes fit", () => {
+    const budget = NAME_MAX_UNITS - byteLength(PREFIX);
+    // U+FFFD is three bytes and ends exactly at the cut; the trailing "é"
+    // pushes the name over the budget so the truncation branch runs at all.
+    const name = `${"a".repeat(budget - 3)}\uFFFDé`;
+    expect(byteLength(name)).toBeGreaterThan(budget);
+
+    expect(fitWithinNameMax(name, PREFIX, { unit: "utf8" })).toBe(
+      `${"a".repeat(budget - 3)}\uFFFD`,
+    );
+  });
+
+  // The same distinction on the UTF-16 side: a pair the cut split is not the
+  // same fact as a lone surrogate the name already ended with.
+  it("keeps a lone surrogate it did not create", () => {
+    const budget = 8;
+    const prefix = "p".repeat(NAME_MAX_UNITS - budget);
+    expect(fitWithinNameMax("abcdefg\uD800xyz", prefix, { unit: "utf16" })).toBe(
+      "abcdefg\uD800",
+    );
+    // And a pair the cut DOES split loses its half.
+    expect(fitWithinNameMax("abcdefg😀z", prefix, { unit: "utf16" })).toBe("abcdefg");
+  });
+
+  // Checked THROUGH the module, against a reference written a different way:
+  // build the name up code point by code point and keep the longest prefix
+  // that fits. Obviously correct, and it shares no code with the byte-level
+  // cut, so agreeing means something. An earlier version used
+  // Buffer#toString plus the same trailing-U+FFFD strip the module did, so it
+  // agreed with the bug.
+  it("answers the longest prefix that fits, at every offset", () => {
+    const longestFitting = (name: string, budget: number) => {
+      let best = "";
+      for (const codePoint of name) {
+        const next = best + codePoint;
+        if (byteLength(next) > budget) break;
+        best = next;
+      }
+      return best;
+    };
+
     const corpus = [
       "\uFEFFreport.md",
       "\uFEFF\uFEFFnotes.md",
@@ -202,6 +242,9 @@ describe("truncation decodes filename bytes, not a text stream", () => {
       "😀😀",
       "e\u0301e\u0301",
       "\uFEFF😀中é",
+      "a\uFFFDé",
+      "\uFFFD\uFFFD\uFFFD",
+      "中\uFFFD😀",
     ];
 
     let compared = 0;
@@ -209,13 +252,10 @@ describe("truncation decodes filename bytes, not a text stream", () => {
       const bytes = new TextEncoder().encode(text);
       for (let cut = 1; cut <= bytes.length; cut += 1) {
         const prefix = "p".repeat(NAME_MAX_UNITS - cut);
-        const oracle = Buffer.from(bytes.subarray(0, cut))
-          .toString("utf8")
-          .replace(/\uFFFD+$/, "");
         expect(
           fitWithinNameMax(text, prefix, { unit: "utf8" }),
           `cut ${cut} of ${JSON.stringify(text)}`,
-        ).toBe(oracle);
+        ).toBe(longestFitting(text, cut));
         compared += 1;
       }
     }

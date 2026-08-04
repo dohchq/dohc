@@ -5,6 +5,7 @@ import {
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
   nameUnitFor,
+  sameFsEntry,
   trashEntryCharBudget,
   trashEntryPlan,
   WINDOWS_MAX_PATH_CHARS,
@@ -671,8 +672,26 @@ export async function moveIntoWorkspaceTrash(
     unit: nameUnitFor(process.platform),
     maxEntryChars: trashEntryCharBudget(trashDir, process.platform),
   });
+  // Captured ONCE, before the first rename. A rung that failed for length
+  // leaves a window in which another process can REPLACE the source, and the
+  // next rung would move the replacement into the trash and report the delete
+  // done -- for a file the user never selected. Re-reading this per rung would
+  // compare the source with itself and reopen the window.
+  const started = await lstat(target).catch(() => null);
   let moveError: unknown = null;
-  for (const candidate of plan.candidates) {
+  for (const [rung, candidate] of plan.candidates.entries()) {
+    if (rung > 0) {
+      const now = await lstat(target).catch(() => null);
+      const identity =
+        started && now ? sameFsEntry(started, now) : ("unknown" as const);
+      // "unknown" stops it too: absent evidence is not permission to move a
+      // file this code can no longer prove is the right one.
+      if (identity !== "same") {
+        throw new Error(
+          `dohc did not move ${basename(target)} to the trash. Something changed that path while dohc worked. Check the folder, then try again.`,
+        );
+      }
+    }
     const trashed = join(trashDir, candidate);
     try {
       await rename(target, trashed);
