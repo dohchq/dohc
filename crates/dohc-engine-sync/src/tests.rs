@@ -15299,6 +15299,120 @@ fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
     );
 }
 
+/// Splitting the ceiling split presence from validation, and only one half
+/// moved. `Binary` and `Ydoc` share `binary_blobs`, so once a Y.Doc base over
+/// the captured-file cap has hydrated legitimately, a LATER `moment.append`
+/// naming the same digest as `binary` was reported already-satisfied — skipping
+/// `hydrate_blob_content`, the only place `MAX_CAPTURE_BINARY_FILE_BYTES` is
+/// enforced. `require_binary_blob` applies no ceiling at all, so an authorized
+/// peer could materialize a 20 MiB Y.Doc payload as an oversized captured file.
+///
+/// The inverse of the defect #549 fixed: there a Y.Doc payload inherited a cap
+/// about user uploads; here a user upload borrows the Y.Doc payload's cap.
+///
+/// The bytes must ALREADY be stored for the hole to open, and one batch cannot
+/// do it: a pass accumulates every page into a single `ops` list and hydrates
+/// once, so both kinds come up missing together and the binary half refuses on
+/// its own ceiling. The precondition here is this machine's OWN origination —
+/// `ydoc_originate_base_in_tx` writes the base through `put_binary_blob`,
+/// bounded only by the 64 MiB store — so no peer is needed to create it.
+///
+/// MUTATION: restore the bare `EXISTS(...)` presence check in
+/// `local_blob_present` and the pull returns `Ok`, the snapshot lands, and the
+/// over-cap binary is materialized.
+#[test]
+fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);
+    let (_, ydoc_limit) = blob_ceiling(BlobKind::Ydoc);
+
+    // A REAL Y.Doc full state, so the first pass genuinely applies and the
+    // lineage really exists. Bytes that merely look like a base would be
+    // refused by the apply, and then the second pass would be running against
+    // a precondition no honest peer could produce.
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, &"x".repeat(binary_limit + 40_000));
+    let payload = doc.encode_full_state();
+    assert!(
+        payload.len() > binary_limit && payload.len() <= ydoc_limit,
+        "the base must sit between the two ceilings: {} bytes",
+        payload.len()
+    );
+    let sha256 = dohc_engine_storage::hex_sha256(&payload);
+
+    let steal = envelope(
+        "peer",
+        0,
+        "moment.append",
+        json!({
+            "momentId": "peer-steal",
+            "versionId": "main",
+            "objectId": "object-steal",
+            "objectCreatedAtMs": 1,
+            "path": "notes/steal.bin",
+            "recordedAtMs": 2_000,
+            "operation": "write",
+            "payloadBeforeBlobSha256": null,
+            "payloadBeforePath": null,
+            "payloadAfterBlobSha256": sha256,
+            "payloadAfterPath": "notes/steal.bin",
+            "payloadAfterContentKind": "binary",
+            "payloadAfterByteLength": payload.len(),
+            "metadata": {"origin": "sync"},
+            "beforePresent": "absent"
+        }),
+    );
+
+    // Pass one: the Y.Doc base hydrates legitimately under its own ceiling.
+    // The precondition: these bytes are already in `binary_blobs`. This is
+    // exactly what `ydoc_originate_base_in_tx` writes when THIS machine starts
+    // a shared lineage — `put_binary_blob`, bounded only by the 64 MiB store —
+    // so the state is one the engine produces itself, with no peer involved.
+    let stored = engine.put_binary_blob(&payload).expect("store the base");
+    assert_eq!(stored, sha256);
+
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![steal],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha256.clone(), payload.clone());
+
+    assert_eq!(
+        RelaySyncClient::new(relay).pull_chat_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Err(RelayError::BlobTooLarge {
+            constraint: binary_constraint,
+            limit_bytes: binary_limit,
+            observed: ObservedBytes::Exact(payload.len()),
+        }),
+        "referencing a stored Y.Doc payload as a captured binary must be refused \
+         by the captured-file ceiling, not admitted because the bytes are in the \
+         shared table"
+    );
+
+    // And nothing of the theft persisted.
+    let snapshots: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE path='notes/steal.bin'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("snapshot count");
+    assert_eq!(snapshots, 0, "no over-cap binary snapshot may materialize");
+}
+
 /// The PUSH side of the same mistake. `upload_missing_blobs` reads the blob out
 /// of the local store before it sends it, and that reader carried the binary
 /// ceiling as a `5 * 1024 * 1024` literal — so a Y.Doc base this engine had just
