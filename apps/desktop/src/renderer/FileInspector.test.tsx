@@ -301,6 +301,42 @@ function stubEditorGlobals() {
   });
 }
 
+// data-testid="markdown-editor" names the editing surface, and BOTH editing
+// surfaces carry it: the source textarea in FileInspector and the WYSIWYG
+// ProseMirror div in MarkdownEditor. findByTestId answers with whichever is
+// mounted, so a test that asked for the source view can be handed the WYSIWYG
+// div -- and `.value` on a div is undefined, which is the `indexOf` TypeError
+// #590 records as shape 3. Wait for the surface the test actually means. The
+// testids are pinned by e2e and must not be renamed.
+async function findSourceEditor(): Promise<HTMLTextAreaElement> {
+  return await waitFor(() => {
+    const editor = screen.getByTestId("markdown-editor");
+    if (!(editor instanceof HTMLTextAreaElement)) {
+      throw new Error(
+        "markdown-editor is the WYSIWYG surface — the source toggle has not landed yet",
+      );
+    }
+    return editor;
+  });
+}
+
+// Why the toggle can be missing at all: registerSourceToggle lands in a
+// passive effect, and findByTestId resolves from a MutationObserver callback
+// that can beat React's effect flush on a busy box. `toggle?.()` then silently
+// does nothing -- the component stays in WYSIWYG and the test spends its whole
+// asyncUtil window waiting for a source view nobody ever asked for. That is
+// the shared root of #590 shapes 1 and 3: shape 1 finds no textarea, shape 3
+// finds the WYSIWYG div and reads `.value` off it. Never optional-chain a
+// missing toggle away; wait for it.
+async function toggleSourceOnce(read: () => (() => void) | null): Promise<void> {
+  const toggle = await waitFor(() => {
+    const registered = read();
+    if (!registered) throw new Error("registerSourceToggle has not run yet");
+    return registered;
+  });
+  act(() => toggle());
+}
+
 // THE P1 trap (codex review): typing arms an 800ms autosave, and unmounting
 // (tab close, tab switch — the inspector is keyed by the active tab) used to
 // clear the timer WITHOUT flushing, silently dropping the draft. The unmount
@@ -387,10 +423,10 @@ describe("markdown editor unmount flush", () => {
     // handed back its toggle, which leaves the view in wysiwyg and fails the
     // editor lookup below with a confusing "not found". Wait for the toggle.
     await waitFor(() => expect(registered).not.toBeNull());
-    act(() => registered?.()); // wysiwyg -> editable source (legacy branch)
+    await toggleSourceOnce(() => registered); // wysiwyg -> editable source (legacy branch)
     await user.type(await screen.findByTestId("markdown-editor"), "Raw!");
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
-    act(() => registered?.()); // source -> wysiwyg: flushes inside the window
+    await toggleSourceOnce(() => registered); // source -> wysiwyg: flushes inside the window
     await waitFor(() =>
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
         workspaceId: "ws-1",
@@ -419,13 +455,11 @@ describe("markdown editor unmount flush", () => {
       />,
     );
     await screen.findByTestId("view-markdown");
-    act(() => registered?.());
-    const textarea = (await screen.findByTestId(
-      "markdown-editor",
-    )) as HTMLTextAreaElement;
+    await toggleSourceOnce(() => registered);
+    const textarea = await findSourceEditor();
     expect(textarea.readOnly).toBe(true);
     expect(textarea.value).toContain("# Big");
-    act(() => registered?.());
+    await toggleSourceOnce(() => registered);
     await screen.findByTestId("view-markdown");
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
@@ -569,10 +603,8 @@ describe("markdown editor unmount flush", () => {
       />,
     );
     await screen.findByTestId("view-markdown");
-    act(() => toggleSource?.());
-    const source = (await screen.findByTestId(
-      "markdown-editor",
-    )) as HTMLTextAreaElement;
+    await toggleSourceOnce(() => toggleSource);
+    const source = await findSourceEditor();
 
     view.rerender(
       <FileInspector
@@ -610,10 +642,8 @@ describe("markdown editor unmount flush", () => {
       />,
     );
     await screen.findByTestId("view-markdown");
-    act(() => toggleSource?.());
-    const source = (await screen.findByTestId(
-      "markdown-editor",
-    )) as HTMLTextAreaElement;
+    await toggleSourceOnce(() => toggleSource);
+    const source = await findSourceEditor();
 
     view.rerender(
       <FileInspector
@@ -996,11 +1026,11 @@ describe("engine markdown source view", () => {
     });
 
     expect(registered).not.toBeNull();
-    act(() => registered?.());
+    await toggleSourceOnce(() => registered);
     await screen.findByTestId("markdown-source-view", {}, { timeout: 5_000 });
     expect(screen.getByTestId("view-markdown").hidden).toBe(true);
 
-    act(() => registered?.());
+    await toggleSourceOnce(() => registered);
     expect(screen.getByTestId("view-markdown").hidden).toBe(false);
     expect(screen.queryByTestId("markdown-source-view")).toBeNull();
   });
@@ -1420,6 +1450,16 @@ describe("markdown document opening state", () => {
     // The open answers: the session is live, and the SAME keystroke now goes
     // through it (the title is frontmatter in the canonical Y.Doc) instead of
     // to disk.
+    // `settle` is created INSIDE the openEngineYDocSession executor, but
+    // `opening` is derived during render (useEngineDoc.ts:189), so
+    // markdown-open-state is in the DOM one commit before the bridge is ever
+    // called. Resolving on that element and then calling settle?.(…) can
+    // silently no-op, and the test burns its whole window waiting for a state
+    // nobody moved -- #590 shape 2, the same trap as the source toggle below.
+    // Wait for the call that creates settle; never optional-chain it away.
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
     bind();
     await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
     await user.type(screen.getByTestId("page-title"), "Retitled");
@@ -1449,6 +1489,11 @@ describe("markdown document opening state", () => {
 
     // The same surface, one state later, does show it — so the absence above
     // was this branch refusing, not a chunk that never arrived.
+    // Wait for the call that creates `settle` (see the note above): the open
+    // state renders one commit before the bridge is asked.
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
     answerNotEngineBacked();
     await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
   });
@@ -1501,6 +1546,11 @@ describe("markdown document opening state", () => {
 
     // "Opening" is not "not engine-backed": an unflagged workspace answers
     // immediately and keeps its local autosave editor, undiminished.
+    // Wait for the call that creates `settle` (see the note above): the open
+    // state renders one commit before the bridge is asked.
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
     answerNotEngineBacked();
     await waitFor(() =>
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
