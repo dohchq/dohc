@@ -992,10 +992,25 @@ export async function deleteWorkspacePath(
   // "Nothing is there" answered on its own, before anything can fail: it is a
   // different fact from "the move failed", and an lstat errno naming an
   // absolute host path told the agent neither (#613).
-  if (!(await lstat(resolved.absolute).catch(() => null))) {
+  //
+  // ONLY ENOENT is absence. A parent directory without search permission
+  // answers EACCES for a file that is right there, and an agent told that file
+  // is gone would stop looking for it -- the same lie in the opposite
+  // direction. Every other code keeps its own failure.
+  const source = await lstat(resolved.absolute).then(
+    () => null,
+    (error: unknown) => errorCode(error),
+  );
+  if (source === "ENOENT") {
     return {
       ok: false as const,
       reason: `dohc could not delete ${resolved.normalized}. Nothing is at that path in this workspace. List the folder to see what is there.`,
+    };
+  }
+  if (source !== null) {
+    return {
+      ok: false as const,
+      reason: `dohc could not delete ${resolved.normalized}. The check on that path failed (${source}). ${resolved.normalized} is unchanged.`,
     };
   }
   // The guard refusals name their own constraint (#585), so they pass through
@@ -1023,12 +1038,28 @@ export async function deleteWorkspacePath(
   try {
     await rename(resolved.absolute, trashedTo);
   } catch (error) {
-    // Name the outcome, not just the failure. rename is atomic, so the path is
-    // exactly as it was, and an agent that cannot tell a failed delete from a
-    // silent one cannot decide what to do next.
+    // Name the outcome, not just the failure: an agent that cannot tell a
+    // refused delete from a silent one cannot decide what to do next.
+    //
+    // Look before claiming it. Nothing serializes these mutations, so the
+    // desktop, another MCP call, or any local process can move the path away
+    // between the check above and this rename -- then the rename fails ENOENT
+    // and the source really is gone. A blanket "is unchanged" would be this
+    // tool's own lie, one layer along. When the look itself fails, the state
+    // is unknown, so the message claims nothing about it.
+    const after = await lstat(resolved.absolute).then(
+      () => "present" as const,
+      (probe: unknown) => (errorCode(probe) === "ENOENT" ? ("gone" as const) : ("unknown" as const)),
+    );
+    const failed = `dohc could not delete ${resolved.normalized}. The move to the workspace trash failed (${errorCode(error)}).`;
     return {
       ok: false as const,
-      reason: `dohc could not delete ${resolved.normalized}. The move to the workspace trash failed (${errorCode(error)}). ${resolved.normalized} is unchanged.`,
+      reason:
+        after === "present"
+          ? `${failed} ${resolved.normalized} is unchanged.`
+          : after === "gone"
+            ? `${failed} ${resolved.normalized} is no longer in this workspace: something else moved or deleted it.`
+            : failed,
     };
   }
   return {

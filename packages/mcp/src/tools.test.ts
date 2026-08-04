@@ -56,6 +56,53 @@ vi.mock("node:crypto", async (importOriginal) => {
   };
 });
 
+// A delete looks at its path twice -- before the move, and after the move
+// fails -- and both looks must be able to fail on demand, on a host where a
+// real unreadable directory is not arrangeable. Each armed entry is consumed
+// by one matching call: null passes through, an error is thrown.
+const lstatOverride = vi.hoisted(() => ({
+  path: null as string | null,
+  results: [] as (NodeJS.ErrnoException | null)[],
+}));
+// A path another process moves away between the check and the rename. The
+// removal happens inside the rename call, which is the race itself.
+const renameRace = vi.hoisted(() => ({ path: null as string | null }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    lstat: async (path: Parameters<typeof actual.lstat>[0]) => {
+      if (lstatOverride.path === String(path) && lstatOverride.results.length > 0) {
+        const failure = lstatOverride.results.shift();
+        if (failure) throw failure;
+      }
+      return actual.lstat(path);
+    },
+    rename: async (
+      from: Parameters<typeof actual.rename>[0],
+      to: Parameters<typeof actual.rename>[1],
+    ) => {
+      if (renameRace.path === String(from)) {
+        renameRace.path = null;
+        await actual.rm(from);
+      }
+      return actual.rename(from, to);
+    },
+  };
+});
+
+function errnoError(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`${code}: forced by test`), { code });
+}
+
+// A tool result is a union and only its refusal arm carries `reason`. Throws
+// on a success rather than narrowing silently, so a tool that should have
+// refused is reported as that instead of an assertion against `undefined`.
+function refusalReason(result: { ok: true } | { ok: false; reason: string }): string {
+  if (result.ok) throw new Error("expected a refusal, got a successful result");
+  return result.reason;
+}
+
 // Keep these split so siteNoLegacyAppModel.test.ts does not flag this
 // compatibility regression fixture as active legacy guidance.
 const LEGACY_APPS_SEGMENT = `.${"apps"}`;
@@ -450,8 +497,8 @@ describe("mcp tool path containment", () => {
         reason:
           "dohc could not delete notes/gone.md. Nothing is at that path in this workspace. List the folder to see what is there.",
       });
-      expect(result.reason).not.toMatch(/ENOENT|lstat/);
-      expect(result.reason).not.toContain(ctx.root);
+      expect(refusalReason(result)).not.toMatch(/ENOENT|lstat/);
+      expect(refusalReason(result)).not.toContain(ctx.root);
     });
   });
 
@@ -474,7 +521,7 @@ describe("mcp tool path containment", () => {
 
         const result = await deleteWorkspacePath(ctx, { path: "note.md" });
         // The errno code varies by platform; everything around it does not.
-        expect(result.reason).toMatch(
+        expect(refusalReason(result)).toMatch(
           /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. note\.md is unchanged\.$/,
         );
         expect(result.ok).toBe(false);
@@ -485,6 +532,84 @@ describe("mcp tool path containment", () => {
       } finally {
         clock.mockRestore();
         uuidOverride.value = null;
+      }
+    });
+  });
+
+  // Only ENOENT is absence. A parent directory without search permission
+  // answers EACCES about a file that is right there, and "nothing is at that
+  // path" would send the agent away from a file it merely cannot reach -- the
+  // same lie, pointing the other way.
+  it("keeps an unreachable path's own failure instead of calling it absent", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, "note.md"), "still here");
+      lstatOverride.path = join(ctx.root, "note.md");
+      lstatOverride.results = [errnoError("EACCES")];
+      try {
+        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
+        expect(result).toMatchObject({
+          ok: false,
+          reason:
+            "dohc could not delete note.md. The check on that path failed (EACCES). note.md is unchanged.",
+        });
+        expect(refusalReason(result)).not.toContain("Nothing is at that path");
+      } finally {
+        lstatOverride.path = null;
+        lstatOverride.results = [];
+      }
+      // The claim the message makes, checked.
+      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("still here");
+    });
+  });
+
+  // "is unchanged" has to be looked at, not assumed. Nothing serializes these
+  // mutations, so the desktop, another MCP call, or any local process can move
+  // the path away between the check and the rename -- and then the rename
+  // fails ENOENT with the source genuinely gone.
+  it("does not claim the path is unchanged when the move lost a race", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, "note.md"), "about to vanish");
+      renameRace.path = join(ctx.root, "note.md");
+      try {
+        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
+        expect(result).toMatchObject({
+          ok: false,
+          reason:
+            "dohc could not delete note.md. The move to the workspace trash failed (ENOENT). note.md is no longer in this workspace: something else moved or deleted it.",
+        });
+      } finally {
+        renameRace.path = null;
+      }
+      await expect(readFile(join(ctx.root, "note.md"), "utf8")).rejects.toThrow();
+    });
+  });
+
+  // And when the look itself fails, the state is unknown -- so the message
+  // claims nothing about it rather than guessing which claim to make.
+  it("claims nothing about the path when the look after a failed move fails", async () => {
+    await withWorkspace(async (ctx) => {
+      const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
+      const now = 1785780488421;
+      uuidOverride.value = uuid;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+      try {
+        await writeFile(join(ctx.root, "note.md"), "still here");
+        const trashDir = join(ctx.root, ".dohc", "trash");
+        await mkdir(trashDir, { recursive: true });
+        await mkdir(join(trashDir, `${now}-${uuid}-note.md`));
+        // The check passes; the look after the failed rename does not.
+        lstatOverride.path = join(ctx.root, "note.md");
+        lstatOverride.results = [null, errnoError("EACCES")];
+
+        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
+        expect(refusalReason(result)).toMatch(
+          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\.$/,
+        );
+      } finally {
+        clock.mockRestore();
+        uuidOverride.value = null;
+        lstatOverride.path = null;
+        lstatOverride.results = [];
       }
     });
   });
