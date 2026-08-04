@@ -1278,10 +1278,19 @@ describe("engine markdown source view", () => {
       // write is not canonical here) and not after it.
       expect(order).toEqual(["open-1", "open-2", "open-3"]);
 
-      // MUTATION: leave the draft armed at the retry -> the 800 ms timer
-      // fires here and "write" lands over the artifact open-3 just bound.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(order).toEqual(["open-1", "open-2", "open-3"]);
+
+      // The unmount flush is the path that survives the read-only window:
+      // the blocked timer left `unsavedDraft` true, and once the retry binds
+      // the guards are open again. MUTATION: leave the draft armed at the
+      // retry -> this unmount writes the stale text over the artifact the
+      // engine just bound.
+      view.unmount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
       });
       expect(order).toEqual(["open-1", "open-2", "open-3"]);
     } finally {
