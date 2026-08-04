@@ -12,8 +12,10 @@
 //! 1.129 at 10 MiB. That is what makes a fast corpus load-bearing.
 //!
 //! The trend is slightly upward, so a small corpus UNDERSTATES the real ratio —
-//! by under 1% across two orders of magnitude. The churn-headroom assertion is
-//! measured in MiB and absorbs it many times over.
+//! by under 2% across two orders of magnitude. The worst shape here reads 1.387
+//! at 512 KiB against 1.406 measured at 10 MiB, a 207 KiB difference in the
+//! projection. The churn-headroom assertion below is measured in MiB and
+//! absorbs that many times over.
 //!
 //! [`full_size_measurement_harness`] is the recorded evidence itself, at the
 //! real `MAX_TEXT_BYTES`. It is `#[ignore]`d because it runs for minutes; it is
