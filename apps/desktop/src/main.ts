@@ -269,6 +269,11 @@ import {
   type PublicUpdateState,
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
+import {
+  createQuitGuard,
+  createRecoveryChecker,
+  createWorkspaceWindowRegistry,
+} from "./quitGuard";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import {
   applyDesktopIconToPlatform,
@@ -756,8 +761,12 @@ async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Pro
 }
 
 function stopSitePreviewsForQuit(): void {
-  // Idempotent by design: explicit update installs and Electron's own
-  // before-quit-for-update event can both ask for the same cleanup.
+  // Called once, from the will-quit teardown — the first moment a quit can no
+  // longer be cancelled (#579 review, r19). It used to run at
+  // before-quit AND on electron-updater's before-quit-for-update, both of
+  // which happen BEFORE the renderer's beforeunload can veto the exit. A user
+  // who clicked "Go back" to keep working got their site previews revoked and
+  // their servers stopped anyway. Idempotent regardless.
   sitePreviewSdkAuthorities.revokeAll();
   for (const [key, handle] of [...sitePreviewHandles]) {
     sitePreviewOriginReleases.get(key)?.();
@@ -1114,8 +1123,24 @@ function prioritizePreferredWorkspace(
   ];
 }
 
+// The windows that RUN the workspace renderer. Not every BrowserWindow does:
+// the PDF export creates a hidden, preload-less one, and asking IT about
+// set-aside drafts would answer nothing (#579 review, r12). Tracked at
+// creation instead of guessed from getAllWindows().
+const workspaceWindows = createWorkspaceWindowRegistry<BrowserWindow>(
+  (window) => window.isDestroyed(),
+);
+function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
+  workspaceWindows.track(window);
+  window.on("closed", () => workspaceWindows.forget(window));
+  return window;
+}
+function liveWorkspaceWindow(): BrowserWindow | undefined {
+  return workspaceWindows.live();
+}
+
 function targetWindow(window: BrowserWindow | undefined): BrowserWindow | undefined {
-  return window ?? BrowserWindow.getAllWindows()[0];
+  return window ?? liveWorkspaceWindow() ?? BrowserWindow.getAllWindows()[0];
 }
 
 function sendWorkspaceActivated(
@@ -2751,7 +2776,9 @@ async function showOrCreateMainWindow(): Promise<void> {
     return;
   }
   const { createMainWindow } = await import("./window/createMainWindow");
-  const window = createMainWindow({ beforeRendererReload: prepareForRendererReload });
+  const window = trackWorkspaceWindow(
+    createMainWindow({ beforeRendererReload: prepareForRendererReload }),
+  );
   window.show();
   window.focus();
 }
@@ -2876,6 +2903,11 @@ app.on("will-quit", (event) => {
   quitting = true;
   event.preventDefault();
   searchRegistry.killAll();
+  // Here, not at before-quit: every window has closed, so every beforeunload
+  // has had its chance to veto and this quit is now certain (#579 review,
+  // r19). Fire-and-forget — skip locks and do not await async stops so
+  // termination stays quick; child.unref() and the OS finish the cleanup.
+  stopSitePreviewsForQuit();
   const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
   const chatDispatchStop = chatDispatchService.stop().catch(() => undefined);
   const cliServerStop = chatDispatchStop.then(() =>
@@ -3104,6 +3136,76 @@ function requireAuthorizedWorkspace(
 // edits, whose nowMs becomes appliedAt (and createId the operationId) in the
 // persisted JSONL operation log. Omitted ⇒ the real wall clock / randomUUID,
 // identical to today's behavior.
+// Quit-ask guard (#567): shared by the before-quit interceptor and the IPC
+// handlers the renderer answers through. The state machine lives in
+// quitGuard.ts so the busy-renderer promise is a tested fact: a silent ACK
+// window opens a MAIN-side dialog that names the loss — it never quits by
+// itself (#579 review, r11).
+const quitGuard = createQuitGuard({
+  askRenderer: () => {
+    // The WORKSPACE window, never an arbitrary live one: the PDF export's
+    // hidden preload-less window would answer nothing and the user would get
+    // the unresponsive dialog over drafts that were fully available (#579
+    // review, r12).
+    liveWorkspaceWindow()?.webContents.send(CHANNELS.quitRequested);
+  },
+  confirmForceQuit: async () => {
+    const { response } = await dialog.showMessageBox({
+      type: "warning",
+      message: "dohc isn't responding.",
+      detail:
+        "Quitting now can lose unsaved recovery text. Wait, or quit anyway.",
+      buttons: ["Wait", "Quit anyway"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    return response === 1;
+  },
+  quit: () => app.quit(),
+  // The user chose "quit anyway" over a renderer that never answered. Destroy
+  // the workspace windows FIRST: a destroyed window runs no beforeunload, so
+  // a renderer that wakes cannot veto the decision and open a second warning
+  // (#579 review, r15). app.quit() still follows, so the will-quit teardown —
+  // engine sessions, stores, WAL locks — runs exactly as for any other quit.
+  forceQuit: () => {
+    for (const window of workspaceWindows.allLive()) window.destroy();
+    app.quit();
+  },
+});
+
+// Recovery re-check at the quit boundary (#579 review, r12). The renderer's
+// own check happens before it asks for the install, and a reopen can set an
+// edit aside in the gap between the two — separate processes, and a queued
+// render lands inside it. So main asks again HERE, and only then approves the
+// quit that quitAndInstall starts.
+//
+// A renderer that misses the ACK window may be BUSY, not dead, and no
+// deadline tells those apart (#579 review, r16). Silence therefore asks the
+// USER rather than refusing the install the user just asked for — the same
+// escalation the quit ask uses, with the loss named.
+const recoveryChecker = createRecoveryChecker({
+  send: (requestId) => {
+    const window = liveWorkspaceWindow();
+    if (!window) return false;
+    window.webContents.send(CHANNELS.recoveryCheckRequested, requestId);
+    return true;
+  },
+  confirmProceed: async () => {
+    const { response } = await dialog.showMessageBox({
+      type: "warning",
+      message: "dohc isn't responding.",
+      detail:
+        "Installing now can lose unsaved recovery text. Wait, or install anyway.",
+      buttons: ["Wait", "Install anyway"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    return response === 1;
+  },
+});
+
 function registerIpcHandlers(
   deps: { now?: () => number; createId?: () => string } = {},
 ): void {
@@ -7878,7 +7980,48 @@ function registerIpcHandlers(
         state: currentUpdateState(),
       });
     }
-    return UpdateActionResult.parse(await autoUpdateController.installUpdate());
+    // Re-ask at the QUIT BOUNDARY (#579 review, r12): the renderer checked
+    // before it called, and a reopen can set an edit aside in the gap. Only
+    // once main has a fresh answer does it approve the quit that
+    // quitAndInstall starts — the ask cannot veto it afterwards, because
+    // that would burn the one-shot latch (#579 review, r10).
+    if (await recoveryChecker.ask()) {
+      return UpdateActionResult.parse({
+        accepted: false,
+        completed: false,
+        state: currentUpdateState(),
+      });
+    }
+    quitGuard.approve();
+    const result = UpdateActionResult.parse(
+      await autoUpdateController.installUpdate(),
+    );
+    if (!result.accepted) quitGuard.revoke();
+    return result;
+  });
+
+  ipcMain.handle(CHANNELS.recoveryCheckAnswer, (event, payload: unknown) => {
+    assertTrustedSender(event);
+    const answer = payload as { requestId?: unknown; blocked?: unknown };
+    if (
+      typeof answer?.requestId !== "number" ||
+      typeof answer?.blocked !== "boolean"
+    ) {
+      return;
+    }
+    recoveryChecker.answer(answer.requestId, answer.blocked);
+  });
+
+  ipcMain.handle(CHANNELS.holdQuit, (event) => {
+    assertTrustedSender(event);
+    // The renderer's recovery dialog owns the decision now; the quit stays
+    // cancelled until the user resumes it (or never).
+    quitGuard.hold();
+  });
+
+  ipcMain.handle(CHANNELS.resumeQuit, (event) => {
+    assertTrustedSender(event);
+    quitGuard.resume();
   });
 
   ipcMain.on(CHANNELS.firstPaint, (event) => {
@@ -8058,10 +8201,20 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
 
-  app.on("before-quit", () => {
-    // Fire-and-forget on quit: skip locks and do not await async stops so
-    // termination stays quick; child.unref() and the OS finish process cleanup.
-    stopSitePreviewsForQuit();
+  // Quit interception (#567 / #579 review, r10): set-aside drafts live only
+  // in renderer memory, and a quit is their one irreversible exit — the
+  // renderer must get to warn BEFORE any destructive teardown runs. This
+  // matters doubly for updates: electron-updater's quitAndInstall is
+  // ONE-SHOT, so the decision has to come before it is ever called. The
+  // renderer answers every ask promptly: resume (no drafts, or the user
+  // confirmed) or hold (its dialog owns the decision). A silent renderer
+  // gets the guard's MAIN-side dialog, never a silent force-quit.
+  app.on("before-quit", (event) => {
+    // No workspace window means nobody to ask and no renderer-held drafts to
+    // lose — a hidden export window is not a reason to intercept, and not a
+    // renderer that could answer (#579 review, r12).
+    if (!liveWorkspaceWindow()) return;
+    quitGuard.beforeQuit(event);
   });
 
   void app.whenReady().then(async () => {
@@ -8146,7 +8299,9 @@ if (!app.requestSingleInstanceLock()) {
     // did-finish-load and never send at all.
     const drainedWorkspace = await flushPendingOpenPaths();
     const activatedWorkspace = drainedWorkspace ?? initialActivatedWorkspace;
-    const window = createMainWindow({ beforeRendererReload: prepareForRendererReload });
+    const window = trackWorkspaceWindow(
+      createMainWindow({ beforeRendererReload: prepareForRendererReload }),
+    );
     // Same tick as the window, so the load cannot finish before this listener.
     window.webContents.once("did-finish-load", () => {
       if (activatedWorkspace) sendWorkspaceActivated(window, activatedWorkspace);
@@ -8173,7 +8328,12 @@ if (!app.requestSingleInstanceLock()) {
     void startAutoUpdates({
       isPackaged: app.isPackaged,
       currentVersion: app.getVersion(),
-      onBeforeQuitForUpdate: stopSitePreviewsForQuit,
+      // A restart already staged has no install left to make — quitAndInstall
+      // started its own quit on the first call and has none left to start.
+      // Main makes it, so the fact lives HERE and not in a renderer module a
+      // reload would reset (#579 review, r18). The quit is already approved:
+      // the IPC handler approves before asking the controller.
+      quitForStagedRestart: () => app.quit(),
       onState: (_state, state) => {
         broadcastUpdateState(state);
       },

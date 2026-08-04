@@ -217,6 +217,10 @@ export function EditorTabs(props: {
   tabs: Array<{ path: string }>;
   activeTab: string | null;
   activeTabDirty: boolean;
+  // Paths with a set-aside draft (#567). Unlike `activeTabDirty`, this is
+  // knowable for EVERY tab — the store outlives the keyed inspectors — so an
+  // inactive tab keeps its marker (#579 review, r4).
+  recoveryPaths: ReadonlySet<string>;
   onActivate: (path: string) => void;
   onClose: (path: string) => void;
   onContextMenu: (path: string) => void;
@@ -315,7 +319,10 @@ export function EditorTabs(props: {
             key={tab.path}
             path={tab.path}
             active={tab.path === props.activeTab}
-            dirty={tab.path === props.activeTab && props.activeTabDirty}
+            dirty={
+              (tab.path === props.activeTab && props.activeTabDirty) ||
+              props.recoveryPaths.has(tab.path)
+            }
             dragging={dragPreview?.path === tab.path}
             dropBefore={
               dragPreview !== null &&

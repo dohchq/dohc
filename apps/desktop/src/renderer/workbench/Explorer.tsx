@@ -63,6 +63,9 @@ export interface ExplorerProps {
   activeTab: string | null;
   openTabs: Array<{ path: string }>;
   dirtyTab: string | null;
+  // Paths with a set-aside draft (#567): marks Open Editors rows for every
+  // tab, not only the active one (#579 review, r4).
+  recoveryPaths: ReadonlySet<string>;
   expandedFolders: string[];
   pinned: string[];
   // Max height of the Open Editors list (workbench state, persisted): the
@@ -1286,7 +1289,9 @@ export function Explorer(props: ExplorerProps) {
               >
                 {props.openTabs.map((tab) => {
                   const active = props.activeTab === tab.path;
-                  const dirty = props.dirtyTab === tab.path;
+                  const dirty =
+                    props.dirtyTab === tab.path ||
+                    props.recoveryPaths.has(tab.path);
                   const title = editorTitle(tab.path);
                   return (
                     <li

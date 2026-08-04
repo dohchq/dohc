@@ -28,6 +28,7 @@ import {
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
 import { bridge } from "../bridge";
+import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyAppearanceSettings } from "../theme";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { PreferredNameControl } from "./PreferredNameControl";
@@ -428,7 +429,10 @@ export function SettingsDialog(props: {
     setUpdateBusy("install");
     setUpdateError(null);
     try {
-      const result = await bridge().installUpdate();
+      // Through the guard (#579 review, r8 + r10): with set-aside drafts
+      // present the recovery dialog opens INSTEAD of the one-shot install.
+      const result = await requestGuardedUpdateInstall();
+      if (result === null) return;
       setUpdateState(result.state);
       if (!result.accepted) {
         setUpdateError(

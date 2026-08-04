@@ -20,6 +20,7 @@ function renderTabs(activeTab: string) {
       tabs={tabs}
       activeTab={activeTab}
       activeTabDirty={false}
+      recoveryPaths={new Set<string>()}
       onActivate={noop}
       onClose={noop}
       onContextMenu={noop}
@@ -49,6 +50,7 @@ describe("EditorTabs strip scrolling", () => {
         tabs={tabs}
         activeTab="c.md"
         activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
         onActivate={noop}
         onClose={noop}
         onContextMenu={noop}
@@ -157,6 +159,7 @@ describe("EditorTabs overlay scrollbar", () => {
         tabs={tabs}
         activeTab="a.md"
         activeTabDirty
+        recoveryPaths={new Set<string>()}
         onActivate={noop}
         onClose={noop}
         onContextMenu={noop}

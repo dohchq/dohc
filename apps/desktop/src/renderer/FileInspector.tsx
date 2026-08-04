@@ -37,6 +37,12 @@ import type {
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
+import {
+  captureOrphanedDraft,
+  dismissOrphanedDraft,
+  useOrphanedDrafts,
+} from "./orphanedDrafts";
+import { DismissDraftControls } from "./RecoveryList";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { IconButton, SectionLabel } from "./ui/controls";
@@ -387,6 +393,11 @@ function useTextContent(
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState(false);
+  // Bumped once per ANSWERED read. The dispatcher uses it to tell "the reread
+  // a version switch triggered has landed" from "the pre-switch body is still
+  // on screen" — the window the plain-text autosave used to write into
+  // (#579 adversarial review, F1).
+  const [readSeq, setReadSeq] = useState(0);
   const lastPathRef = useRef<string | null>(null);
   useEffect(() => {
     if (!enabled) return;
@@ -406,11 +417,15 @@ function useTextContent(
         setLoadedPath(path);
         setTruncated(r.truncated);
         setError(false);
+        setReadSeq((seq) => seq + 1);
       })
       .catch(() => {
         if (cancelled) return;
         setText(null);
         setError(true);
+        // A failed reread still ANSWERS: leaving writes refused forever would
+        // strand every later save on a file the user can still edit.
+        setReadSeq((seq) => seq + 1);
       });
     return () => {
       cancelled = true;
@@ -418,7 +433,7 @@ function useTextContent(
     // refreshKey bumps on workspace activity so an open file re-reads when it
     // changes on disk (e.g. an agent edits it).
   }, [workspaceId, path, enabled, refreshKey]);
-  return { text, loadedPath, truncated, error };
+  return { text, loadedPath, truncated, error, readSeq };
 }
 
 // `actions` puts a view's controls (edit toggle, save state, presence) in the
@@ -462,7 +477,12 @@ function ViewHeader(props: {
 // The source view's explicit copy affordance ("view source" implies "grab the
 // text"): quiet inline "Copied" confirmation, same swap-and-restore rhythm as
 // DocumentMenu / the code-block copy button (FEEDBACK_MS there is 1200 too).
-function CopySourceButton(props: { getSource: () => string | null }) {
+function CopySourceButton(props: {
+  getSource: () => string | null;
+  // The default is pinned by e2e; the orphaned-draft notice (#567) renders its
+  // own copy control beside a possible source view, so it needs its own name.
+  testId?: string;
+}) {
   const [label, setLabel] = useState<"Copy" | "Copied" | "Couldn't copy">("Copy");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
@@ -474,7 +494,7 @@ function CopySourceButton(props: { getSource: () => string | null }) {
   return (
     <button
       type="button"
-      data-testid="markdown-source-copy"
+      data-testid={props.testId ?? "markdown-source-copy"}
       onClick={() => {
         const source = props.getSource();
         const write = source === null ? undefined : navigator.clipboard?.writeText(source);
@@ -491,6 +511,45 @@ function CopySourceButton(props: { getSource: () => string | null }) {
     >
       {label}
     </button>
+  );
+}
+
+// The restore half of #567's cancel-and-restore: one row per set-aside
+// draft, oldest first, because a second reopen must not cost the first draft
+// its row (#579 review, P2). Self-contained on the module store, so every
+// surface where the keyed document view dies — the editor branches AND the
+// not-in-version refusal — can show the same recovery.
+function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
+  const drafts = useOrphanedDrafts(props.workspaceId, props.path);
+  if (drafts.length === 0) return null;
+  return (
+    <div>
+      {drafts.map((draft) => (
+        <div
+          key={draft.id}
+          data-testid="orphaned-draft-notice"
+          className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
+        >
+          <span className="text-danger">
+            This document reopened before your last edit saved. Copy your text
+            to keep it.
+          </span>
+          <div className="flex items-center gap-2">
+            <CopySourceButton
+              testId="orphaned-draft-copy"
+              getSource={() => draft.text}
+            />
+            {/* Deleting the only copy needs the explicit confirm step (#579
+                review, r6) — the same control the recovery list uses. */}
+            <DismissDraftControls
+              onDismiss={() =>
+                dismissOrphanedDraft(props.workspaceId, props.path, draft.id)
+              }
+            />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -537,11 +596,31 @@ const MARKDOWN_COMPONENTS = {
 
 type SaveState = "saved" | "saving" | "error";
 
+// The plain-text autosave, used by every NON-markdown editable view (CSV,
+// JSON, text). It carries the same three write seams as MarkdownView — an
+// armed timer, an unmount flush, and the shell's flush — and until #579's
+// adversarial review it carried none of the opening gate, because `opening`
+// only ever existed inside MarkdownView. A version switch bumps `reopenKey`,
+// the reread it triggers leaves the PRE-switch body on screen, and the armed
+// timer landed that body on the POST-switch tree. That is #567's exact
+// mechanism on the surfaces #567 never covered.
+//
+// Every gate here reads a REF at call time, never a prop. Routing the signal
+// through `disabled` (or any dep) is actively worse: the unmount-flush effect
+// would re-run on the flip, and its PREVIOUS cleanup — whose closure still
+// says writes are allowed — would issue the very write the flip was meant to
+// stop.
 function useAutosavedTextDraft(props: {
   body: string;
   workspaceId: string;
   path: string;
   disabled?: boolean;
+  // Bumped when the active version changes. The transition sets a pending
+  // draft aside exactly as MarkdownView's render-phase capture does.
+  reopenKey?: number;
+  // Live refusal from the parent: a version switch whose reread has not
+  // answered yet. Reactive, because the hook must also see it LIFT.
+  writesRefused?: boolean;
   onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
 }) {
@@ -550,6 +629,13 @@ function useAutosavedTextDraft(props: {
   const latestDraft = useRef(props.body);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unsavedDraft = useRef(false);
+  // Assigned during render, read at call time — `readOnlyRef` precedent.
+  const disabledRef = useRef(props.disabled);
+  disabledRef.current = props.disabled;
+  const writesRefusedRef = useRef(props.writesRefused);
+  writesRefusedRef.current = props.writesRefused;
+  const writesBlocked = () =>
+    disabledRef.current === true || writesRefusedRef.current === true;
 
   useEffect(() => {
     props.onSaveStateChange?.(saveState);
@@ -562,8 +648,37 @@ function useAutosavedTextDraft(props: {
     setSaveState("saved");
   }, [props.body, props.path]);
 
+  // Cancel-and-restore, during the render that first sees the new version
+  // (#567, extended to these views by #579's adversarial review). The armed
+  // write would land the previous version's text on the tree the switch just
+  // bound; dropping it silently would lose keystrokes. So it is set aside into
+  // the same store the markdown notice reads, and the surface goes back to the
+  // document.
+  const reopenKeyRef = useRef(props.reopenKey);
+  const wasRefused = useRef(props.writesRefused);
+  // Two moments, one transition: the switch itself, and the reread landing
+  // with something typed while writes were refused. Both leave a draft built
+  // on the version the user has left.
+  const refusalLifted =
+    wasRefused.current === true && props.writesRefused !== true;
+  wasRefused.current = props.writesRefused;
+  if (props.reopenKey !== reopenKeyRef.current || refusalLifted) {
+    reopenKeyRef.current = props.reopenKey;
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    if (unsavedDraft.current) {
+      unsavedDraft.current = false;
+      captureOrphanedDraft(props.workspaceId, props.path, latestDraft.current);
+      setSaveState("saved");
+      setDraft(props.body);
+      latestDraft.current = props.body;
+    }
+  }
+
   async function writeDraftNow(options: { rejectOnError?: boolean } = {}): Promise<void> {
-    if (props.disabled) return;
+    if (writesBlocked()) return;
     const text = latestDraft.current;
     unsavedDraft.current = false;
     setSaveState("saving");
@@ -589,7 +704,11 @@ function useAutosavedTextDraft(props: {
   function scheduleSave(next: string) {
     setDraft(next);
     latestDraft.current = next;
-    if (props.disabled) return;
+    // Deliberately NOT gated on writesBlocked(): swallowing the keystroke here
+    // would lose it silently when the reread lands and the sync effect
+    // repaints. It arms as normal, the write seams refuse it, and the capture
+    // below sets it aside when the refusal lifts.
+    if (disabledRef.current === true) return;
     unsavedDraft.current = true;
     setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -600,8 +719,18 @@ function useAutosavedTextDraft(props: {
   useEffect(() => {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      if (!unsavedDraft.current || props.disabled) return;
+      if (!unsavedDraft.current) return;
+      // A pending draft that cannot be written is SET ASIDE, never dropped
+      // (#579 adversarial review, F3). A reread that REJECTS selects the error
+      // branch in the same commit that lifts the refusal, so this view is gone
+      // before it can render again and act on the lift — waiting to observe it
+      // loses the user's text with no notice. Capturing here needs nothing to
+      // survive: it is the last moment this draft exists.
       unsavedDraft.current = false;
+      if (writesBlocked()) {
+        captureOrphanedDraft(workspaceId, path, latestDraft.current);
+        return;
+      }
       void bridge()
         .writeWorkspaceText({
           workspaceId,
@@ -610,19 +739,25 @@ function useAutosavedTextDraft(props: {
         })
         .catch(() => undefined);
     };
-  }, [workspaceId, path, props.disabled]);
+    // `disabled` is deliberately NOT a dep: as one it made every flip run this
+    // cleanup with the PREVIOUS render's value captured, so turning writes off
+    // was itself a write (#534's lesson, and #579's adversarial review found
+    // the same trap waiting here). The ref carries the current value to a real
+    // unmount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, path]);
 
   useEffect(() => {
     if (!registerDraftFlush) return;
     registerDraftFlush(async () => {
-      if (!unsavedDraft.current || props.disabled) return;
+      if (!unsavedDraft.current || writesBlocked()) return;
       if (saveTimer.current) clearTimeout(saveTimer.current);
       await writeDraftNow({ rejectOnError: true });
     });
     return () => registerDraftFlush(null);
     // writeDraftNow uses refs for the draft; workspace/path are stable per keyed inspector.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [registerDraftFlush, props.disabled]);
+  }, [registerDraftFlush]);
 
   return {
     draft,
@@ -747,6 +882,101 @@ function MarkdownView(props: {
   const latestDraft = useRef(props.body);
   const serializeDraftRef = useRef<() => string>(() => props.body);
   const editing = surfaceMode !== "read";
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // True from the keystroke until a write for that draft has been ISSUED.
+  // The unmount flush keys off this — never off the timer handle, which stays
+  // set (already fired) after a completed autosave and would double-write.
+  const unsavedDraft = useRef(false);
+  // ONE queue, joined at ENTRY (#579 review, r15). The earlier design tracked
+  // the write that held the slot, so a writer PARKED behind it was invisible:
+  // the flush could see an empty slot while a waiter was still queued, and
+  // that waiter then landed the previous version's text after the switch.
+  // Three rounds each closed one interleaving and exposed the next, which is
+  // what polling a slot always does. Membership now starts when the writer
+  // arrives, so "everything ahead of me" is one await of this tail.
+  //
+  // Never rejects: a failed write is its own caller's business, not a poison
+  // pill for every writer behind it.
+  const writeChain = useRef<Promise<void>>(Promise.resolve());
+  // Writers that have ENTERED and not yet finished. Zero means the queue is
+  // idle and the next writer can run without deferring (see writeDraftNow).
+  const writersLive = useRef(0);
+  // Armed while the flush drains. A writer arriving now holds text from the
+  // version (or path) the caller is about to leave: running it before the
+  // change races the flush, and running it after IS the clobber #567 is
+  // about. So it is REFUSED rather than re-armed — re-arming would write
+  // pre-switch text onto the post-switch tree. The draft stays unsaved, and
+  // the reopen's render-phase capture above sets it aside.
+  const flushBarrier = useRef(false);
+
+  // #567 cancel-and-restore: the moment `opening` flips true, the pending
+  // draft leaves the save pipeline. Writing it would land the previous
+  // version's text on the tree the reopen is binding; dropping it would lose
+  // keystrokes silently. So the armed autosave is cancelled, the draft is set
+  // aside, and the notice below surfaces it for the user to copy.
+  //
+  // The drafts live in a module store keyed by workspace + path, not in this
+  // component's state: the notice promises the text stays recoverable, and
+  // this view unmounts on every tab switch (#579 review, P1). The hook
+  // subscribes; the capture appends.
+  //
+  // The capture runs DURING RENDER, not in an effect, for two reasons. The
+  // armed 800ms timer can fire between this commit and a passive effect — by
+  // then it has written. And `serializeDraftRef` still holds the PREVIOUS
+  // render's closure here, which reads the live editor this very commit is
+  // about to unmount — an effect would serialize the pre-edit body (the trap
+  // writeDraftNow documents). The transition guard keeps it idempotent under
+  // replayed renders (`readOnlyRef` precedent below).
+  const orphanedDrafts = useOrphanedDrafts(props.workspaceId, props.path);
+  const openingRef = useRef(opening);
+  if (opening && !openingRef.current) {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    if (unsavedDraft.current) {
+      unsavedDraft.current = false;
+      captureOrphanedDraft(
+        props.workspaceId,
+        props.path,
+        serializeDraftRef.current(),
+      );
+      // The armed save will never issue, so "saving" must not stand. The
+      // set-aside edit's own signal is DERIVED from the store below — that
+      // way Dismiss retires it (#579 review, P2) instead of stranding an
+      // error chip on a draft that no longer exists.
+      setSaveState("saved");
+      // The surface goes back to the document. Clearing the flag lets the
+      // props.body sync effect take over when a dependency fires — but in
+      // READ mode `editing` never flips and the reopened body can be
+      // byte-identical, so that effect has nothing to fire on and the
+      // set-aside title/property edit would keep painting the view and ride
+      // into the next property save (#579 review, r7). Reset here.
+      setDraft(props.body);
+      setSavedBody(props.body);
+      latestDraft.current = props.body;
+    }
+  }
+  openingRef.current = opening;
+  // What the header chip shows: a real pending/failed save wins; otherwise an
+  // unresolved set-aside draft gets its OWN state (#579 review, P2). The
+  // set-aside edit is not in the file, but it is not savable-dirty either —
+  // only the real save state is lifted to the shell, so the version-switch
+  // save-first prompt never promises to save a draft the pipeline cannot
+  // write. The shell reads the store itself for the tab dot.
+  const chipState =
+    saveState !== "saved"
+      ? saveState
+      : orphanedDrafts.length > 0
+        ? ("recovery" as const)
+        : "saved";
+  // The engine branch has its own authoritative save state; the set-aside
+  // draft still is not in the document it shows, so a settled engine must
+  // not read "Saved" over an unresolved notice.
+  const engineChipState =
+    engine.saveState === "saved" && orphanedDrafts.length > 0
+      ? ("recovery" as const)
+      : engine.saveState;
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -807,11 +1037,6 @@ function MarkdownView(props: {
   }, [pendingScrollLine, surfaceMode]);
 
   const { onSaveStateChange } = props;
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // True from the keystroke until a write for that draft has been ISSUED.
-  // The unmount flush keys off this — never off the timer handle, which stays
-  // set (already fired) after a completed autosave and would double-write.
-  const unsavedDraft = useRef(false);
 
   // Parse-once + visible-first (Phase 16): the memo stops re-parses on
   // unrelated re-renders (collab status flips, save-state ticks), and the
@@ -847,14 +1072,18 @@ function MarkdownView(props: {
   // false->true transition with `readOnly === false` captured. Making the
   // document read-only was itself the write. Both now read `readOnlyRef`.
   //
-  // NOTE for #567: this makes the `readOnly` guards read the CURRENT value.
-  // It does not add `opening` to them — whether an opening document may drop
-  // an armed keystroke is that issue's product decision, not this one's.
+  // #567 decided the `opening` half: a reopen cancels the armed autosave and
+  // sets the draft aside (the render-phase capture above), and every write
+  // path refuses while `opening` holds, via `openingRef` — assigned during
+  // render for the same reason as `readOnlyRef`.
   //
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
   useEffect(() => {
+    // Set-aside drafts (#567) deliberately do NOT count: they are not
+    // discarded — the store outlives this view and the refusal screen renders
+    // their notice itself, Copy included.
     onPendingDraftChange?.(unsavedDraft.current);
   });
   const readOnly =
@@ -1030,6 +1259,10 @@ function MarkdownView(props: {
   // engine Y.Doc is still settling.
   useEffect(() => {
     if (!engine.available) {
+      // The REAL save state only — a set-aside draft is deliberately not
+      // lifted here (#579 review, P2). Lifting it as "error" made the shell's
+      // save-first machinery promise a save the flush cannot deliver; the
+      // shell reads the store itself for the tab dot instead.
       onSaveStateChange?.(saveState);
       return;
     }
@@ -1071,44 +1304,76 @@ function MarkdownView(props: {
     }
   }, [props.body, editing]);
 
-  async function writeDraftNow(options: { rejectOnError?: boolean } = {}): Promise<void> {
-    // The REF, not the captured value. The 800ms autosave timer holds the
-    // closure from the render that armed it, where readOnly was false — so a
-    // document that turned read-only after the keystroke still wrote (#534).
-    // Writes are blocked (a read-only view, or the version refusal). The edit
-    // does NOT reach disk — and the indicator must stop saying it is going to.
-    // Leaving it on "saving" is the same lie as a doc reading "Saved" over a
-    // zero-byte file: this reports the honest state, that the file on disk is
-    // behind the editor.
-    //
-    // The draft itself is still lost when the view is torn down in this state,
-    // and #567 owns that: preserving the TEXT needs eager serialization,
-    // because `serializeDraftRef` reads the live editor and a read-only window
-    // unmounts it — a naive rearm here writes the PRE-EDIT body.
-    if (writesBlocked()) {
-      setSaveState("error");
-      return;
-    }
-    const text = serializeDraftRef.current();
-    latestDraft.current = text;
-    unsavedDraft.current = false;
-    setSaveState("saving");
-    try {
-      await bridge().writeWorkspaceText({
-        workspaceId: props.workspaceId,
-        relativePath: props.path,
-        text,
-      });
-      setDraft(text);
-      setSavedBody(text);
-      setSaveState("saved");
-    } catch (error) {
-      // The write failed: the draft is still unsaved, so the unmount flush
-      // gets another shot at landing it.
-      unsavedDraft.current = true;
-      setSaveState("error");
-      if (options.rejectOnError) throw error;
-    }
+  async function writeDraftNow(
+    options: { rejectOnError?: boolean; fromFlush?: boolean } = {},
+  ): Promise<void> {
+    // Refused, not queued (see flushBarrier): a writer that joined behind the
+    // barrier could only ever land stale text. Silent, because the flush owns
+    // the save state from here — it either lands this same draft itself or
+    // the reopen sets it aside.
+    if (flushBarrier.current && !options.fromFlush) return;
+    const run = async (): Promise<void> => {
+      // The REFS, not captured values. The 800ms autosave timer holds the
+      // closure from the render that armed it, where readOnly was false — so
+      // a document that turned read-only after the keystroke still wrote
+      // (#534). And this runs after everything ahead of it in the queue, so
+      // `readOnly`/`opening` may have flipped meanwhile; the refs carry the
+      // current answer. Writes are blocked (a read-only view, or the version
+      // refusal). The edit does NOT reach disk — and the indicator must stop
+      // saying it is going to. Leaving it on "saving" is the same lie as a
+      // doc reading "Saved" over a zero-byte file.
+      //
+      // The draft itself is still lost when the view is torn down in this
+      // state: preserving the TEXT needs eager serialization, because
+      // `serializeDraftRef` reads the live editor and a read-only window
+      // unmounts it — a naive rearm here writes the PRE-EDIT body. The
+      // `opening` window is different: its render-phase capture serialized
+      // the draft eagerly and surfaced it, so this gate only refuses.
+      if (writesBlocked() || openingRef.current) {
+        setSaveState("error");
+        return;
+      }
+      // Serialized HERE, not at enqueue: a writer that waited reads the
+      // newest text, so an older queued write can never land over a newer one
+      // (#579 review, r4).
+      const text = serializeDraftRef.current();
+      latestDraft.current = text;
+      unsavedDraft.current = false;
+      setSaveState("saving");
+      try {
+        await bridge().writeWorkspaceText({
+          workspaceId: props.workspaceId,
+          relativePath: props.path,
+          text,
+        });
+        setDraft(text);
+        setSavedBody(text);
+        setSaveState("saved");
+      } catch (error) {
+        // The write failed: the draft is still unsaved, so the unmount flush
+        // gets another shot at landing it.
+        unsavedDraft.current = true;
+        setSaveState("error");
+        if (options.rejectOnError) throw error;
+      }
+    };
+    // Synchronous when the queue is idle. Callers like the source-mode toggle
+    // serialize-then-switch-mode in ONE tick, and switching re-points
+    // serializeDraftRef at the Tiptap parse — deferring the serialize by even
+    // a microtask would write that lossy parse instead of the typed source.
+    // Only a writer that must actually wait is deferred.
+    const runsNow = writersLive.current === 0;
+    writersLive.current += 1;
+    const queued = (runsNow ? run() : writeChain.current.then(run)).finally(
+      () => {
+        writersLive.current -= 1;
+      },
+    );
+    writeChain.current = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
   }
 
   async function saveNow(): Promise<void> {
@@ -1212,9 +1477,30 @@ function MarkdownView(props: {
   useEffect(() => {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      if (!unsavedDraft.current || writesBlocked()) return;
+      // `opening` too (#567): unmounting mid-reopen must not land the
+      // previous version's draft on the tree the reopen is binding.
+      if (!unsavedDraft.current) return;
       unsavedDraft.current = false;
       const text = serializeDraftRef.current();
+      // Same invariant as the plain-text hook (#579 adversarial review, F3):
+      // a draft this unmount may not write is set aside rather than dropped.
+      // The render-phase capture normally runs first, but it cannot when the
+      // branch above replaces this view in the very commit that flips
+      // `opening` — and this cleanup is already willing to WRITE this exact
+      // value, so keeping it can only be safer than losing it.
+      //
+      // DECLARED UNPINNED. No test enters this branch, and that is a property
+      // of the design rather than a coverage gap: the render-phase capture
+      // clears `unsavedDraft` first on every path a test can construct, so
+      // reaching here needs the engine open and the file read to land in the
+      // same batch. A mutation aimed at it survives against the neighbouring
+      // "no write happens" tests, because turning the capture back into a
+      // `return` still writes nothing — those tests pin the write, not the
+      // rescue. Kept as a backstop, not as covered code.
+      if (writesBlocked() || openingRef.current) {
+        captureOrphanedDraft(workspaceId, path, text);
+        return;
+      }
       void bridge()
         .writeWorkspaceText({
           workspaceId,
@@ -1234,17 +1520,52 @@ function MarkdownView(props: {
   useEffect(() => {
     if (!registerDraftFlush) return;
     registerDraftFlush(async () => {
-      // The ref, not the captured value: the shell can call this seam between
-      // the refusal and the re-registration.
-      if (!unsavedDraft.current || writesBlocked()) return;
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      await writeDraftNow({ rejectOnError: true });
+      // A write already past the guards is the same obligation as an armed
+      // timer (#579 review, r3): the caller is about to move paths or switch
+      // versions, and must not proceed while the previous state's text is
+      // still landing. If that write FAILS, `unsavedDraft` is true again by
+      // the time this resumes, and the seam's own write below lands it before
+      // the move.
+      //
+      // A BARRIER in the write queue, not a poll of it (#579 review, r15).
+      // Arming and reading the tail are one synchronous step, so no writer
+      // can slip between them.
+      flushBarrier.current = true;
+      try {
+        // Everything already enqueued — in flight OR parked behind it — runs
+        // to completion ahead of this point, and nothing can join behind.
+        await writeChain.current;
+        // This seam is now the only writer that can exist. Land the draft, so
+        // the keystrokes reach disk while this path and this version still
+        // mean what the editor shows. The REFS, not captured values: the
+        // shell can call this between the refusal and the re-registration,
+        // and `opening` (#567) means a flush arriving mid-reopen must not
+        // write the previous version's draft. A write that FAILS leaves
+        // `unsavedDraft` true, and the unmount flush gets the next shot.
+        if (!unsavedDraft.current || writesBlocked() || openingRef.current) {
+          return;
+        }
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        await writeDraftNow({ rejectOnError: true, fromFlush: true });
+      } finally {
+        flushBarrier.current = false;
+      }
+      // INVARIANT at return: the queue is empty. No writer — in flight,
+      // parked, or arriving during the drain — survives this seam holding
+      // text from before the caller's change.
     });
     return () => registerDraftFlush(null);
     // writeDraftNow reads refs (latestDraft) + per-mount-stable props only, so the
     // first render's closure stays correct for the whole mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
+
+  // The restore half of #567: each set-aside draft stays copyable until the
+  // user takes it or dismisses it. Rendered in both branches below — the
+  // reopen can resolve into either editor.
+  const orphanedDraftNotice = (
+    <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+  );
 
   // Linked mentions live at the BOTTOM of the document, inside the reading
   // measure, in every markdown branch (engine / wysiwyg / read). Hidden when a
@@ -1280,33 +1601,35 @@ function MarkdownView(props: {
             <>
               <span
                 data-testid="markdown-save-state"
-                data-state={engine.saveState}
+                data-state={engineChipState}
                 title={
-                  engine.saveState === "error"
+                  engineChipState === "error"
                     ? "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit."
-                    : engine.saveState === "read-only"
+                    : engineChipState === "read-only"
                       ? "This document is shared with you to read. Your changes stay on screen but are not saved."
-                      : engine.saveState === "changed-on-disk"
+                      : engineChipState === "changed-on-disk"
                         ? "This file changed outside dohc while it was open. Open History to restore your text."
-                        : undefined
+                        : engineChipState === "recovery"
+                          ? "A set-aside edit is not saved. Copy or dismiss it in the notice below."
+                          : undefined
                 }
                 className={`font-mono text-[11px] ${
-                  engine.saveState === "error" ||
-                  engine.saveState === "read-only" ||
-                  engine.saveState === "changed-on-disk"
-                    ? "text-danger"
-                    : "text-subtle"
+                  engineChipState === "saved" || engineChipState === "saving"
+                    ? "text-subtle"
+                    : "text-danger"
                 }`}
               >
-                {engine.saveState === "saved"
+                {engineChipState === "saved"
                   ? "Saved"
-                  : engine.saveState === "saving"
+                  : engineChipState === "saving"
                     ? "Saving…"
-                    : engine.saveState === "read-only"
+                    : engineChipState === "read-only"
                       ? "Read-only"
-                      : engine.saveState === "changed-on-disk"
+                      : engineChipState === "changed-on-disk"
                         ? "Changed on disk"
-                        : "Couldn't save"}
+                        : engineChipState === "recovery"
+                          ? "Edit set aside"
+                          : "Couldn't save"}
               </span>
               <button
                 type="button"
@@ -1330,6 +1653,7 @@ function MarkdownView(props: {
           }
         />
         {props.truncatedNotice}
+        {orphanedDraftNotice}
         {showSource ? (
           // Raw markdown, monospaced and read-only — frontmatter included, so
           // the top-matter zone (which renders the same metadata as chrome)
@@ -1459,13 +1783,33 @@ function MarkdownView(props: {
               >
                 Opening…
               </span>
-            ) : editing || saveState !== "saved" ? (
+            ) : null}
+            {/* Independent of "Opening…", not its else-branch (#567): a save
+                that fails inside the opening window must still surface. While
+                opening, `editing` is always false, so the chip appears there
+                only when the state is not "saved". */}
+            {editing || chipState !== "saved" ? (
               <span
                 data-testid="markdown-save-state"
-                data-state={saveState}
-                className={`font-mono text-[11px] ${saveState === "error" ? "text-danger" : "text-subtle"}`}
+                data-state={chipState}
+                title={
+                  chipState === "recovery"
+                    ? "A set-aside edit is not saved. Copy or dismiss it in the notice below."
+                    : undefined
+                }
+                className={`font-mono text-[11px] ${
+                  chipState === "error" || chipState === "recovery"
+                    ? "text-danger"
+                    : "text-subtle"
+                }`}
               >
-                {saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : "Couldn't save"}
+                {chipState === "saved"
+                  ? "Saved"
+                  : chipState === "saving"
+                    ? "Saving…"
+                    : chipState === "recovery"
+                      ? "Edit set aside"
+                      : "Couldn't save"}
               </span>
             ) : null}
             <button
@@ -1504,6 +1848,7 @@ function MarkdownView(props: {
         }
       />
       {props.truncatedNotice}
+      {orphanedDraftNotice}
       {surfaceMode === "source" ? (
         <textarea
           data-testid="markdown-editor"
@@ -1619,9 +1964,13 @@ function CsvView({
   path,
   onOpenPath,
   truncated,
+  reopenKey,
+  writesRefused,
   onSaveStateChange,
   registerDraftFlush,
 }: {
+  reopenKey?: number;
+  writesRefused?: boolean;
   body: string;
   workspaceId: string;
   path: string;
@@ -1638,6 +1987,8 @@ function CsvView({
     workspaceId,
     path,
     disabled: truncated,
+    reopenKey,
+    writesRefused,
     onSaveStateChange,
     registerDraftFlush,
   });
@@ -2080,11 +2431,15 @@ function TextEditorView({
   workspaceId,
   path,
   truncated,
+  reopenKey,
+  writesRefused,
   onSaveStateChange,
   registerDraftFlush,
   pendingUndo,
   onPendingUndoConsumed,
 }: {
+  reopenKey?: number;
+  writesRefused?: boolean;
   body: string;
   testId: string;
   language: string;
@@ -2104,6 +2459,8 @@ function TextEditorView({
     workspaceId,
     path,
     disabled: truncated,
+    reopenKey,
+    writesRefused,
     onSaveStateChange,
     registerDraftFlush,
   });
@@ -2263,7 +2620,7 @@ export function FileInspector(props: {
   // refusal arrives — which is the only way to have it, since the refusal
   // unmounts the reporter.
   const [pendingDraft, setPendingDraft] = useState(false);
-  const { text, loadedPath, truncated, error } = useTextContent(
+  const { text, loadedPath, truncated, error, readSeq } = useTextContent(
     props.workspaceId,
     props.path,
     isText,
@@ -2296,6 +2653,23 @@ export function FileInspector(props: {
   // leaves this notice up until the request changes. Reopening a daemon session
   // on every activity tick would churn the capture chain for no gain.
   const notInVersion = engine.notInVersion;
+  // A version switch bumps engineVersionKey, and the reread it triggers leaves
+  // the PRE-switch body on screen until it answers. Markdown has the engine
+  // open to tell it so; the plain-text views have nothing, so this window is
+  // where their autosave landed pre-switch text on the post-switch tree
+  // (#579 adversarial review, F1). True from the switch until the next read
+  // ANSWERS — success or failure, so a failed reread cannot strand writes.
+  const switchReadPending = useRef(false);
+  const seenVersionKey = useRef(props.engineVersionKey);
+  const seenReadSeq = useRef(readSeq);
+  if (seenVersionKey.current !== props.engineVersionKey) {
+    seenVersionKey.current = props.engineVersionKey;
+    seenReadSeq.current = readSeq;
+    switchReadPending.current = true;
+  }
+  if (switchReadPending.current && readSeq !== seenReadSeq.current) {
+    switchReadPending.current = false;
+  }
   // The child never gets a render carrying this refusal: the branch below
   // replaces it in the same commit that learns of it, so its own `readOnlyRef`
   // still holds the pre-refusal value when its unmount flush runs. A REF the
@@ -2330,6 +2704,13 @@ export function FileInspector(props: {
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
     : undefined;
+  // Recovery follows the PATH, not the file kind (#579 review, r4): an
+  // extension-changing rename remaps a markdown draft onto a text/CSV/binary
+  // view, and Copy/Dismiss must exist wherever the marker shows. The markdown
+  // branch renders its own copy inside its header layout.
+  const recoveryNotices = (
+    <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+  );
 
   if (notInVersion) {
     return (
@@ -2340,6 +2721,10 @@ export function FileInspector(props: {
           label="file"
           onShare={onShareCurrentPath}
         />
+        {/* A reopen's set-aside drafts (#567) survive this refusal in the
+            module store — recovery stays visible right here, not behind a
+            version switch. */}
+        {recoveryNotices}
         <div
           data-testid="file-not-in-version"
           className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-subtle"
@@ -2367,6 +2752,10 @@ export function FileInspector(props: {
           label="file"
           onShare={onShareCurrentPath}
         />
+        {/* A failed read is exactly when the set-aside text matters most —
+            the marker and the close warning must not point at actions this
+            branch withholds (#579 review, r5). */}
+        {recoveryNotices}
         <Empty>{error ? "Couldn't read this file." : "Loading…"}</Empty>
       </div>
     );
@@ -2415,12 +2804,15 @@ export function FileInspector(props: {
             onShare={onShareCurrentPath}
           />
           {truncatedNotice}
+          {recoveryNotices}
           <CsvView
             body={text ?? ""}
             workspaceId={props.workspaceId}
             path={props.path}
             onOpenPath={props.onOpenPath}
             truncated={truncated || !!props.readOnly}
+            reopenKey={props.engineVersionKey}
+            writesRefused={switchReadPending.current}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
           />
@@ -2437,6 +2829,7 @@ export function FileInspector(props: {
             onShare={onShareCurrentPath}
           />
           {truncatedNotice}
+          {recoveryNotices}
           <TextEditorView
             body={text ?? ""}
             testId={kind === "json" ? "view-json" : "view-text"}
@@ -2444,6 +2837,8 @@ export function FileInspector(props: {
             workspaceId={props.workspaceId}
             path={props.path}
             truncated={truncated || !!props.readOnly}
+            reopenKey={props.engineVersionKey}
+            writesRefused={switchReadPending.current}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
             scrollLine={
@@ -2465,6 +2860,7 @@ export function FileInspector(props: {
             label="image"
             onShare={onShareCurrentPath}
           />
+          {recoveryNotices}
           <ImageView url={url} path={props.path} />
         </div>
       );
@@ -2477,6 +2873,7 @@ export function FileInspector(props: {
             label="audio"
             onShare={onShareCurrentPath}
           />
+          {recoveryNotices}
           <div className="flex flex-1 items-center justify-center p-4">
             <audio data-testid="view-audio" controls src={url} />
           </div>
@@ -2491,6 +2888,7 @@ export function FileInspector(props: {
             label="pdf"
             onShare={onShareCurrentPath}
           />
+          {recoveryNotices}
           <AffordanceCard
             testId="view-pdf"
             title="PDF document"
@@ -2501,27 +2899,30 @@ export function FileInspector(props: {
       );
     case "database":
       return (
-        <Suspense
-          fallback={
-            <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-              <ViewHeader
-                icon={<FileText size={13} aria-hidden />}
-                path={props.path}
-                label="database"
-                onShare={onShareCurrentPath}
-              />
-              <Empty>Loading database…</Empty>
-            </div>
-          }
-        >
-          <LazyDatabaseStudioView
-            workspaceId={props.workspaceId}
-            path={props.path}
-            refreshKey={props.refreshKey}
-            onSharePath={props.onSharePath}
-            readOnly={props.readOnly}
-          />
-        </Suspense>
+        <>
+          {recoveryNotices}
+          <Suspense
+            fallback={
+              <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
+                <ViewHeader
+                  icon={<FileText size={13} aria-hidden />}
+                  path={props.path}
+                  label="database"
+                  onShare={onShareCurrentPath}
+                />
+                <Empty>Loading database…</Empty>
+              </div>
+            }
+          >
+            <LazyDatabaseStudioView
+              workspaceId={props.workspaceId}
+              path={props.path}
+              refreshKey={props.refreshKey}
+              onSharePath={props.onSharePath}
+              readOnly={props.readOnly}
+            />
+          </Suspense>
+        </>
       );
     default:
       return (
@@ -2532,6 +2933,7 @@ export function FileInspector(props: {
             label="file"
             onShare={onShareCurrentPath}
           />
+          {recoveryNotices}
           <AffordanceCard
             testId="view-binary"
             title="File"

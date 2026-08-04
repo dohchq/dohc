@@ -59,6 +59,7 @@ function renderBar(
 ) {
   return render(
     <StatusBar
+      workspaceId="ws-status-test"
       workspaceName="my-notes"
       syncStatus={props.syncStatus ?? null}
       agentActive={props.agentActive ?? false}
@@ -424,6 +425,7 @@ describe("notice center", () => {
     // Live state: once main reports the set cleared, the notice is gone.
     rerender(
       <StatusBar
+        workspaceId="ws-status-test"
         workspaceName="my-notes"
         syncStatus={{
           state: "synced",
@@ -508,6 +510,7 @@ describe("notice center", () => {
 
     rerender(
       <StatusBar
+        workspaceId="ws-status-test"
         workspaceName="my-notes"
         syncStatus={{ ...failedStatus, historyCaptureFailed: false }}
         agentActive={false}

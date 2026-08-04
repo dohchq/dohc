@@ -34,6 +34,7 @@ import {
   resolveWikilinkNavigation,
 } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
@@ -762,6 +763,184 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
+  // #579 adversarial review F1: the opening gate lived inside MarkdownView, so
+  // every NON-markdown editable view carried #567's exact mechanism unfixed —
+  // three write seams, none of them gated, reached by the same version switch.
+  // A pending .csv edit plus a version bump landed pre-switch text on the
+  // post-switch tree, with no capture, no notice and no recovery entry.
+  it("sets a pending CSV edit aside on a version switch instead of writing it", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "date,amount\n2026-06-10,42",
+      truncated: false,
+    });
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+
+    await screen.findByTestId("view-csv");
+    const cells = screen.getAllByTestId("csv-cell") as HTMLInputElement[];
+    await user.clear(cells[3]!);
+    await user.type(cells[3]!, "43");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    // The version switch: same mount, same pending draft, same armed timer.
+    // MUTATION (F1 gate): drop reopenKey/writesRefusedRef from CsvView, or the
+    // writesBlocked() checks from useAutosavedTextDraft's three seams. The
+    // armed timer then lands "43" — the previous version's text — on the tree
+    // the switch just bound.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    // Cancelled is not dropped: the edit is recoverable, on the same surface
+    // markdown drafts use.
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "date,amount\n2026-06-10,43",
+      ),
+    );
+
+    // ...and unmounting mid-switch does not write it either.
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  // ...and the window stays honest while the reread is still in flight. Typing
+  // here is NOT swallowed — swallowing it would lose the keystroke silently
+  // when the reread lands and repaints — so it arms as normal, the write seams
+  // refuse it, and the capture takes it when the refusal lifts.
+  it("refuses a CSV write typed while the switch reread is in flight, and sets it aside", async () => {
+    let releaseReread!: (value: { text: string; truncated: boolean }) => void;
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "date,amount\n2026-06-10,42",
+        truncated: false,
+      })
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          releaseReread = resolve;
+        }),
+      );
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+    await screen.findByTestId("view-csv");
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+
+    // The reread is held, so the body on screen still belongs to the version
+    // the user just left.
+    const cells = screen.getAllByTestId("csv-cell") as HTMLInputElement[];
+    await user.clear(cells[3]!);
+    await user.type(cells[3]!, "99");
+    // MUTATION (window guard): drop `writesBlocked()` from writeDraftNow. The
+    // armed timer lands "99" — built on the pre-switch body — on the tree the
+    // switch just bound.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    // MUTATION (refusal-lift capture): drop `refusalLifted` from the capture's
+    // condition. The keystroke is then silently repainted away by the sync
+    // effect with nothing set aside.
+    await act(async () => {
+      releaseReread({ text: "date,amount\n2026-06-10,42", truncated: false });
+      await Promise.resolve();
+    });
+    const notices = await screen.findAllByTestId("orphaned-draft-copy");
+    await user.click(notices[notices.length - 1]!);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "date,amount\n2026-06-10,99",
+      ),
+    );
+  });
+
+  // ...and the error path is the half that ordering cannot save. A reread that
+  // REJECTS selects the error branch in the same commit that lifts the
+  // refusal, so the view is unmounted before it can render again and act on
+  // the lift. The draft has to be taken on the way out.
+  it("sets a CSV draft aside when the switch reread fails and the view is torn down", async () => {
+    let rejectReread!: (reason: Error) => void;
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "date,amount\n2026-06-10,42",
+        truncated: false,
+      })
+      .mockReturnValueOnce(
+        new Promise((_resolve, reject) => {
+          rejectReread = reject;
+        }),
+      );
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+    await screen.findByTestId("view-csv");
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data/table.csv"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+
+    const cells = screen.getAllByTestId("csv-cell") as HTMLInputElement[];
+    await user.clear(cells[3]!);
+    await user.type(cells[3]!, "77");
+
+    // The reread fails: `setText(null)` selects the error branch and this view
+    // goes away in the same commit.
+    // MUTATION (F3): restore the early `return` when writes are blocked, so
+    // the cleanup drops the draft instead of setting it aside. The user's text
+    // vanishes with no notice and no recovery entry.
+    await act(async () => {
+      rejectReread(new Error("reread failed"));
+      await Promise.resolve();
+    });
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    const copies = await screen.findAllByTestId("orphaned-draft-copy");
+    await user.click(copies[copies.length - 1]!);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "date,amount\n2026-06-10,77",
+      ),
+    );
+  });
+
   it("can start editing an empty CSV as a table", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",
@@ -933,12 +1112,16 @@ describe("engine markdown source view", () => {
 
   beforeEach(() => {
     stubEditorGlobals();
+    // The reopen-refusal test below captures a set-aside draft into the
+    // module store (#567) — do not leak it across tests.
+    resetOrphanedDrafts();
   });
 
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    resetOrphanedDrafts();
   });
 
   async function renderEngineDoc(options?: {
@@ -1327,9 +1510,17 @@ describe("engine markdown source view", () => {
         await vi.advanceTimersByTimeAsync(5_000);
       });
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
-      // The user is TOLD the edit went nowhere. Losing it silently would be
-      // the same defect wearing the other face.
-      expect(notice.textContent).toContain("dohc discarded your unsaved edit.");
+      // The draft is not lost and not misreported: the reopen set it aside
+      // (#567), the store outlives the replaced view, and the refusal screen
+      // itself offers the copy. "Discarded" would be false here — that line
+      // is reserved for a draft that really went nowhere.
+      //
+      // MUTATION (refusal recovery): drop <OrphanedDraftNotices> from the
+      // not-in-version branch. The set-aside text survives in the store but
+      // the user has no way to reach it from this screen.
+      expect(screen.getByTestId("orphaned-draft-notice")).toBeTruthy();
+      expect(screen.queryByTestId("file-not-in-version-discarded")).toBeNull();
+      expect(notice.textContent).toContain("Switch to the version that has it.");
     } finally {
       vi.useRealTimers();
     }
@@ -1396,12 +1587,16 @@ describe("markdown document opening state", () => {
 
   beforeEach(() => {
     stubEditorGlobals();
+    // The set-aside drafts live in a module store on purpose (they must
+    // outlive the keyed view), so tests must not inherit each other's.
+    resetOrphanedDrafts();
   });
 
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    resetOrphanedDrafts();
   });
 
   // The user's real attempt: click the header's edit control, then type into
@@ -1570,5 +1765,831 @@ describe("markdown document opening state", () => {
         }),
       { timeout: 5_000 },
     );
+  });
+
+  // #567: a save armed BEFORE a reopen must not land DURING it. The reachable
+  // arming: a document the engine answered "not engine-backed" for (plain
+  // editor, legitimately writable), a draft typed inside the 800ms autosave
+  // window, then a version switch that reopens the session on the SAME
+  // mounted component (the shell keys the inspector by path, so the switch is
+  // a prop change, not a remount). Three write paths reach disk from that
+  // state — the armed timer, the unmount flush, and the shell's draft-flush
+  // seam — and each gets its own test below, so killing any one path's gate
+  // fails the test that names it.
+  async function armDraftThenReopen(
+    user: ReturnType<typeof userEvent.setup>,
+    bridge: ReturnType<typeof makeHeldOpenBridge>,
+    extraProps: Partial<Parameters<typeof FileInspector>[0]> = {},
+  ) {
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        {...extraProps}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(
+      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      "Draft!",
+    );
+    expect(bridge.bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    // The version switch: same mount, same pending draft, same armed timer.
+    // The second open stays held — the "Opening…" window under test.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={2}
+        {...extraProps}
+      />,
+    );
+    expect(screen.getByTestId("markdown-open-state").textContent).toBe(
+      "Opening…",
+    );
+    return view;
+  }
+
+  it("cancels the pending timer when a reopen starts, and surfaces the set-aside draft", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    await armDraftThenReopen(user, bridge);
+
+    // MUTATION (pending-timer path): remove the render-phase capture's
+    // clearTimeout AND `|| openingRef.current` from writeDraftNow's guard.
+    // The 800ms timer then fires inside this wait and the write lands while
+    // the header reads "Opening…" — the previous version's draft on the
+    // switched tree.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
+
+    // Cancelled is not dropped: the draft is surfaced for the user to copy,
+    // eagerly serialized at the flip (the editor that held it is unmounted by
+    // the same commit).
+    expect(
+      screen.getByTestId("orphaned-draft-notice").textContent,
+    ).toContain("Copy your text to keep it.");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "# Plan\n\nBase paragraph.\nDraft!",
+      ),
+    );
+
+    // The chip shows BESIDE "Opening…", not underneath it: the header slot
+    // used to be either/or, hiding any state in this window. Recovery has its
+    // OWN chip state — "Couldn't save" would invite a retry that cannot help.
+    expect(screen.queryByTestId("markdown-open-state")).not.toBeNull();
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe("recovery");
+    expect(screen.getByTestId("markdown-save-state").textContent).toBe(
+      "Edit set aside",
+    );
+  });
+
+  it("hands the surface back to the document after the reopen — the set-aside draft cannot re-arm a save", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    await armDraftThenReopen(user, bridge);
+
+    // The reopen answers "not engine-backed": the plain editor is writable
+    // again and shows the DOCUMENT's text. Keeping the set-aside draft in the
+    // editor instead would leave it one keystroke from landing on the new
+    // version — the clobber, one step removed.
+    //
+    // MUTATION (restore path): in the capture, keep `unsavedDraft.current`
+    // TRUE and drop the setDraft/setSavedBody/latestDraft reset together.
+    // Neither the sync effect (blocked by the flag) nor the direct reset
+    // hands the surface back, and the assertion below finds "Draft!" still
+    // in the textarea.
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    expect(
+      (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
+    ).toBe(DOC_MARKDOWN);
+
+    // Dismiss retires the notice, and the save pipeline is healthy again.
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    await user.type(screen.getByTestId("markdown-editor"), "New!");
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+          workspaceId: "ws-1",
+          relativePath: "a.md",
+          text: "# Plan\n\nBase paragraph.\nNew!",
+        }),
+      { timeout: 5_000 },
+    );
+  });
+
+  it("skips the unmount flush during a reopen — closing the view must not write the set-aside draft", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const view = await armDraftThenReopen(user, bridge);
+
+    // MUTATION (unmount-flush path): remove the render-phase capture's
+    // `unsavedDraft.current = false` AND `|| openingRef.current` from the
+    // unmount cleanup's guard. This unmount then writes the stale draft to
+    // the tree the reopen is binding.
+    view.unmount();
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
+  });
+
+  it("refuses the shell's draft flush during a reopen — the seam must not write the set-aside draft", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    let flush: (() => Promise<void>) | null = null;
+    const registerDraftFlush = (next: (() => Promise<void>) | null) => {
+      flush = next;
+    };
+    await armDraftThenReopen(user, bridge, { registerDraftFlush });
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    // MUTATION (draft-flush path): remove the render-phase capture's
+    // `unsavedDraft.current = false`, `|| openingRef.current` from the seam's
+    // guard, AND `|| openingRef.current` from writeDraftNow's. The awaited
+    // flush then writes the stale draft mid-reopen.
+    await act(async () => {
+      await flush!();
+    });
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
+  });
+
+  // #579 review P1: the notice promises the text stays recoverable, and the
+  // inspector is KEYED — every tab switch unmounts it. The drafts therefore
+  // live outside the view, keyed by workspace + path.
+  it("keeps the set-aside draft across an unmount and shows it again on remount", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const view = await armDraftThenReopen(user, bridge);
+    await screen.findByTestId("orphaned-draft-notice");
+
+    // The user switches tabs before copying, then comes back.
+    // MUTATION (survival): clear the path's drafts in the unmount cleanup —
+    // the component-local lifetime this store exists to escape. The remount
+    // below then has nothing to show.
+    view.unmount();
+    render(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={2} />);
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "# Plan\n\nBase paragraph.\nDraft!",
+      ),
+    );
+  });
+
+  // #579 review P2: a second reopen with the first notice still up must not
+  // destroy the first draft. Both stay, oldest first, each with its own copy.
+  it("keeps both set-aside drafts when a second reopen lands before the first is resolved", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const view = await armDraftThenReopen(user, bridge);
+
+    // The reopen resolves, the user types again, and a THIRD open starts.
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.type(screen.getByTestId("markdown-editor"), "More!");
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={3} />,
+    );
+
+    // MUTATION (append): make captureOrphanedDraft overwrite instead of
+    // append. Only one row survives and the first edit is gone.
+    await waitFor(() =>
+      expect(screen.getAllByTestId("orphaned-draft-notice")).toHaveLength(2),
+    );
+    const copies = screen.getAllByTestId("orphaned-draft-copy");
+    await user.click(copies[0]);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "# Plan\n\nBase paragraph.\nDraft!",
+      ),
+    );
+    await user.click(copies[1]);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "# Plan\n\nBase paragraph.\nMore!",
+      ),
+    );
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
+  });
+
+  // #579 review P2, both halves. The chip carries recovery with its own state
+  // and settles on Dismiss — but the LIFTED save state never carries it: the
+  // shell's save-first machinery keys off that lift, and a prompt promising
+  // to save a draft the flush cannot write would be a false promise.
+  it("keeps recovery out of the lifted save state and settles the chip on dismiss", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const states: string[] = [];
+    await armDraftThenReopen(user, bridge, {
+      onSaveStateChange: (state) => states.push(state),
+    });
+    await screen.findByTestId("orphaned-draft-notice");
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe("recovery");
+    // MUTATION (lift): report the recovery-derived state through
+    // onSaveStateChange (the round-1 behavior). The shell then marks the tab
+    // savable-dirty and the version switch prompts to save a draft that no
+    // longer exists in the pipeline.
+    await waitFor(() => expect(states.at(-1)).toBe("saved"));
+    expect(states).not.toContain("error");
+
+    // MUTATION (chip): collapse chipState to the plain saveState. The chip
+    // then reads nothing while the notice says an edit is not saved.
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
+    expect(screen.queryByTestId("markdown-save-state")).toBeNull();
+    expect(states.at(-1)).toBe("saved");
+  });
+
+  // #579 review r3, the last unguarded interleaving: an autosave that already
+  // passed the guards and is AWAITING its IPC write. `unsavedDraft` clears at
+  // issue time, so a flush that only reads it would return at once, the
+  // version would switch, and the outstanding write would land the previous
+  // version's text on the new tree. The seam must hold until the write lands.
+  it("holds the shell's flush until an in-flight autosave lands, so a switch cannot race the write", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    let releaseWrite!: () => void;
+    const heldWrite = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseWrite = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => heldWrite);
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    let flush: (() => Promise<void>) | null = null;
+    const registerDraftFlush = (next: (() => Promise<void>) | null) => {
+      flush = next;
+    };
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        registerDraftFlush={registerDraftFlush}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(
+      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      "Draft!",
+    );
+    // The 800ms timer fires; the write is now in flight, held by the mock.
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    // MUTATION (in-flight window): remove `await pendingWrite.current` from
+    // the draft-flush seam. The flush below settles with the write still in
+    // flight, and the switch it gates proceeds while the previous version's
+    // text is still landing.
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(flushSettled).toBe(false);
+
+    // The write lands; only then does the flush release its caller.
+    await act(async () => {
+      releaseWrite();
+      await heldWrite;
+    });
+    await act(async () => {
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    // The draft landed exactly once, into the version being left — not lost,
+    // not duplicated.
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([
+      [
+        {
+          workspaceId: "ws-1",
+          relativePath: "a.md",
+          text: "# Plan\n\nBase paragraph.\nDraft!",
+        },
+      ],
+    ]);
+
+    // The switch now reopens the document; nothing further writes.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={2}
+        registerDraftFlush={registerDraftFlush}
+      />,
+    );
+    expect(screen.getByTestId("markdown-open-state").textContent).toBe(
+      "Opening…",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
+  // #579 review r4: overlapping writes. Autosave A awaiting its IPC and a
+  // later B must not overlap — if B settles first, a waiter releases while
+  // A's older temp-file rename is still pending over newer content. One
+  // write in flight, ever; the next one waits and then reads the NEWER text.
+  it("serializes overlapping autosaves — a second write waits for the first to land", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    let releaseFirst!: () => void;
+    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseFirst = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    let writes = 0;
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => {
+      writes += 1;
+      return writes === 1
+        ? heldFirst
+        : Promise.resolve({ path: "a.md", recorded: true });
+    });
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />);
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(
+      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      "One",
+    );
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    // The user keeps typing while write one is still in flight; a second
+    // autosave arms and fires.
+    await user.type(screen.getByTestId("markdown-editor"), "Two");
+    // MUTATION (serialization): remove the `while (pendingWrite.current)`
+    // wait in writeDraftNow. The second write issues inside this window,
+    // overlapping the first.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseFirst();
+      await heldFirst;
+    });
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    // The serialized second write carries the newest text.
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[1]).toEqual([
+      {
+        workspaceId: "ws-1",
+        relativePath: "a.md",
+        text: "# Plan\n\nBase paragraph.\nOneTwo",
+      },
+    ]);
+  });
+
+  // #579 review r4: recovery follows the PATH, not the file kind. An
+  // extension-changing rename remaps a markdown draft onto the text view,
+  // and Copy/Dismiss must exist there too — a marker with no controls
+  // strands the text behind a permanent dirty dot.
+  it("offers recovery on a non-markdown view after an extension-changing rename", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    captureOrphanedDraft("ws-1", "a.txt", "# Plan\n\nBase paragraph.\nDraft!");
+    render(<FileInspector workspaceId="ws-1" path="a.txt" />);
+
+    // MUTATION (kind coverage): drop {recoveryNotices} from the text branch.
+    // The path still carries the marker, but Copy/Dismiss is gone.
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "# Plan\n\nBase paragraph.\nDraft!",
+      ),
+    );
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
+  });
+
+  // #579 review r8: the queue and the obligation. Writer A is in flight,
+  // writer B is parked in writeDraftNow's own wait, and the shell's flush
+  // awaits the slot. When A lands, B resumes FIRST, claims the slot, and
+  // clears `unsavedDraft` — a single-await flush would return right there,
+  // and the switch it gates would proceed while B lands the previous
+  // version's text.
+  it("the flush outlasts a queued writer that claims the slot when the first write lands", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    let releaseA!: () => void;
+    const heldA = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseA = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    let releaseB!: () => void;
+    const heldB = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseB = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    let writes = 0;
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => {
+      writes += 1;
+      return writes === 1 ? heldA : heldB;
+    });
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    let flush: (() => Promise<void>) | null = null;
+    const registerDraftFlush = (next: (() => Promise<void>) | null) => {
+      flush = next;
+    };
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        registerDraftFlush={registerDraftFlush}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(
+      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      "One",
+    );
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    // B arms and fires while A holds the slot: B is parked in the queue.
+    await user.type(screen.getByTestId("markdown-editor"), "Two");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    // A lands; B claims the slot and issues its own write.
+    await act(async () => {
+      releaseA();
+      await heldA;
+    });
+    await waitFor(() =>
+      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // MUTATION (flush loop): make the seam await `pendingWrite` ONCE. The
+    // flush settles right here, with B still landing the old text.
+    expect(flushSettled).toBe(false);
+
+    await act(async () => {
+      releaseB();
+      await heldB;
+    });
+    await act(async () => {
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
+  });
+
+  // #579 review r15, the exact reported interleaving: the flush registers on
+  // the in-flight write BEFORE a later Ctrl+S registers on the same promise.
+  // Ctrl+S saves unconditionally, so `unsavedDraft` is already false — the
+  // old seam therefore returned the moment the slot cleared, and the queued
+  // writer landed the previous version's text after the switch. Membership
+  // now starts at ENTRY and the barrier refuses anything arriving after the
+  // seam began, so there is no writer left to resume.
+  it("refuses a Ctrl+S that arrives after the flush began, with no draft pending", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    let releaseA!: () => void;
+    const heldA = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseA = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => heldA);
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    let flush: (() => Promise<void>) | null = null;
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        registerDraftFlush={(next: (() => Promise<void>) | null) => {
+          flush = next;
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    const editor = await screen.findByTestId(
+      "markdown-editor",
+      {},
+      { timeout: 5_000 },
+    );
+    await user.type(editor, "One");
+    // Autosave A issues and holds. It cleared `unsavedDraft` at issue time.
+    await waitFor(
+      () =>
+        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    // The seam starts first, then Ctrl+S — the reported order.
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    editor.focus();
+    await user.keyboard("{Control>}s{/Control}");
+
+    // MUTATION (barrier): drop the flushBarrier check from writeDraftNow.
+    // Ctrl+S joins the queue behind A, the seam's captured tail does not
+    // include it, and it lands the previous version's text after the switch.
+    await act(async () => {
+      releaseA();
+      await heldA;
+    });
+    await act(async () => {
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
+  // #579 review r9 + r15: a writer can arrive DURING the flush's own final
+  // write — typing (or Ctrl+S) mid-flush. Draining it was the wrong answer:
+  // its text is from the version the caller is about to leave, so landing it
+  // before the switch races the flush and landing it after IS the clobber.
+  // The barrier refuses it outright, and the draft stays unsaved for the
+  // reopen's capture to set aside.
+  it("refuses a writer that arrives during the flush instead of landing its stale text", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    let releaseF!: () => void;
+    const heldF = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseF = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    let releaseB!: () => void;
+    const heldB = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseB = () => resolve({ path: "a.md", recorded: true });
+      },
+    );
+    let writes = 0;
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => {
+      writes += 1;
+      return writes === 1 ? heldF : heldB;
+    });
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    let flush: (() => Promise<void>) | null = null;
+    const registerDraftFlush = (next: (() => Promise<void>) | null) => {
+      flush = next;
+    };
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        registerDraftFlush={registerDraftFlush}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(
+      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      "One",
+    );
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    // The flush itself issues the final write (the armed timer is cleared).
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    await waitFor(() =>
+      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+
+    // Mid-flush, the user types more: a new autosave arms and fires while the
+    // barrier is up.
+    await user.type(screen.getByTestId("markdown-editor"), "Two");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    // The flush's write lands. Nothing is queued behind it, so the seam
+    // returns with an EMPTY queue — the invariant the barrier exists for.
+    // MUTATION (barrier): drop the flushBarrier check from writeDraftNow.
+    // The mid-flush writer joins the queue, issues a second write, and lands
+    // the previous version's text.
+    await act(async () => {
+      releaseF();
+      await heldF;
+    });
+    await act(async () => {
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    void releaseB;
+    void heldB;
+  });
+
+  // #579 review r7: READ mode (a large, non-truncated document) edits title
+  // and properties without `editing` ever flipping, and a reopen can hand
+  // back a byte-identical body — the props.body sync effect then has no
+  // dependency to fire on, so the capture itself must hand the surface back
+  // or the set-aside edit keeps painting the view and rides into the next
+  // property save.
+  it("a reopen in read mode resets the document state the set-aside edit had painted", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    const bigBody = `# Plan\n\n${"word ".repeat(14_000)}\n`;
+    bridge.bridgeMock.readWorkspaceText.mockImplementation(async () => ({
+      text: bigBody,
+      truncated: false,
+    }));
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    // A read-mode title edit arms a draft; blur mirrors it into the input.
+    const title = await screen.findByTestId("page-title");
+    await user.type(title, "R");
+    await user.tab();
+    expect((title as HTMLInputElement).value).toBe("R");
+
+    // The version switch reopens the same content.
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={2} />,
+    );
+    await screen.findByTestId("orphaned-draft-notice");
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    // MUTATION (read-mode reset): drop the capture's setDraft/setSavedBody/
+    // latestDraft reset. The title keeps painting the set-aside edit and the
+    // next property save writes the set-aside document.
+    await waitFor(() =>
+      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+        "",
+      ),
+    );
+    await user.type(screen.getByTestId("page-title"), "New");
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalled(),
+      { timeout: 5_000 },
+    );
+    const writes = bridge.bridgeMock.writeWorkspaceText.mock
+      .calls as unknown as ReadonlyArray<[{ text: string }]>;
+    const written = writes.at(-1)![0];
+    expect(written.text).toContain("title: New");
+    expect(written.text).not.toContain("R");
+  });
+
+  // #579 review r5: a set-aside draft on a path whose read FAILS (a rename
+  // raced an I/O failure) must still be copyable — the error branch is a
+  // state the marker and close warning point into, so it must offer the
+  // actions they demand.
+  it("offers recovery on the failed-read branch", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    bridge.bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      throw Object.assign(new Error("EIO"), { code: "EIO" });
+    });
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    // MUTATION (error-branch render): drop {recoveryNotices} from the
+    // loading/error branch. The screen says only "Couldn't read this file"
+    // while the close warning demands actions that render nowhere.
+    await screen.findByText("Couldn't read this file.");
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Kept!"),
+    );
+  });
+
+  // #579 review P2 (engine half): a bound engine session's settled "Saved"
+  // must not outrank an unresolved set-aside edit — the edit is NOT in the
+  // document the engine settled.
+  it("shows recovery over a settled engine document until the draft is resolved", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    await armDraftThenReopen(user, bridge);
+
+    // The reopen resolves BOUND: the engine branch renders with the notice.
+    bridge.bind();
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("orphaned-draft-notice");
+
+    // MUTATION (engine chip): read `engine.saveState` directly instead of
+    // the recovery-aware state. The chip then says "Saved" while the notice
+    // says the set-aside edit is not in this document.
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe("recovery");
+    expect(screen.getByTestId("markdown-save-state").textContent).toBe(
+      "Edit set aside",
+    );
+
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe("saved");
+    expect(screen.getByTestId("markdown-save-state").textContent).toBe("Saved");
   });
 });

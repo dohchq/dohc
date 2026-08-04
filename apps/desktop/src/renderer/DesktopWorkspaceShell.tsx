@@ -76,6 +76,12 @@ import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import {
+  noteWorkspaceLabel,
+  remapOrphanedDraftPaths,
+  useOrphanedDraftPaths,
+} from "./orphanedDrafts";
+import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
 // chunk resolved, and every character typed in that gap went to whatever the
@@ -1296,6 +1302,19 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
+  // Set-aside recovery markers (#567): every path holding a draft marks its
+  // tab and Open Editors row — inactive tabs included, because the store is
+  // knowable for all of them (#579 review, r4). Deliberately NOT part of
+  // activeTabDirty, which drives save-first machinery that cannot save these
+  // (#579 review, P2). The store outlives tabs and version switches, so no
+  // save-first prompt is owed.
+  const recoveryPaths = useOrphanedDraftPaths(workspaceId);
+  // The global recovery list (the close dialog, above this shell) labels
+  // rows with the name the UI shows here — the raw id is a UUID (#579
+  // review, r10).
+  useEffect(() => {
+    noteWorkspaceLabel(workspaceId, workspaceName(props.workspace));
+  }, [workspaceId, props.workspace]);
   // Every workbench destination change invalidates an in-flight canonical DM
   // lookup. Kept beside the central mutateWb seam so file/graph/history/tab
   // navigation cannot be missed by a one-off opener.
@@ -1565,6 +1584,11 @@ export function DesktopWorkspaceShell(props: {
       flush();
     };
   }, [workspaceId]);
+
+  // The close warning for set-aside drafts lives ABOVE the error boundary
+  // (RecoveryCloseGuard in main.tsx, #579 review r5) — a guard here would
+  // unmount with a crashed shell and the crash screen's reload would destroy
+  // the drafts unannounced.
 
   // Latest-wins: fourteen call sites issue listings — mount, the watcher,
   // imports, restores, the share pull — and they can resolve out of order. An
@@ -2657,6 +2681,12 @@ export function DesktopWorkspaceShell(props: {
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
+      // Set-aside drafts key by path, so recovery follows the same projection
+      // as tabs and pins (#579 review, P1) — a rename must not strand the
+      // notice on the old path while the tab remaps to the new one.
+      remapOrphanedDraftPaths(workspaceId, (path) =>
+        projectTreePath(path, changes),
+      );
       const current = wbRef.current;
       const next = remapWorkbenchPaths(current, (path) =>
         projectTreePath(path, changes),
@@ -2668,7 +2698,7 @@ export function DesktopWorkspaceShell(props: {
         remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
       );
     },
-    [mutateWb],
+    [mutateWb, workspaceId],
   );
 
   // Share mounts: the registry is loaded once at boot, so the shell owns a
@@ -2872,7 +2902,10 @@ export function DesktopWorkspaceShell(props: {
   }, [reportShellError]);
   const installDesktopUpdate = useCallback(async () => {
     try {
-      const result = await bridge().installUpdate();
+      // Through the guard (#579 review, r8 + r10): with set-aside drafts
+      // present the recovery dialog opens INSTEAD of the one-shot install.
+      const result = await requestGuardedUpdateInstall();
+      if (result === null) return;
       if (!result.accepted) {
         reportShellError(
           "Could not install the update.",
@@ -3354,6 +3387,7 @@ export function DesktopWorkspaceShell(props: {
         activeTab={wb.activeTab}
         openTabs={wb.tabs}
         dirtyTab={activeTabDirty ? wb.activeTab : null}
+        recoveryPaths={recoveryPaths}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
@@ -3676,6 +3710,7 @@ export function DesktopWorkspaceShell(props: {
                   tabs={wb.tabs}
                   activeTab={wb.activeTab}
                   activeTabDirty={activeTabDirty}
+                  recoveryPaths={recoveryPaths}
                   onActivate={activateEditorTab}
                   onClose={closeFileTab}
                   onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
@@ -3711,6 +3746,7 @@ export function DesktopWorkspaceShell(props: {
               tabs={wb.tabs}
               activeTab={wb.activeTab}
               activeTabDirty={activeTabDirty}
+              recoveryPaths={recoveryPaths}
               onActivate={activateEditorTab}
               onClose={closeFileTab}
               onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
@@ -4027,6 +4063,7 @@ export function DesktopWorkspaceShell(props: {
       </div>
 
       <StatusBar
+        workspaceId={workspaceId}
         workspaceName={workspaceName(props.workspace)}
         syncStatus={syncStatus}
         agentActive={agentActive}

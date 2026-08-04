@@ -134,6 +134,13 @@ export function TryInVersionReviewCard(props: {
     // Undefined until the switch settles, because until then a failure leaves
     // nobody knowing what stuck.
     let landedOn: string | undefined;
+    // Did the switch IPC start? The failure path keys on this (#579 review,
+    // r7 + r11): main settles and closes live Y.Doc sessions before it sets
+    // the active version, so a switch that failed mid-way needs the
+    // announcement — but a failure BEFORE it (the pre-switch flush, the
+    // version lookup) changed nothing, and announcing would reopen the
+    // document and set its still-editable draft aside on the same version.
+    let switchIssued = false;
     try {
       await props.flushActiveDraft();
       if (token !== liveToken.current) return;
@@ -142,6 +149,7 @@ export function TryInVersionReviewCard(props: {
       const main = versions.versions.find((version) => version.kind === "main");
       if (!main) throw new Error("Main is not available right now.");
       if (versions.activeVersionId !== main.id) {
+        switchIssued = true;
         await bridge().switchWorkspaceVersion({ workspaceId, versionId: main.id });
         if (token !== liveToken.current) return;
       }
@@ -157,10 +165,20 @@ export function TryInVersionReviewCard(props: {
     } catch (error) {
       if (token !== liveToken.current) return;
       setInlineError(ipcErrorMessage(error, "Could not switch back to Main."));
-      // Make the shell reflect reality. A dismissal that failed AFTER the
-      // switch does not un-know where the workspace landed, so do not send the
-      // shell looking for what this call already proved.
-      props.onWorkspaceStateChanged(landedOn);
+      // Make the shell reflect reality — but only the reality this call may
+      // have CHANGED, and only ONCE (#579 review, r11 + r15).
+      //
+      // Already announced: the dismissal failed AFTER the announcement, which
+      // does not un-know where the workspace landed. Announcing again bumps
+      // the version epoch a SECOND time, and that same-version reopen would
+      // set aside a draft the user typed while the dismissal hung — pulling
+      // it out of the save pipeline for a failure that has nothing to do with
+      // the version.
+      if (landedOn !== undefined) return;
+      // Nothing was issued, so nothing changed.
+      if (!switchIssued) return;
+      // Mid-switch: the shell has to ask where it landed.
+      props.onWorkspaceStateChanged(undefined);
     } finally {
       if (token === liveToken.current) setBusy(null);
     }

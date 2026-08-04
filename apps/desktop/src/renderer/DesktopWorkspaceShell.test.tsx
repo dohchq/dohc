@@ -69,6 +69,8 @@ import {
   momentDiffTabPath,
   versionCompareTabPath,
 } from "./workbench/workbenchState";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
+import { RecoveryList } from "./RecoveryList";
 
 const WORKSPACE: Workspace = {
   workspaceId: "ws-shell-test",
@@ -537,6 +539,9 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+  // The set-aside drafts (#567) live in a module store on purpose; tests
+  // that seed it must not leak into each other.
+  resetOrphanedDrafts();
 });
 
 describe("targeted chat navigation", () => {
@@ -6665,5 +6670,420 @@ describe("unreadable workspace settings", () => {
     expect(await screen.findByTestId("notice-center")).toBeTruthy();
     expect(screen.queryByTestId("notice-workspace-settings-unreadable")).toBeNull();
     expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
+  });
+});
+
+// #567 / #579 review: set-aside draft recovery at the shell seams. The drafts
+// live in a module store keyed by workspace + path; the shell owns the two
+// integrations under test — path remapping on explorer renames, and the
+// distinction between recovery (dot, no save promise) and savable-dirty
+// (dot AND the version-switch save-first prompt).
+describe("set-aside draft recovery", () => {
+  it("keeps the notice reachable when the open file is renamed mid-notice", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    Object.assign(bridge, {
+      moveWorkspacePath: vi.fn(async () => undefined),
+    });
+    captureOrphanedDraft(WORKSPACE.workspaceId, "a.md", "Kept!");
+    renderShell(bridge);
+
+    // The notice is up on the open document.
+    await screen.findByTestId("view-markdown");
+    await screen.findByTestId("orphaned-draft-notice");
+
+    // Rename a.md through the explorer (F2 flow — the same seam every rename
+    // takes). The tab remaps to the new path.
+    const row = (await screen.findAllByTestId("tree-row")).find((candidate) =>
+      candidate.textContent?.includes("a.md"),
+    );
+    expect(row).toBeTruthy();
+    await user.click(row!);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed.md{Enter}");
+    await screen.findByTestId("tab-renamed.md");
+
+    // MUTATION (remap wiring): drop the remapOrphanedDraftPaths call from
+    // onExplorerPathsChanged. The store still keys by a.md, the tab is
+    // renamed.md, and the recovery text is unreachable from the UI.
+    expect(await screen.findByTestId("orphaned-draft-notice")).toBeTruthy();
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Kept!"),
+    );
+  });
+
+  it("marks the tab with recovery but lets a version switch proceed without a save promise", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "v2",
+          name: "Draft two",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: "main",
+    }));
+    captureOrphanedDraft(WORKSPACE.workspaceId, "a.md", "Kept!");
+    renderShell(bridge);
+
+    // The recovery marks the tab: an unsaved edit exists, and hiding that
+    // would be the engine-Saved lie one level up.
+    // MUTATION (dot): drop `|| activeTabRecovery` from the EditorTabs prop.
+    await screen.findByTestId("view-markdown");
+    await screen.findByTestId("tab-dirty");
+
+    // But it is NOT savable-dirty: switching versions must not prompt
+    // "dohc will save them" about a draft the flush cannot write — the store
+    // outlives the switch, so the switch just proceeds.
+    // MUTATION (lift): lift the recovery-derived state from MarkdownView's
+    // onSaveStateChange (the round-1 behavior). The save-first dialog then
+    // appears and the switch below never runs.
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+    await waitFor(() =>
+      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
+    );
+    expect(screen.queryByTestId("version-switch-save-confirm")).toBeNull();
+    // The notice survives the switch — recovery needed no save.
+    expect(screen.getByTestId("orphaned-draft-notice")).toBeTruthy();
+  });
+
+  // #579 review r4: only the mounted inspector can report savable-dirty, but
+  // recovery is knowable for EVERY tab — an inactive tab must keep its
+  // marker or the user forgets the draft exists.
+  it("marks an inactive tab that holds a set-aside draft", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["a.md", "b.md"],
+        activeTab: "a.md",
+      }),
+    );
+    captureOrphanedDraft(WORKSPACE.workspaceId, "b.md", "Kept!");
+    renderShell(bridge);
+
+    // MUTATION (per-tab set): key the marker off the active tab only. The
+    // inactive b.md loses its marker while its draft still exists.
+    const inactive = await screen.findByTestId("tab-b.md");
+    expect(within(inactive).getByTestId("tab-dirty")).toBeTruthy();
+    const active = screen.getByTestId("tab-a.md");
+    expect(within(active).queryByTestId("tab-dirty")).toBeNull();
+  });
+
+  // #579 review r10: the global recovery list labels rows with the NAME the
+  // UI shows for the workspace, not its UUID — the shell registers it.
+  it("registers the workspace's display name for the global recovery list", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    captureOrphanedDraft(WORKSPACE.workspaceId, "a.md", "Kept!");
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    // The same global list the close dialog embeds.
+    // MUTATION (label wiring): drop the shell's noteWorkspaceLabel effect —
+    // the row falls back to the raw workspace id.
+    render(<RecoveryList />);
+    expect(screen.getByTestId("recovery-list-workspace").textContent).toBe(
+      "personal",
+    );
+  });
+
+  // #579 review r7: a switch can fail AFTER its IPC started — main settles
+  // and closes live Y.Doc sessions before it sets the active version, so
+  // "the version never moved" does not mean "nothing happened". The reopen
+  // must fire, or the editor keeps a session main already closed and later
+  // edits vanish into swallowed IPC rejections.
+  it("reopens the document when a switch fails after its IPC started", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "v2",
+          name: "Draft two",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: "main",
+    }));
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      throw new Error("switch failed mid-way");
+    });
+    const openEngineYDocSession = vi.fn(async () => ({ available: false }));
+    Object.assign(bridge, { openEngineYDocSession });
+    renderShell(bridge);
+    await screen.findByTestId("view-markdown");
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+
+    // No pending draft, so the switch starts at once — and fails inside.
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+    await waitFor(() =>
+      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
+    );
+
+    // MUTATION (switch-issued key): suppress the announce whenever the
+    // version did not move, regardless of where the failure happened. The
+    // reopen below never comes and the closed-session write path is live.
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+  });
+
+  // #579 review r18: a SUCCESSFUL switch announces before its selector
+  // refresh, and announcing again after that refresh fails would bump the
+  // version epoch a second time — the same-version reopen moves whatever the
+  // user typed in between into set-aside recovery, which is in-memory only
+  // and dies on the next reload.
+  //
+  // What this test pins is the OUTCOME: one switch, one reopen. It does not
+  // pin the `announced` guard that also enforces it — removing that guard
+  // still passes.
+  //
+  // An earlier round claimed that was because a successful switch re-keys this
+  // panel. That was WRONG: `<VersionMenu>` is mounted without a key
+  // (DesktopWorkspaceShell.tsx), so it is not re-keyed, exactly as
+  // WorkspaceVersions.tsx:105-115 intends. What actually absorbs the second
+  // announcement is not established — measured on the mutated build, the
+  // catch path's recovery read DOES run (four listWorkspaceVersions calls) and
+  // the reopen count still stays at two.
+  //
+  // So: unpinned, and reachable under an order these tests do not produce —
+  // two liveness checks sit between the recovery read and the announcement,
+  // and passing them is a scheduling order, not a structural barrier. The
+  // guard stays because it makes the outcome hold regardless of that order.
+  it("reopens once when a successful switch's selector refresh fails", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    let switched = false;
+    let refreshFailed = false;
+    bridge.listWorkspaceVersions = vi.fn(async () => {
+      // The switch's OWN refresh fails; the catch path's recovery read then
+      // succeeds and reports the version the switch already announced. That
+      // is the shape that announces twice.
+      if (switched && !refreshFailed) {
+        refreshFailed = true;
+        throw new Error("selector refresh failed");
+      }
+      return {
+        versions: [
+          {
+            id: "main",
+            name: "Main",
+            kind: "main" as const,
+            createdAtMs: 0,
+            canMergeIntoMain: false,
+          },
+          {
+            id: "v2",
+            name: "Draft two",
+            kind: "named" as const,
+            createdAtMs: 1,
+            canMergeIntoMain: true,
+          },
+        ],
+        activeVersionId: switched ? "v2" : "main",
+      };
+    });
+    bridge.switchWorkspaceVersion = vi.fn(async () => {
+      switched = true;
+      return { activeVersionId: "v2", changedFileCount: 0 };
+    });
+    const openEngineYDocSession = vi.fn(async () => ({ available: false }));
+    Object.assign(bridge, { openEngineYDocSession });
+    renderShell(bridge);
+    await screen.findByTestId("view-markdown");
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+    await waitFor(() =>
+      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
+    );
+
+    // The switch landed, so the reopen it announced is the RIGHT one.
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(openEngineYDocSession).toHaveBeenCalledTimes(2);
+  });
+
+  // #579 review r5: a deleted file's tab is gone, so no inspector will ever
+  // render its notice again — the notice center is the path-independent
+  // surface where the draft stays reachable, Copy/Dismiss included.
+  it("keeps a deleted path's set-aside draft reachable from the notice center", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    // The path is in no listing and no tab: only the store knows it.
+    captureOrphanedDraft(WORKSPACE.workspaceId, "deleted/gone.md", "Kept!");
+    // Another workspace's draft must NOT leak into this workspace's notice
+    // center (#579 review, r6) — the close guard is the global surface.
+    captureOrphanedDraft("ws-somewhere-else", "private/notes.md", "Theirs");
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    // MUTATION (notice-center surface): drop the set-aside section from
+    // NoticeCenter. The draft exists, the close warning demands action, and
+    // no reachable surface offers it.
+    // MUTATION (workspace filter): drop the workspaceId filter — the other
+    // workspace's private path appears here and both assertions below fail.
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    const rows = screen.getAllByTestId("recovery-list-row");
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    expect(row.textContent).toContain("deleted/gone.md");
+    expect(row.textContent).not.toContain("private/notes.md");
+    // A workspace-scoped list needs no workspace label (#579 review, r7) —
+    // only the global close dialog carries them.
+    expect(within(row).queryByTestId("recovery-list-workspace")).toBeNull();
+    await user.click(screen.getByTestId("recovery-list-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Kept!"),
+    );
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull(),
+    );
+
+    // ...and with nothing left, the surface says so rather than implying a
+    // draft that is not there. This is the same state a reload, quit,
+    // update-restart or renderer crash leaves behind, because the store is
+    // in-memory by design.
+    expect(screen.getByTestId("notice-center").textContent).toContain(
+      "All clear",
+    );
+  });
+
+  // #579 adversarial review: the store dies on reload, quit, update-restart
+  // and renderer crash. That is a deliberate scope decision (#600 owns
+  // persistence), which makes it honest ONLY if the surface offering recovery
+  // says so. Nothing pinned that sentence, so it could have been edited away
+  // and left the design silently lossy.
+  it("discloses that set-aside edits live only in this window", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    captureOrphanedDraft(WORKSPACE.workspaceId, "notes/a.md", "Kept!");
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    // MUTATION (lifetime disclosure): drop the second paragraph from
+    // NoticeCenter's set-aside section. Recovery then looks durable, and the
+    // next reload deletes the user's only copy without ever having said it
+    // could.
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const section = await screen.findByTestId("notice-set-aside-edits");
+    expect(section.textContent).toContain("They live only in this window");
+    // ...and it names both ways out, so the warning offers what it demands.
+    expect(section.textContent).toContain("Copy an edit to keep its text");
+    expect(section.textContent).toContain("Dismiss deletes it for good");
+  });
+
+  // #579 review r4: a failed save-first flush aborts the switch, the
+  // workspace never leaves its version, and the recovery announcement must
+  // not fire — announcing a version change reopens the live document and
+  // sets the still-editable draft aside on the SAME version.
+  it("does not set the draft aside when a failed switch never left the version", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "v2",
+          name: "Draft two",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: "main",
+    }));
+    // The save-first flush fails: the autosave write rejects.
+    bridge.writeWorkspaceText = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    renderShell(bridge);
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(
+      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      "Draft!",
+    );
+    await screen.findByTestId("tab-dirty");
+
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+    await user.click(await screen.findByTestId("version-switch-save-continue"));
+
+    // The flush failed, the switch never started, the version never changed.
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalled(),
+    );
+    expect(bridge.switchWorkspaceVersion).not.toHaveBeenCalled();
+
+    // MUTATION (failed-switch announce): announce the unchanged version from
+    // performSwitch's catch. The bookkeeping reopen then sets the draft
+    // aside on the same version — the notice appears and the editor loses
+    // the text the user could just keep editing.
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    expect(
+      (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
+    ).toContain("Draft!");
   });
 });
