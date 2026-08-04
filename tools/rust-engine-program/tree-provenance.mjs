@@ -15,7 +15,9 @@
 // It does NOT make the tree watched. Nothing observes the interval between
 // two readings, so the stamp reports how many readings agreed rather than
 // claiming the run was clean throughout. A weaker true claim beats a stronger
-// unverifiable one.
+// unverifiable one. That residual — a change made and undone inside one step,
+// which no sample rate removes — is tracked in #644, with what closing it
+// would cost.
 //
 // The classifier is pure so it can be tested without a repository: the gate
 // reads the tree state, this decides what those states prove.
@@ -70,10 +72,10 @@ function nameSome(entries) {
  * the commit does not describe everything that ran.
  *
  * Two limits, and neither is assumed away. Nothing observes the tree BETWEEN
- * two readings, so a change made and undone inside one step is invisible;
- * that is why the stamp reports how many readings agreed rather than saying
- * the run was clean throughout. And a reading is a list of paths and their
- * status codes, not their contents, so a second edit to a path that was
+ * two readings, so a change made and undone inside one step is invisible
+ * (#644); that is why the stamp reports how many readings agreed rather than
+ * saying the run was clean throughout. And a reading is a list of paths and
+ * their status codes, not their contents, so a second edit to a path that was
  * already dirty leaves the reading identical — there the stamp already says
  * `dirty(N)`, which already says the commit does not describe what ran.
  *
