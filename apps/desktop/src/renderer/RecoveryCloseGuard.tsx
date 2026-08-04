@@ -2,10 +2,8 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import {
-  freezeOrphanedCaptures,
   orphanedDraftCount,
   orphanedDraftIds,
-  thawOrphanedCaptures,
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
@@ -117,18 +115,17 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   const bypassCloseGuard = useRef(false);
   const bypassRearmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The drafts the warning LISTED when the user confirmed. An approval covers
-  // exactly those (#579 review, r13) — never a draft a queued reopen sets
-  // aside afterwards, which the user was never shown and which the exit would
-  // destroy. The store is frozen for the same window, so this set can only
-  // shrink; the checks below still read the LIVE store, so a capture that ever
-  // slipped past the freeze stops the exit instead of riding a stale bypass.
+  // exactly those (#579 review, r13 + r14) — never a draft a queued reopen
+  // sets aside afterwards, which the user was never shown. Every gate below
+  // measures the LIVE store against this set instead of reading the bypass as
+  // "the user already decided", so a new draft stops the exit and comes back
+  // to the dialog with its text intact.
   const approvedDraftIds = useRef<ReadonlySet<number>>(new Set());
   const hasUnapprovedDrafts = () =>
     orphanedDraftIds().some((id) => !approvedDraftIds.current.has(id));
   const rearmGuard = () => {
     bypassCloseGuard.current = false;
     approvedDraftIds.current = new Set();
-    thawOrphanedCaptures();
     if (bypassRearmTimer.current) {
       clearTimeout(bypassRearmTimer.current);
       bypassRearmTimer.current = null;
@@ -170,7 +167,8 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // check still blocks the install. The answer is the LIVE store measured
       // against what the user approved (#579 review, r13), never a blanket
       // "the user already confirmed": a draft captured after the confirm was
-      // in no warning, and quitAndInstall is the last chance to stop.
+      // in no warning, and quitAndInstall is the last chance to stop. A
+      // refusal here is what brings the dialog back with that draft listed.
       unsubscribeRecoveryCheck = bridge().onRecoveryCheckRequested?.(
         (requestId) => {
           void bridge().answerRecoveryCheck({
@@ -277,6 +275,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   // Resume exactly what the user asked for: a requested
                   // reload, restart, or quit must not become a plain exit
                   // (#579 review, r7 + r8 + r10).
+                  const kind = closeWarning.kind;
                   const resume =
                     closeWarning.resume ??
                     (() => {
@@ -291,13 +290,13 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   // never unloads must not leave a later close unguarded.
                   //
                   // It is scoped to THIS LIST too (#579 review, r13): the user
-                  // approved losing the drafts the dialog just showed. Freeze
-                  // the store so a reopen queued behind this click cannot add
-                  // one more before the exit runs.
+                  // approved losing the drafts the dialog just showed, and a
+                  // reopen queued behind this click can still set one more
+                  // aside. That draft keeps its notice and its Copy button,
+                  // and the gates below refuse to exit over it.
                   approvedDraftIds.current = new Set(
                     liveDrafts.map((row) => row.draft.id),
                   );
-                  freezeOrphanedCaptures();
                   bypassCloseGuard.current = true;
                   if (bypassRearmTimer.current) {
                     clearTimeout(bypassRearmTimer.current);
@@ -307,7 +306,16 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     BYPASS_REARM_MS,
                   );
                   void resume().then((unloading) => {
-                    if (!unloading) rearmGuard();
+                    if (unloading) return;
+                    // The action did not unload. When a draft this approval
+                    // never covered is WHY — the boundary re-check refuses an
+                    // install for it — the user gets the decision back, now
+                    // over the full list (#579 review, r14). Any other
+                    // failure (an updater that is not ready) re-arms in
+                    // silence, exactly as before: nothing new is at stake.
+                    const uncovered = hasUnapprovedDrafts();
+                    rearmGuard();
+                    if (uncovered) setCloseWarning({ kind, resume });
                   });
                 }}
                 className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"

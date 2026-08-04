@@ -49,47 +49,16 @@ function scheduleNotify(): void {
   });
 }
 
-// An approval is only valid for the store state it was given (#579 review,
-// r13). The user confirms losing the edits the warning LISTED; between that
-// confirm and the destructive call the app is already exiting, so a reopen
-// that lands inside the gap must not add a draft nobody was shown. While
-// frozen the store REFUSES captures instead of taking them: a refused draft
-// stays in the editor, where the user can still see it, rather than moving
-// into a recovery promise the exit is about to break.
-let capturesFrozen = false;
-
-export function freezeOrphanedCaptures(): void {
-  if (capturesFrozen) return;
-  capturesFrozen = true;
-  scheduleNotify();
-}
-
-// Lifts the freeze when the exit is cancelled. Subscribers re-render so a
-// refused capture can run for real.
-export function thawOrphanedCaptures(): void {
-  if (!capturesFrozen) return;
-  capturesFrozen = false;
-  scheduleNotify();
-}
-
-export function useOrphanedCapturesFrozen(): boolean {
-  return useSyncExternalStore(subscribe, () => capturesFrozen);
-}
-
-// True when the draft was taken. FALSE means the store refused it and the
-// caller still owns the text.
 export function captureOrphanedDraft(
   workspaceId: string,
   path: string,
   text: string,
-): boolean {
-  if (capturesFrozen) return false;
+): void {
   const key = keyFor(workspaceId, path);
   // Append, never overwrite: a second reopen with the first notice still up
   // must not destroy the first draft (#579 review, P2).
   drafts.set(key, [...(drafts.get(key) ?? EMPTY), { id: nextId++, text }]);
   scheduleNotify();
-  return true;
 }
 
 export function dismissOrphanedDraft(
@@ -177,7 +146,8 @@ export function orphanedDraftCount(): number {
 
 // Every unresolved draft's id. The close guard compares this LIVE list against
 // the ids the user approved losing (#579 review, r13) — a count alone cannot
-// tell "the same two drafts" from "one dismissed and one new".
+// tell "the same two drafts" from "one dismissed and one new". A draft the
+// list does not contain was in no warning, and the exit stops for it.
 export function orphanedDraftIds(): readonly number[] {
   const ids: number[] = [];
   for (const kept of drafts.values()) {
@@ -241,6 +211,5 @@ export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
 export function resetOrphanedDrafts(): void {
   drafts.clear();
   workspaceLabels.clear();
-  capturesFrozen = false;
   scheduleNotify();
 }

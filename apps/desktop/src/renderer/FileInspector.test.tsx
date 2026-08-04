@@ -34,12 +34,7 @@ import {
   resolveWikilinkNavigation,
 } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
-import {
-  captureOrphanedDraft,
-  freezeOrphanedCaptures,
-  resetOrphanedDrafts,
-  thawOrphanedCaptures,
-} from "./orphanedDrafts";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
@@ -1721,115 +1716,6 @@ describe("markdown document opening state", () => {
           text: "# Plan\n\nBase paragraph.\nNew!",
         }),
       { timeout: 5_000 },
-    );
-  });
-
-  // #579 review r13: the store refuses captures while an approved exit is
-  // pending — the user agreed to lose a named list, and one more edit must not
-  // join it behind their back. A refused draft is not dropped: it stays in the
-  // editor, and no write path may take it, because it is still the previous
-  // version's text.
-  it("keeps a refused set-aside in the editor, and no write path takes it", async () => {
-    const user = userEvent.setup();
-    const bridge = makeHeldOpenBridge();
-    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
-    // The user confirmed "Restart anyway" a moment before this reopen.
-    freezeOrphanedCaptures();
-    const view = await armDraftThenReopen(user, bridge);
-    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
-
-    // The reopen resolves. The text the store refused is still on screen —
-    // the alternative is a silent disappearance with nothing to copy.
-    // MUTATION (refusal): ignore captureOrphanedDraft's answer and reset the
-    // surface anyway. The draft is consumed by a store that never took it and
-    // the editor comes back showing only the document.
-    bridge.answerNotEngineBacked();
-    await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
-    );
-    expect(
-      (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
-    ).toBe("# Plan\n\nBase paragraph.\nDraft!");
-
-    // MUTATION (held write paths): drop `|| setAsideRefused.current` from the
-    // unmount flush's guard. The reopen has landed, so `opening` no longer
-    // holds, and this unmount writes the previous version's draft onto the
-    // switched tree — the #567 clobber, restored.
-    view.unmount();
-    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
-  });
-
-  it("holds the armed save while a set-aside stays refused", async () => {
-    const user = userEvent.setup();
-    const bridge = makeHeldOpenBridge();
-    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
-    freezeOrphanedCaptures();
-    await armDraftThenReopen(user, bridge);
-    bridge.answerNotEngineBacked();
-    await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
-    );
-
-    // The reopen has landed, so `opening` no longer blocks anything. The
-    // editor still holds the PREVIOUS version's text, and every keystroke on
-    // top of it is still that text.
-    // MUTATION (armed save): drop `|| setAsideRefused.current` from
-    // writeDraftNow's guard. The 800ms timer lands the old version's draft on
-    // the switched tree.
-    await user.type(screen.getByTestId("markdown-editor"), "X");
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
-  });
-
-  it("refuses the shell's flush while a set-aside stays refused", async () => {
-    const user = userEvent.setup();
-    const bridge = makeHeldOpenBridge();
-    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
-    let flush: (() => Promise<void>) | null = null;
-    freezeOrphanedCaptures();
-    await armDraftThenReopen(user, bridge, {
-      registerDraftFlush: (next: (() => Promise<void>) | null) => {
-        flush = next;
-      },
-    });
-    bridge.answerNotEngineBacked();
-    await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
-    );
-    await waitFor(() => expect(flush).not.toBeNull());
-
-    // MUTATION (flush seam): drop `|| setAsideRefused.current` from the seam's
-    // guard AND from writeDraftNow's — the seam drains until the queue is
-    // empty, so removing only its own gate spins instead of writing. The
-    // shell's next version switch then flushes the previous version's text.
-    await act(async () => {
-      await flush!();
-    });
-    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
-  });
-
-  it("sets the refused draft aside once a cancelled exit lifts the freeze", async () => {
-    const user = userEvent.setup();
-    const bridge = makeHeldOpenBridge();
-    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
-    freezeOrphanedCaptures();
-    await armDraftThenReopen(user, bridge);
-    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
-
-    // The restart was refused, so the freeze lifts.
-    // MUTATION (retry): drop `|| (setAsideRefused.current && !capturesFrozen)`
-    // from the render-phase capture's condition. The reopen already consumed
-    // its transition, so nothing ever sets the draft aside and the notice
-    // below never appears.
-    act(() => {
-      thawOrphanedCaptures();
-    });
-    await screen.findByTestId("orphaned-draft-notice");
-    await user.click(screen.getByTestId("orphaned-draft-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(
-        "# Plan\n\nBase paragraph.\nDraft!",
-      ),
     );
   });
 
