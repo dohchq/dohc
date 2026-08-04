@@ -29,7 +29,13 @@ target-*/
 # One home for throwaway agent prompts, reports, and CLI logs. Anything worth
 # keeping goes to docs/ under a real name instead of sitting at the repo root.
 /.agent-artifacts/
-/codex-*.log
+# Every log a tool tees into the repo root, which is where the gates write
+# theirs: `pr-engine-gate.log`, the macOS evidence run's `macos-*.log`, and
+# `codex-*.log`. Ignoring the class keeps the gates out of the worktree they
+# measure — the provenance row fails a tree that changes mid-run, and a log
+# `tee` creates as the run starts would otherwise race that check or stamp a
+# pristine CI checkout `dirty(N)`.
+/*.log
 
 # Read-only external source clones for agent exploration.
 /.agent-sources/

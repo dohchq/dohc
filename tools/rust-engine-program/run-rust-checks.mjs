@@ -19,6 +19,17 @@
 // row is how the fault-injection tests went unrun for a month. Optional tools
 // may still skip.
 //
+// PROVENANCE: the run resolves `git rev-parse HEAD` before the first step and
+// again after the last, and stamps the commit into both the summary block and
+// the evidence line. A verdict that cannot name the tree it examined is not
+// evidence — two concurrent runs sharing one worktree produced PASS and FAIL
+// for the same commit, and neither log could say which tree it had read. HEAD
+// moving mid-run FAILS the verdict, and so does the worktree changing under
+// it; a tree already dirty when the run starts is recorded, not failed,
+// because running the gate over uncommitted work is the normal local loop and
+// a check that forbids it just gets removed. Recorded is the point: the
+// reader learns the sha does not describe everything that ran.
+//
 // Usage:
 //   node tools/rust-engine-program/run-rust-checks.mjs
 // Exit code is non-zero if any REQUIRED step fails (optional tool skips do not
@@ -29,6 +40,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { arch, platform, release } from "node:os";
 import { verifyNativeTarget } from "./native-target.mjs";
+import {
+  classifyTreeProvenance,
+  formatTreeState,
+  readTreeState,
+} from "./tree-provenance.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -43,6 +59,17 @@ function run(cmd) {
   });
   if (res.error) return { ok: false, code: null, error: res.error };
   return { ok: res.status === 0, code: res.status };
+}
+
+// The steps' own shell, so the provenance is read exactly where they ran.
+function captureGit(cmd) {
+  const res = spawnSync(cmd, {
+    cwd: repoRoot,
+    shell: true,
+    encoding: "utf8",
+  });
+  if (res.error || res.status !== 0) return null;
+  return res.stdout;
 }
 
 function toolAvailable(probe) {
@@ -91,9 +118,22 @@ const optional = [
 const results = [];
 let failed = false;
 
+// One reading per step boundary, not one before and one after the run. A tree
+// that changes and changes back reads identical at the two ends, so endpoints
+// alone certify an interval nothing observed.
+//
+// Each reading is a `git rev-parse` and a `git status --untracked-files=all`
+// through a shell. Measured on this repo on Windows, the slowest of the
+// platforms the gate runs on: ~0.9s per reading, ~9s for the ten a full run
+// takes — under a percent of a gate that spends twenty minutes in cargo.
+const readings = [{ step: "start", state: readTreeState(captureGit) }];
+const readTreeAfter = (step) =>
+  readings.push({ step, state: readTreeState(captureGit) });
+
 console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
-console.log(`repo: ${repoRoot}\n`);
+console.log(`repo: ${repoRoot}`);
+console.log(`tree at start: ${formatTreeState(readings[0].state)}\n`);
 
 console.log(`\n--- native target ---`);
 const native = verifyNativeTarget();
@@ -110,12 +150,16 @@ results.push({
   status: native.ok ? "PASS" : "FAIL",
   reason: native.ok ? undefined : native.reason,
 });
+readTreeAfter("native target");
 
 // An unverified host makes every later result unattributable, so nothing else
 // runs — and the expensive steps are the ones worth skipping.
 for (const step of native.ok ? required : []) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);
+  // Read as soon as the command returns, before anything else can touch the
+  // tree, so the interval this reading closes is the step's own.
+  readTreeAfter(step.name);
   if (r.code === step.skipCode) {
     // A skipped required step is a FAIL: stamping PASS with a row missing is
     // exactly the blind spot this gate exists to prevent.
@@ -144,13 +188,39 @@ for (const step of native.ok ? optional : []) {
     console.warn(
       `  ${step.name} not installed — SKIPPED (install with \`cargo install ${step.name} --locked\`).`,
     );
+    // Nothing ran, so there is no interval to attribute to this step and no
+    // reading to take: a boundary names the step that consumed the time
+    // before it.
     results.push({ name: step.name, status: "SKIP" });
     continue;
   }
   const r = run(step.cmd);
+  readTreeAfter(step.name);
   if (!r.ok) failed = true;
   results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL" });
 }
+
+// Provenance closes the run: the series of readings is judged, and a step
+// that straddled a change makes its own row and the rows after it
+// unattributable — those checks read two trees, so the verdict describes
+// neither.
+const provenance = classifyTreeProvenance(readings);
+if (provenance.status === "FAIL") failed = true;
+// First row: it frames every row under it.
+results.unshift({
+  name: "tree provenance",
+  status: provenance.status,
+  reason: provenance.reason,
+});
+
+// The stamp comes from the judgement, not from the opening reading: a run the
+// classifier refused must not print a commit it cannot stand behind.
+//
+// The commit rides the platform field rather than a sixth `|` column: the
+// evidence line's five fields are a parsed contract
+// (`require-ci-pass-verdict.mjs`), and a FAIL row's free-form reason can
+// already carry a `|`, so a trailing field could not be read back reliably.
+const treeStamp = provenance.stamp;
 
 // Summary + pasteable evidence line.
 const stamp = new Date().toISOString();
@@ -159,6 +229,7 @@ const summary = results
   .join(" ");
 
 console.log(`\n== summary ==`);
+console.log(`  tree ${treeStamp}`);
 for (const r of results) {
   console.log(
     `  ${r.status.padEnd(4)} ${r.name}${r.reason ? ` — ${r.reason}` : ""}`,
@@ -168,7 +239,7 @@ for (const r of results) {
 const verdict = failed ? "FAIL" : "PASS";
 console.log(`\nEVIDENCE (paste into EXECUTION_LOG.md):`);
 console.log(
-  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}) | ${verdict} | ${summary}`,
+  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, head ${treeStamp}) | ${verdict} | ${summary}`,
 );
 
 process.exit(failed ? 1 : 0);
