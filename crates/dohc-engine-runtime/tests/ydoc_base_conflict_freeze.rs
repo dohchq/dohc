@@ -663,3 +663,155 @@ async fn a_resolution_refuses_while_a_session_holds_the_document() {
         "the refused resolve left the review open"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
+    // The fourth face of the property: the reviewed OUTCOME is what ends up
+    // in the lineage. A deletion is the one resolution carrying no bytes to
+    // fold, so the write-only path skipped it — the conflict closed, the
+    // canonical rows survived, and the next `ydoc.update` found the path
+    // absent, accepted it, and projected the retained lineage back into a
+    // snapshot. The user's approved deletion was silently reversed.
+    //
+    // MUTATION: drop the `retire_ydoc_lineage_in_tx` call from the delete
+    // arm — the lineage rows survive and the assertions below fail.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let (key, _winner_base, _winner_doc, conflict_id) = {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        seed_divergent_base(&mut store)
+    };
+
+    // The incoming side is ABSENT: applying it is a deletion. This is the
+    // row shape a delete-side conflict carries.
+    {
+        let mut store = EngineStore::open(&db, 2).expect("reopen");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET incoming_exists = 0, \
+                     incoming_blob_sha256 = NULL, incoming_binary_sha256 = NULL \
+                     WHERE workspace_id = ?1 AND conflict_id = ?2",
+                    rusqlite::params![WS, conflict_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("make the incoming side absent");
+    }
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 10).expect("open actor").actor;
+    handle
+        .conflict_resolve(
+            ResolveTextConflict {
+                workspace_id: WS.to_owned(),
+                conflict_id,
+                resolution: ResolveConflictKind::ApplyIncoming,
+                object_id: "resolution-fresh-object".to_owned(),
+                write_moment_id: "m-resolve-del-write".to_owned(),
+                delete_moment_id: "m-resolve-del".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 11,
+                request_id: None,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the deletion resolves");
+    supervisor.close(&db).expect("close actor");
+
+    // Nothing is left that could project the deleted content back.
+    let store = EngineStore::open(&db, 12).expect("inspect");
+    let (updates, snapshots, markers): (i64, i64, i64) = store
+        .read_with(|conn| {
+            let count = |table: &str| -> Result<i64, dohc_engine_storage::StorageError> {
+                conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE workspace_id=?1 AND object_id=?2"),
+                    rusqlite::params![WS, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            };
+            Ok::<_, dohc_engine_storage::StorageError>((
+                count("ydoc_updates")?,
+                count("ydoc_snapshots")?,
+                count("ydoc_docs")?,
+            ))
+        })
+        .expect("lineage state");
+    assert_eq!(
+        (updates, snapshots, markers),
+        (0, 0, 0),
+        "the reviewed deletion retires the lineage: nothing can project it back"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idempotent_retry_survives_a_live_session() {
+    // The live-lease guard must not outrank the idempotency contract. A
+    // resolution commits, its response is lost, the user opens the resolved
+    // document, and the client retries the SAME request_id. The request
+    // ledger replays the recorded result and rewrites nothing — so refusing
+    // that retry for a live lease would turn a lost response into a
+    // different answer.
+    //
+    // MUTATION: drop `AND status='open'` from the guard's conflict lookup —
+    // the retry below fails with ydoc-session-live.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let (key, _winner_base, _winner_doc, conflict_id) = {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        seed_divergent_base(&mut store)
+    };
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 10).expect("open actor").actor;
+    let resolve = |leases: dohc_engine_collab::LeaseRegistry| {
+        let handle = handle.clone();
+        let conflict_id = conflict_id.clone();
+        async move {
+            handle
+                .conflict_resolve(
+                    ResolveTextConflict {
+                        workspace_id: WS.to_owned(),
+                        conflict_id,
+                        resolution: ResolveConflictKind::KeepCurrent,
+                        object_id: "resolution-fresh-object".to_owned(),
+                        write_moment_id: "m-retry-write".to_owned(),
+                        delete_moment_id: "m-retry-delete".to_owned(),
+                        metadata_origin: "test".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 11,
+                        request_id: Some("retry-request-1".to_owned()),
+                    },
+                    leases,
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+        }
+    };
+
+    // The first attempt commits; imagine its response never arrived.
+    resolve(dohc_engine_collab::LeaseRegistry::new())
+        .await
+        .expect("the resolution commits");
+
+    // The user reopens the resolved document, so a session now holds it.
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let _held = leases.acquire(&key).expect("hold the document live");
+
+    // The exact retry must replay, not refuse.
+    resolve(leases)
+        .await
+        .expect("an idempotent retry must survive a live session");
+    supervisor.close(&db).expect("close actor");
+}

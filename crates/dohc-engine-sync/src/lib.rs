@@ -74,7 +74,7 @@ pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
     LeaseProbe, NoLiveLeases, YdocApplyResult, YdocDrainResult, apply_ydoc_envelope,
     drain_deferred_ydoc_for_key, fold_resolution_into_ydoc_in_tx, open_sync_conflict_for_object,
-    project_and_write_in_tx,
+    project_and_write_in_tx, retire_ydoc_lineage_in_tx,
 };
 
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};

@@ -10686,9 +10686,16 @@ fn conflict_resolve_on_store(
     // Refuse rather than mutate underneath it. The caller closes or resyncs
     // the session and resolves again; `ydoc_resync_on_store` is the door
     // that makes that recoverable.
+    // `status='open'` is what stops this guard outranking the idempotency
+    // contract. A resolution that COMMITTED and lost its response is retried
+    // with the same `request_id`; the domain's request ledger replays the
+    // recorded result and rewrites nothing, so refusing that retry for a live
+    // lease would turn a lost response into a different answer. Only a
+    // resolution that has not committed can still rewrite a held document,
+    // and only that one is refused.
     let held_object: Option<(String, String)> = store.read_with(|conn| {
         conn.query_row(
-            "SELECT target_version_id, current_object_id FROM conflicts              WHERE workspace_id=?1 AND conflict_id=?2",
+            "SELECT target_version_id, current_object_id FROM conflicts              WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
             params![input.workspace_id, input.conflict_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
@@ -10715,6 +10722,19 @@ fn conflict_resolve_on_store(
                     &delete.object.object_id,
                 )
                 .map_err(search_domain)?;
+                // A deletion is a reviewed outcome carrying no bytes to
+                // fold, so the write path skipped it and the canonical rows
+                // survived — the next `ydoc.update` found the path absent,
+                // accepted it, and projected the retained lineage back into
+                // a snapshot, reversing the deletion the user approved.
+                // Retire the lineage so the reviewed outcome is what remains.
+                dohc_engine_sync::retire_ydoc_lineage_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &delete.before.version_id,
+                    &delete.object.object_id,
+                )
+                .map_err(map_fold_error)?;
             }
             if let Some(write) = result.write.as_ref()
                 && let Some(root_dir) = root_dir

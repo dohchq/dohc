@@ -484,6 +484,39 @@ fn open_sync_conflict_id(
     open_sync_conflict_for_object(conn, &key.workspace_id, &key.version_id, &key.object_id)
 }
 
+/// Retire an object's Y.Doc lineage because a resolution DELETED its path.
+///
+/// The fourth face of the property the fold serves: the reviewed outcome is
+/// the outcome that ends up in the lineage, permanently. A deletion is a
+/// reviewed outcome, and it is the one resolution that carries no bytes to
+/// fold — so the write-only path skipped it, the conflict closed, and the
+/// canonical rows survived. The next `ydoc.update` then found the path
+/// absent, accepted it, and projected the retained lineage straight back
+/// into a snapshot, silently reversing the deletion the user approved.
+///
+/// Retirement is the representation: the CRDT rows and the marker go, so
+/// nothing can project the deleted content again. A later base for this
+/// coordinate starts a fresh lineage, which is the correct reading of "this
+/// path was deleted and something new arrived".
+pub fn retire_ydoc_lineage_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<(), SyncError> {
+    for statement in [
+        "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        "DELETE FROM ydoc_deferred_updates \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        "DELETE FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+    ] {
+        tx.execute(statement, params![workspace_id, version_id, object_id])
+            .map_err(SyncError::persist)?;
+    }
+    Ok(())
+}
+
 /// Fold a conflict resolution's chosen text into the object's canonical
 /// Y.Doc, inside the resolution's own transaction.
 ///
