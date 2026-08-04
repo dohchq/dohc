@@ -19,6 +19,16 @@
 // row is how the fault-injection tests went unrun for a month. Optional tools
 // may still skip.
 //
+// PROVENANCE: the run resolves `git rev-parse HEAD` before the first step and
+// again after the last, and stamps the commit into both the summary block and
+// the evidence line. A verdict that cannot name the tree it examined is not
+// evidence — two concurrent runs sharing one worktree produced PASS and FAIL
+// for the same commit, and neither log could say which tree it had read. HEAD
+// moving mid-run FAILS the verdict; a dirty tree is recorded, not failed,
+// because running the gate over uncommitted work is the normal local loop and
+// a check that forbids it just gets removed. Recorded is the point: the
+// reader learns the sha does not describe everything that ran.
+//
 // Usage:
 //   node tools/rust-engine-program/run-rust-checks.mjs
 // Exit code is non-zero if any REQUIRED step fails (optional tool skips do not
@@ -29,6 +39,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { arch, platform, release } from "node:os";
 import { verifyNativeTarget } from "./native-target.mjs";
+import {
+  classifyTreeProvenance,
+  formatTreeStamp,
+  readTreeState,
+} from "./tree-provenance.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -43,6 +58,17 @@ function run(cmd) {
   });
   if (res.error) return { ok: false, code: null, error: res.error };
   return { ok: res.status === 0, code: res.status };
+}
+
+// The steps' own shell, so the provenance is read exactly where they ran.
+function captureGit(cmd) {
+  const res = spawnSync(cmd, {
+    cwd: repoRoot,
+    shell: true,
+    encoding: "utf8",
+  });
+  if (res.error || res.status !== 0) return null;
+  return res.stdout;
 }
 
 function toolAvailable(probe) {
@@ -91,9 +117,16 @@ const optional = [
 const results = [];
 let failed = false;
 
+const treeBefore = readTreeState(captureGit);
+
 console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
-console.log(`repo: ${repoRoot}\n`);
+console.log(`repo: ${repoRoot}`);
+console.log(
+  `tree: ${treeBefore.head ?? "UNVERIFIED"}${
+    treeBefore.dirtyPaths ? ` (dirty: ${treeBefore.dirtyPaths} path(s))` : ""
+  }\n`,
+);
 
 console.log(`\n--- native target ---`);
 const native = verifyNativeTarget();
@@ -152,6 +185,25 @@ for (const step of native.ok ? optional : []) {
   results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL" });
 }
 
+// Provenance closes the run: HEAD is read again, and a tree that moved makes
+// every row above unattributable — the checks straddled two commits, so the
+// verdict describes neither.
+const treeAfter = readTreeState(captureGit);
+const provenance = classifyTreeProvenance(treeBefore, treeAfter);
+if (provenance.status === "FAIL") failed = true;
+// First row: it frames every row under it.
+results.unshift({
+  name: "tree provenance",
+  status: provenance.status,
+  reason: provenance.reason,
+});
+
+// The commit rides the platform field rather than a sixth `|` column: the
+// evidence line's five fields are a parsed contract
+// (`require-ci-pass-verdict.mjs`), and a FAIL row's free-form reason can
+// already carry a `|`, so a trailing field could not be read back reliably.
+const treeStamp = formatTreeStamp(treeBefore);
+
 // Summary + pasteable evidence line.
 const stamp = new Date().toISOString();
 const summary = results
@@ -159,6 +211,7 @@ const summary = results
   .join(" ");
 
 console.log(`\n== summary ==`);
+console.log(`  tree ${treeStamp}`);
 for (const r of results) {
   console.log(
     `  ${r.status.padEnd(4)} ${r.name}${r.reason ? ` — ${r.reason}` : ""}`,
@@ -168,7 +221,7 @@ for (const r of results) {
 const verdict = failed ? "FAIL" : "PASS";
 console.log(`\nEVIDENCE (paste into EXECUTION_LOG.md):`);
 console.log(
-  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}) | ${verdict} | ${summary}`,
+  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, head ${treeStamp}) | ${verdict} | ${summary}`,
 );
 
 process.exit(failed ? 1 : 0);

@@ -4,6 +4,12 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const requiredSteps = [
+  // Without this row the log cannot say which tree produced it, and a run
+  // whose HEAD moved mid-way reports FAIL here rather than a green verdict
+  // over two commits. Requiring the row is what makes the provenance
+  // load-bearing: a log from a gate that never checked would otherwise read
+  // exactly as green as one that did.
+  "tree provenance",
   // Without this row the platform in the verdict line is Node's unverified
   // claim, which is what the line was before the gate asked rustc.
   "native target",

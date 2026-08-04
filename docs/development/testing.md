@@ -12,6 +12,11 @@ node tools/rust-engine-program/run-rust-checks.mjs
 Read the Rust gate’s `== summary ==` block. Its exit code alone is not the
 verdict.
 
+The block opens with the commit the run examined and whether the tree was
+dirty. Check it against the commit you meant to gate: a verdict that names a
+different tree describes different code. A run whose HEAD moved mid-way
+reports `tree provenance=FAIL`.
+
 ## Focused checks
 
 ```bash

@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
+import {
+  classifyTreeProvenance,
+  formatTreeStamp,
+  readTreeState,
+} from "../tools/rust-engine-program/tree-provenance.mjs";
 
 const workflow = await readFile(
   new URL("../.github/workflows/pr-checks.yml", import.meta.url),
@@ -11,7 +16,8 @@ const triggerBlock = workflow.slice(0, workflow.indexOf("\nconcurrency:"));
 
 const passVerdict =
   "- 2026-07-27T00:00:00.000Z | run-rust-checks | linux/x64 " +
-  "(rust cfg x86_64/linux/gnu) | PASS | " +
+  "(rust cfg x86_64/linux/gnu, head 1f47af31 clean) | PASS | " +
+  "tree provenance=PASS " +
   "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
   "build --workspace=PASS test --workspace=PASS test collab crash tier=PASS " +
   "cargo-deny=PASS cargo-audit=PASS";
@@ -31,6 +37,21 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
         passVerdict.replace("cargo-deny=PASS", "cargo-deny=SKIP"),
       ),
     /cargo-deny/,
+  );
+  // Two runs sharing one worktree produced PASS and FAIL for the same commit,
+  // and neither log could say which tree it read. A verdict without this row
+  // is from a gate that never checked; a FAIL here is a run whose HEAD moved
+  // mid-way, so its rows straddle two commits.
+  assert.throws(
+    () => requireCiPassVerdict(passVerdict.replace("tree provenance=PASS ", "")),
+    /tree provenance/,
+  );
+  assert.throws(
+    () =>
+      requireCiPassVerdict(
+        passVerdict.replace("tree provenance=PASS", "tree provenance=FAIL"),
+      ),
+    /tree provenance/,
   );
   // Drop this row and the platform in the verdict line is Node's unverified
   // claim again — a cross-compiled run recorded as native evidence.
@@ -111,8 +132,8 @@ test("the verdict is read from its own field, not found anywhere in the line", (
   // A failed run can quote `| PASS |` inside a step's reason, and the quote
   // does not split the line into more fields when it carries no outer spaces.
   const forged = passVerdict.replace(
-    "| PASS | native target=PASS",
-    "| FAIL | native target=PASS[the run before this one said x| PASS |y]",
+    "| PASS | tree provenance=PASS",
+    "| FAIL | tree provenance=PASS[the run before this one said x| PASS |y]",
   );
   assert.throws(
     () => requireCiPassVerdict(forged),
@@ -181,12 +202,15 @@ test("the gate name is required in its own field, not anywhere in the line", () 
 });
 
 test("the verdict line a real gate run printed passes as written", () => {
-  // Verbatim from C:/w/iss-nativeev-gate3.log, 2026-08-02 — a passing local
-  // run of tools/rust-engine-program/run-rust-checks.mjs. The parser has to
-  // read the names this producer emits, spaces, hyphens and all.
+  // Verbatim from a passing local run of
+  // tools/rust-engine-program/run-rust-checks.mjs, 2026-08-04, on the commit
+  // that added the provenance row. The parser has to read the names this
+  // producer emits, spaces, hyphens and all — including the head stamp the
+  // platform field now carries.
   const observed =
-    "- 2026-08-02T05:19:19.166Z | run-rust-checks | win32/x64 " +
-    "(rust cfg x86_64/windows/msvc) | PASS | native target=PASS " +
+    "- 2026-08-04T02:01:20.492Z | run-rust-checks | win32/x64 " +
+    "(rust cfg x86_64/windows/msvc, head 7f892132 clean) | PASS | " +
+    "tree provenance=PASS native target=PASS " +
     "fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
     "build --workspace=PASS test --workspace=PASS test collab crash tier=PASS " +
     "cargo-deny=PASS cargo-audit=PASS";
@@ -232,4 +256,58 @@ test("PR workflow is deliberately disabled: dispatch-only, decision documented",
   assert.doesNotMatch(triggerBlock, /^  merge_group:/m);
   // The disable must stay explained in the workflow itself.
   assert.match(workflow, /DISABLED ON PURPOSE \(2026-07-28\)/);
+});
+
+test("a run whose HEAD moved cannot claim either commit", () => {
+  // The failure this row exists for: two runs shared one worktree, and a
+  // `git checkout` moved the tree under the checks. Both logs looked like
+  // verdicts; neither described a commit.
+  const before = { head: "1f47af31ed00", dirtyPaths: 0 };
+  const after = { head: "700f1cfc3e00", dirtyPaths: 0 };
+  const moved = classifyTreeProvenance(before, after);
+  assert.equal(moved.status, "FAIL");
+  assert.match(moved.reason, /HEAD moved during the run/);
+  // Both commits are named: a reader must be able to see what it straddled.
+  assert.match(moved.reason, /1f47af31/);
+  assert.match(moved.reason, /700f1cfc/);
+
+  assert.equal(classifyTreeProvenance(before, before).status, "PASS");
+});
+
+test("a tree git cannot resolve fails rather than reading as green", () => {
+  const unknown = { head: null, dirtyPaths: null };
+  const known = { head: "1f47af31ed00", dirtyPaths: 0 };
+  assert.equal(classifyTreeProvenance(unknown, known).status, "FAIL");
+  assert.equal(classifyTreeProvenance(known, unknown).status, "FAIL");
+  assert.equal(formatTreeStamp(unknown), "UNVERIFIED");
+});
+
+test("a dirty tree is recorded, not failed", () => {
+  // Running the gate over uncommitted work is the normal local loop. Failing
+  // it would get the check removed; recording it tells the reader the commit
+  // does not describe everything that ran.
+  const dirty = { head: "1f47af31ed00", dirtyPaths: 3 };
+  assert.equal(classifyTreeProvenance(dirty, dirty).status, "PASS");
+  assert.equal(formatTreeStamp(dirty), "1f47af31 dirty(3)");
+  assert.equal(
+    formatTreeStamp({ head: "1f47af31ed00", dirtyPaths: 0 }),
+    "1f47af31 clean",
+  );
+});
+
+test("the tree state counts changed paths, and survives a silent git", () => {
+  const capture = (cmd) =>
+    cmd === "git rev-parse HEAD"
+      ? "1f47af31ed00\n"
+      : " M a.rs\n?? b.rs\n\n";
+  assert.deepEqual(readTreeState(capture), {
+    head: "1f47af31ed00",
+    dirtyPaths: 2,
+  });
+  // A repo that cannot answer must not read as a clean tree at an unknown
+  // commit — that is the shape of evidence with no subject.
+  assert.deepEqual(readTreeState(() => null), {
+    head: null,
+    dirtyPaths: null,
+  });
 });
