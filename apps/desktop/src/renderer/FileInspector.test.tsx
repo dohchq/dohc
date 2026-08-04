@@ -1450,6 +1450,16 @@ describe("markdown document opening state", () => {
     // The open answers: the session is live, and the SAME keystroke now goes
     // through it (the title is frontmatter in the canonical Y.Doc) instead of
     // to disk.
+    // `settle` is created INSIDE the openEngineYDocSession executor, but
+    // `opening` is derived during render (useEngineDoc.ts:189), so
+    // markdown-open-state is in the DOM one commit before the bridge is ever
+    // called. Resolving on that element and then calling settle?.(…) can
+    // silently no-op, and the test burns its whole window waiting for a state
+    // nobody moved -- #590 shape 2, the same trap as the source toggle below.
+    // Wait for the call that creates settle; never optional-chain it away.
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
     bind();
     await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
     await user.type(screen.getByTestId("page-title"), "Retitled");
@@ -1479,6 +1489,11 @@ describe("markdown document opening state", () => {
 
     // The same surface, one state later, does show it — so the absence above
     // was this branch refusing, not a chunk that never arrived.
+    // Wait for the call that creates `settle` (see the note above): the open
+    // state renders one commit before the bridge is asked.
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
     answerNotEngineBacked();
     await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
   });
@@ -1531,6 +1546,11 @@ describe("markdown document opening state", () => {
 
     // "Opening" is not "not engine-backed": an unflagged workspace answers
     // immediately and keeps its local autosave editor, undiminished.
+    // Wait for the call that creates `settle` (see the note above): the open
+    // state renders one commit before the bridge is asked.
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
     answerNotEngineBacked();
     await waitFor(() =>
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
