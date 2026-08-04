@@ -1108,14 +1108,14 @@ describe("mergeVersionIntoMain", () => {
     loopback.seedSettledText(WORKSPACE_ID, draftId, "plan.md", incomingBody);
 
     const merge = await engine.mergeVersionIntoMain(draftId);
-    expect(merge.conflicts).toHaveLength(1);
+    expect(merge.conflictCount).toBe(1);
 
     // Isolate the listing lane: the merge above also read this body for its
     // compare, and those reads must not vouch for this one.
     requests.length = 0;
-    const open = await engine.listOpenConflicts();
-    expect(open).toHaveLength(1);
-    const conflict = open[0]!;
+    const open = await engine.listOpenConflictsPage();
+    expect(open.conflicts).toHaveLength(1);
+    const conflict = open.conflicts[0]!;
     // The under-cap sides ride in band even on a degraded row.
     expect(conflict.base.text).toBe("base line\n");
     expect(conflict.current.text).toBe("current line\n");

@@ -1200,6 +1200,14 @@ fn map_domain(error: DomainError) -> SyncError {
         hard @ (DomainError::StateCorrupt { .. } | DomainError::Crypto(_)) => {
             SyncError::Storage(dohc_engine_storage::StorageError::corrupt_public(hard))
         }
+        // Named rather than folded into the generic reason. Not reachable
+        // from a peer today — `ReplicationEnvelope::validate` caps a payload
+        // at `MAX_PAYLOAD_JSON_BYTES`, thirty times inside the row budget —
+        // but `insert_text_conflict_if_absent` is a shared path, so the arm
+        // says which bound broke rather than "invalid".
+        DomainError::ConflictMetadataTooLarge { .. } => SyncError::InvalidInput {
+            reason: "replicated conflict metadata exceeds the conflicts.list row budget",
+        },
         _ => SyncError::InvalidInput {
             reason: "replicated conflict operation is invalid",
         },

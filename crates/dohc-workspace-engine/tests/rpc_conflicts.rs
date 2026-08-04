@@ -1382,63 +1382,165 @@ async fn over_frame_conflict_row_degrades_to_hydratable_metadata_instead_of_refu
     assert_eq!(egress.bytes, oversized.as_bytes());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn over_bound_conflict_metadata_is_refused_at_open_not_at_the_listing() {
-    // The probe vector from #603's review: metadata rides every listing row
-    // and is never withheld, so an 8.33 MB summary — inside the frame at
-    // OPEN — would land a row in the refusal window between
-    // CONFLICT_ROW_HARD_CAP_BYTES and the frame, reviving #537's failure via
-    // peer-supplied conflicts. `conflicts.open` now bounds it like its
-    // sibling write paths. MUTATION: drop `validate_metadata_fields` from
-    // `ConflictDto::into_domain` and the first open below succeeds.
-    let (_scratch, transport, handle, workspace_id) = fixture("metadata-window").await;
+/// The replicated shape of an open, which is NOT the RPC DTO's shape: a
+/// peer's sides carry `exists`/`path`/`contentKind`, never a nested snapshot
+/// (`dohc-engine-sync::conflict_apply::OpenPayload`). Built here so the test
+/// exercises the route a peer actually takes.
+fn replicated_open_envelope(workspace_id: &str, conflict_id: &str, summary: &str) -> Value {
+    let side = json!({
+        "exists": false,
+        "path": "notes/replicated.md",
+        "contentKind": "text",
+    });
+    json!({
+        "workspaceId": workspace_id,
+        "originId": "peer-over-budget",
+        "originSeq": 0,
+        "opKind": "conflict.open",
+        "payload": {
+            "id": conflict_id,
+            "workspaceId": workspace_id,
+            "path": "notes/replicated.md",
+            "targetVersionId": "main",
+            "sourceVersionId": "peer",
+            "createdAtMs": 9,
+            "updatedAtMs": 9,
+            "status": "open",
+            "chosenFrom": "current",
+            "metadata": { "origin": "sync", "summary": summary },
+            "base": side,
+            "current": side,
+            "incoming": side,
+        },
+        "recordedAtMs": 2_000,
+    })
+}
 
-    let mut oversized_summary = conflict_payload(&workspace_id, 0, "small body");
-    oversized_summary["conflict"]["metadata"]["summary"] = json!("m".repeat(8_330_000));
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_budget_conflict_metadata_is_refused_on_both_open_routes() {
+    // The window the review found: metadata rides every listing row and
+    // withholding cannot shrink it, so a conflict whose non-withheld strings
+    // outgrow one row would dead-end `conflicts.list` for every open conflict
+    // in the workspace. The bound lives at the shared pre-persistence path
+    // (`insert_text_conflict_if_absent`) because that is the ONLY place both
+    // open routes meet — the RPC DTO never sees a peer's open.
+    //
+    // MUTATION: delete the budget check in `insert_text_conflict_if_absent`
+    // and every open below succeeds.
+    let (_scratch, transport, handle, workspace_id) = fixture("metadata-budget").await;
+    let over_budget = "m".repeat(dohc_engine_domain::CONFLICT_METADATA_BUDGET_BYTES + 1);
+
+    // ROUTE 1: the local RPC. Its refusal carries the numbers.
+    let mut payload = conflict_payload(&workspace_id, 0, "small body");
+    payload["conflict"]["metadata"]["summary"] = json!(over_budget);
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(10, "conflicts.open", Some(handle.clone()), payload),
+        )
+        .await
+        .expect_err("an over-budget conflict summary is refused at open");
+    assert_eq!(refused.code, ErrorCode::PayloadTooLarge);
+    for needle in [
+        "CONFLICT_METADATA_BUDGET_BYTES".to_owned(),
+        dohc_engine_domain::CONFLICT_METADATA_BUDGET_BYTES.to_string(),
+        "encoded bytes".to_owned(),
+    ] {
+        assert!(
+            refused.message.contains(&needle),
+            "the refusal must name constraint, limit, unit and observed: {}",
+            refused.message
+        );
+    }
+
+    // ROUTE 2: a PEER's replicated open, which never passes through the RPC
+    // DTO above.
+    //
+    // A peer cannot reach the row budget at all, and this pins WHY:
+    // `ReplicationEnvelope::validate` caps every payload at
+    // `MAX_PAYLOAD_JSON_BYTES` (256 KiB) before any apply runs, which is some
+    // thirty times inside the row budget. So the two routes are covered by
+    // two different bounds, and this test holds BOTH ends — the shared budget
+    // for the local route, the payload cap for the replicated one — rather
+    // than assuming either covers the other.
     let refused = transport
         .call(
             RequestContext::unbounded(),
             request(
-                10,
+                11,
                 "conflicts.open",
                 Some(handle.clone()),
-                oversized_summary,
+                json!({
+                    "envelope": replicated_open_envelope(
+                        &workspace_id,
+                        "replicated-over-budget",
+                        &over_budget,
+                    )
+                }),
             ),
         )
         .await
-        .expect_err("an over-bound conflict summary is refused at open");
-    assert_eq!(refused.message, "invalid-metadata");
+        .expect_err("a replicated envelope past the payload cap is refused before apply");
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
 
-    // Per-side metadata takes the same bound.
-    let mut oversized_side = conflict_payload(&workspace_id, 1, "small body");
-    oversized_side["conflict"]["incoming"]["metadataSummary"] = json!("m".repeat(8_330_000));
+    // The largest conflict a peer CAN serve: a payload just inside the cap.
+    // It applies, and the listing still answers — which is the property the
+    // budget protects, reached here by the payload cap instead. MUTATION:
+    // narrowing the budget below this refuses it.
+    let peer_summary = "p".repeat(200 * 1024);
+    let applied = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.open",
+                Some(handle.clone()),
+                json!({
+                    "envelope": replicated_open_envelope(
+                        &workspace_id,
+                        "replicated-largest-legal",
+                        &peer_summary,
+                    )
+                }),
+            ),
+        )
+        .await
+        .expect("the largest legal replicated open applies");
+    assert_eq!(applied.result["status"], "applied");
+
+    // EVERY non-withheld string, not an enumerated subset: `metadata.origin`
+    // is persisted verbatim and serialized into every row, and no body
+    // withholding can shrink it.
+    let mut origin_payload = conflict_payload(&workspace_id, 2, "small body");
+    origin_payload["conflict"]["metadata"]["origin"] = json!(over_budget);
     let refused = transport
         .call(
             RequestContext::unbounded(),
-            request(11, "conflicts.open", Some(handle.clone()), oversized_side),
+            request(12, "conflicts.open", Some(handle.clone()), origin_payload),
         )
         .await
-        .expect_err("an over-bound side summary is refused at open");
-    assert_eq!(refused.message, "invalid-metadata");
+        .expect_err("an over-budget conflict origin is refused at open");
+    assert_eq!(refused.code, ErrorCode::PayloadTooLarge);
 
-    // So do the identifier strings a row carries un-withheld.
-    let mut oversized_id = conflict_payload(&workspace_id, 2, "small body");
-    oversized_id["conflict"]["current"]["snapshot"]["objectId"] = json!("i".repeat(8_330_000));
+    // A snapshot identifier is the same class.
+    let mut id_payload = conflict_payload(&workspace_id, 3, "small body");
+    id_payload["conflict"]["current"]["snapshot"]["objectId"] = json!(over_budget);
     let refused = transport
         .call(
             RequestContext::unbounded(),
-            request(12, "conflicts.open", Some(handle.clone()), oversized_id),
+            request(13, "conflicts.open", Some(handle.clone()), id_payload),
         )
         .await
-        .expect_err("an over-bound snapshot object id is refused at open");
-    assert_eq!(refused.message, "invalid-metadata");
+        .expect_err("an over-budget snapshot object id is refused at open");
+    assert_eq!(refused.code, ErrorCode::PayloadTooLarge);
 
-    // Nothing landed, so the listing still answers — the window is closed.
+    // Every refused open landed nothing, and the listing still answers — the
+    // one row present is the largest legal replicated open from above.
     let listed = transport
         .call(
             RequestContext::unbounded(),
             request(
-                13,
+                14,
                 "conflicts.list",
                 Some(handle),
                 json!({ "status": "open" }),
@@ -1446,12 +1548,192 @@ async fn over_bound_conflict_metadata_is_refused_at_open_not_at_the_listing() {
         )
         .await
         .expect("the listing survives every refused open");
+    let rows = listed.result["conflicts"]
+        .as_array()
+        .expect("conflict rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "replicated-largest-legal");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healthy_conflict_metadata_sits_far_inside_the_row_budget() {
+    // AGENTS.md: measure representative healthy work before adding a limit
+    // that rejects it. This is that measurement, executable, so a later
+    // narrowing of the budget fails HERE rather than on a user's workspace.
+    //
+    // Case 1: an ordinary conflict this repo's own paths produce. Case 2: the
+    // worst metadata a caller can legitimately supply — every free-form
+    // metadata field at the 16 KiB cap the sibling write paths enforce.
+    let (_scratch, transport, handle, workspace_id) = fixture("healthy-metadata").await;
+    seed_conflicts(&transport, &handle, &workspace_id, 1, "a routine body\n").await;
+    let listed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "conflicts.list",
+                Some(handle.clone()),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("list the ordinary conflict");
+    // What the row costs with its bodies removed — the quantity the budget
+    // bounds.
+    let mut degraded = listed.result["conflicts"][0].clone();
+    for side in ["base", "current", "incoming"] {
+        if let Some(snapshot) = degraded[side].get_mut("snapshot") {
+            snapshot["text"] = Value::Null;
+        }
+    }
+    let ordinary = serde_json::to_string(&degraded)
+        .expect("serialize degraded row")
+        .len();
     assert!(
-        listed.result["conflicts"]
-            .as_array()
-            .expect("conflict rows")
-            .is_empty()
+        ordinary < 4 * 1024,
+        "an ordinary conflict row costs {ordinary} bytes once its bodies are withheld"
     );
+
+    // The legitimate worst case: 16 KiB in each metadata field, on the
+    // conflict and on all three sides.
+    let field = "s".repeat(16 * 1024);
+    let mut maximal = conflict_payload(&workspace_id, 1, "a routine body\n");
+    maximal["conflict"]["metadata"]["summary"] = json!(field);
+    maximal["conflict"]["metadata"]["correlationId"] = json!(field);
+    for side in ["base", "current", "incoming"] {
+        maximal["conflict"][side]["metadataSummary"] = json!(field);
+        maximal["conflict"][side]["metadataCorrelationId"] = json!(field);
+    }
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(11, "conflicts.open", Some(handle.clone()), maximal),
+        )
+        .await
+        .expect("MUTATION: a budget under the measured healthy range refuses this");
+    assert_eq!(opened.result["inserted"], true);
+
+    // And it still lists, which is the property the budget exists to protect.
+    let listed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.list",
+                Some(handle),
+                json!({ "status": "open", "afterConflictId": "conflict-000" }),
+            ),
+        )
+        .await
+        .expect("the maximal-metadata conflict lists");
+    let mut maximal_row = listed.result["conflicts"][0].clone();
+    assert_eq!(maximal_row["id"], "conflict-001");
+    // Measured on the SAME quantity the budget bounds — the row with its
+    // bodies withheld — not on the full row, whose bodies the budget exempts.
+    for side in ["base", "current", "incoming"] {
+        if let Some(snapshot) = maximal_row[side].get_mut("snapshot") {
+            snapshot["text"] = Value::Null;
+        }
+    }
+    let maximal_cost = serde_json::to_string(&maximal_row)
+        .expect("serialize maximal row")
+        .len();
+    // The headroom the budget keeps over the worst healthy conflict, MEASURED
+    // rather than assumed: about 226 KiB against a budget of roughly 8.26 MB,
+    // some thirty-five times over. Asserted so a future narrowing of the
+    // budget has to confront the measurement here, not a user's workspace.
+    assert!(
+        maximal_cost * 30 < dohc_engine_domain::CONFLICT_METADATA_BUDGET_BYTES,
+        "the budget ({}) must stay far beyond the worst healthy conflict ({maximal_cost} bytes)",
+        dohc_engine_domain::CONFLICT_METADATA_BUDGET_BYTES
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn side_metadata_is_measured_at_the_two_copies_the_row_actually_carries() {
+    // A side's metadata pair is STORED once but SERVED twice: the load reads
+    // one column pair into both the side and its snapshot, so the listing row
+    // carries two copies. A pre-persistence measure that counts one copy is
+    // an under-estimate, and an under-estimate is the one direction this
+    // bound must never err in — it would admit exactly the unlistable row the
+    // budget exists to refuse.
+    //
+    // Sized to separate the two rules: six fields of 1 MB each is 6 MB
+    // counted once (inside the budget, so a one-copy measure ADMITS it) and
+    // 12 MB counted twice (past the budget, and past the row cap the row
+    // would actually have to fit).
+    //
+    // MUTATION: count `metadata_summary`/`metadata_correlation_id` once in
+    // `non_withheld_encoded_bytes` and this open succeeds, persisting a
+    // conflict whose row no listing can carry.
+    let (_scratch, transport, handle, workspace_id) = fixture("side-metadata-copies").await;
+    let field = "s".repeat(1_000_000);
+    let mut payload = conflict_payload(&workspace_id, 0, "small body");
+    for side in ["base", "current", "incoming"] {
+        payload["conflict"][side]["metadataSummary"] = json!(field);
+        payload["conflict"][side]["metadataCorrelationId"] = json!(field);
+    }
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(10, "conflicts.open", Some(handle), payload),
+        )
+        .await
+        .expect_err("six 1 MB side metadata fields serve as twelve, past the budget");
+    assert_eq!(refused.code, ErrorCode::PayloadTooLarge);
+    assert!(
+        refused.message.contains("12"),
+        "the refusal reports the observed size the ROW carries, not the size sent: {}",
+        refused.message
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fully_withheld_conflict_row_fits_the_structural_headroom() {
+    // Step 4 of the budget's derivation, executable: the budget is the row cap
+    // less a 64 KiB allowance for the row's own JSON scaffolding, so that
+    // allowance has to actually cover it. Measured on a row stripped of every
+    // free-form string, which leaves exactly the scaffolding — keys,
+    // punctuation, and the numbers beside each withheld body.
+    //
+    // MUTATION: drop `CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES` to 128 and this
+    // fails with the real figure.
+    let (_scratch, transport, handle, workspace_id) = fixture("structural-headroom").await;
+    seed_conflicts(&transport, &handle, &workspace_id, 1, "a routine body\n").await;
+    let listed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "conflicts.list",
+                Some(handle),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("list the probe conflict");
+    let mut skeleton = listed.result["conflicts"][0].clone();
+    blank_every_string(&mut skeleton);
+    let scaffolding = serde_json::to_string(&skeleton)
+        .expect("serialize the row skeleton")
+        .len();
+    assert!(
+        scaffolding < dohc_engine_domain::CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES,
+        "a conflict row's scaffolding is {scaffolding} bytes, which must stay inside the \
+         {} byte allowance the budget reserves for it",
+        dohc_engine_domain::CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES
+    );
+}
+
+/// Replace every string in a JSON value with the empty string, leaving the
+/// structure, keys and numbers intact.
+fn blank_every_string(value: &mut Value) {
+    match value {
+        Value::String(text) => text.clear(),
+        Value::Array(items) => items.iter_mut().for_each(blank_every_string),
+        Value::Object(fields) => fields.values_mut().for_each(blank_every_string),
+        _ => {}
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -7593,9 +7593,10 @@ impl EngineService {
             // The last line of defense, not dead code: withholding nulls only
             // the side BODIES, so this fires for a row still over the cap on
             // what remains — which is why every string that survives
-            // withholding is bounded at open (`ConflictDto::into_domain`).
-            // A named refusal beats an over-frame response the daemon's
-            // writer treats as fatal.
+            // withholding is bounded before persistence, at the shared path
+            // both open routes funnel through
+            // (`insert_text_conflict_if_absent`). A named refusal beats an
+            // over-frame response the daemon's writer treats as fatal.
             let observed = rows
                 .first()
                 .and_then(|row| serde_json::to_string(row).ok())
@@ -9657,16 +9658,11 @@ struct SnapshotDto {
 
 impl ConflictDto {
     fn into_domain(self) -> Result<TextConflict, WireError> {
-        // The bound its eleven sibling write paths already apply. Every one
-        // of these fields rides into a conflicts.list row and is never
-        // withheld, so without this an 8.33 MB summary lands a row in the
-        // refusal window between CONFLICT_ROW_HARD_CAP_BYTES and the frame —
-        // the exact failure #537 removed, surviving via peer-supplied
-        // conflicts.
-        validate_metadata_fields(
-            self.metadata.summary.as_deref(),
-            self.metadata.correlation_id.as_deref(),
-        )?;
+        // No size gate here on purpose. Everything a conflict row carries
+        // that withholding cannot shrink is bounded ONCE, at the shared
+        // pre-persistence path both conflict opens funnel through
+        // (`insert_text_conflict_if_absent`) — this DTO is only the local
+        // route, and a peer's replicated open never passes through it.
         Ok(TextConflict {
             conflict_id: self.id,
             workspace_id: self.workspace_id,
@@ -9706,11 +9702,6 @@ impl ConflictStateDto {
                 ));
             }
         };
-        // Per-side metadata takes the same bound as the top-level pair above.
-        validate_metadata_fields(
-            self.metadata_summary.as_deref(),
-            self.metadata_correlation_id.as_deref(),
-        )?;
         Ok(ConflictFileState {
             path: self.path,
             snapshot: self.snapshot.map(SnapshotDto::into_domain).transpose()?,
@@ -9732,11 +9723,6 @@ impl ConflictStateDto {
 
 impl SnapshotDto {
     fn into_domain(self) -> Result<TextSnapshot, WireError> {
-        // Identifier and origin strings ride the listing row beside the
-        // metadata pair, un-withheld, so they get the same 16 KiB bound. The
-        // body itself is exempt: `withhold_conflict_side_texts` handles it.
-        validate_metadata_fields(Some(&self.object_id), Some(&self.latest_moment_id))?;
-        validate_metadata_fields(Some(&self.metadata_origin), None)?;
         let actual = dohc_engine_storage::hex_sha256(self.text.as_bytes());
         if self.blob_sha256 != actual {
             return Err(wire(
@@ -11000,6 +10986,11 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if let RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) = &error {
         return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
     }
+    // Same reason: this refusal names a constraint, a limit, a unit and an
+    // observed size, and `wire` takes a static string.
+    if let RuntimeError::Domain(domain @ DomainError::ConflictMetadataTooLarge { .. }) = &error {
+        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
+    }
     if let RuntimeError::Domain(domain) = &error {
         let message = match domain {
             DomainError::IdempotencyKeyReuseMismatch => Some("idempotency-key-reuse-mismatch"),
@@ -11149,6 +11140,7 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
         | DomainError::IdempotencyKeyReuseMismatch
         | DomainError::SecretMomentNotFound
         | DomainError::Chat { .. } => ErrorCode::InvalidParams,
+        DomainError::ConflictMetadataTooLarge { .. } => ErrorCode::PayloadTooLarge,
         _ => ErrorCode::Internal,
     }
 }
@@ -11887,6 +11879,22 @@ mod tests {
                 "code": "invalid-input",
                 "reason": "conflict.open must describe an unresolved conflict"
             })
+        );
+    }
+
+    /// The domain bounds a conflict's non-withheld strings, but the cap it is
+    /// derived from lives here, on the transport. Neither crate can see the
+    /// other's constant, so the derivation is pinned by this guard: if the
+    /// frame, the envelope headroom or the scaffolding allowance moves and the
+    /// budget does not, a conflict the listing cannot carry becomes
+    /// persistable again.
+    #[test]
+    fn the_conflict_metadata_budget_stays_derived_from_the_row_cap() {
+        assert_eq!(
+            dohc_engine_domain::CONFLICT_METADATA_BUDGET_BYTES
+                + dohc_engine_domain::CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES,
+            CONFLICT_ROW_HARD_CAP_BYTES,
+            "the metadata budget plus its scaffolding allowance must equal the row cap"
         );
     }
 

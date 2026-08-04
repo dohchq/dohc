@@ -19,6 +19,132 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 /// plus one lookahead row used to decide whether a continuation exists.
 pub const TEXT_CONFLICT_QUERY_LIMIT: i64 = 17;
 
+/// The name a refusal reports, so an agent can grep the constant whose value
+/// the refusal quotes. Deliberately the budget's own name and not the
+/// `CONFLICT_ROW_HARD_CAP_BYTES` it derives from: naming the cap would send a
+/// reader to a constant holding a DIFFERENT number than the limit reported
+/// beside it.
+pub const CONFLICT_ROW_CONSTRAINT: &str = "CONFLICT_METADATA_BUDGET_BYTES";
+
+/// The most one conflict's NON-WITHHELD strings may occupy, JSON-encoded.
+///
+/// The rule this enforces: **anything that survives withholding is bounded
+/// before persistence.** A `conflicts.list` row withholds an over-cap side
+/// BODY and the caller hydrates it by digest, so a body never bounds the row.
+/// Everything else — ids, paths, digests, origins, metadata — rides the row
+/// whatever its size, and withholding cannot shrink it. Persisting more of it
+/// than one row can carry dead-ends the listing for every open conflict in
+/// the workspace, and only the peer that wrote it could ever repair that.
+///
+/// DERIVED from the wire contract, not chosen. This is a transport bound, so
+/// AGENTS.md's measurement rule does not govern it — it governs limits chosen
+/// to reject otherwise-valid work, and every byte past this one is work the
+/// listing provably cannot carry. The derivation, in full:
+///
+/// 1. `conflicts.list` admits a row of at most `CONFLICT_ROW_HARD_CAP_BYTES`
+///    (the negotiated 8 MiB control frame less 64 KiB of envelope headroom =
+///    8,323,072 bytes).
+/// 2. The only shrinking the listing can apply is withholding side BODIES.
+/// 3. So a row is listable exactly when its non-withheld strings, plus the
+///    row's own JSON scaffolding, fit that cap.
+/// 4. The scaffolding is a fixed schema — keys, punctuation, and the numbers
+///    beside each withheld body — so 64 KiB bounds it with room to spare.
+///    `a_fully_withheld_conflict_row_fits_the_structural_headroom` measures
+///    the real figure — 1,514 bytes — against that 64 KiB.
+///
+/// Hence `CONFLICT_ROW_HARD_CAP_BYTES - 64 KiB`. The sum below is of ENCODED
+/// lengths, and counts each string once per place the ROW carries it — a
+/// side's metadata pair is stored once but served twice, so it is counted
+/// twice — which is what makes the sum a true upper bound rather than an
+/// under-estimate. See
+/// `side_metadata_is_measured_at_the_two_copies_the_row_actually_carries`.
+///
+/// The bound therefore refuses only conflicts that would dead-end the listing,
+/// and accepts every conflict the listing can carry. Healthy work is nowhere
+/// near it: `healthy_conflict_metadata_sits_far_inside_the_row_budget`
+/// measures an ordinary conflict at under 4 KiB of non-withheld strings, and
+/// the legitimate worst case — every free-form metadata field at the 16 KiB
+/// cap the sibling write paths enforce, on the conflict and all three sides —
+/// at about 226 KiB, some thirty-five times inside this budget.
+///
+/// This is the shared pre-persistence path, so it covers all three routes
+/// that mint a conflict: the local RPC, a peer's replicated open, and the
+/// merge that raises one. A peer is in fact bounded EARLIER and far tighter —
+/// `ReplicationEnvelope::validate` caps a payload at `MAX_PAYLOAD_JSON_BYTES`
+/// (256 KiB) before any apply runs, thirty times inside this budget — so the
+/// replicated route cannot reach this bound today. It lives here anyway
+/// because one shared gate is what makes that a fact about the code rather
+/// than a coincidence between two independent limits.
+pub const CONFLICT_METADATA_BUDGET_BYTES: usize = (8 * 1024 * 1024) - (64 * 1024) - (64 * 1024);
+
+/// The scaffolding allowance inside the derivation above: what a fully
+/// withheld row spends on JSON keys, punctuation and numbers.
+pub const CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES: usize = 64 * 1024;
+
+/// How many bytes a string occupies once JSON-encoded, quotes included. The
+/// frame carries encoded bytes, so escaping is counted where the frame counts
+/// it: 4 MiB of newlines is 8 MiB on the wire.
+fn json_encoded_len(text: &str) -> usize {
+    text.bytes().fold(2, |len, byte| {
+        len + match byte {
+            b'"' | b'\\' | 0x08 | 0x09 | 0x0a | 0x0c | 0x0d => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        }
+    })
+}
+
+/// Every string a conflict row carries that withholding cannot shrink.
+///
+/// Exhaustive BY CONSTRUCTION over the wire shape (`conflict_json`,
+/// `conflict_state_json`, `snapshot_json`): the row's own free-form strings,
+/// each side's, and each snapshot's — minus `text`, the one field withholding
+/// removes. Enum-valued fields (`status`, `chosenFrom`, `resolution`,
+/// `contentKind`) are fixed strings and numbers are bounded by their type, so
+/// neither can grow a row.
+fn non_withheld_encoded_bytes(conflict: &TextConflict) -> usize {
+    fn optional(value: &Option<String>) -> usize {
+        value.as_deref().map_or(0, json_encoded_len)
+    }
+    let mut total = json_encoded_len(&conflict.conflict_id)
+        + json_encoded_len(&conflict.workspace_id)
+        + json_encoded_len(&conflict.path)
+        + json_encoded_len(&conflict.target_version_id)
+        + json_encoded_len(&conflict.source_version_id)
+        + json_encoded_len(&conflict.metadata.origin)
+        + optional(&conflict.metadata.summary)
+        + optional(&conflict.metadata.correlation_id);
+    for side in [&conflict.base, &conflict.current, &conflict.incoming] {
+        total += json_encoded_len(&side.path)
+            + optional(&side.binary_sha256)
+            + optional(&side.binary_object_id)
+            + optional(&side.binary_latest_moment_id)
+            // COUNTED TWICE, because the row carries them twice. A side's
+            // metadata pair is stored in one column pair
+            // (`conflict_side_columns`), and the load reads that same pair
+            // into BOTH the side and its snapshot — so one stored string is
+            // serialized into two places in every listing row. Counting it
+            // once here would make this an under-estimate of the row, which
+            // is the one direction a pre-persistence bound must never err in.
+            + 2 * optional(&side.metadata_summary)
+            + 2 * optional(&side.metadata_correlation_id);
+        if let Some(snapshot) = &side.snapshot {
+            // `snapshot.text` is deliberately absent: the listing withholds an
+            // over-cap body and the caller hydrates it by `blobSha256`.
+            total += json_encoded_len(&snapshot.workspace_id)
+                + json_encoded_len(&snapshot.version_id)
+                + json_encoded_len(&snapshot.object_id)
+                + json_encoded_len(&snapshot.path)
+                + json_encoded_len(&snapshot.blob_sha256)
+                + json_encoded_len(&snapshot.latest_moment_id)
+                + json_encoded_len(&snapshot.metadata_origin)
+                + optional(&snapshot.metadata_summary)
+                + optional(&snapshot.metadata_correlation_id);
+        }
+    }
+    total
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictContentKind {
     Text,
@@ -394,6 +520,21 @@ pub fn insert_text_conflict_if_absent(
     tx: &Transaction<'_>,
     conflict: &TextConflict,
 ) -> Result<bool, DomainError> {
+    // The shared pre-persistence gate. BOTH conflict opens funnel here — the
+    // local RPC through `conflict_open`, and a peer's through
+    // `conflict_apply::apply_open` — so the bound has one home and neither
+    // route can persist a conflict the listing could not then carry.
+    //
+    // Before the duplicate-id shortcut, for the same reason the side checks
+    // below are: a refusal must not be skippable by reusing an existing id.
+    let observed_bytes = non_withheld_encoded_bytes(conflict);
+    if observed_bytes > CONFLICT_METADATA_BUDGET_BYTES {
+        return Err(DomainError::ConflictMetadataTooLarge {
+            constraint: CONFLICT_ROW_CONSTRAINT,
+            limit_bytes: CONFLICT_METADATA_BUDGET_BYTES,
+            observed_bytes,
+        });
+    }
     // Validate sides BEFORE the duplicate-id shortcut: an invalid or
     // unhydrated binary side must fail closed even when it reuses an existing
     // conflict id, or a replicated open would be acked without ever passing
