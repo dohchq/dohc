@@ -67,6 +67,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { hasLegacyAppImport } from "./sourceScanner";
 
@@ -267,6 +268,38 @@ async function recordedChangeFields(
 
 function failureReason(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+// What happened to a path a tool was working on, once the work failed.
+// "unchanged" is a claim about ONE entry, so it needs the entry's identity,
+// not the presence of something at its name.
+type Aftermath = "unchanged" | "replaced" | "gone" | "unknown";
+
+// Is this the same entry the tool looked at before? ino + dev identify an
+// entry on every filesystem dohc ships to: NTFS supplies the file index and
+// the volume serial number, ext4 and APFS the inode and device. A filesystem
+// that cannot supply an inode reports 0, and then the question has no answer
+// here -- "unknown" rather than a guess, because a wrong "unchanged" is what
+// this comparison exists to prevent.
+function entryIdentity(before: Stats, after: Stats): Aftermath {
+  if (before.ino === 0 || after.ino === 0) return "unknown";
+  return before.ino === after.ino && before.dev === after.dev ? "unchanged" : "replaced";
+}
+
+// The half of a delete refusal that says what is true of the path now. The
+// agent's question is "can I retry?", so each case answers it.
+function deleteAftermath(path: string, aftermath: Aftermath): string {
+  switch (aftermath) {
+    case "unchanged":
+      return ` ${path} is unchanged.`;
+    case "replaced":
+      return ` Something else replaced ${path} while dohc worked. A retry deletes the replacement, not the entry you asked for.`;
+    case "gone":
+      return ` ${path} is no longer in this workspace: something else moved or deleted it.`;
+    case "unknown":
+      // The look itself failed. Claim nothing about the path.
+      return "";
+  }
 }
 
 // The errno code alone, for refusals that translate a filesystem failure. An
@@ -998,19 +1031,16 @@ export async function deleteWorkspacePath(
   // is gone would stop looking for it -- the same lie in the opposite
   // direction. Every other code keeps its own failure.
   const source = await lstat(resolved.absolute).then(
-    () => null,
-    (error: unknown) => errorCode(error),
+    (stats) => ({ found: true as const, stats }),
+    (error: unknown) => ({ found: false as const, code: errorCode(error) }),
   );
-  if (source === "ENOENT") {
+  if (!source.found) {
     return {
       ok: false as const,
-      reason: `dohc could not delete ${resolved.normalized}. Nothing is at that path in this workspace. List the folder to see what is there.`,
-    };
-  }
-  if (source !== null) {
-    return {
-      ok: false as const,
-      reason: `dohc could not delete ${resolved.normalized}. The check on that path failed (${source}). ${resolved.normalized} is unchanged.`,
+      reason:
+        source.code === "ENOENT"
+          ? `dohc could not delete ${resolved.normalized}. Nothing is at that path in this workspace. List the folder to see what is there.`
+          : `dohc could not delete ${resolved.normalized}. The check on that path failed (${source.code}). ${resolved.normalized} is unchanged.`,
     };
   }
   // The guard refusals name their own constraint (#585), so they pass through
@@ -1041,25 +1071,21 @@ export async function deleteWorkspacePath(
     // Name the outcome, not just the failure: an agent that cannot tell a
     // refused delete from a silent one cannot decide what to do next.
     //
-    // Look before claiming it. Nothing serializes these mutations, so the
-    // desktop, another MCP call, or any local process can move the path away
-    // between the check above and this rename -- then the rename fails ENOENT
-    // and the source really is gone. A blanket "is unchanged" would be this
-    // tool's own lie, one layer along. When the look itself fails, the state
-    // is unknown, so the message claims nothing about it.
+    // Look before claiming it, and compare IDENTITY, not presence. Nothing
+    // serializes these mutations, so between the check above and this rename
+    // the desktop, another MCP call, or any local process can move the path
+    // away or replace what is at it. "Something is here" does not support the
+    // sentence "note.md is unchanged" -- that is the same defect as the
+    // assertion it replaced, one level in.
     const after = await lstat(resolved.absolute).then(
-      () => "present" as const,
+      (stats) => entryIdentity(source.stats, stats),
       (probe: unknown) => (errorCode(probe) === "ENOENT" ? ("gone" as const) : ("unknown" as const)),
     );
-    const failed = `dohc could not delete ${resolved.normalized}. The move to the workspace trash failed (${errorCode(error)}).`;
     return {
       ok: false as const,
       reason:
-        after === "present"
-          ? `${failed} ${resolved.normalized} is unchanged.`
-          : after === "gone"
-            ? `${failed} ${resolved.normalized} is no longer in this workspace: something else moved or deleted it.`
-            : failed,
+        `dohc could not delete ${resolved.normalized}. The move to the workspace trash failed (${errorCode(error)}).` +
+        deleteAftermath(resolved.normalized, after),
     };
   }
   return {

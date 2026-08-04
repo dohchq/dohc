@@ -64,9 +64,15 @@ const lstatOverride = vi.hoisted(() => ({
   path: null as string | null,
   results: [] as (NodeJS.ErrnoException | null)[],
 }));
-// A path another process moves away between the check and the rename. The
-// removal happens inside the rename call, which is the race itself.
-const renameRace = vi.hoisted(() => ({ path: null as string | null }));
+// A path another process changes between the check and the rename. It happens
+// inside the rename call, which is the race itself. `replaceWith` names an
+// entry to move ON TOP of the path -- a real second file, so the replacement
+// carries its own inode and no test depends on a deleted one not being reused.
+// Without it the path is simply removed.
+const renameRace = vi.hoisted(() => ({
+  path: null as string | null,
+  replaceWith: null as string | null,
+}));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -83,8 +89,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       to: Parameters<typeof actual.rename>[1],
     ) => {
       if (renameRace.path === String(from)) {
+        const replaceWith = renameRace.replaceWith;
         renameRace.path = null;
-        await actual.rm(from);
+        renameRace.replaceWith = null;
+        if (replaceWith) await actual.rename(replaceWith, from);
+        else await actual.rm(from);
       }
       return actual.rename(from, to);
     },
@@ -581,6 +590,45 @@ describe("mcp tool path containment", () => {
         renameRace.path = null;
       }
       await expect(readFile(join(ctx.root, "note.md"), "utf8")).rejects.toThrow();
+    });
+  });
+
+  // The look has to compare IDENTITY, not presence. A racing process can
+  // REPLACE the path rather than empty it, and then something is at the name
+  // while the entry the agent asked about is gone. Presence would answer "is
+  // unchanged" -- the same false reassurance, one level in.
+  it("does not call a replaced path unchanged", async () => {
+    await withWorkspace(async (ctx) => {
+      const uuid = "0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10";
+      const now = 1785780488421;
+      uuidOverride.value = uuid;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+      try {
+        await writeFile(join(ctx.root, "note.md"), "the entry the agent asked about");
+        await writeFile(join(ctx.root, "replacement.md"), "a different entry entirely");
+        // A directory at the destination makes the rename fail; the race moves
+        // a second, real file onto the source while that happens.
+        const trashDir = join(ctx.root, ".dohc", "trash");
+        await mkdir(trashDir, { recursive: true });
+        await mkdir(join(trashDir, `${now}-${uuid}-note.md`));
+        renameRace.path = join(ctx.root, "note.md");
+        renameRace.replaceWith = join(ctx.root, "replacement.md");
+
+        const result = await deleteWorkspacePath(ctx, { path: "note.md" });
+        expect(refusalReason(result)).toMatch(
+          /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. Something else replaced note\.md while dohc worked\. A retry deletes the replacement, not the entry you asked for\.$/,
+        );
+        // Something IS at the path -- which is exactly why presence could not
+        // answer this -- and it is not what the agent asked to delete.
+        expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe(
+          "a different entry entirely",
+        );
+      } finally {
+        clock.mockRestore();
+        uuidOverride.value = null;
+        renameRace.path = null;
+        renameRace.replaceWith = null;
+      }
     });
   });
 
