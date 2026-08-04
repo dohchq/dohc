@@ -7428,6 +7428,152 @@ fn a_fold_that_cannot_reproduce_the_choice_refuses_instead_of_diverging() {
 }
 
 #[test]
+fn recounting_a_malformed_redelivery_returns_zero_instead_of_wedging() {
+    // A malformed `ydoc.update` is refused and ACKED. If the process then
+    // crashes before the relay cursor commits, the next pull replays that
+    // coordinate as `Skipped` and asks the recount helper about it. Decoding
+    // the payload again returned InvalidInput and aborted the whole pull, so
+    // every retry wedged on an operation already durably handled — the
+    // coordinate can never be got past.
+    //
+    // The decision record is keyed by the ENVELOPE coordinate and needs no
+    // payload, so absence reads as zero.
+    //
+    // MUTATION: reparse the payload in `redelivered_conflicts_opened` — this
+    // returns Err and the assertion below fails.
+    let (_scratch, _path, engine) = store();
+    let malformed = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({ "versionId": 5, "not": "a ydoc.update payload" }),
+    );
+    assert_eq!(
+        crate::router::redelivered_conflicts_opened(&engine, &malformed)
+            .expect("a malformed redelivery must recount as zero, not abort the pull"),
+        0
+    );
+}
+
+#[test]
+fn a_resolution_over_an_incomplete_lineage_refuses() {
+    // ONE property with the orientation fix: the reviewed bytes are the
+    // bytes that end up in the lineage, permanently.
+    //
+    // An out-of-order cross-origin update is appended to `ydoc_updates`
+    // while its predecessor is missing, and `apply_ydoc_envelope` skips its
+    // projection for exactly that reason. Resolving over that document
+    // reviews a PARTIAL lineage: when the predecessor lands it integrates
+    // the unseen update and projects it through a review gate that has
+    // already closed, changing the approved head with no second review.
+    //
+    // The deferred-queue check one guard above cannot see this — those rows
+    // were never applied at all, while these are already in the lineage.
+    // Two different records of "not whole yet", which is how consulting one
+    // of them missed the other.
+    //
+    // MUTATION: delete the `has_pending_dependencies()` guard in
+    // `fold_resolution_into_ydoc_in_tx` — the fold succeeds over the partial
+    // document and this refusal assertion fails.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-partial',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-partial").expect("key");
+
+    // A claimed lineage, so the fold reaches its completeness check.
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "base text");
+    let base_sha = engine
+        .put_binary_blob(&base_doc.encode_full_state())
+        .expect("base blob");
+    apply_ydoc_envelope(
+        &mut engine,
+        &envelope(
+            "peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-partial",
+                "path": "notes/partial.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": base_sha,
+                "isBaseState": true
+            }),
+        ),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base claims");
+
+    // A THIRD origin's dependent update lands without its predecessor: it is
+    // durably in `ydoc_updates` and the doc reports a missing dependency.
+    let dep_doc = dohc_engine_collab::Ydoc::wire();
+    let _predecessor = dep_doc.plaintext_insert(0, "dep base");
+    let dependent = dep_doc.plaintext_insert(0, "more ");
+    let dependent_sha = engine.put_binary_blob(&dependent).expect("dependent blob");
+    apply_ydoc_envelope(
+        &mut engine,
+        &envelope(
+            "dep-peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-partial",
+                "path": "notes/partial.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": dependent_sha,
+                "isBaseState": false
+            }),
+        ),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("the dependent update parks in the lineage");
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load")
+        .expect("lineage");
+    assert!(
+        persisted.doc.has_pending_dependencies(),
+        "precondition: the lineage is genuinely incomplete"
+    );
+
+    let refused = engine.write_with(&NoFaults, |tx| {
+        crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+            tx,
+            "ws",
+            "main",
+            "object-partial",
+            "notes/partial.md",
+            "the reviewer's choice",
+            1_700,
+        )
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(SyncError::InvalidInput {
+                reason: "ydoc-incomplete-lineage"
+            })
+        ),
+        "a resolution over a partial lineage must refuse: {refused:?}"
+    );
+}
+
+#[test]
 fn a_fold_the_parser_can_reproduce_still_commits() {
     // The guard must not refuse everything: a rich choice the parser does
     // model folds and journals as before.

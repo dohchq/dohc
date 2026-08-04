@@ -541,6 +541,26 @@ pub fn fold_resolution_into_ydoc_in_tx(
         return Ok(());
     }
     let doc = dohc_engine_collab::load_doc_in_tx(tx, &key).map_err(map_collab_hard_error)?;
+    // THE PROPERTY BOTH GUARDS SERVE: the reviewed bytes are the bytes that
+    // end up in the lineage, permanently. A resolution may only run over a
+    // document that is WHOLE.
+    //
+    // "Not whole yet" is recorded in two different places, and consulting
+    // one of them is how this was missed. `ydoc_deferred_updates` holds
+    // coordinates acked but never applied (checked above). This checks the
+    // other: an out-of-order cross-origin update ALREADY appended to
+    // `ydoc_updates` whose predecessor has not arrived. `apply_ydoc_envelope`
+    // skips its projection for exactly this reason, so resolving here would
+    // review a partial document — and when the predecessor lands it
+    // integrates the unseen update and projects it through a review gate
+    // that has already closed, changing the approved head with no second
+    // review. Sourced from the same predicate the apply path uses, so the
+    // two cannot drift apart again.
+    if doc.has_pending_dependencies() {
+        return Err(SyncError::InvalidInput {
+            reason: "ydoc-incomplete-lineage",
+        });
+    }
     let projection = doc
         .project(marker.content_kind)
         .map_err(|_| SyncError::InvalidInput {

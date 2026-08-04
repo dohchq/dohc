@@ -3571,6 +3571,27 @@ fn main() {}
     }
 
     #[test]
+    fn an_ordered_list_ordinal_at_the_integer_ceiling_does_not_overflow() {
+        // A parsed ordinal can be i64::MAX, and the successor it implies
+        // cannot be represented: unchecked `+ 1` panics the workspace actor
+        // in debug and test builds, and wraps in release, where the wrapped
+        // value then mis-parses every following line. A resolution body is
+        // user-supplied text, so this is reachable from a tiny input.
+        //
+        // MUTATION: restore `Some(start + 1)` — this test panics with
+        // 'attempt to add with overflow'.
+        let doc = Ydoc::wire();
+        let chosen = format!("{}. item\n\nafter", i64::MAX);
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen);
+        let projected = doc.project(ContentKind::Richdoc).expect("projection");
+        assert!(
+            projected.markdown.contains("item") && projected.markdown.contains("after"),
+            "the list ends where no successor exists and the rest still parses: {}",
+            projected.markdown
+        );
+    }
+
+    #[test]
     fn a_fold_within_the_quote_budget_roundtrips_byte_exactly() {
         // MUTATION: lower QUOTE_FOLD_MAX_DEPTH below 100 — the 100-level arm
         // overflows into escaped paragraph text and this fails. The bound's
