@@ -509,5 +509,30 @@ One size question is open too. #549 — the base inherits `MAX_YDOC_UPDATE_BYTES
 a cap written for a single update, so a document past 5 MiB of Y.Doc state
 cannot originate and its edits fail.
 
+**One open item is not dormant. #558 — the gate reads past contact, and it
+never reads false again.** `workspace_replicates_with_relay_in_tx` asks whether
+a durable relay position exists, and nothing deletes one: `recover_origin` is
+the only deleter and it re-inserts a row in the same transaction. No
+disable-sync path exists in the desktop at all. So the gate keeps answering
+`true` after the user signs out, after a token expires, and after the recorded
+remote stops matching the signed-in account — and every later rich `.md` edit
+promotes a private lineage to `Replicated`. A replicated lineage never prunes
+on close, and its deltas queue in `replication_log` for whoever binds the
+workspace next. The desktop can already tell bound-and-credentialed from
+historically-contacted (`workspaceRemoteMatchesCredentials`, in
+`apps/desktop/src/workspaces/chatRelayIdentity.ts`). The engine has no durable
+record of that answer, and no way to be told it changed.
+
+This one is a limitation, not a gap in an unbuilt feature: it conflicts with
+the AGENTS.md invariant that every reversible state change needs a visible
+reverse path. It is accepted only until that path exists. Closing it needs a
+durable, revocable record of current enrolment — the same record that closes
+the enrolment window documented on the predicate — and a decision about the
+lineages already promoted. `emit_outbound` reads the marker alone
+(`regime == Replicated && base_claimed`), so revoking the gate stops new
+promotions and does not stop an existing lineage from journaling. Whether those
+lineages demote or freeze is a base-claim question, and #547's arbitration
+context governs it.
+
 Do not treat #378 as the end of replicated rich documents. It is the first of
 four steps.
