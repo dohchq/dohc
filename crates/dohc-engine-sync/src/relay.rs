@@ -1467,6 +1467,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         .map(BlobContent::Text)
                         .map_err(|_| RelayError::BlobInvalid)?,
                     BlobKind::Binary => BlobContent::Binary(response.bytes.clone()),
+                    BlobKind::Ydoc => BlobContent::Ydoc(response.bytes.clone()),
                 };
                 match hydrate_blob_content(
                     store,
@@ -1566,11 +1567,10 @@ fn collect_blob_refs(
                 }
             }
             "ydoc.update" => {
-                insert_optional_ref(
-                    &mut refs,
-                    op.payload.get("updateBlobSha256"),
-                    BlobKind::Binary,
-                )?;
+                // Its OWN kind, not `Binary`: a Y.Doc delta or full-state base
+                // rides the collab layer's measured payload cap, never the
+                // captured-file cap (#549).
+                insert_optional_ref(&mut refs, op.payload.get("updateBlobSha256"), BlobKind::Ydoc)?;
             }
             "secret.file.put" => {
                 insert_optional_ref(
@@ -1658,7 +1658,7 @@ fn local_blob_bytes(
                 }
                 Ok(Some(bytes))
             }
-            BlobKind::Binary => {
+            BlobKind::Binary | BlobKind::Ydoc => {
                 let row = conn
                     .query_row(
                         "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",
@@ -1670,8 +1670,13 @@ fn local_blob_bytes(
                 let Some((byte_length, bytes)) = row else {
                     return Ok(None);
                 };
+                // The ceiling comes from the REFERENCED kind, never a literal.
+                // A restated number here read a Y.Doc base against the
+                // captured-file cap and called a valid oversized blob
+                // `BlobInvalid` — the wrong constraint and the wrong error
+                // (#549).
                 if usize::try_from(byte_length).ok() != Some(bytes.len())
-                    || bytes.len() > 5 * 1024 * 1024
+                    || bytes.len() > blob_ceiling(kind).1
                     || hex_sha256(&bytes) != sha256
                 {
                     return Err(SyncError::BlobInvalid);
@@ -1711,7 +1716,7 @@ fn local_blob_present(
         .read_with(|conn| {
             let table = match kind {
                 BlobKind::Text => "blobs",
-                BlobKind::Binary => "binary_blobs",
+                BlobKind::Binary | BlobKind::Ydoc => "binary_blobs",
             };
             conn.query_row(
                 &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE sha256=?1)"),

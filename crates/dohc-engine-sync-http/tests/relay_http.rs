@@ -1508,3 +1508,38 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
         "the refusal must not name the text ceiling"
     );
 }
+
+/// The relay stores what the engine may send. Both numbers are hand-written,
+/// in different languages, with no shared source — so raising the engine's
+/// widest ingest ceiling past the relay's transport cap would compile, pass
+/// every Rust test, and then fail at runtime with a 413 the sender cannot
+/// anticipate. #549 raised that ceiling for Y.Doc payloads, which is exactly
+/// the change that could cross it.
+///
+/// MUTATION: lower `MAX_BLOB_BYTES` in `services/sync-relay/src/server.ts`
+/// below `MAX_INGEST_BLOB_BYTES` and this fails, naming both values.
+#[test]
+fn the_relay_transport_cap_covers_the_widest_engine_ingest_ceiling() {
+    const RELAY_SERVER_TS: &str = include_str!("../../../services/sync-relay/src/server.ts");
+    let declaration = RELAY_SERVER_TS
+        .lines()
+        .find_map(|line| line.strip_prefix("export const MAX_BLOB_BYTES = "))
+        .expect("services/sync-relay/src/server.ts no longer declares MAX_BLOB_BYTES");
+    let relay_cap: usize = declaration
+        .trim_end_matches(';')
+        .split('*')
+        .map(|factor| {
+            factor
+                .trim()
+                .parse::<usize>()
+                .expect("MAX_BLOB_BYTES is a product of integer literals")
+        })
+        .product();
+    assert!(
+        relay_cap >= dohc_engine_sync::MAX_INGEST_BLOB_BYTES,
+        "the relay caps a blob body at {relay_cap} bytes, under the engine's \
+         widest ingest ceiling MAX_INGEST_BLOB_BYTES ({} bytes): a payload the \
+         engine accepts would be refused 413 on push",
+        dohc_engine_sync::MAX_INGEST_BLOB_BYTES
+    );
+}
