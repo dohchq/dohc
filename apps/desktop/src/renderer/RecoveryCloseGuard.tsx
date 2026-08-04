@@ -19,7 +19,7 @@ type UnloadKind = "close" | "reload" | "update" | "quit";
 // update installs are decided before quitAndInstall is ever called — neither
 // uses this slot.
 type PendingUnload = {
-  kind: "reload" | "update";
+  kind: "reload" | "update" | "quit";
   // Re-runs the blocked action. Resolves TRUE when the action was accepted
   // and an unload should follow, FALSE when it failed without unloading —
   // the guard re-arms itself on false (#579 review, r9).
@@ -60,6 +60,24 @@ export function requestGuardedReload(): void {
 // INSTEAD of the install, whose confirm makes the one and only call.
 // Returns null when the dialog took over — the caller's own flow ends there.
 export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult | null> {
+  // A restart already staged cannot be staged again — quitAndInstall's latch
+  // is one-shot. It is not spent, though: what remains is the quit it would
+  // have made, so a second Restart finishes THAT (#579 review, r17). This is
+  // what makes the late warning's "Go back" a real reverse path instead of a
+  // button that quietly strands the update for the rest of the run.
+  if (installStaged) {
+    if (orphanedDraftCount() > 0 && openRecoveryWarning !== null) {
+      openRecoveryWarning({
+        kind: "update",
+        resume: () => resumeExit("update"),
+      });
+      return null;
+    }
+    await resumeExit("update");
+    // No new action result: nothing was installed, the app is on its way out,
+    // and the callers' own flow ends on null.
+    return null;
+  }
   if (orphanedDraftCount() === 0 || openRecoveryWarning === null) {
     return beginInstall();
   }
@@ -68,6 +86,30 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult 
     resume: () => beginInstall().then((result) => result.accepted, () => false),
   });
   return null;
+}
+
+// Resumes an exit main has already approved, re-claiming the intent each
+// attempt so a draft captured before THIS attempt's unload still produces a
+// warning that names the right action (#579 review, r16 + r17).
+function resumeExit(kind: "update" | "quit"): Promise<boolean> {
+  pendingUnload = { kind, resume: () => resumeExit(kind) };
+  return bridge()
+    .resumeQuit()
+    .then(
+      () => true,
+      () => false,
+    );
+}
+
+// True once quitAndInstall has been called for this app run.
+let installStaged = false;
+
+// Test seam: this module's state is deliberately app-run scoped, so suites
+// reset it between tests instead of leaking a staged restart or an unclaimed
+// intent into the next one.
+export function resetGuardedExits(): void {
+  pendingUnload = null;
+  installStaged = false;
 }
 
 // The install's own exit runs through beforeunload like any other unload, and
@@ -83,13 +125,7 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult 
 function beginInstall(): Promise<UpdateActionResult> {
   const attempt: PendingUnload = {
     kind: "update",
-    resume: () =>
-      bridge()
-        .resumeQuit()
-        .then(
-          () => true,
-          () => false,
-        ),
+    resume: () => resumeExit("update"),
   };
   pendingUnload = attempt;
   const forget = () => {
@@ -101,7 +137,8 @@ function beginInstall(): Promise<UpdateActionResult> {
     .installUpdate()
     .then(
       (result) => {
-        if (!result.accepted) forget();
+        if (result.accepted) installStaged = true;
+        else forget();
         return result;
       },
       (error: unknown) => {
@@ -214,20 +251,17 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     // main's hung-renderer fail-safe never fires for a live renderer.
     const unsubscribeQuit = bridge().onQuitRequested(() => {
       if (!hasUnapprovedDrafts()) {
-        void bridge().resumeQuit();
+        // Claim the intent BEFORE resuming (#579 review, r17). Answering
+        // clear does not end the story: a queued reopen can still capture a
+        // draft between this answer and the quit's own beforeunload, and the
+        // warning that blocks it there must resume the QUIT. Falling back to
+        // window.close() would leave the process running on macOS, and with
+        // agent dispatch still alive.
+        void resumeExit("quit");
         return;
       }
       void bridge().holdQuit();
-      setCloseWarning({
-        kind: "quit",
-        resume: () =>
-          bridge()
-            .resumeQuit()
-            .then(
-              () => true,
-              () => false,
-            ),
-      });
+      setCloseWarning({ kind: "quit", resume: () => resumeExit("quit") });
     });
     // Registered LAST, so a preload that fails the contract above leaves no
     // listener and no opener behind — a half-installed guard is worse than

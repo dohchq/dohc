@@ -317,6 +317,30 @@ describe("publicUpdateState", () => {
     });
   });
 
+  // #579 review r17: quitAndInstall's latch never clears, so gating install on
+  // it stranded a ready update for the rest of the run whenever the restart
+  // was interrupted — a recovery warning whose "Go back" had nothing to go
+  // back to. The restart is not lost; it is finishable by quitting.
+  it("keeps a STAGED restart offerable while blocking a new check", () => {
+    const checking = transition(initialUpdateState, { type: "check" });
+    const ready = transition(checking, { type: "downloaded", version: "1.0.1" });
+
+    // MUTATION (staged restart offerable): gate canInstall on installInFlight
+    // again. The Restart button disappears for the rest of the app run.
+    expect(
+      publicUpdateState(ready, {
+        currentVersion: "1.0.0",
+        channel: "latest",
+        installInFlight: true,
+      }),
+    ).toMatchObject({
+      status: "ready",
+      canInstall: true,
+      // ...but staging is done, so there is nothing to re-check for.
+      canCheck: false,
+    });
+  });
+
   it("keeps checks available after retryable error and offline states", () => {
     expect(
       publicUpdateState(transition(initialUpdateState, { type: "error", message: "boom" }), {

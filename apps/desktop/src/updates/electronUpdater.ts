@@ -115,7 +115,13 @@ export function publicUpdateState(
       state.status === "up-to-date" ||
       state.status === "offline" ||
       state.status === "error");
-  const canInstall = !options.installInFlight && state.status === "ready";
+  // A STAGED restart is still offerable (#579 review, r17). `installInFlight`
+  // latches once quitAndInstall runs and never clears, so gating on it stranded
+  // the update for the rest of the run whenever the restart was interrupted —
+  // a late recovery warning whose "Go back" then had nothing to go back to.
+  // The restart is not lost: electron-updater installs it on the next quit,
+  // and the renderer finishes the staged one by resuming that quit.
+  const canInstall = state.status === "ready";
   return {
     status: state.status,
     message: state.message,

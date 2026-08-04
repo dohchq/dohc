@@ -13,6 +13,7 @@ import { AppErrorBoundary } from "./ErrorBoundary";
 import {
   RecoveryCloseGuard,
   requestGuardedUpdateInstall,
+  resetGuardedExits,
 } from "./RecoveryCloseGuard";
 import {
   captureOrphanedDraft,
@@ -45,6 +46,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetGuardedExits();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   resetOrphanedDrafts();
@@ -643,6 +645,109 @@ describe("RecoveryCloseGuard", () => {
     await waitFor(() => expect(harness.resumeQuit).toHaveBeenCalledTimes(1));
     expect(closeSpy).not.toHaveBeenCalled();
     expect(harness.installUpdate).toHaveBeenCalledTimes(1);
+    closeSpy.mockRestore();
+  });
+
+  // #579 review r17: a draft appearing after main's recovery check opens the
+  // late warning, and "Go back" saves the text — but quitAndInstall has
+  // already run by then. The restart must stay finishable, or Go back is a
+  // reverse path that reverses nothing and the update strands for the run.
+  it("finishes a staged restart on the next Restart instead of re-installing", async () => {
+    const user = userEvent.setup();
+    let reopened = false;
+    const harness = confirmedRestartHarness({
+      onInstall: () => {
+        if (reopened) return;
+        reopened = true;
+        captureOrphanedDraft("ws-1", "b.md", "Typed in the gap");
+      },
+    });
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await harness.ready();
+
+    await requestGuardedUpdateInstall();
+    await screen.findByTestId("recovery-close-warning");
+    await user.click(screen.getByTestId("recovery-close-anyway"));
+    await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(1));
+
+    // The late draft blocks the install's own exit, and the user goes back to
+    // save it. quitAndInstall's latch is spent.
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    await user.click(await screen.findByTestId("recovery-close-goback"));
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+
+    // They copy the text, resolve the drafts, and ask to restart again.
+    resetOrphanedDrafts();
+    // MUTATION (staged restart): drop the installStaged branch from
+    // requestGuardedUpdateInstall. The second Restart calls installUpdate
+    // again, the spent latch refuses it, and no restart ever happens.
+    await requestGuardedUpdateInstall();
+    await waitFor(() => expect(harness.resumeQuit).toHaveBeenCalledTimes(1));
+    expect(harness.installUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  // #579 review r17: answering the quit ask "clear" does not end the story. A
+  // queued reopen can still capture a draft before the quit's own unload, and
+  // the warning that blocks it must resume the QUIT — window.close() leaves
+  // the process running on macOS and with agent dispatch alive.
+  it("keeps a native quit's intent through a draft captured after the clear answer", async () => {
+    const user = userEvent.setup();
+    let quitListener: (() => void) | null = null;
+    const resumeQuit = vi.fn(async () => undefined);
+    const holdQuit = vi.fn(async () => undefined);
+    stubBridge({
+      holdQuit,
+      resumeQuit,
+      onQuitRequested: (listener: () => void) => {
+        quitListener = listener;
+        return () => {
+          quitListener = null;
+        };
+      },
+    });
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    await waitFor(() => expect(quitListener).not.toBeNull());
+
+    // Nothing set aside: the renderer answers clear and main starts quitting.
+    act(() => {
+      quitListener?.();
+    });
+    await waitFor(() => expect(resumeQuit).toHaveBeenCalledTimes(1));
+    expect(holdQuit).not.toHaveBeenCalled();
+
+    // A queued reopen lands before the quit's beforeunload.
+    captureOrphanedDraft("ws-1", "a.md", "Typed in the gap");
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+
+    // MUTATION (quit intent): stop claiming pendingUnload before resumeQuit.
+    // The warning degrades to "Close", and confirming calls window.close() —
+    // which does not quit on macOS.
+    expect(screen.getByTestId("recovery-close-anyway").textContent).toBe(
+      "Quit anyway",
+    );
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    await user.click(screen.getByTestId("recovery-close-anyway"));
+    await waitFor(() => expect(resumeQuit).toHaveBeenCalledTimes(2));
+    expect(closeSpy).not.toHaveBeenCalled();
     closeSpy.mockRestore();
   });
 
