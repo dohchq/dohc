@@ -2412,6 +2412,7 @@ async function lockedRebindCapture(prefix: string) {
     closeSettleFailure: null as Error | null,
     journal: [] as Uint8Array[],
     settleCalls: [] as number[],
+    closeCalls: [] as number[],
     settledMarkdowns: [] as string[],
     generation: 0,
     generationOptions: [] as EngineYdocProviderSessionOptions[],
@@ -2468,6 +2469,7 @@ async function lockedRebindCapture(prefix: string) {
         return { kind: "merged", markdown } as const;
       },
       async close(closeOptions) {
+        state.closeCalls.push(gen);
         if (state.closeFailure) throw state.closeFailure;
         if (closeOptions?.settle === false) return;
         // The pre-close settle, same contract as settleNow: refuses while
@@ -3033,17 +3035,166 @@ it("a failed release keeps the debt instead of dropping it", async () => {
       { timeout: 15_000 },
     )
     .not.toHaveLength(0);
-  const attemptsAtFailure = state.settleCalls.length;
+  const closesAtFailure = state.closeCalls.length;
+  const generationAtFailure = state.generation;
 
   // THE proof of retention: with the debt dropped, nothing would ever run
-  // again. It is retained, so attempts keep coming — and once the release
-  // works, one of them completes and the ladder stops.
+  // again. It is retained, so attempts keep coming — and #595 round 9:
+  // they retry the RETAINED session's own close. The daemon reinserted
+  // that session and kept its lease, so opening a fresh one would be
+  // refused ydoc-session-busy forever; a growing generation count here
+  // would mean exactly that bug.
   await expect
-    .poll(() => state.settleCalls.length, { timeout: 15_000 })
-    .toBeGreaterThan(attemptsAtFailure);
+    .poll(() => state.closeCalls.length, { timeout: 15_000 })
+    .toBeGreaterThan(closesAtFailure);
+  expect(state.generation).toBe(generationAtFailure);
   state.closeFailure = null;
   await expect
     .poll(() => state.settledMarkdowns.length, { timeout: 15_000 })
     .toBeGreaterThan(0);
   await capture.stop();
 }, 25_000);
+
+
+it("a directory move drains a detached debt under its prefix", async () => {
+  // #595 round 9: beginFileRename serves directory moves too, so a debt for
+  // `dir/note.md` rides a move of `dir`. Left behind, its delayed payment
+  // reopens the moved-from path and recreates the tree the user just moved
+  // away. The endpoint scan is prefix-based, like the delete seam's.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-dirmove-drain-",
+  );
+  await mkdir(join(rootPath, "dir"), { recursive: true });
+  await writeFile(join(rootPath, "dir", "note.md"), "stale artifact\n", "utf8");
+  const session = await capture.openYDocSession({
+    path: "dir/note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "moved edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The lock releases; the user moves the whole directory.
+  state.locked = false;
+  const finish = await capture.beginFileRename("dir", "moved");
+  // The descendant's debt was paid BEFORE the move proceeded.
+  expect(state.settledMarkdowns).toEqual(["moved edit"]);
+  await finish(true).catch(() => undefined);
+  await capture.stop();
+}, 20_000);
+
+it("refused renames never stack more than one retry ladder", async () => {
+  // #595 round 9: a refused rename reaches the debt's arming path while its
+  // ORIGINAL timer is still scheduled. Stacking them gave every rename
+  // attempt an independent ladder, each opening and settling its own
+  // temporary session once it hit the cap — engine load proportional to how
+  // often someone tried to rename. One debt, one timer.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-one-timer-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "one ladder only");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // Four refused renames while the lock holds: each pays, fails, and arms.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
+      /another program still has note\.md open/,
+    );
+  }
+  const settlesAfterRenames = state.settleCalls.length;
+
+  // THE measurement, taken while the lock still HOLDS: this is where
+  // stacked ladders cost. Each one wakes on its own schedule and opens and
+  // settles its own temporary session, so N ladders do N times the engine
+  // work every cycle. One ladder on a doubling delay (1s, 2s, 4s...) can
+  // fit at most three attempts in this window; four stacked ladders fit
+  // far more. The bound is deliberately generous — it fails on the
+  // MULTIPLE, not on exact timing.
+  await new Promise((resolve) => setTimeout(resolve, 4_000));
+  const attemptsWhileLocked = state.settleCalls.length - settlesAfterRenames;
+  // Correct: the one surviving timer sits at the doubled delay (8s by now),
+  // so nothing fires in this window. Stacked: the 1s, 2s and 4s ladders all
+  // wake inside it.
+  expect(attemptsWhileLocked).toBeLessThanOrEqual(1);
+
+  // And the single ladder still pays the debt once the lock releases.
+  state.locked = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["one ladder only"]);
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  expect(state.settledMarkdowns).toEqual(["one ladder only"]);
+  await capture.stop();
+}, 30_000);
+
+it("a failing active-version read re-arms instead of stranding the debt", async () => {
+  // #595 round 9: the version read sat before the guarded block, so a
+  // rejection (reconnect ladder exhausted, engine refusing the read) left
+  // the debt in the registry with NO timer — stranded until an unrelated
+  // lifecycle action or a restart. Inside the block it re-arms like any
+  // other failure.
+  const { capture, state, loopback } = await lockedRebindCapture(
+    "dohc-ydoc-version-read-fails-",
+  );
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "survives a failed read");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The active-version read fails while the retry ladder runs.
+  const realSend = loopback.sendRequest.bind(loopback);
+  let failVersionReads = true;
+  loopback.sendRequest = async (request) => {
+    if (failVersionReads && request.method === "versions.active") {
+      throw new Error("version read unavailable");
+    }
+    return await realSend(request);
+  };
+  state.locked = false;
+
+  // The debt was NOT stranded: once the read works again, the write lands.
+  await expect
+    .poll(
+      () => state.errors.filter((context) => context.includes("close retry")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+  failVersionReads = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["survives a failed read"]);
+  await capture.stop();
+}, 30_000);

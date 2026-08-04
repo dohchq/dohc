@@ -3098,6 +3098,15 @@ export function createWorkspaceEngineCapture(
         // all. Every terminal outcome removes the registry entry; only a
         // still-held lock keeps it and re-arms.
         let detachedRetryMs = LOCKED_CLOSE_RETRY_INITIAL_MS;
+        // The single pending timer for this debt (#595 round 9).
+        let pendingRetryTimer: ReturnType<typeof setTimeout> | null = null;
+        // A retry session whose RELEASE was refused: the daemon reinserted
+        // it and kept its lease, so only this session can complete its own
+        // release. settled records whether its settle had already landed.
+        let pendingRelease: {
+          session: WorkspaceEngineYDocProviderSession;
+          settled: boolean;
+        } | null = null;
         const payDetachedLockedDebt = async (): Promise<void> => {
           // Another edge may have paid, transferred, or CANCELLED this debt
           // after the timer's own check — a destructive vacate cancels
@@ -3119,18 +3128,43 @@ export function createWorkspaceEngineCapture(
             detachedLockedDebts.delete(input.path);
             return;
           }
-          const activeVersionId = await activeVersionIdOf(engine);
-          if (activeVersionId !== versionId) {
-            detachedLockedDebts.delete(input.path);
-            onError(
-              `ydoc close retry of ${input.path}`,
-              new Error(
-                `locked-write retry dropped: the workspace moved to version ${activeVersionId} while a pending write for version ${versionId} waited; the version fence replay owns pending writes across switches`,
-              ),
-            );
-            return;
-          }
           try {
+            // The active-version read lives INSIDE the guarded block (#595
+            // round 9): it can reject (the reconnect ladder exhausted, the
+            // engine refusing the read), and rejecting outside left the debt
+            // in the registry with no timer scheduled — stranded until an
+            // unrelated lifecycle action or a restart. A failure here
+            // re-arms like any other.
+            const activeVersionId = await activeVersionIdOf(engine);
+            if (activeVersionId !== versionId) {
+              detachedLockedDebts.delete(input.path);
+              onError(
+                `ydoc close retry of ${input.path}`,
+                new Error(
+                  `locked-write retry dropped: the workspace moved to version ${activeVersionId} while a pending write for version ${versionId} waited; the version fence replay owns pending writes across switches`,
+                ),
+              );
+              return;
+            }
+            // A session whose release was REFUSED is still alive in the
+            // daemon (#595 round 9): ydoc_close_inner reinserts it and it
+            // keeps its lease, so opening a FRESH session for this path is
+            // answered ydoc-session-busy forever. Only that session can
+            // finish its own release — retry its close before anything else.
+            if (pendingRelease !== null) {
+              const held = pendingRelease;
+              await held.session.close({ settle: false });
+              pendingRelease = null;
+              if (held.settled) {
+                // PROOF: the write landed earlier, the session is released.
+                detachedLockedDebts.delete(input.path);
+                return;
+              }
+              // The lease is back but the write never landed: a fresh
+              // attempt owes the settle.
+              armDetachedLockedRetry();
+              return;
+            }
             const { session: retrySession } =
               await openRestartSafeRustYDocSession({
                 versionId,
@@ -3145,17 +3179,25 @@ export function createWorkspaceEngineCapture(
                 onSettleError: () => undefined,
                 onSettled: () => undefined,
               });
+            let settled = false;
             try {
               await retrySession.settleNow({ summary: "session close" });
+              settled = true;
             } finally {
               // The release is NOT suppressed (#595 round 8): a replicated
               // update arriving between the settle and this release makes
               // `settle: false` escalate to a settling close, and that can
               // fail. Swallowing it dropped the debt while the daemon
               // session could stay reserved and the newest update had no
-              // retry. Let it reach the handler below, which retains and
-              // re-arms — the next attempt completes the release.
-              await retrySession.close({ settle: false });
+              // retry. The session is RETAINED for its own close retry
+              // (round 9) rather than discarded, because the daemon keeps
+              // its lease when it refuses a release.
+              try {
+                await retrySession.close({ settle: false });
+              } catch (closeError) {
+                pendingRelease = { session: retrySession, settled };
+                throw closeError;
+              }
             }
             // PROOF: the write landed and the session released.
             detachedLockedDebts.delete(input.path);
@@ -3174,9 +3216,18 @@ export function createWorkspaceEngineCapture(
         };
         const armDetachedLockedRetry = (): void => {
           if (stopped) return;
+          // ONE debt, ONE timer (#595 round 9). Every arming path can run
+          // while a timer is already pending — a refused rename reaches
+          // this through pay() while the original ladder still sleeps — and
+          // stacking them gave each attempt its own independent ladder,
+          // every one of which opens and settles a temporary session once
+          // it reaches the cap. Replacing the pending timer keeps the work
+          // proportional to the DEBT, not to how often something touched it.
+          if (pendingRetryTimer !== null) clearTimeout(pendingRetryTimer);
           const delay = detachedRetryMs;
           detachedRetryMs = Math.min(detachedRetryMs * 2, LOCKED_CLOSE_RETRY_CAP_MS);
-          setTimeout(() => {
+          pendingRetryTimer = setTimeout(() => {
+            pendingRetryTimer = null;
             // Paid, transferred, or dropped by another edge while the timer
             // slept: the registry no longer names this routine — stand down.
             if (detachedLockedDebts.get(input.path)?.pay !== payDetachedLockedDebt) {
@@ -4637,7 +4688,18 @@ export function createWorkspaceEngineCapture(
         // text, which the finisher's path rollback cannot undo. The registry
         // is the proof: still named after the payment means it did not land,
         // so the rename REFUSES and the debt survives for the retry ladder.
-        for (const endpoint of [fromPath, toPath]) {
+        // DESCENDANTS too (#595 round 9): this method also serves directory
+        // moves, so a debt for `dir/note.md` rides a move of `dir`. Left
+        // behind, its delayed payment reopens the moved-from path and
+        // recreates the tree the user just moved away — the same prefix rule
+        // the delete seam already applies.
+        const endpointMatch = (candidate: string): boolean =>
+          candidate === fromPath ||
+          candidate === toPath ||
+          candidate.startsWith(`${fromPath}/`) ||
+          candidate.startsWith(`${toPath}/`);
+        for (const endpoint of [...detachedLockedDebts.keys()]) {
+          if (!endpointMatch(endpoint)) continue;
           const debt = detachedLockedDebts.get(endpoint);
           if (!debt) continue;
           await debt.pay();
