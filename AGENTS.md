@@ -247,6 +247,21 @@ the current head, source, and stated behavior.
 - Prefer the smallest safe fix. Do not add machinery, abstractions, or
   repository policy only to satisfy a reviewer.
 
+### Run a simplification review
+
+Every code PR needs one dedicated simplification review after it becomes ready.
+
+- Use a subagent from a different model family than the implementation agent.
+- Give it the diff, relevant source, and required behavior. Do not give it the
+  implementation agent's reasoning.
+- Ask what code can be deleted, combined, or made obvious without weakening
+  behavior, performance, or product invariants.
+- Prefer less code, not compressed code. Reject changes that only hide or move
+  complexity.
+- Verify each finding. Apply the clear simplifications and rerun affected local
+  gates.
+- Record the reviewed commit and result in the PR.
+
 ### Select reviewers
 
 These requirements apply only after a PR is ready for review. Do not request or
