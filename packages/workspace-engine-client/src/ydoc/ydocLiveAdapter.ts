@@ -1,6 +1,10 @@
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import {
+  EngineRequestDeadlineError,
+  EngineRequestError,
+} from "../daemon/engineClient";
+import {
   isDaemonReconnectError,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
@@ -57,6 +61,96 @@ export class YdocAdapterError extends Error {
     this.name = "YdocAdapterError";
     this.code = code;
   }
+}
+
+// #616: how long ONE in-flight `ydoc.open` may go unanswered. Its sibling
+// `workspace.open` has carried a 2 s bound since it was written; this request
+// carried none, so a daemon that ACCEPTED an open and then said nothing held
+// the capture chain for as long as the silence lasted — the wedge watchdog's
+// ~225 s at best, and longer behind other traffic.
+//
+// MEASURED, because the only work this limit can reject is a healthy open
+// (AGENTS.md, "measure limits that reject work"). Every case below is the real
+// daemon — dohc-workspace-engine, debug build of de3fb9d5 — driven through this
+// adapter and the real transport on a Ryzen 9 7950X / Windows 11 / 64 GB. The
+// number is the `ydoc.open` request alone: response minus send.
+//
+//   cold store, small document                                     0.9 ms
+//   cold store, 47 KiB document (the largest a seeded open can carry:
+//     the daemon refuses a seed past INBAND_CONTENT_CAP_BYTES)      2.3 ms
+//   warm store, same document                                      2.1 ms
+//   open while the daemon captures 40 x 32 KiB files               0.9 ms
+//   reopen after 7,500 SETTLED appends (42 KiB of typed text)       2.0 ms
+//   resurrect a lineage nothing settled, 500 real appends          13.7 ms
+//   resurrect a lineage nothing settled, 3,000 real appends        67.4 ms
+//   resurrect a lineage nothing settled, 10,000 real appends      120.9 ms
+//
+// What the shape of that says: a settled document reopens flat, because its
+// close compacted the lineage. The cost is in a lineage NOTHING settled — a
+// draft a dead daemon left behind — where the open replays every journalled
+// update, and it grows with how many there are. 10,000 of them is already past
+// ordinary: the settle debounce is 800 ms, so a lineage that deep means the
+// daemon never settled once across 10,000 keystrokes.
+//
+// ydocOpenMeasurement.e2e.test.ts runs these cases again on whatever machine it
+// is on, and fails when the bound stops clearing them.
+//
+// 5,000 ms is 41x the widest of those, past the headroom this repo usually
+// gives a measured limit, and deliberately so. The table is one fast machine's
+// debug build and the population is every machine dohc runs on. The costs are
+// not symmetric either: too tight rejects a healthy open and the user gets a
+// read-only document, while too loose holds the capture chain a few seconds
+// longer on a daemon that has already stopped answering. If a healthy open ever
+// does reach this limit, measure again rather than widening it here.
+//
+// ONE number for both sides: the daemon's supervisor adopts a request's own
+// `deadline_ms` as its deadline (dohc-engine-protocol/src/supervisor.rs, capped
+// at `max_deadline`), so it cancels the handler at the same instant this client
+// stops waiting, instead of the 30 s default it applies to a request that names
+// none.
+export const YDOC_OPEN_DEADLINE_MS = 5_000;
+
+/**
+ * `ydoc.open` did not land inside YDOC_OPEN_DEADLINE_MS.
+ *
+ * TERMINAL for the caller's open, and deliberately not a transport error: the
+ * daemon accepted the request, so re-issuing it costs another full deadline
+ * against a daemon that is already not answering. The surface answers the same
+ * read-only "the engine may still hold this document" state it answers for a
+ * spent retry budget, with the user's own retry (#564, #657).
+ */
+export class YdocOpenTimedOutError extends Error {
+  readonly path: string;
+  readonly limitMs: number;
+  readonly waitedMs: number;
+
+  constructor(path: string, limitMs: number, waitedMs: number, cause: unknown) {
+    super(
+      `Rust engine did not answer ydoc.open for ${path}. ` +
+        `The ydoc.open deadlineMs limit of ${limitMs}ms was reached: ` +
+        `the caller waited ${waitedMs}ms. ` +
+        `The daemon may still hold this document; open it again.`,
+      { cause },
+    );
+    this.name = "YdocOpenTimedOutError";
+    this.path = path;
+    this.limitMs = limitMs;
+    this.waitedMs = waitedMs;
+  }
+}
+
+// The bound has TWO clocks, because both sides honour the same number: this
+// client's timer, and the daemon's supervisor answering DEADLINE_EXCEEDED for
+// the deadline the request carried. Whichever reports first, the open did not
+// land inside the bound and the document is in the same state — so the caller
+// gets one refusal rather than two, only one of which the surface knows how to
+// answer.
+function isYdocOpenDeadlineFailure(error: unknown): boolean {
+  return (
+    error instanceof EngineRequestDeadlineError ||
+    (error instanceof EngineRequestError &&
+      error.wireError?.code === "DEADLINE_EXCEEDED")
+  );
 }
 
 export class IllFormedUtf16EditError extends YdocAdapterError {
@@ -951,7 +1045,21 @@ export class YdocLiveAdapter {
       path: input.path,
       ...(input.contentKind ? { contentKind: input.contentKind } : {}),
     };
-    const rawResult = await this.request(input.workspace, YDOC_METHOD.open, params);
+    const startedAtMs = performance.now();
+    let rawResult: Response["result"];
+    try {
+      rawResult = await this.request(input.workspace, YDOC_METHOD.open, params, {
+        deadlineMs: YDOC_OPEN_DEADLINE_MS,
+      });
+    } catch (error) {
+      if (!isYdocOpenDeadlineFailure(error)) throw error;
+      throw new YdocOpenTimedOutError(
+        input.path,
+        YDOC_OPEN_DEADLINE_MS,
+        Math.round(performance.now() - startedAtMs),
+        error,
+      );
+    }
     const result = decodeYdocOpenResult(rawResult);
     const session = new YdocAdapterSession(this, input.workspace, result.sessionId, {
       objectId: result.objectId,
@@ -1014,7 +1122,7 @@ export class YdocLiveAdapter {
     workspace: WorkspaceHandle,
     method: string,
     params: Request["params"],
-    options?: { idempotencyKey?: string },
+    options?: { idempotencyKey?: string; deadlineMs?: number },
   ): Promise<Response["result"]> {
     const id = this.nextRequestId++;
     const response = await this.transport.sendRequest({
@@ -1023,6 +1131,9 @@ export class YdocLiveAdapter {
       workspace,
       ...(options?.idempotencyKey
         ? { idempotencyKey: options.idempotencyKey }
+        : {}),
+      ...(options?.deadlineMs !== undefined
+        ? { deadlineMs: options.deadlineMs }
         : {}),
       params,
     });

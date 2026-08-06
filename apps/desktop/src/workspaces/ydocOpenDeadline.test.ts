@@ -1,14 +1,17 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
   VersionedLoopbackEngine,
+  YDOC_OPEN_DEADLINE_MS,
+  YdocOpenTimedOutError,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
+  EngineRequestDeadlineError,
   EngineWorkspaceRetryDeadlineError,
   EngineWorkspaceSessions,
   EngineWorkspaceShuttingDownError,
@@ -162,6 +165,100 @@ describe("the document open's capture-chain hold (#564)", () => {
     // otherwise have spent holding the chain.
     expect(sleeps.length).toBeLessThanOrEqual(3);
     await engine.stop();
+  });
+
+  it("frees the chain at the ydoc.open bound when the daemon never answers", async () => {
+    // #616. The retry budget above bounds RETRY WAITING, and a daemon that
+    // accepts `ydoc.open` and then says nothing never fails once — so before
+    // this bound the chain was held for as long as the silence lasted.
+    const root = await tempRoot();
+    await write(root, "note.md", "hello\n");
+    const loopback = new VersionedLoopbackEngine();
+    // The EngineClient seam, and only it: a deadlined request arms a timer at
+    // `request.deadlineMs` and rejects with EngineRequestDeadlineError
+    // (engineClient.ts, `sendRequest`). Everything else answers normally, so
+    // the open reaches `ydoc.open` through the real provider and the real
+    // adapter rather than a stub standing in for them.
+    const client = {
+      close: () => undefined,
+      onEvent: () => () => undefined,
+      async sendRequest(request: Request): Promise<Response> {
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: String(WORKSPACE_ID) } };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        if (request.method === "ydoc.open") {
+          const deadlineMs = request.deadlineMs;
+          if (deadlineMs === undefined || deadlineMs === null) {
+            return await new Promise<never>(() => undefined);
+          }
+          return await new Promise<never>((_resolve, reject) => {
+            setTimeout(() => {
+              reject(
+                new EngineRequestDeadlineError(
+                  request.id,
+                  request.method,
+                  deadlineMs,
+                ),
+              );
+            }, deadlineMs);
+          });
+        }
+        return await loopback.sendRequest(request);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      rustEngineSessions: sessions,
+    });
+    engine.start();
+    await engine.flush();
+
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "Date", "performance"],
+    });
+    try {
+      const opening = engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+      // Ordinary chain traffic, queued behind the open. Whether it runs is how
+      // "the chain is held" is observed rather than asserted.
+      let chainFreed = false;
+      const queued = engine
+        .listMoments({ limit: 1 })
+        .then(() => {
+          chainFreed = true;
+        })
+        .catch(() => {
+          chainFreed = true;
+        });
+
+      await vi.advanceTimersByTimeAsync(YDOC_OPEN_DEADLINE_MS - 1);
+      expect(chainFreed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      const refusal = await opening;
+      // MUTATION: translate the deadline into a plain transport error -> the
+      // run ladder retries it, each retry costs another full bound, and the
+      // refusal that eventually reaches main names the retry budget instead of
+      // the limit that actually fired.
+      expect(refusal).toBeInstanceOf(YdocOpenTimedOutError);
+      expect((refusal as Error).message).toContain(
+        `The ydoc.open deadlineMs limit of ${YDOC_OPEN_DEADLINE_MS}ms was reached`,
+      );
+      // The surface answer #533 requires: read-only with a retry, never the
+      // writable plain editor.
+      expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+      await queued;
+      expect(chainFreed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await engine.stop();
+    }
   });
 
   it("spends one budget across the several runs the task makes", async () => {

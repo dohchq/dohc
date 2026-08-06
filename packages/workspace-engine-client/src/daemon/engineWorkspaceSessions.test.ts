@@ -1458,10 +1458,10 @@ describe("EngineWorkspaceSessions", () => {
     it("refuses the operation when the rebind spent the window", async () => {
       // codex r17. The start-of-run gate answered before `openForRun`, and
       // that call has a ladder of its own: it can wait, retry, recover, and
-      // return with the whole window behind it. The operation it admits may be
-      // the `ydoc.open` that carries no deadline — so the region ended up
-      // holding the capture chain on a budget it had already spent, which is
-      // the hold this whole bound exists to remove.
+      // return with the whole window behind it. The operation it admits is the
+      // document open itself — so the region ended up holding the capture
+      // chain on a budget it had already spent, which is the hold this whole
+      // bound exists to remove.
       const workspace = await tempWorkspace("workspace-rebind-spends");
       let nowMs = 5_000;
       let opens = 0;
@@ -2026,8 +2026,7 @@ describe("EngineWorkspaceSessions", () => {
       // never fails never checks it. A document open still queued on the
       // capture chain when `will-quit` fires would enter the region
       // afterwards, SUCCEED at its first workspace call, and proceed into a
-      // `ydoc.open` that carries no deadline — holding the chain through the
-      // 3 s forced-exit timer.
+      // `ydoc.open` whose own bound (#616) outlasts the 3 s forced-exit timer.
       const workspace = await tempWorkspace("workspace-region-after-quit");
       const client = new MockClient("handle-region-after-quit");
       let ran = 0;

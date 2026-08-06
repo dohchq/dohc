@@ -475,6 +475,33 @@ export class EngineRequestError extends EngineClientError {
   }
 }
 
+/**
+ * A request the caller deadlined ran out of time before the daemon answered.
+ *
+ * The code stays `transport-error`, because that is what happened: the request
+ * left, and nothing came back. Every caller that rebinds on a dropped transport
+ * must keep doing so here. What the class adds is IDENTITY — a caller that set
+ * the deadline can tell its own limit firing apart from a socket that died,
+ * which a message match cannot do safely.
+ */
+export class EngineRequestDeadlineError extends EngineClientError {
+  readonly requestId: number;
+  readonly method: string;
+  readonly deadlineMs: number;
+
+  constructor(requestId: number, method: string, deadlineMs: number) {
+    super(
+      "transport-error",
+      `engine-request-deadline-exceeded: request ${requestId} (${method}) carries ` +
+        `a deadline of ${deadlineMs} ms and the daemon did not answer inside it.`,
+    );
+    this.name = "EngineRequestDeadlineError";
+    this.requestId = requestId;
+    this.method = method;
+    this.deadlineMs = deadlineMs;
+  }
+}
+
 export type BlobStreamErrorCode =
   | "blob-backpressure-exceeded"
   | "blob-digest-mismatch"
@@ -704,21 +731,19 @@ export class EngineClient implements EngineTransport {
         ),
       );
     }
+    const deadlineMs = request.deadlineMs ?? null;
     return new Promise<Response>((resolve, reject) => {
       const deadlineTimer =
-        request.deadlineMs !== undefined && request.deadlineMs !== null
+        deadlineMs !== null
           ? setTimeout(() => {
               const pending = this.pending.get(wireId);
               if (!pending) return;
               this.pending.delete(wireId);
               this.abandonedRequestIds.add(wireId);
               pending.reject(
-                new EngineClientError(
-                  "transport-error",
-                  `Engine request ${wireId} timed out after ${request.deadlineMs}ms.`,
-                ),
+                new EngineRequestDeadlineError(wireId, request.method, deadlineMs),
               );
-            }, request.deadlineMs)
+            }, deadlineMs)
           : undefined;
       this.pending.set(wireId, {
         callerId: request.id,
