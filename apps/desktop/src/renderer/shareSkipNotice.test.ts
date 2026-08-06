@@ -25,6 +25,15 @@ const unusableVersion = {
     "the relay offered no versionId string",
 };
 
+// An authentic shared file over this recipient's content-kind ceiling,
+// verbatim from the engine (`RelayError::ShareBlobOverCeiling`).
+const oversized = {
+  code: "share-blob-over-ceiling",
+  detail:
+    "shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES: limit 5242880 " +
+    "bytes, observed 5242881 bytes — docs/report.bin",
+};
+
 describe("what a share's skipped ops say", () => {
   // The grant excluded the op. The share is the cause, and the person who
   // shared it is the one who can change that.
@@ -92,6 +101,43 @@ describe("what a share's skipped ops say", () => {
       "MUTATION: the persisted detail says the moment was outside the share boundary, contradicting the notice it is attached to and the code that classifies it",
     ).not.toContain("outside the share boundary");
     expect(line?.detail).toContain("128 UTF-16 code units");
+  });
+
+  // The one replay refusal with a recovery. The bytes are authentically the
+  // granter's file and it is over the ceiling this recipient enforces, so no
+  // repair at the relay helps — but the granter making the file smaller and
+  // sharing it again arrives as a new op at a later cursor. "dohc couldn't
+  // apply it" would state that nobody can act, which is false here, and the
+  // cursor has already committed past the file.
+  it("tells the reader how to recover an update refused for size", () => {
+    const [line, ...rest] = shareSkipNoticeLines(
+      { ops: [oversized], more: 0 },
+      "granter@dohc.test",
+    );
+    expect(rest).toEqual([]);
+    expect(
+      line?.kind,
+      "MUTATION: an oversized update is classed as unappliable and the reader is told nothing can be done",
+    ).toBe("oversized");
+    expect(line?.text).toBe(
+      "dohc skipped 1 update with files over the size limit. Ask granter@dohc.test to make them smaller and share them again.",
+    );
+    // The measurements ride along as the notice title.
+    expect(line?.detail).toContain("MAX_CAPTURE_BINARY_FILE_BYTES");
+  });
+
+  it("names no granter for a size refusal when the share has none", () => {
+    const [line, ...rest] = shareSkipNoticeLines(
+      { ops: [oversized], more: 0 },
+      null,
+    );
+    expect(
+      rest,
+      "MUTATION: the size refusal is counted twice, once as unappliable",
+    ).toEqual([]);
+    expect(line?.text).toBe(
+      "dohc skipped 1 update with files over the size limit. Ask the person who shared it to make them smaller and share them again.",
+    );
   });
 
   it("says both when both happened", () => {

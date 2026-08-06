@@ -4,7 +4,7 @@ description: >-
   Use Claude Code CLI as a separate collaborator for taste-sensitive design
   and writing, architecture, investigation, scoped implementation, or
   independent review. Trigger when the user asks Codex to use Claude, Fable,
-  or Opus; when repository review policy requires local Claude; when a
+  Opus, or Sonnet; when repository review policy requires local Claude; when a
   user-facing decision needs Claude's taste; or when another capable model
   should challenge Codex's plan or patch. Do not use for routine mechanical
   work that Codex can complete directly.
@@ -23,8 +23,8 @@ Read the shared
 Follow an explicit user choice. If the configured Claude default fits the
 task, omit `--model`.
 
-When an override is useful, pass `fable` or `opus`. Choose effort separately
-from model choice.
+When an override is useful, pass `fable`, `opus`, or `sonnet`. Choose effort
+separately from model choice.
 
 Do not hardcode Fable or another Claude model into this workflow.
 

@@ -85,8 +85,8 @@ const PATH_STRING = z.string().min(1).max(4096);
 // arrives. The daemon caps one wire string at 8 MiB (`WireLimits`,
 // `crates/dohc-engine-protocol/src/limits.rs`), so a larger body reaches the
 // renderer only by blob hydration. `versionedText.read` and the moment
-// timeline hydrate, and compare rows inherit that through `listTextFiles`.
-// Conflict listing is the one lane that does not — see VERSION_TEXT.
+// timeline hydrate, compare rows inherit that through `listTextFiles`, and
+// conflict listing hydrates its withheld sides too (#537) — see VERSION_TEXT.
 //
 // One REQUEST field shares the schema — the combined conflict resolution at
 // VERSION_TEXT. There this bound is only a ceiling on what crosses IPC; the
@@ -1653,15 +1653,18 @@ export const WORKSPACE_VERSION_NAME_MAX = 80;
 // hydrates each differing path by `readTextFile` -> `readTextBlob`, so a
 // compare side at the engine's contract does arrive.
 //
-// Conflict listing is the exception. The daemon serializes a conflict's three
-// sides in band and refuses the page with `conflict-row-exceeds-wire-limit`
-// above 8 MiB minus envelope headroom
-// (`crates/dohc-workspace-engine/src/lib.rs:244-248,7482-7491`), and
-// `listTextConflicts` has no hydration branch. So this raise fixes the 2 MB to
-// ~8 MB band, where the bridge was the only rejecting gate, and #537 tracks
-// the tail above it. The bound stays the engine's storage contract rather than
-// the transport's current ceiling: a second hand-copied constant is the drift
-// #517 was filed about, and it would have to move again when #537 lands.
+// Conflict listing keeps up too (#537): a row past 8 MiB minus envelope
+// headroom is degraded to withheld metadata rather than refused
+// (`conflicts_list`, crates/dohc-workspace-engine/src/lib.rs), and
+// `listTextConflicts` hydrates each withheld side through
+// `versionedText.readBlob`. So a conflict side at the engine's storage
+// contract arrives on every lane this bound covers.
+//
+// The bound stays the engine's storage contract rather than any transport
+// ceiling: a second hand-copied constant is the drift #517 was filed about.
+// The one place the client mirrors the frame cap is `engineTextLimits.ts`,
+// where `CONFLICT_ROW_HARD_CAP_BYTES` is DERIVED from the frame constant the
+// drift guard already covers.
 //
 // The combined resolution (`keep-combined` below) is the one REQUEST use, and
 // its contract is NOT this one: the engine bounds a combined resolution by the
@@ -2436,20 +2439,38 @@ export const ShareChatChannelResult = z.object({
 });
 export type ShareChatChannelResult = z.infer<typeof ShareChatChannelResult>;
 
-// The per-lane row cap on a share listing, in one place because two layers
-// enforce it. readRelayChatShareLanes applies it to the RELAY lanes before
-// this schema sees them: a relay-controlled body over the cap would otherwise
-// fail the parse below, reject the IPC call, and clear every cached row on the
-// sharing surface (#608).
+// How many chat-channel shares one account can hold, in one place because
+// three layers enforce it: readRelayChatShareLanes caps the RELAY lanes, and
+// mergeJoinedChannel refuses a join past it. One number, because the received
+// lane IS the set of shares that can become joined rows, so both bound the
+// same quantity — an account's chat-channel shares.
 //
-// The joined lane is NOT guarded here, and it is not local-only either.
-// autoJoinReceivedDms appends a sharedChannels row per received DM grant on
-// every syncDms, with no user action, and endJoinedChannel only marks
-// `ended: true` — so that lane is relay-fed and grows monotonically. Past the
-// cap the parse below throws through the same door, and the count never
-// shrinks, so it stays broken. Tracked separately; do not read this comment as
-// a claim that the lane is safe.
-export const MAX_CHAT_CHANNEL_SHARE_ROWS = 1000;
+// This number is PROVISIONAL, and an earlier version of this comment claimed
+// it was measured. It was not: the fixture behind that claim invented account
+// sizes and checked their arithmetic, and its central assumption — one DM per
+// correspondent — is not the product's shape, because a DM can have several
+// recipients. The fabricated fixture is gone; see sharedChannels.test.ts for
+// the one contract the live count really has (it is the per-pass relay
+// fan-out, which makes this backpressure rather than a limit on user work).
+//
+// Two things this number does NOT do, both open:
+//  - It does not bound total retained state. A revocation moves a row out of
+//    the live count without deleting its tombstone, so revoke-and-grant
+//    cycles grow the durable array and every joined-lane response without
+//    limit.
+//  - It has no evidence fixing it at 4096 rather than any other value.
+// Both resolve by scoping the lane to the channels a caller is showing —
+// paging, the alternative #617 named — not by choosing a better constant.
+//
+// On the joined lane it counts LIVE rows only — an ended tombstone is a
+// durable row the user cannot delete, so counting it would make the refusal's
+// own recovery impossible to act on. See mergeJoinedChannel.
+//
+// readRelayChatShareLanes applies it to the RELAY lanes before this schema
+// sees them: a relay-controlled body over the cap would otherwise fail the
+// parse below, reject the IPC call, and clear every cached row on the sharing
+// surface (#608).
+export const MAX_CHAT_CHANNEL_SHARE_ROWS = 4096;
 
 export const ChatChannelShareGrantRow = z.object({
   shareId: SHARE_ID,
@@ -2493,7 +2514,14 @@ export type ListChatChannelSharesPayload = z.infer<typeof ListChatChannelSharesP
 //    rows must clear — another account's invitations and recipient emails
 //    must not survive a logout.
 export const ListChatChannelSharesResult = z.object({
-  joined: z.array(JoinedSharedChannelRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
+  // The joined lane carries NO row cap, and must not gain one. These rows are
+  // dohc's own durable registry state, and they are the authority for
+  // channelIsLocked: a read that refuses them rejects the whole IPC call, the
+  // renderer reads an unknown listing, and every channel goes read-only. The
+  // count only grows, so that state never recovers (#617). The bound belongs
+  // at the WRITE, where mergeJoinedChannel can refuse one join and name why —
+  // never at the read, where it can only reject rows dohc itself wrote.
+  joined: z.array(JoinedSharedChannelRow),
   // The account the relay lanes are scoped to (server + stable user id), or
   // null when no session exists. Cached relay rows are preservable only
   // within the SAME session: an unreachable answer under a different account
@@ -2506,6 +2534,27 @@ export const ListChatChannelSharesResult = z.object({
       received: z.array(ChatChannelShareReceivedRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
     }),
     z.object({ state: z.literal("unreachable") }),
+    // Over the per-lane cap. NOT "unreachable": that word means dohc could not
+    // read the answer, and a retry is the right next step for it. This answer
+    // arrived and will arrive again identically, so a surface that shows it as
+    // an outage offers a Try again that can never work and never says what is
+    // wrong — the #618 defect, reintroduced for the one condition dohc's own
+    // cap creates. It carries what it observed and the configured limit so the
+    // surface can name the constraint. Like "unreachable" it is NOT
+    // authoritative: cached rows stand.
+    z.object({
+      state: z.literal("over-limit"),
+      lanes: z
+        .array(
+          z.object({
+            lane: z.enum(["granted", "received"]),
+            rows: z.number().int().nonnegative(),
+          }),
+        )
+        .min(1)
+        .max(2),
+      limit: z.number().int().positive(),
+    }),
     z.object({ state: z.literal("signed-out") }),
   ]),
 });
@@ -2523,7 +2572,8 @@ export type ListJoinedSharedChannelsPayload = z.infer<
 >;
 
 export const ListJoinedSharedChannelsResult = z.object({
-  joined: z.array(JoinedSharedChannelRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
+  // No row cap, for the reason ListChatChannelSharesResult states.
+  joined: z.array(JoinedSharedChannelRow),
 });
 export type ListJoinedSharedChannelsResult = z.infer<
   typeof ListJoinedSharedChannelsResult

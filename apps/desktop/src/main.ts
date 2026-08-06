@@ -315,6 +315,8 @@ import {
   assertSharedChannelWritable,
   createKeyedSerializer,
   endJoinedChannel,
+  JoinedSharedChannelLimitError,
+  joinedSharedChannelLimitRefusal,
   mergeJoinedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
@@ -342,7 +344,7 @@ import {
   type ShareLogPage,
 } from "./workspaces/dmChats";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
-import { claimDmHome, readDmHome } from "./workspaces/dmHomeStore";
+import { claimDmHome, readDmHome, readDmHomes } from "./workspaces/dmHomeStore";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import {
   adoptCompletedCloudLoginSession,
@@ -4426,6 +4428,33 @@ function registerIpcHandlers(
     });
   });
 
+  // Received shares another local workspace already claimed — joined into its
+  // registry, or pinned to it by the account-level DM home map. A received
+  // grant is account-wide, so the relay answers the same lane in every
+  // workspace; scoping it here is what keeps one workspace's sharing surface
+  // independent of another's (#618).
+  function shareIdsClaimedByOtherWorkspaces(workspaceId: string): Set<string> {
+    const claimed = new Set<string>();
+    for (const entry of listWorkspaces()) {
+      if (entry.workspaceId === workspaceId) continue;
+      for (const channel of entry.sharedChannels ?? []) {
+        // ENDED rows claim nothing. The tombstone is workspace A's own write
+        // gate and stays for that, but it was never an argument for
+        // cross-workspace exclusivity: once A has left, A is not managing the
+        // share, and filtering the invitation out of every OTHER workspace
+        // makes leaving irreversible everywhere except A — where the only
+        // offered action is to rejoin. Leaving is presented as reversible, so
+        // it has to be reversible somewhere.
+        if (channel.ended === true) continue;
+        claimed.add(channel.shareId);
+      }
+    }
+    for (const [shareId, homeWorkspaceId] of Object.entries(readDmHomes(dmHomeFile()))) {
+      if (homeWorkspaceId !== workspaceId) claimed.add(shareId);
+    }
+    return claimed;
+  }
+
   ipcMain.handle(CHANNELS.listChatChannelShares, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatChannelSharesPayload.parse(payload);
@@ -4450,6 +4479,7 @@ function registerIpcHandlers(
         }>(credentials, "/sync/shares");
       },
       remoteWorkspaceId: entry.remote?.remoteWorkspaceId ?? null,
+      shareIdsClaimedElsewhere: shareIdsClaimedByOtherWorkspaces(input.workspaceId),
     });
     return ListChatChannelSharesResult.parse({
       joined,
@@ -4491,27 +4521,14 @@ function registerIpcHandlers(
       // the renderer's "Joining…" button stuck forever.
       fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
     };
-    let info;
-    try {
-      info = await fetchSharedChannelInfo({ relay, shareId: input.shareId });
-      const daemonRelay = relayClientForWorkspace({
-        workspaceId: workspace.workspaceId,
-        rootPath: workspace.rootPath,
-        relay,
-      });
-      const pulled = await daemonRelay.pullSharedChannel({
-        shareId: info.shareId,
-        channelWireId: info.channelWireId,
-      });
-      if (pulled.applied > 0) {
-        await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
-      }
-    } catch (error) {
-      if (error instanceof ShareUnavailableError) {
-        throw new Error("That shared channel isn't available anymore.");
-      }
-      throw error;
-    }
+    const info = await fetchSharedChannelInfo({ relay, shareId: input.shareId }).catch(
+      (error: unknown) => {
+        if (error instanceof ShareUnavailableError) {
+          throw new Error("That shared channel isn't available anymore.");
+        }
+        throw error;
+      },
+    );
     const joined: JoinedSharedChannel = {
       shareId: info.shareId,
       channelWireId: info.channelWireId,
@@ -4520,13 +4537,69 @@ function registerIpcHandlers(
       relayUrl: joinedRelayUrl,
       recipientUserId: joinedRecipientUserId,
     };
+    // RESERVE the slot before the pull, not after it. A separate check ahead
+    // of an awaited pull is not a gate: two joins can both pass it at the
+    // limit, both pull, and the loser's merge then throws with its channel
+    // already durably imported and no registry row to gate it — the read-only
+    // channel reads as locally owned again. The reservation IS the merge, and
+    // the merge is synchronous over the cached registry, so two callers cannot
+    // interleave inside it: the loser refuses having pulled nothing.
+    //
     // Dedup by shareId AND channelWireId (CodeRabbit Data Integrity): a
     // re-join of the same channel under a NEW share id (revoked + re-granted)
     // replaces the stale row instead of listing and syncing the channel twice.
+    // Read the rows FRESH here — the fetch above awaited, so the entry
+    // captured before it may already be stale.
     setWorkspaceSharedChannels(
       input.workspaceId,
-      mergeJoinedChannel(entry.sharedChannels ?? [], joined),
+      mergeJoinedChannel(findWorkspace(input.workspaceId)?.sharedChannels ?? [], joined),
     );
+    try {
+      // The initial pull runs under the SAME per-workspace serializer as
+      // runSharedChannelSyncPass. Reserving the row before the pull makes it
+      // visible to any pass that starts meanwhile — a relay cadence,
+      // listChatChannels, a syncDms refresh — and that pass would pull this
+      // same share concurrently, racing the per-share cursor and peer updates
+      // the serializer exists to protect. Neither join path runs inside a
+      // pass, so this queues rather than deadlocking.
+      await serializeSharedChannelSync(input.workspaceId, async () => {
+        const daemonRelay = relayClientForWorkspace({
+          workspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath,
+          relay,
+        });
+        const pulled = await daemonRelay.pullSharedChannel({
+          shareId: info.shareId,
+          channelWireId: info.channelWireId,
+        });
+        if (pulled.applied > 0) {
+          await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
+        }
+      });
+    } catch (error) {
+      // The reservation STAYS. A pull is multi-page and durable, so a failure
+      // proves nothing about what already landed: an earlier page can be
+      // applied before a later one times out, and a rejoin's merge may already
+      // have displaced an ended or read-only row. Removing the row in either
+      // case leaves channel data with no registry row — and no row is what
+      // joinedSharedChannelForTarget answers null for, so the channel reads as
+      // locally owned and writable. That is the defect the reservation exists
+      // to prevent, arriving through the cleanup path.
+      //
+      // The row is the write gate; it must never be absent while channel data
+      // exists locally. A leaked reservation costs capacity, which the user
+      // can recover by leaving a channel. A released one costs authority,
+      // which nobody can recover.
+      //
+      // It is not really leaked either: syncJoinedSharedChannels pulls every
+      // LIVE row on each pass, so this one either completes on a later pass or
+      // — if the share is genuinely gone — is marked ended and becomes the
+      // tombstone that gates it.
+      if (error instanceof ShareUnavailableError) {
+        throw new Error("That shared channel isn't available anymore.");
+      }
+      throw error;
+    }
     return JoinSharedChannelResult.parse({ joined: { ...joined, ended: false } });
   });
 
@@ -6914,6 +6987,18 @@ function registerIpcHandlers(
       ) {
         continue;
       }
+      // Before ANY durable mutation on this path — the DM home claim below
+      // and the pull after it. A refusal raised at the merge would leave a
+      // claimed home and the channel's pulled messages with no registry row,
+      // and no row reads as a channel this workspace owns and may write into.
+      const refusal = joinedSharedChannelLimitRefusal(existing, {
+        shareId,
+        channelWireId: selector.channelWireId,
+      });
+      if (refusal) {
+        console.warn(`[desktop] DM auto-join stopped: ${refusal}`);
+        return;
+      }
       // Probe each received share AT MOST ONCE (CodeRabbit: unbounded relay
       // round-trips). Skip without a network peek when it is either already
       // confirmed non-DM, or a DM homed in ANOTHER workspace (cross-workspace
@@ -6934,18 +7019,6 @@ function registerIpcHandlers(
         // The DM peek confirmed it — claim it here (or confirm this is home).
         if (!claimDmHome(dmHomeFile(), shareId, workspace.workspaceId)) continue;
         const info = await fetchSharedChannelInfo({ relay, shareId });
-        const daemonRelay = relayClientForWorkspace({
-          workspaceId: workspace.workspaceId,
-          rootPath: workspace.rootPath,
-          relay,
-        });
-        const pulled = await daemonRelay.pullSharedChannel({
-          shareId: info.shareId,
-          channelWireId: info.channelWireId,
-        });
-        if (pulled.applied > 0) {
-          await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
-        }
         const joined: JoinedSharedChannel = {
           shareId: info.shareId,
           channelWireId: info.channelWireId,
@@ -6954,6 +7027,9 @@ function registerIpcHandlers(
           relayUrl,
           recipientUserId,
         };
+        // RESERVE before the pull, for the reason joinSharedChannel states:
+        // the refusal has to land while this path still owns nothing durable.
+        // Rows read fresh — every await above could have changed them.
         setWorkspaceSharedChannels(
           workspace.workspaceId,
           mergeJoinedChannel(
@@ -6961,11 +7037,41 @@ function registerIpcHandlers(
             joined,
           ),
         );
+        // No rollback on failure, for the reason joinSharedChannel states: a
+        // multi-page pull can land data before it fails, and a row removed
+        // under landed data is a channel that reads as locally owned. The
+        // reservation stays and the next pass finishes or ends it.
+        //
+        // Under the same per-workspace serializer as the sync pass, for the
+        // reason joinSharedChannel states: the reserved row is visible to a
+        // pass that starts during this pull.
+        await serializeSharedChannelSync(workspace.workspaceId, async () => {
+          const daemonRelay = relayClientForWorkspace({
+            workspaceId: workspace.workspaceId,
+            rootPath: workspace.rootPath,
+            relay,
+          });
+          const pulled = await daemonRelay.pullSharedChannel({
+            shareId: info.shareId,
+            channelWireId: info.channelWireId,
+          });
+          if (pulled.applied > 0) {
+            await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
+          }
+        });
       } catch (error) {
         // A share revoked between the listing and the fetch surfaces as
         // unavailable — skip it; the next pass reconciles. Never blocks the
         // other grants.
         if (error instanceof ShareUnavailableError) continue;
+        // The joined lane is full. Auto-join is the relay-fed writer, so this
+        // is where the bound bites: stop the pass instead of retrying the same
+        // refusal for every remaining grant. Everything already joined keeps
+        // working; the user makes room by leaving a shared channel.
+        if (error instanceof JoinedSharedChannelLimitError) {
+          console.warn(`[desktop] DM auto-join stopped: ${error.message}`);
+          return;
+        }
         throw error;
       }
     }

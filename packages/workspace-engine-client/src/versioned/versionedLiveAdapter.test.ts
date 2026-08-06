@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Request } from "../ydoc/generated/Request";
 import type { Response } from "../ydoc/generated/Response";
 import {
+  DaemonProtocolError,
   DaemonRefusalError,
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
@@ -387,6 +388,219 @@ describe("VersionedLiveAdapter", () => {
       targetVersionId: "main",
       afterPath: "0.md",
     });
+  });
+
+  it("hydrates a withheld conflict side through the text blob route", async () => {
+    // The daemon degrades a conflicts.list row past its frame cap: the side
+    // body arrives as `text: null` beside `inbandLimitBytes` and `blobSha256`.
+    // MUTATION: drop the hydration branch in `listTextConflicts` and this
+    // side reaches the caller with no body at all.
+    const body = "an over-cap side body";
+    const bodySha = createHash("sha256").update(body, "utf8").digest("hex");
+    const withheld: ConflictRecord = {
+      ...conflict,
+      current: {
+        ...conflictState,
+        snapshot: {
+          ...snapshot,
+          text: null,
+          inbandLimitBytes: 128 * 1024,
+          byteLength: body.length,
+          blobSha256: bodySha,
+        },
+      },
+    };
+    const requests: Request[] = [];
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        if (request.method === WORKSPACE_METHOD.conflictsList) {
+          return {
+            id: request.id,
+            result: { conflicts: [withheld], nextAfterConflictId: null },
+          };
+        }
+        expect(request.method).toBe(VERSIONED_METHOD.textReadBlob);
+        expect((request.params as { sha256?: string }).sha256).toBe(bodySha);
+        return {
+          id: request.id,
+          result: {
+            bytesBase64: Buffer.from(body, "utf8").toString("base64"),
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    const listed = await adapter.listTextConflicts({ workspaceId: WORKSPACE });
+    expect(listed.conflicts).toHaveLength(1);
+    const hydrated = listed.conflicts[0]!.current.snapshot;
+    expect(hydrated?.text).toBe(body);
+    // The hydration hint does not outlive the hydration.
+    expect(hydrated?.inbandLimitBytes).toBeUndefined();
+    // Sides that carried their bodies in band are returned as served, with
+    // no extra blob round trips.
+    expect(listed.conflicts[0]!.base.snapshot?.text).toBe("hello");
+    expect(listed.conflicts[0]!.incoming.snapshot?.text).toBe("hello");
+    expect(
+      requests.filter(
+        (request) => request.method === VERSIONED_METHOD.textReadBlob,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("reads no bodies for a metadata-only conflict listing", async () => {
+    // `listOpenConflictIds` drains every page to collect ids. Hydrating for it
+    // fetches every body of every open conflict and keeps none of them.
+    // MUTATION: drop the `bodies: "withheld"` early return and this listing
+    // issues a blob read.
+    const withheld: ConflictRecord = {
+      ...conflict,
+      current: {
+        ...conflictState,
+        snapshot: { ...snapshot, text: null, inbandLimitBytes: 128 * 1024 },
+      },
+    };
+    const requests: Request[] = [];
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
+        return {
+          id: request.id,
+          result: { conflicts: [withheld], nextAfterConflictId: null },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    const listed = await adapter.listTextConflicts({
+      workspaceId: WORKSPACE,
+      bodies: "withheld",
+    });
+    expect(listed.conflicts).toHaveLength(1);
+    // Served exactly as the daemon sent it: still withheld, not an empty body.
+    expect(listed.conflicts[0]!.current.snapshot?.text).toBeNull();
+    expect(
+      requests.filter(
+        (request) => request.method === VERSIONED_METHOD.textReadBlob,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("cuts a hydrated conflict page to its byte budget before fetching bodies", async () => {
+    // The concurrency limit bounds simultaneous reads, not retained bytes. A
+    // page of degraded conflicts whose sides approach the daemon's text limit
+    // is kilobytes of metadata on the wire and hundreds of megabytes once
+    // rebuilt. The page is cut by the `byteLength` each withheld side already
+    // carries, so the bodies past the budget are never transferred.
+    //
+    // MUTATION: drop the budget cut in `listTextConflicts` and both conflicts
+    // hydrate, issuing a second blob read.
+    const body = "rebuilt";
+    const bodySha = createHash("sha256").update(body, "utf8").digest("hex");
+    const huge = (id: string): ConflictRecord => ({
+      ...conflict,
+      id,
+      base: { ...conflictState, snapshot: null },
+      incoming: { ...conflictState, snapshot: null },
+      current: {
+        ...conflictState,
+        snapshot: {
+          ...snapshot,
+          text: null,
+          inbandLimitBytes: 128 * 1024,
+          // Each side alone fits the budget; two together cannot.
+          byteLength: 5 * 1024 * 1024,
+          blobSha256: bodySha,
+        },
+      },
+    });
+    const requests: Request[] = [];
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        if (request.method === WORKSPACE_METHOD.conflictsList) {
+          return {
+            id: request.id,
+            result: {
+              conflicts: [huge("conflict-a"), huge("conflict-b")],
+              nextAfterConflictId: null,
+            },
+          };
+        }
+        return {
+          id: request.id,
+          result: { bytesBase64: Buffer.from(body, "utf8").toString("base64") },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    const listed = await adapter.listTextConflicts({ workspaceId: WORKSPACE });
+    expect(listed.conflicts).toHaveLength(1);
+    expect(listed.conflicts[0]!.id).toBe("conflict-a");
+    expect(listed.conflicts[0]!.current.snapshot?.text).toBe(body);
+    // The caller continues from the row the cut stopped at, not the daemon's
+    // own continuation, or the dropped conflict would never be served.
+    expect(listed.nextAfterConflictId).toBe("conflict-a");
+    // The body past the budget was never fetched.
+    expect(
+      requests.filter(
+        (request) => request.method === VERSIONED_METHOD.textReadBlob,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("refuses a withheld conflict side whose blob the daemon cannot serve", async () => {
+    // A withheld side names its body by digest. When the daemon then cannot
+    // serve that digest, silently returning the null-bodied record would hand
+    // readers an empty document that looks like an edit.
+    const withheld: ConflictRecord = {
+      ...conflict,
+      current: {
+        ...conflictState,
+        snapshot: {
+          ...snapshot,
+          text: null,
+          inbandLimitBytes: 128 * 1024,
+        },
+      },
+    };
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        if (request.method === WORKSPACE_METHOD.conflictsList) {
+          return {
+            id: request.id,
+            result: { conflicts: [withheld], nextAfterConflictId: null },
+          };
+        }
+        throw Object.assign(new Error("file-not-found"), {
+          wireError: {
+            code: "INVALID_PARAMS",
+            message: "file-not-found",
+            retry: "no",
+          },
+        });
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.listTextConflicts({ workspaceId: WORKSPACE }),
+    ).rejects.toThrow(DaemonProtocolError);
   });
 
   it("consumes the matching out-of-band blob for an over-cap binary read", async () => {
@@ -1097,14 +1311,13 @@ describe("VersionedLiveAdapter", () => {
     },
   );
 
-  it("REFUSES a withheld conflict body from a listing, and accepts one from a resolve", () => {
-    // Only `conflicts.resolve` withholds, to keep its answer inside one control
-    // frame (`settled_conflict_json`, lib.rs). A listing carries every body it
-    // returns, so a null from THAT surface is a protocol fault — accepting one
-    // would hand a reader an empty document that reads like an edit.
-    //
-    // MUTATION: decode both surfaces with the same nullability -> the listing
-    // stops refusing and this fails.
+  it("decodes a withheld conflict body from either surface as a hydration hint", () => {
+    // `conflicts.resolve` withholds over-cap sides to keep its answer inside
+    // one control frame (`settled_conflict_json`, lib.rs), and `conflicts.list`
+    // withholds the sides of a row past the conflict row frame cap (#537).
+    // The null is a hint, not content: `blobSha256` names the body, and
+    // `listTextConflicts` hydrates it — or throws — before any reader sees
+    // the record.
     const withheld = {
       ...conflict,
       base: {
@@ -1113,12 +1326,12 @@ describe("VersionedLiveAdapter", () => {
       },
     };
 
-    expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.conflictsList, {
-        conflicts: [withheld],
-        nextAfterConflictId: null,
-      }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    const listed = decodeWorkspaceResult(WORKSPACE_METHOD.conflictsList, {
+      conflicts: [withheld],
+      nextAfterConflictId: null,
+    }) as { conflicts: ConflictRecord[] };
+    expect(listed.conflicts[0]?.base.snapshot?.text).toBeNull();
+    expect(listed.conflicts[0]?.base.snapshot?.inbandLimitBytes).toBe(131072);
 
     const resolved = decodeWorkspaceResult(WORKSPACE_METHOD.conflictsResolve, {
       conflict: withheld,
@@ -1127,6 +1340,19 @@ describe("VersionedLiveAdapter", () => {
     }) as { conflict: ConflictRecord };
     expect(resolved.conflict.base.snapshot?.text).toBeNull();
     expect(resolved.conflict.base.snapshot?.inbandLimitBytes).toBe(131072);
+
+    // A body is a string or an explicit withholding — never anything else.
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.conflictsList, {
+        conflicts: [
+          {
+            ...conflict,
+            base: { ...conflict.base, snapshot: { ...snapshot, text: 5 } },
+          },
+        ],
+        nextAfterConflictId: null,
+      }),
+    ).toThrow(WorkspaceProtocolShapeError);
   });
 
   it("keeps the daemon's provenance fields on decoded conflict snapshots", () => {

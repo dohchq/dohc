@@ -123,7 +123,7 @@ type OverviewState =
 // The independently committed parts of the Chats overview surfaces. Several
 // readers write them, each authoritative for a different subset, so each part
 // carries its own commit watermark (see commitTicket).
-type CommitLane = "overview" | "joinedShares" | "relayShares";
+type CommitLane = "overview" | "joinedShares" | "relayShares" | "relayReach";
 
 // What the view keeps: the flat merged share listing. This is NOT the contract
 // result — that one may answer "the relay was unreachable", which is not
@@ -137,6 +137,19 @@ interface ShareListing {
   joined: JoinedSharedChannelRow[];
   sessionKey: string | null;
 }
+
+// Why a committed share read carried no rows. "unreachable" covers both a
+// relay that did not answer and a listing the IPC rejected outright: dohc
+// could not read it, and a retry is the honest next step. "over-limit" is the
+// answer that DID arrive and that dohc cannot list — retrying repeats it
+// exactly, so the surface owes the count and the limit instead of a button.
+type ShareReadFailure =
+  | { kind: "unreachable" }
+  | {
+      kind: "over-limit";
+      lanes: ReadonlyArray<{ lane: "granted" | "received"; rows: number }>;
+      limit: number;
+    };
 
 // A share listing answers two independent questions. The JOINED rows come from
 // the local registry, so any reader that got a listing at all has the true
@@ -742,6 +755,86 @@ function UnreadPill(props: { count: number; testId: string }) {
   );
 }
 
+// One sentence per over-limit lane, counting what the lane actually holds.
+//
+// The unit is SHARES, not channels. A relay lane carries one row per grant and
+// nothing deduplicates the channel — mapRelayShareListing keeps every row,
+// because each carries its own recipient — so one channel shared with 4097
+// people is 4097 rows. Saying "you share 4097 channels" names the wrong thing
+// and sends the user to reduce channels when the excess is grants on a single
+// channel they own. It is the same unit slip that made the deleted account
+// fixture wrong, arriving at the surface.
+//
+// The joined lane is different and its refusal is not: mergeJoinedChannel
+// matches on channelWireId as well as shareId, so those rows really are one
+// per channel, and "leave a shared channel" is the action that shrinks them.
+function overLimitSentences(failure: {
+  lanes: ReadonlyArray<{ lane: "granted" | "received"; rows: number }>;
+  limit: number;
+}): string[] {
+  return failure.lanes.map(({ lane, rows }) =>
+    lane === "granted"
+      ? `You have ${rows} shares of your channels; the limit is ${failure.limit}.`
+      : `You have ${rows} shares from other people; the limit is ${failure.limit}.`,
+  );
+}
+
+// Whether a NEW outgoing grant would deepen the over-limit state. Only the
+// GRANTED lane can: an outgoing share adds a row there and nowhere else. A
+// full RECEIVED lane is an inbound backlog the user did not create and cannot
+// clear from here, and rejecting their outgoing work over it turns one
+// account-wide problem into a second one.
+function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
+  return (
+    failure?.kind === "over-limit" &&
+    failure.lanes.some((entry) => entry.lane === "granted")
+  );
+}
+
+// What the sharing surface says when a committed share read carried no rows.
+// Without it the surface renders an empty list, which reads as "you have no
+// shares" (#618).
+//
+// The two reasons owe different things. An outage owes a retry, because the
+// next request can answer. A listing over dohc's own cap owes the count and
+// the limit and NO retry: the same request answers the same way forever, and a
+// button that cannot work is the defect this notice exists to remove.
+function ShareReadFailureNotice(props: {
+  testId: string;
+  failure: ShareReadFailure;
+  // True when rows are still on screen from an earlier read: they are real,
+  // they are just older than this failure.
+  stale: boolean;
+  onRetry: () => void;
+}) {
+  const staleLine = props.stale ? " This list may be out of date." : "";
+  return (
+    <div
+      data-testid={props.testId}
+      data-failure={props.failure.kind}
+      className="flex items-start gap-1.5 border-b border-line px-3 py-2"
+    >
+      <span className="min-w-0 flex-1 text-[11px] leading-4 text-muted">
+        {props.failure.kind === "unreachable"
+          ? `dohc could not read your shares.${staleLine}`
+          : `dohc cannot list this many shares. ${overLimitSentences(
+              props.failure,
+            ).join(" ")}${staleLine}`}
+      </span>
+      {props.failure.kind === "unreachable" ? (
+        <button
+          type="button"
+          data-testid={`${props.testId}-retry`}
+          onClick={props.onRetry}
+          className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+        >
+          Try again
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function BackHeader(props: {
   label: string;
   testId: string;
@@ -980,6 +1073,19 @@ export function ChatsView(props: {
   // out / listing failed) and every sharing affordance stays hidden — the
   // solo view is unchanged.
   const [channelShares, setChannelShares] = useState<ShareListing | null>(null);
+  // WHY the last committed share read did not produce rows, or null when it
+  // did. The rows above are what dohc knows; this is what stopped it knowing.
+  // Separate facts: a relay that did not answer commits no rows AND keeps the
+  // cached ones, so without this the surface renders an empty list that reads
+  // as "no shares" (#618). Its own commit lane, because it answers its own
+  // question and an older response must not overwrite a newer one.
+  //
+  // The two reasons owe the user different things. An outage owes a retry.
+  // A listing over dohc's own cap owes the count, the limit, and no retry at
+  // all — the same request will answer the same way forever.
+  const [shareReadFailure, setShareReadFailure] = useState<ShareReadFailure | null>(
+    null,
+  );
   // The workspace `channelShares` was last DEFINITIVELY resolved for (even when
   // that resolution is `null` — signed out / listing failed). Presence stays
   // dormant until this equals the current workspaceId, so a conversation's
@@ -1079,6 +1185,7 @@ export function ChatsView(props: {
     overview: 0,
     joinedShares: 0,
     relayShares: 0,
+    relayReach: 0,
   });
   const takeCommitTicket = useCallback(() => ++commitTicket.current, []);
   // Claim every lane in `lanes`, or none of them. A response writes exactly
@@ -1132,6 +1239,13 @@ export function ChatsView(props: {
           committedLane.current.relayShares > 0;
         if (answered) return;
         setChannelShares(null);
+        // Claims NO lane, reachability included. This refresh learned nothing
+        // and only fills in where nothing has answered yet — so a real answer
+        // still in flight, issued EARLIER and therefore holding an older
+        // ticket, must still be able to correct it. Taking the lane here left
+        // "dohc could not read your shares" standing over a listing that then
+        // arrived and worked.
+        setShareReadFailure({ kind: "unreachable" });
         setSharesWorkspaceId(workspaceId);
         return;
       }
@@ -1141,8 +1255,51 @@ export function ChatsView(props: {
       if (value === null) {
         if (!claimLanes(["joinedShares", "relayShares"], ticket)) return;
         setChannelShares(null);
+        // The listing did not answer at all, so the surface says so. Without
+        // this the user sees an empty sharing surface and every channel
+        // read-only, with nothing naming either.
+        if (claimLanes(["relayReach"], ticket)) {
+          setShareReadFailure({ kind: "unreachable" });
+        }
         setSharesWorkspaceId(workspaceId);
         return;
+      }
+      // Whether dohc could READ the relay is its own answer, and every
+      // resolved listing carries it — including the unreachable one, which
+      // claims no row lane at all.
+      const nextFailure: ShareReadFailure | null =
+        value.relay.state === "unreachable"
+          ? { kind: "unreachable" }
+          : value.relay.state === "over-limit"
+            ? {
+                kind: "over-limit",
+                lanes: value.relay.lanes,
+                limit: value.relay.limit,
+              }
+            : null;
+      // A refresh NOBODY ASKED FOR may take the reachability lane only when it
+      // ESTABLISHED an account-scoped answer. The test is what the read
+      // learned, not which sentinel it returned: a background read that
+      // resolved "unreachable" or "over-limit" established no listing, exactly
+      // like one that rejected, and taking the lane over either would let it
+      // outrank an authoritative answer still in flight — leaving the notice
+      // standing over a listing that then arrived and worked. Keying this on
+      // `value === null` covered one of the three shapes.
+      //
+      // It may still SAY so where nothing has answered yet, so the surface
+      // resolves instead of waiting on a request that may never return.
+      const establishedRelayFact =
+        value.relay.state === "answered" || value.relay.state === "signed-out";
+      if (!options?.background || establishedRelayFact) {
+        if (claimLanes(["relayReach"], ticket)) setShareReadFailure(nextFailure);
+      } else if (ticket > committedLane.current.relayReach) {
+        // It may still SAY so — an outage the user should see is a real fact,
+        // and refusing to show it would trade one silence for another. It
+        // READS the watermark without taking it: newer than what is displayed,
+        // so a late-arriving older outage cannot repaint over a fresher
+        // answer; unclaimed, so an authoritative answer still in flight on an
+        // OLDER ticket can still land and clear it.
+        setShareReadFailure(nextFailure);
       }
       // The relay lanes are only this answer's to write when it learned an
       // account-scoped fact: the relay's rows, or that no session exists
@@ -1150,7 +1307,12 @@ export function ChatsView(props: {
       // and recipient emails must not survive a logout). "Unreachable" is NOT
       // an empty listing: the cached rows stand, and the unclaimed lane lets
       // a real relay answer land its rows.
-      const relayAuthoritative = value.relay.state !== "unreachable";
+      // Over-limit is non-authoritative for the same reason unreachable is:
+      // dohc has no listing it can stand behind, so the cached rows are still
+      // the best thing it knows, and the unclaimed lane lets a listing that
+      // later fits land its rows.
+      const relayAuthoritative =
+        value.relay.state !== "unreachable" && value.relay.state !== "over-limit";
       const listing: ShareListing =
         value.relay.state === "answered"
           ? {
@@ -1490,6 +1652,7 @@ export function ChatsView(props: {
     setNewThreadBody("");
     setCreatingChannel(null);
     setChannelShares(null);
+    setShareReadFailure(null);
     setSharesWorkspaceId(null);
     // Nothing is committed for the new workspace yet. Tickets stay monotonic:
     // an in-flight response from the old workspace holds an older ticket AND
@@ -1497,7 +1660,12 @@ export function ChatsView(props: {
     // refreshShares commits under IT rather than the nav token — an old
     // workspace's share listing must be refused at the commit point.
     sessionGeneration.current += 1;
-    committedLane.current = { overview: 0, joinedShares: 0, relayShares: 0 };
+    committedLane.current = {
+      overview: 0,
+      joinedShares: 0,
+      relayShares: 0,
+      relayReach: 0,
+    };
     setSharePanelOpen(false);
     setShareEmail("");
     setShareReadOnly(false);
@@ -2875,6 +3043,12 @@ export function ChatsView(props: {
             ? state
             : { ...state, granted: [], received: [], sessionKey },
         );
+        // The failure is account-scoped too, and it is a PERSISTENT claim
+        // rather than a transient one: an over-limit answer names the previous
+        // account's share counts, and leaving it up would show them under the
+        // new account for as long as its own listing takes to arrive — or for
+        // good, if that listing stalls. It goes with the rows it explains.
+        setShareReadFailure(null);
         void refreshShares();
         return;
       }
@@ -2891,6 +3065,11 @@ export function ChatsView(props: {
 
   const submitShare = useCallback(async () => {
     if (readOnly) return;
+    // The disabled control is honesty; this is the gate. A submit that slips
+    // past it (a stale enter key, a re-render race) would still grow the lane
+    // dohc already cannot list. Only the GRANTED lane, though — an outgoing
+    // share never touches the received one.
+    if (grantedLaneIsOverLimit(shareReadFailure)) return;
     if (nav.level !== "channel" || shareBusy) return;
     const recipientEmail = shareEmail.trim();
     if (recipientEmail.length === 0) return;
@@ -2913,7 +3092,17 @@ export function ChatsView(props: {
     } finally {
       setShareBusy(false);
     }
-  }, [nav, props, readOnly, refreshShares, shareBusy, shareEmail, shareReadOnly, workspaceId]);
+  }, [
+    nav,
+    props,
+    readOnly,
+    refreshShares,
+    shareBusy,
+    shareEmail,
+    shareReadFailure,
+    shareReadOnly,
+    workspaceId,
+  ]);
 
   const revokeShare = useCallback(
     async (shareId: string) => {
@@ -4200,6 +4389,14 @@ export function ChatsView(props: {
       : [];
     // Sharing an OWNED channel needs the sharing surface up; a joined channel
     // is never re-shareable from here (only its owner manages members).
+    // Over the cap, a NEW grant only deepens the state: the relay's create
+    // path has no matching cap, so each one grows the lane dohc already
+    // cannot list, and the granted rows are empty on an over-limit read so
+    // the user cannot remove any to make room. A refusal has to leave a way
+    // to retry or degrade; offering the one control that moves retry further
+    // away is the opposite. Removal and paging belong to the lane-scoping
+    // work, not here.
+    const shareGrantsBlocked = grantedLaneIsOverLimit(shareReadFailure);
     const canShare =
       !readOnly &&
       nav.channel.kind !== "agent" &&
@@ -4325,6 +4522,17 @@ export function ChatsView(props: {
             data-testid="chats-share-panel"
             className="shrink-0 border-b border-line bg-panel-2/40 px-3 py-2"
           >
+            {/* Same honesty on the owner side: an unreadable listing left this
+                panel showing no members, which reads as "nobody has this
+                channel". */}
+            {shareReadFailure ? (
+              <ShareReadFailureNotice
+                testId="chats-share-members-unreadable"
+                failure={shareReadFailure}
+                stale={channelGrants.length > 0}
+                onRetry={() => void refreshShares()}
+              />
+            ) : null}
             {channelGrants.length > 0 ? (
               <ul className="m-0 mb-2 list-none p-0">
                 {channelGrants.map((grant) => (
@@ -4366,6 +4574,7 @@ export function ChatsView(props: {
                 data-testid="chats-share-email"
                 type="email"
                 value={shareEmail}
+                disabled={shareGrantsBlocked}
                 maxLength={320}
                 placeholder="teammate@example.com"
                 onChange={(event) => setShareEmail(event.target.value)}
@@ -4383,7 +4592,9 @@ export function ChatsView(props: {
               <button
                 type="submit"
                 data-testid="chats-share-submit"
-                disabled={shareBusy || shareEmail.trim().length === 0}
+                disabled={
+                  shareBusy || shareGrantsBlocked || shareEmail.trim().length === 0
+                }
                 className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-50"
               >
                 Share
@@ -4714,11 +4925,23 @@ export function ChatsView(props: {
             ) : null}
           </div>
         ) : null}
-        {receivedNotJoined.length > 0 ? (
+        {receivedNotJoined.length > 0 || shareReadFailure !== null ? (
           <div data-testid="chats-shared-with-you">
             <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
               Shared with you
             </p>
+            {/* The section stays even with nothing to list. Hiding it on an
+                unreadable listing was the whole of #618: the invitations
+                vanished with no copy anywhere saying dohc could not read
+                them. */}
+            {shareReadFailure ? (
+              <ShareReadFailureNotice
+                testId="chats-shares-unreadable"
+                failure={shareReadFailure}
+                stale={receivedNotJoined.length > 0}
+                onRetry={() => void refreshShares()}
+              />
+            ) : null}
             <ul className="m-0 list-none p-0">
               {receivedNotJoined.map((row) => (
                 <li key={row.shareId} className="border-b border-line">

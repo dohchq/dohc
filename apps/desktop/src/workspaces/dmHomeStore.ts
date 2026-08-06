@@ -84,6 +84,15 @@ export function readDmHome(file: string, shareId: string): string | null {
   return result.ok ? (result.homes[shareId] ?? null) : null;
 }
 
+// Every pin in the map, for a caller that must scope a whole received lane to
+// one workspace rather than probe one shareId. An unreadable map answers {} —
+// the same "cannot confirm here" readDmHome gives, which only declines the
+// scoping, never widens a claim.
+export function readDmHomes(file: string): Readonly<Record<string, string>> {
+  const result = readMap(file);
+  return result.ok ? result.homes : {};
+}
+
 // Claim (or confirm) the home workspace for a received DM. Returns TRUE only
 // when `workspaceId` is (or durably becomes) the home — i.e. this workspace
 // should auto-join the DM. Returns FALSE when the DM is homed elsewhere, when

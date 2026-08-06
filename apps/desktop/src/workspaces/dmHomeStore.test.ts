@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { claimDmHome, readDmHome } from "./dmHomeStore";
+import { claimDmHome, readDmHome, readDmHomes } from "./dmHomeStore";
 
 // WS-MU-C3 cross-workspace DM contamination fix: a received DM is pinned to
 // EXACTLY ONE local workspace so it can't be materialized into every workspace
@@ -46,6 +46,33 @@ describe("dmHomeStore", () => {
     // ENOENT is genuinely empty, so a first claim succeeds and persists.
     expect(claimDmHome(file(), "share-x", "ws-A")).toBe(true);
     expect(readDmHome(file(), "share-x")).toBe("ws-A");
+  });
+
+  // Scoping a whole received lane to one workspace needs every pin at once,
+  // not one probe per share (#618).
+  it("reads every pin at once, and answers empty rather than guessing when the map is unreadable", () => {
+    const f = file();
+    expect(readDmHomes(f)).toEqual({});
+    expect(claimDmHome(f, "share-A", "ws-A")).toBe(true);
+    expect(claimDmHome(f, "share-B", "ws-B")).toBe(true);
+    expect(readDmHomes(f)).toEqual({ "share-A": "ws-A", "share-B": "ws-B" });
+
+    chmodSync(f, 0o000);
+    let stillReadable = true;
+    try {
+      readFileSync(f);
+    } catch {
+      stillReadable = false;
+    }
+    if (stillReadable) {
+      // Running as root ignores mode bits — can't simulate the read error here.
+      chmodSync(f, 0o600);
+      return;
+    }
+    // An unreadable map declines the scoping; it never invents a pin, and it
+    // never widens one workspace's claim over another's.
+    expect(readDmHomes(f)).toEqual({});
+    chmodSync(f, 0o600);
   });
 
   it("does NOT clobber other homes when a POPULATED map is momentarily unreadable (non-ENOENT)", () => {

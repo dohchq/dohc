@@ -135,6 +135,8 @@ fn resolve(id: &str, kind: ResolveConflictKind, suffix: &str) -> ResolveTextConf
         author_json: None,
         now_ms: 900,
         request_id: None,
+        // This caller builds no wire answer, so nothing bounds the row here.
+        conflict_answer_budget_bytes: usize::MAX,
     }
 }
 
