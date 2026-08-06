@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, rm, truncate, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readdir,
+  rm,
+  truncate,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -149,6 +158,75 @@ test("one directory full of empty files is counted, not reported as nothing", as
     assert.equal(report.descendants, 1_001, "the directory and its 1,000 files");
     assert.match(report.reason, /1 entries \(1001 descendants\) and 0 bytes/);
   } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+// Deny listing an EMPTY directory, and hand back the undo. Real permissions on
+// both platforms — `icacls /deny` on Windows, `chmod` elsewhere — and neither
+// needs privilege on a directory this process just made.
+//
+// The right denied is the narrow one: reading the directory's contents, not
+// deleting it. `readdir` fails, `rmdir` still succeeds, and the removal below
+// therefore runs at full speed. Denying more (`(RX)`, or a directory with a
+// file in it) makes `rm` retry its whole Windows budget against a tree it can
+// never enumerate: 26 seconds, measured, for one unit test.
+async function denyListing(directory) {
+  if (process.platform === "win32") {
+    const account = userInfo().username;
+    execFileSync("icacls", [directory, "/deny", `${account}:(RD)`], { stdio: "pipe" });
+    return () => {
+      // The removal under test may already have taken the directory with it.
+      try {
+        execFileSync("icacls", [directory, "/remove:d", account], { stdio: "pipe" });
+      } catch {}
+    };
+  }
+  await chmod(directory, 0o000);
+  return async () => {
+    await chmod(directory, 0o700).catch(() => {});
+  };
+}
+
+// The reporter is the gate's last reclamation point. A measurement that throws
+// is exactly when something is wrong, and it used to take the removal with it:
+// the row failed and the whole run root stayed on disk.
+test("a child that cannot be read still fails the row and still reclaims the root", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
+  const runRoot = join(parent, "run");
+  const unreadable = join(runRoot, "unreadable-workspace");
+  let restore;
+  try {
+    await plant(runRoot, 0, 0);
+    await mkdir(unreadable, { recursive: true });
+    restore = await denyListing(unreadable);
+
+    // Prove the fixture before asserting on it. Running as root, or on a
+    // filesystem that ignores the deny, would make this test pass for no
+    // reason at all — the shape of green check this PR exists to remove.
+    const listable = await readdir(unreadable).then(
+      () => true,
+      () => false,
+    );
+    if (listable) {
+      t.skip("this user can list a directory it denied itself; there is no fixture to test");
+      return;
+    }
+
+    const report = await inspectScratchRun(runRoot);
+
+    assert.equal(report.status, "FAIL", "a child that cannot be read is a leak");
+    assert.match(report.reason, /scratch measurement failed/);
+    // Both facts, never one: what could not be measured, and whether the tree
+    // is still on disk.
+    assert.match(report.reason, /run root reclaimed/);
+    assert.equal(
+      existsSync(runRoot),
+      false,
+      "the row must reclaim the root even when it could not finish measuring it",
+    );
+  } finally {
+    if (restore) await restore();
     await rm(parent, { recursive: true, force: true });
   }
 });

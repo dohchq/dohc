@@ -68,15 +68,24 @@ export async function inspectScratchRun(runRoot) {
   }
 
   names = names.filter((name) => name !== SCRATCH_SENTINEL);
-  let bytes = 0;
-  let descendants = 0;
-  for (const name of names) {
-    const tree = await measureTree(join(runRoot, name));
-    bytes += tree.bytes;
-    descendants += tree.entries;
-  }
   const entryCount = names.length;
   const leaked = names.slice(0, 5);
+  let bytes = 0;
+  let descendants = 0;
+  // A child this walk cannot read is a leak too, and it is the case where
+  // reclaiming matters most. Recording the failure instead of throwing keeps
+  // the removal below on the path — this reporter is the gate's last
+  // reclamation point, so a throw here would leave the whole run root behind.
+  let measurementFailure;
+  try {
+    for (const name of names) {
+      const tree = await measureTree(join(runRoot, name));
+      bytes += tree.bytes;
+      descendants += tree.entries;
+    }
+  } catch (error) {
+    measurementFailure = error instanceof Error ? error.message : String(error);
+  }
 
   // Reclaim the run root either way. Every test binary has exited by now, so
   // the handles that beat the in-process guards are gone and this succeeds —
@@ -91,6 +100,20 @@ export async function inspectScratchRun(runRoot) {
     });
   } catch (error) {
     cleanupFailure = error instanceof Error ? error.message : String(error);
+  }
+
+  // A measurement that could not finish is reported ahead of the limits, and it
+  // carries the reclamation outcome with it: the two facts a reader needs are
+  // what could not be measured and whether the tree is still on disk.
+  if (measurementFailure) {
+    return {
+      status: "FAIL",
+      reason: `scratch measurement failed: ${measurementFailure}; counted at least ${observed(entryCount, descendants, bytes)} before stopping; ${cleanupFailure ? `and the run root could not be reclaimed: ${cleanupFailure}` : "run root reclaimed"}; leaked directories: ${leaked.join(", ")}`,
+      entryCount,
+      descendants,
+      bytes,
+      leaked,
+    };
   }
 
   // A tree the gate itself cannot reclaim is a real leak whatever its size:

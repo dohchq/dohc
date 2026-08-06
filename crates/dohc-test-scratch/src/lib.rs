@@ -245,9 +245,17 @@ fn is_idle_since(path: &Path, now: SystemTime, max_age: Duration) -> bool {
     let Ok(metadata) = path.symlink_metadata() else {
         return false;
     };
-    if let Ok(modified) = metadata.modified()
-        && now.duration_since(modified).is_ok_and(|age| age <= max_age)
-    {
+    // An age this process cannot establish is not an age past the cutoff. A
+    // `modified()` the platform refuses, and an mtime in the apparent future
+    // after the clock moves back, both mean "cannot tell" — and what follows a
+    // `true` here is a recursive delete, so "cannot tell" has to read as busy.
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let Ok(age) = now.duration_since(modified) else {
+        return false;
+    };
+    if age <= max_age {
         return false;
     }
     if !metadata.is_dir() {
@@ -456,6 +464,38 @@ mod tests {
         assert!(
             current.exists(),
             "the current run must survive its own sweep"
+        );
+    }
+
+    /// A clock correction moves `now` behind files already on disk. Their age
+    /// cannot be computed, and the sweep's next act is a recursive delete — so
+    /// an age nobody can establish has to mean the run is busy, never that it
+    /// is 48 hours idle. The JS twin already reads this way: its
+    /// `nowMs - mtimeMs` goes negative, which is inside the cutoff.
+    #[test]
+    fn sweep_keeps_a_run_whose_mtime_is_in_the_future() {
+        let harness = ScratchDir::new_named("future-mtime").expect("scratch");
+        let parent = harness.join("runs");
+        let live = parent.join("run-from-the-future");
+        fs::create_dir_all(&live).expect("run root");
+        let file = live.join("engine.db");
+        fs::write(&file, b"written after the clock moved back").expect("write");
+
+        let now = SystemTime::now();
+        // The run root itself looks long abandoned; only the file is ahead.
+        let stale = FileTime::from_system_time(now - MAX_RUN_AGE - Duration::from_secs(60));
+        set_file_mtime(&live, stale).expect("age the run root");
+        set_file_mtime(
+            &file,
+            FileTime::from_system_time(now + Duration::from_secs(3600)),
+        )
+        .expect("stamp the file in the future");
+
+        sweep_old_runs(&parent, &parent.join("current-run"), now).expect("sweep");
+
+        assert!(
+            live.exists(),
+            "an age that cannot be established must read as busy, not as idle"
         );
     }
 
