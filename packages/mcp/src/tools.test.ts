@@ -2270,6 +2270,65 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 
+  // Reading or writing THROUGH the alias is the attack; removing the alias is
+  // the cleanup, and refusing that left an agent unable to undo the very thing
+  // the guard is warning about. A rename moves the link and never opens it.
+  it("deletes the alias itself, and .dohc keeps every byte", async () => {
+    await withDohcAlias(async (ctx) => {
+      await expect(deleteWorkspacePath(ctx, { path: "meta" })).resolves.toMatchObject({
+        ok: true,
+        trashed: true,
+      });
+      await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+    });
+  });
+
+  it("renames the alias, and it is still only an alias", async () => {
+    await withDohcAlias(async (ctx) => {
+      await expect(
+        moveWorkspacePath(ctx, { fromPath: "meta", toPath: "old-meta" }),
+      ).resolves.toMatchObject({ ok: true });
+      await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
+      expect((await lstat(join(ctx.root, "old-meta"))).isSymbolicLink()).toBe(true);
+      // Moving it does not launder it: the new spelling reads .dohc too.
+      expectsReservedRefusal(
+        refusalReason(await readWorkspaceFile(ctx, { path: "old-meta/settings.local.json" })),
+      );
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+    });
+  });
+
+  // The entry is the object for an ordinary link too -- deleting a shortcut
+  // must not delete what it points at.
+  it("deletes a live link to an ordinary folder without touching the folder", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "notes"), { recursive: true });
+      await writeFile(join(ctx.root, "notes", "day.md"), "kept\n");
+      await symlink(join(ctx.root, "notes"), join(ctx.root, "shortcut"), "dir");
+
+      await expect(deleteWorkspacePath(ctx, { path: "shortcut" })).resolves.toMatchObject({
+        ok: true,
+      });
+      await expect(lstat(join(ctx.root, "shortcut"))).rejects.toThrow();
+      expect(await readFile(join(ctx.root, "notes", "day.md"), "utf8")).toBe("kept\n");
+    });
+  });
+
+  // Holding back the final name does not skip the reserved rule: the parent
+  // still resolves, and the rule reads that real path plus this name.
+  it("still refuses deleting a live link that sits inside an aliased .dohc", async () => {
+    await withDohcAlias(async (ctx) => {
+      await mkdir(join(ctx.root, "notes"), { recursive: true });
+      await symlink(join(ctx.root, "notes"), join(ctx.root, ".dohc", "inner"), "dir");
+
+      const deleted = await deleteWorkspacePath(ctx, { path: "meta/inner" });
+      expectsReservedRefusal(refusalReason(deleted));
+      expect((await lstat(join(ctx.root, ".dohc", "inner"))).isSymbolicLink()).toBe(true);
+    });
+  });
+
   // shared-with-me is a WRITE reservation: mount refresh owns it, agents read
   // it. An alias must inherit exactly that split, not more and not less.
   it("refuses a write through an alias of shared-with-me but still reads it", async () => {
@@ -2672,13 +2731,14 @@ describe("a guard that decides authority reads the resolved path", () => {
       });
     });
 
-    // The cycle is in a PARENT here, so lstat cannot reach the final name at
-    // all. That refuses on its own errno, which is why the relaxation is keyed
-    // on the final component and never on the code.
+    // Only the FINAL name is held back. The cycle is a parent here, so it is
+    // still a route to somewhere unknown and still has to be resolved.
     it("still refuses a delete THROUGH the looping link", async () => {
       await withCycle(async (ctx) => {
         const deleted = await deleteWorkspacePath(ctx, { path: "ping/note.md" });
-        expect(refusalReason(deleted)).toMatch(/could not check where this path leads/i);
+        const reason = refusalReason(deleted);
+        expect(reason).toContain("ELOOP");
+        expect(reason).toMatch(/cannot be resolved/i);
       });
     });
   });

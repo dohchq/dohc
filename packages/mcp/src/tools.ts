@@ -135,9 +135,12 @@ const UNNAMED_ERROR = "unknown error";
 
 // `noFollow` says the caller mutates the ENTRY at `absolute` rather than
 // reading or writing through it -- delete and a move's source, both of which
-// rename the entry itself. Only the final component changes meaning: a link
-// there that leads nowhere, or in a circle, is the thing being removed rather
-// than a step on the way somewhere.
+// rename the entry itself. Its final name is then held back and only the
+// PARENT chain is resolved, because where that entry POINTS is not the
+// question: a link there is the thing being removed, whether it is live,
+// broken, or looping. The parent must still resolve inside the root, and
+// safeResolve still decides the reserved rule on the parent's real path plus
+// this name, so an alias INSIDE a reserved area still refuses.
 async function realRelativeInRoot(
   root: string,
   absolute: string,
@@ -154,6 +157,12 @@ async function realRelativeInRoot(
   if (realRoot.endsWith(sep)) realRoot = realRoot.slice(0, -1);
   const absentTail: string[] = [];
   let probe = absolute;
+  if (noFollow) {
+    // Never empty, never "." or ".." -- validateUserMaterializePath drops both,
+    // so this is always a real component below the root.
+    absentTail.push(basename(absolute));
+    probe = dirname(absolute);
+  }
   for (;;) {
     let real: string;
     try {
@@ -175,24 +184,14 @@ async function realRelativeInRoot(
       if (!climbable) return { ok: false, reason: "unreadable-path", code: realpathCode };
       try {
         await lstat(probe);
-        // Deleting or renaming a broken or looping link IS the cleanup, so a
-        // no-follow mutation climbs past one at the END of the path the same
-        // way it climbs past a name that is not there. Getting here means lstat
-        // proved an entry is present and realpath refused to say where it
-        // leads; a rename does not need to know. Nothing else is relaxed: the
-        // parent chain must still resolve inside the root, and the reserved
-        // rule below still decides on the parent's real path plus this name.
-        //
-        // Keyed on the final component, NOT on the errno. A cycle in a PARENT
-        // component fails the lstat below instead, and refuses there.
-        if (!noFollow || probe !== absolute) {
-          // The link is there and realpath will not follow it. ENOENT proves
-          // the target is missing; ELOOP proves a cycle. Only the first is
-          // dangling.
-          return ABSENT_CODES.has(realpathCode)
-            ? { ok: false, reason: "dangling-symlink" }
-            : { ok: false, reason: "unresolvable-symlink", code: realpathCode };
-        }
+        // The link is there and realpath will not follow it. ENOENT proves the
+        // target is missing; ELOOP proves a cycle. Only the first is dangling.
+        // A no-follow caller never reaches here for its own entry -- that name
+        // was held back above -- so this is always a link PARTWAY along the
+        // path, and where it leads is a question that still has to be answered.
+        return ABSENT_CODES.has(realpathCode)
+          ? { ok: false, reason: "dangling-symlink" }
+          : { ok: false, reason: "unresolvable-symlink", code: realpathCode };
       } catch (cause) {
         const code = errnoCode(cause) ?? UNNAMED_ERROR;
         if (!ABSENT_CODES.has(code)) {
