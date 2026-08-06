@@ -356,25 +356,52 @@ export function couldBeLengthRefusal(
 // was skipped.
 //
 // `null` means both ends are there, so the ENOENT is about the composed path
-// and the ladder may try a shorter name.
-type MissingEnd = "source" | "danglingLink" | "destination";
+// and the ladder may try a shorter name. Everything else aborts the batch, and
+// "unchecked" aborts it with the failure the copy actually hit: a probe that
+// could not look establishes nothing to say instead.
+type MissingEnd = "source" | "danglingLink" | "destination" | "unchecked";
+
+/**
+ * What one probe established about one end. Exported for unit testing, as
+ * `classifyLadderProbe` below is: an EACCES or EIO on the probe is not
+ * arrangeable in that suite, and it is the case that carries the defect.
+ *
+ * "unknown" is not "absent". Only ENOENT and ENOTDIR say a path is not there.
+ * EACCES, EIO and the rest say dohc could not look -- and "the file it points
+ * to is missing", written on that evidence, names a file that is fine.
+ */
+export function classifyEndProbe(
+  probe: { looked: true } | { looked: false; code: string | undefined },
+): "there" | "absent" | "unknown" {
+  if (probe.looked) return "there";
+  return probe.code === "ENOENT" || probe.code === "ENOTDIR"
+    ? "absent"
+    : "unknown";
+}
+
+async function probeEnd(path: string) {
+  return classifyEndProbe(
+    await stat(path).then(
+      () => ({ looked: true as const }),
+      (error: unknown) => ({
+        looked: false as const,
+        code: (error as NodeJS.ErrnoException).code,
+      }),
+    ),
+  );
+}
 
 async function missingEnd(
   source: string,
   absDir: string,
 ): Promise<MissingEnd | null> {
-  const [sourceThere, dirThere] = await Promise.all([
-    stat(source).then(
-      () => true,
-      () => false,
-    ),
-    stat(absDir).then(
-      () => true,
-      () => false,
-    ),
+  const [sourceProbe, dirProbe] = await Promise.all([
+    probeEnd(source),
+    probeEnd(absDir),
   ]);
-  if (!dirThere) return "destination";
-  if (sourceThere) return null;
+  if (dirProbe === "absent") return "destination";
+  if (sourceProbe === "unknown" || dirProbe === "unknown") return "unchecked";
+  if (sourceProbe === "there") return null;
   // Say WHICH nothing the source resolved to. A dangling link is still at the
   // path the user picked, so "no such file" alone sends them to look at
   // something they can plainly see.

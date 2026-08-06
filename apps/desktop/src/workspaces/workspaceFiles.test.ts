@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  classifyEndProbe,
   classifyLadderProbe,
   collectZipEntries,
   couldBeLengthRefusal,
@@ -877,6 +878,29 @@ describe("copy length-refusal classification", () => {
   it("leaves every other failure to abort the batch", () => {
     for (const code of ["EACCES", "EPERM", "EIO", "EXDEV", undefined]) {
       expect(couldBeLengthRefusal(code, "n".repeat(5000), WINDOWS_BUDGET), code).toBe(false);
+    }
+  });
+});
+
+// Before the copy loop may call a link dangling, something has to establish
+// that the target is ABSENT. A probe that failed establishes nothing --
+// separated from the I/O because an EACCES or an EIO stat is not arrangeable
+// here, and it is the case that carries the defect: a link to an unreachable
+// network path would be reported to the user as a link to a missing file.
+describe("copy end-probe classification", () => {
+  it("reads a stat that answered as the end being there", () => {
+    expect(classifyEndProbe({ looked: true })).toBe("there");
+  });
+
+  it("takes only ENOENT and ENOTDIR as absence", () => {
+    expect(classifyEndProbe({ looked: false, code: "ENOENT" })).toBe("absent");
+    expect(classifyEndProbe({ looked: false, code: "ENOTDIR" })).toBe("absent");
+  });
+
+  // The finding. The same distinction the trash ladder draws above.
+  it("says it could not check when the probe itself failed", () => {
+    for (const code of ["EACCES", "EIO", "EPERM", "ELOOP", "ETIMEDOUT", undefined]) {
+      expect(classifyEndProbe({ looked: false, code }), code).toBe("unknown");
     }
   });
 });
