@@ -78,7 +78,10 @@ export type VersionedTextStoreErrorCode =
   | "invalid-path"
   | "invalid-root"
   | "invalid-version"
-  | "invalid-text"
+  // No `invalid-text`: the engine raises `DomainError::InvalidText` only for
+  // the secret file size limit, which answers on the secret surface and its
+  // own `SecretFileStoreErrorCode`. This store's text validation is size-only
+  // and reports `payload-too-large`.
   | "invalid-timestamp"
   | "invalid-version-name"
   | "invalid-workspace"

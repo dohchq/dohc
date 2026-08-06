@@ -59,7 +59,6 @@ const VERSIONED_TEXT_STORE_ERROR_CODES = [
   "invalid-path",
   "invalid-root",
   "invalid-version",
-  "invalid-text",
   "invalid-timestamp",
   "invalid-version-name",
   "invalid-workspace",
