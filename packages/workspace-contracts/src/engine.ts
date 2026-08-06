@@ -934,6 +934,10 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     status?: VersionedTextConflictStatus;
     afterConflictId?: VersionedTextConflictId;
+    // Bodies the daemon withheld are rebuilt by default, under a byte budget.
+    // A caller that reads only ids, paths or counts passes "withheld": for it
+    // the rebuild transfers every body and then discards it.
+    bodies?: "hydrate" | "withheld";
   }): Promise<VersionedTextConflictPage>;
   resolveTextConflict(input: {
     workspaceId: WorkspaceId;

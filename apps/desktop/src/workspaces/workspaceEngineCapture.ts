@@ -3394,6 +3394,9 @@ export function createWorkspaceEngineCapture(
             const page = await engine.listTextConflicts({
               workspaceId,
               status: "open",
+              // Paths only, like the compare walk above. Hydrating here would
+              // fetch every withheld body of every open conflict and keep none.
+              bodies: "withheld",
               ...(afterConflictId !== undefined ? { afterConflictId } : {}),
             });
             for (const conflict of page.conflicts) {
@@ -3526,6 +3529,9 @@ export function createWorkspaceEngineCapture(
         const page = await engine.listTextConflicts({
           workspaceId,
           status: "open",
+          // Ids only. This drains every page, so hydrating would fetch every
+          // body of every open conflict and keep none of them.
+          bodies: "withheld",
           ...(afterConflictId !== undefined ? { afterConflictId } : {}),
         });
         ids.push(...page.conflicts.map((conflict) => conflict.id));

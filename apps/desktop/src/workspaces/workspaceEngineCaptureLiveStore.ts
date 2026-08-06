@@ -384,9 +384,10 @@ function conflictStateFromWire(state: ConflictFileState): VersionedTextFileState
     sha256: snapshot.sha256,
     byteLength: snapshot.byteLength,
     // A withheld body carries no text, the way a binary side carries none.
-    // Only `conflicts.resolve` withholds, and the conflict it answers with is
+    // `conflicts.resolve` answers with withheld sides, and its conflict is
     // read for identity and content kind, never for a body — the bodies a
-    // reader paints come from `conflicts.list`.
+    // reader paints come from `conflicts.list`, whose adapter hydrates any
+    // side the daemon withheld before this mapping sees it.
     ...(state.contentKind === "text" && snapshot.text !== null
       ? { text: snapshot.text }
       : {}),

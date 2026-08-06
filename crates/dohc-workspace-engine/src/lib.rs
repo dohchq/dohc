@@ -200,6 +200,45 @@ fn resolve_request_encoded_bytes(
         .saturating_add(params_bytes)
 }
 
+/// The encoded size of the response envelope that will carry this result —
+/// what the control frame actually holds. The mirror of
+/// `resolve_request_encoded_bytes`, and measured the same way: through the
+/// encoder the transport itself uses, with the result slot filled by an empty
+/// object and its two bytes taken back. Nothing is reserved and nothing is
+/// estimated, so a result one byte inside the frame still crosses.
+fn response_encoded_bytes(id: u64, result: &Value) -> usize {
+    let envelope =
+        dohc_engine_protocol::wire::Envelope::Response(dohc_engine_protocol::wire::Response {
+            id,
+            result: json!({}),
+        });
+    let envelope_bytes = serde_json::to_vec(&envelope).map_or(usize::MAX, |bytes| bytes.len());
+    let result_bytes = serde_json::to_vec(result).map_or(usize::MAX, |bytes| bytes.len());
+    // `- 2` drops the empty object measured in the result slot.
+    envelope_bytes
+        .saturating_sub(2)
+        .saturating_add(result_bytes)
+}
+
+/// What a resolve answer spends on everything the REQUEST supplies, each
+/// string counted at the number of places the answer serves it.
+///
+/// Read off the answer builder and rounded up: the object id rides
+/// `object.id`, `snapshot.objectId` and `moment.objectId` in both the write
+/// and the delete block; each moment id rides its own block's snapshot and
+/// moment; the metadata pair rides both snapshots and both moments; the author
+/// rides both moments, and its PARSED form is never longer than the string
+/// measured here.
+fn resolve_answer_beside_conflict_bytes(local: &LocalResolveDto) -> usize {
+    let optional = |value: &Option<String>| value.as_deref().map_or(0, json_string_encoded_len);
+    6 * json_string_encoded_len(&local.object_id)
+        + 3 * json_string_encoded_len(&local.write_moment_id)
+        + 3 * json_string_encoded_len(&local.delete_moment_id)
+        + 4 * optional(&local.metadata_summary)
+        + 4 * optional(&local.metadata_correlation_id)
+        + 2 * optional(&local.author_json)
+}
+
 fn encode_ydoc_state_base64(full_state: &[u8]) -> Result<String, WireError> {
     if full_state.len() > MAX_YDOC_STATE_WIRE_BYTES {
         return Err(wire(ErrorCode::Internal, "ydoc-state-exceeds-wire-limit"));
@@ -292,9 +331,11 @@ const GRANULAR_CHAT_RESPONSE_BYTE_BUDGET: usize = 256 * 1024;
 const CONFLICTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 const CONFLICTS_RESPONSE_ROW_LIMIT: usize =
     dohc_engine_domain::TEXT_CONFLICT_QUERY_LIMIT as usize - 1;
-/// Conflict rows are the only hydration surface for the three full-text
-/// sides. Let any row that fits the negotiated 8 MiB control frame progress,
-/// retaining explicit envelope and continuation headroom.
+/// The most one serialized conflict row may carry in band: the negotiated
+/// 8 MiB control frame, retaining explicit envelope and continuation
+/// headroom. A row past it is degraded, not refused — `conflicts_list`
+/// withholds its over-cap side bodies, and the caller hydrates them through
+/// `versionedText.readBlob`.
 const CONFLICT_ROW_HARD_CAP_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
 /// What a hand-combined resolution is bounded by: the control frame that has
@@ -310,6 +351,31 @@ const CONFLICT_ROW_HARD_CAP_BYTES: usize =
 /// newlines are 4 MiB raw and 8 MiB encoded.
 const RESOLVE_REQUEST_FRAME_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+/// What one whole RESPONSE is bounded by: the control frame that has to carry
+/// it. A per-row or per-body cap cannot stand in for this — a response serves
+/// more than its largest part (`conflicts.list` appends the continuation after
+/// its rows; `conflicts.resolve` answers a conflict, a write and a delete),
+/// and the daemon's writer treats an over-frame answer as fatal rather than
+/// answering it.
+const RESPONSE_FRAME_BYTES: usize =
+    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+/// What a fully withheld resolve answer spends on JSON keys, punctuation and
+/// every fixed-width field beside them — 64-hex digests, i64 counters, enum
+/// strings, the `inbandLimitBytes` numbers each withheld body leaves behind.
+/// `a_fully_withheld_resolve_answer_fits_its_scaffolding_allowance` measures
+/// the real figure against this, which is why it is public: a test carrying
+/// its own copy of the number would pass whatever this held.
+pub const RESOLVE_ANSWER_SCAFFOLDING_BYTES: usize = 64 * 1024;
+/// The one part of a resolve answer that no request supplies and no conflict
+/// row carries: the metadata pair on the head a resolution REMOVES. The write
+/// path that minted it bounded each field at `MAX_METADATA_FIELD_BYTES`
+/// decoded, and escaping costs at most six bytes per byte, so both fields
+/// together cannot pass this.
+const RESOLVE_ANSWER_REMOVED_HEAD_METADATA_BYTES: usize = 2 * (6 * MAX_METADATA_FIELD_BYTES + 2);
+/// Everything a resolve answer carries that is neither the conflict row nor
+/// this request's own fields.
+const RESOLVE_ANSWER_STRUCTURAL_BYTES: usize =
+    RESOLVE_ANSWER_SCAFFOLDING_BYTES + RESOLVE_ANSWER_REMOVED_HEAD_METADATA_BYTES;
 const SEARCH_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
 const CHAT_PAGE_LIMIT_DEFAULT: i64 = 200;
@@ -919,7 +985,7 @@ impl EngineService {
                     .await?
             }
             "conflicts.list" => {
-                self.conflicts_list(&ctx, request.workspace, request.params)
+                self.conflicts_list(&ctx, request.id, request.workspace, request.params)
                     .await?
             }
             "conflicts.open" => {
@@ -7549,6 +7615,7 @@ impl EngineService {
     async fn conflicts_list(
         &self,
         ctx: &RequestContext,
+        id: u64,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
@@ -7568,16 +7635,47 @@ impl EngineService {
         // The domain query returns sixteen candidates plus one lookahead, with
         // LIMIT applied before its blob joins hydrate the three text sides.
         let candidates = conflicts.len().min(CONFLICTS_RESPONSE_ROW_LIMIT);
-        let rows: Vec<Value> = conflicts[..candidates].iter().map(conflict_json).collect();
+        let mut rows: Vec<Value> = conflicts[..candidates].iter().map(conflict_json).collect();
+        // A row past the hard cap can never ship in band, and refusing it
+        // would refuse its healthy neighbors AND dead-end the cursor: an
+        // over-cap row that is not first ends the page, the cursor advances
+        // to it, and the next request makes it the leading row. Degrade THAT
+        // row instead: withhold each over-cap side body, so the `blobSha256`
+        // and `inbandLimitBytes` beside it route the caller to
+        // `versionedText.readBlob` — the hydration `versionedText.read`
+        // already uses.
+        for row in &mut rows {
+            if serde_json::to_string(row).map_or(0, |s| s.len()) > CONFLICT_ROW_HARD_CAP_BYTES {
+                // EVERY body, not just the over-cap ones: the row crossed on
+                // the sum of its parts, so withholding only the parts that
+                // individually cross can leave it over the cap.
+                withhold_all_conflict_side_texts(row);
+            }
+        }
         let included = byte_budget_cut_serialized_with_row_cap(
             &rows,
             CONFLICTS_PAGE_BYTE_BUDGET,
             CONFLICT_ROW_HARD_CAP_BYTES,
         );
         if included == 0 && !conflicts.is_empty() {
-            return Err(wire(
+            // The last line of defense, not dead code: withholding nulls only
+            // the side BODIES, so this fires for a row still over the cap on
+            // what remains — which is why every string that survives
+            // withholding is bounded before persistence, at the shared path
+            // both open routes funnel through
+            // (`insert_text_conflict_if_absent`). A named refusal beats an
+            // over-frame response the daemon's writer treats as fatal.
+            let observed = rows
+                .first()
+                .and_then(|row| serde_json::to_string(row).ok())
+                .map_or(0, |serialized| serialized.len());
+            return Err(WireError::new(
                 ErrorCode::LimitExceeded,
-                "conflict-row-exceeds-wire-limit",
+                format!(
+                    "conflict-row-exceeds-wire-limit: a conflicts.list row is capped at \
+                     CONFLICT_ROW_HARD_CAP_BYTES = {CONFLICT_ROW_HARD_CAP_BYTES} serialized \
+                     bytes; observed {observed} bytes after withholding"
+                ),
             ));
         }
         let next_after_conflict_id = (included < conflicts.len())
@@ -7587,10 +7685,45 @@ impl EngineService {
                     .map(|conflict| conflict.conflict_id.clone())
             })
             .flatten();
-        Ok(json!({
+        let mut page = json!({
             "conflicts": rows[..included].to_vec(),
             "nextAfterConflictId": next_after_conflict_id,
-        }))
+        });
+        // The cap above bounds a ROW; the frame carries the PAGE. The
+        // continuation is appended AFTER the cut — a second copy of one row's
+        // id — and a body admitted in band can leave no room for it, so a row
+        // and a cursor that are each admissible still cross together. Measure
+        // the encoded response, and past the frame withhold every body on
+        // every row: the sum is what crossed, so the remedy is the sum.
+        //
+        // The withheld page fits. A fully withheld row costs its non-withheld
+        // strings plus scaffolding — `CONFLICT_METADATA_BUDGET_BYTES` plus
+        // `CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES`, both bounded before
+        // persistence — and that budget counts the conflict id TWICE, which is
+        // precisely the continuation's copy. A page of several rows is bounded
+        // instead by `CONFLICTS_PAGE_BYTE_BUDGET`, which admits a row after the
+        // first only while the running total stays inside it, and its
+        // continuation is one of those rows' ids.
+        if response_encoded_bytes(id, &page) > RESPONSE_FRAME_BYTES {
+            for row in page["conflicts"].as_array_mut().into_iter().flatten() {
+                withhold_all_conflict_side_texts(row);
+            }
+            let observed = response_encoded_bytes(id, &page);
+            if observed > RESPONSE_FRAME_BYTES {
+                // The last line of defense for the page, in the shape the row
+                // guard above already has: a named refusal beats an over-frame
+                // response the daemon's writer treats as fatal.
+                return Err(WireError::new(
+                    ErrorCode::LimitExceeded,
+                    format!(
+                        "conflict-page-exceeds-wire-limit: a conflicts.list response is capped \
+                         at the negotiated control frame of {RESPONSE_FRAME_BYTES} encoded \
+                         bytes; observed {observed} encoded bytes after withholding every body"
+                    ),
+                ));
+            }
+        }
+        Ok(page)
     }
 
     async fn conflicts_open(
@@ -7663,6 +7796,42 @@ impl EngineService {
             local.metadata_correlation_id.as_deref(),
         )?;
         let metadata_origin = validated_origin(Some(&local.metadata_origin), None)?;
+        // THE ANSWER IS BUILT AFTER THE MUTATION COMMITS. Withholding (below)
+        // takes out every body, never the strings beside them, so an answer
+        // whose withheld form still passes the frame cannot be sent at all —
+        // and by then the resolution has happened, which turns a transport
+        // limit into a lost acknowledgement. So the answer is bounded BEFORE
+        // anything is written: reserve what this request's own fields will
+        // spend, and the resolve transaction refuses inside itself, without
+        // writing, if the conflict cannot fit in what remains.
+        //
+        // The reservation is an upper bound, not an estimate. Every string a
+        // withheld answer serves is one of three things:
+        //   1. the conflict row's own strings, measured against this budget in
+        //      the transaction that serves them (`non_withheld_encoded_bytes`);
+        //   2. this request's identifiers and metadata, counted here at every
+        //      place the answer repeats them;
+        //   3. scaffolding, fixed-width fields, and the removed head's
+        //      metadata pair — `RESOLVE_ANSWER_STRUCTURAL_BYTES`.
+        // Nothing else can appear. The write and delete blocks describe the
+        // LIVE head, and `live_state_matches_conflict_current` admits a
+        // resolution only when that head matches the recorded current side on
+        // path, object and latest moment — so those identifiers are the
+        // conflict row's, already counted in (1).
+        //
+        // Healthy work cannot reach it, MEASURED rather than assumed. Three
+        // UUID identifiers served twelve times cost under 600 bytes, and the
+        // sibling write paths cap a metadata field at
+        // `MAX_METADATA_FIELD_BYTES`. `a_worst_legitimate_resolve_is_admitted`
+        // runs the heaviest legitimate resolve there is — every free-form
+        // field at that cap, in its escaping-heaviest form, on the conflict
+        // and on the request — and its conflict measures 655,980 encoded
+        // bytes against a budget of about 8.13 MB, twelve times inside it.
+        // The only conflicts this can refuse carry metadata within a quarter
+        // megabyte of an entire control frame.
+        let conflict_answer_budget_bytes = RESPONSE_FRAME_BYTES
+            .saturating_sub(resolve_answer_beside_conflict_bytes(&local))
+            .saturating_sub(RESOLVE_ANSWER_STRUCTURAL_BYTES);
         let resolution = match local.resolution.as_str() {
             "keep-current" => ResolveConflictKind::KeepCurrent,
             "apply-incoming" => ResolveConflictKind::ApplyIncoming,
@@ -7708,6 +7877,7 @@ impl EngineService {
                     author_json: local.author_json,
                     now_ms: local.now_ms.unwrap_or(now_ms()?),
                     request_id,
+                    conflict_answer_budget_bytes,
                 },
                 self.leases.clone(),
                 open.root,
@@ -7716,7 +7886,7 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        Ok(json!({
+        let mut answer = json!({
             "conflict": settled_conflict_json(&result.conflict),
             "write": result.write.as_ref().map(|write| json!({
                 "object": file_object_json(&write.object),
@@ -7737,7 +7907,28 @@ impl EngineService {
                 ),
                 "moment": moment_json(&delete.moment),
             })),
-        }))
+        });
+        // ONE frame carries the whole ANSWER, and this one reports a mutation
+        // that ALREADY COMMITTED: an over-frame answer loses the caller's
+        // acknowledgement for work the workspace kept. Each body is withheld
+        // past the in-band cap above; nothing bounds their sum beside a
+        // conflict whose own metadata may reach
+        // `CONFLICT_METADATA_BUDGET_BYTES`. Measure the encoded answer, and
+        // past the frame withhold every body it carries — each keeps its
+        // digest and `inbandLimitBytes`, so the caller hydrates through
+        // `versionedText.readBlob`.
+        //
+        // This is the belt, not the guarantee. The guarantee is the budget
+        // reserved above and enforced inside the resolve transaction, which
+        // refuses — without writing — an answer whose withheld form cannot
+        // fit. What this pass adds is the shrinking that keeps a fitting
+        // answer inside the frame once the bodies are counted. Refusing HERE
+        // is not an option: the resolution has committed, and a refusal would
+        // report a mutation that happened as one that did not.
+        if response_encoded_bytes(id, &answer) > RESPONSE_FRAME_BYTES {
+            withhold_all_resolve_answer_texts(&mut answer);
+        }
+        Ok(answer)
     }
 
     async fn search_query(
@@ -9629,6 +9820,11 @@ struct SnapshotDto {
 
 impl ConflictDto {
     fn into_domain(self) -> Result<TextConflict, WireError> {
+        // No size gate here on purpose. Everything a conflict row carries
+        // that withholding cannot shrink is bounded ONCE, at the shared
+        // pre-persistence path both conflict opens funnel through
+        // (`insert_text_conflict_if_absent`) — this DTO is only the local
+        // route, and a peer's replicated open never passes through it.
         Ok(TextConflict {
             conflict_id: self.id,
             workspace_id: self.workspace_id,
@@ -10349,17 +10545,26 @@ fn snapshot_json(snapshot: &TextSnapshot) -> Value {
     })
 }
 
-/// Withhold one text body past the in-band cap, in place: the digest and the
-/// limit go out, the body does not. This is the shape `versionedText.read`
-/// already uses, so the caller hydrates with `versionedText.readBlob`.
+/// Withhold one text body, in place: the digest and the limit go out, the body
+/// does not. `byteLength` is left as serialized, so a caller can size the
+/// hydration before it asks for it.
+fn withhold_text(body: &mut Value) {
+    if body.get("text").is_some_and(|text| !text.is_null()) {
+        body["text"] = Value::Null;
+        body["inbandLimitBytes"] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+    }
+}
+
+/// Withhold one text body past the in-band cap, in place. This is the shape
+/// `versionedText.read` already uses, so the caller hydrates with
+/// `versionedText.readBlob`.
 fn withhold_over_cap_text(body: &mut Value) {
     let over_cap = body
         .get("text")
         .and_then(Value::as_str)
         .is_some_and(|text| text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES);
     if over_cap {
-        body["text"] = Value::Null;
-        body["inbandLimitBytes"] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        withhold_text(body);
     }
 }
 
@@ -10383,10 +10588,19 @@ fn settled_snapshot_json(snapshot: &TextSnapshot) -> Value {
 /// writer treats an oversized answer as a fatal transport error AFTER the
 /// resolution has committed.
 ///
-/// The conflict LISTING is untouched: it bounds its own answer by cutting
-/// rows, and its readers paint the bodies it returns.
+/// The conflict LISTING shares the withholding, not the trigger: it carries
+/// bodies in band up to `CONFLICT_ROW_HARD_CAP_BYTES` per row, and degrades
+/// only a row past that (`conflicts_list`).
 fn settled_conflict_json(conflict: &TextConflict) -> Value {
     let mut value = conflict_json(conflict);
+    withhold_conflict_side_texts(&mut value);
+    value
+}
+
+/// Withhold every over-cap side body of one serialized conflict, in place.
+/// Each side keeps its digest, byte length and `inbandLimitBytes`, so the
+/// caller hydrates through `versionedText.readBlob`.
+fn withhold_conflict_side_texts(value: &mut Value) {
     for side in ["base", "current", "incoming"] {
         if let Some(snapshot) = value[side].get_mut("snapshot")
             && !snapshot.is_null()
@@ -10394,7 +10608,63 @@ fn settled_conflict_json(conflict: &TextConflict) -> Value {
             withhold_over_cap_text(snapshot);
         }
     }
-    value
+}
+
+/// Withhold EVERY side body of one serialized conflict, whatever each body's
+/// own size.
+///
+/// The per-body rule above cannot degrade an AGGREGATE overrun: three sides of
+/// 128 KiB each are individually in band, and beside metadata near
+/// `CONFLICT_METADATA_BUDGET_BYTES` their sum still carries the row past
+/// `CONFLICT_ROW_HARD_CAP_BYTES`. Withholding only the over-cap bodies would
+/// leave the row over the cap and dead-end the cursor — the failure is the
+/// sum, so the remedy has to be the sum. With every body withheld, what
+/// remains is bounded at open, so the row provably fits.
+fn withhold_all_conflict_side_texts(value: &mut Value) {
+    for side in ["base", "current", "incoming"] {
+        if let Some(snapshot) = value[side].get_mut("snapshot")
+            && !snapshot.is_null()
+        {
+            withhold_text(snapshot);
+        }
+    }
+}
+
+/// Withhold both payload bodies of one serialized moment, in place. The
+/// digests beside them stay, so the caller hydrates through
+/// `versionedText.readBlob` — the shape an over-cap moment already arrives in.
+fn withhold_moment_texts(moment: &mut Value) {
+    for (text, limit) in [
+        ("afterText", "afterInbandLimitBytes"),
+        ("beforeText", "beforeInbandLimitBytes"),
+    ] {
+        if moment.get(text).is_some_and(|body| !body.is_null()) {
+            moment[text] = Value::Null;
+            moment[limit] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        }
+    }
+}
+
+/// Withhold EVERY body one resolve answer carries: the conflict's three sides,
+/// the settled snapshot, and both moments' payloads. The removed head is
+/// described by its moment, so `delete.before` carries no body to withhold.
+fn withhold_all_resolve_answer_texts(answer: &mut Value) {
+    withhold_all_conflict_side_texts(&mut answer["conflict"]);
+    for block in ["write", "delete"] {
+        let Some(block) = answer.get_mut(block).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        if let Some(snapshot) = block.get_mut("snapshot")
+            && !snapshot.is_null()
+        {
+            withhold_text(snapshot);
+        }
+        if let Some(moment) = block.get_mut("moment")
+            && !moment.is_null()
+        {
+            withhold_moment_texts(moment);
+        }
+    }
 }
 
 fn file_object_json(object: &dohc_engine_domain::FileObjectRecord) -> Value {
@@ -10944,6 +11214,15 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if let RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) = &error {
         return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
     }
+    // Same reason: this refusal names a constraint, a limit, a unit and an
+    // observed size, and `wire` takes a static string.
+    if let RuntimeError::Domain(domain @ DomainError::ConflictMetadataTooLarge { .. }) = &error {
+        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
+    }
+    if let RuntimeError::Domain(domain @ DomainError::ConflictResolveAnswerTooLarge { .. }) = &error
+    {
+        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
+    }
     if let RuntimeError::Domain(domain) = &error {
         let message = match domain {
             DomainError::IdempotencyKeyReuseMismatch => Some("idempotency-key-reuse-mismatch"),
@@ -11106,6 +11385,8 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
         | DomainError::IdempotencyKeyReuseMismatch
         | DomainError::SecretMomentNotFound
         | DomainError::Chat { .. } => ErrorCode::InvalidParams,
+        DomainError::ConflictMetadataTooLarge { .. }
+        | DomainError::ConflictResolveAnswerTooLarge { .. } => ErrorCode::PayloadTooLarge,
         _ => ErrorCode::Internal,
     }
 }
@@ -11847,6 +12128,22 @@ mod tests {
         );
     }
 
+    /// The domain bounds a conflict's non-withheld strings, but the cap it is
+    /// derived from lives here, on the transport. Neither crate can see the
+    /// other's constant, so the derivation is pinned by this guard: if the
+    /// frame, the envelope headroom or the scaffolding allowance moves and the
+    /// budget does not, a conflict the listing cannot carry becomes
+    /// persistable again.
+    #[test]
+    fn the_conflict_metadata_budget_stays_derived_from_the_row_cap() {
+        assert_eq!(
+            dohc_engine_domain::CONFLICT_METADATA_BUDGET_BYTES
+                + dohc_engine_domain::CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES,
+            CONFLICT_ROW_HARD_CAP_BYTES,
+            "the metadata budget plus its scaffolding allowance must equal the row cap"
+        );
+    }
+
     #[test]
     fn sync_outcome_json_surfaces_an_undrained_complete_pass() {
         let value = sync_outcome_json(SyncPassOutcome::Complete {
@@ -12437,6 +12734,7 @@ mod tests {
             service
                 .conflicts_list(
                     &RequestContext::unbounded(),
+                    1,
                     Some(handle.clone()),
                     json!({}),
                 )

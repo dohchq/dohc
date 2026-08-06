@@ -660,6 +660,8 @@ fn local_resolution(conflict_id: &str, suffix: &str, now_ms: i64) -> ResolveText
         author_json: None,
         now_ms,
         request_id: None,
+        // This caller builds no wire answer, so nothing bounds the row here.
+        conflict_answer_budget_bytes: usize::MAX,
     }
 }
 

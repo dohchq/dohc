@@ -9,7 +9,10 @@ import type { Response } from "../ydoc/generated/Response";
 import type { WireError } from "../ydoc/generated/WireError";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
-import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
+import {
+  CONFLICT_ROW_HARD_CAP_BYTES,
+  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
+} from "./engineTextLimits";
 import {
   VERSIONED_METHOD,
   type MomentRecord,
@@ -50,6 +53,7 @@ const INBAND_LIMIT_BYTES = 48 * 1024;
 // The limits live in a leaf module (no imports) so a renderer can read them
 // without pulling this fixture's `node:crypto` into a browser bundle.
 export {
+  CONFLICT_ROW_HARD_CAP_BYTES,
   MAX_DESKTOP_CAPTURE_TEXT_BYTES,
   RESOLVE_REQUEST_FRAME_BYTES,
   jsonStringEncodedLength,
@@ -76,25 +80,65 @@ export function settledSnapshotForWire(snapshot: JsonObject): JsonObject {
 }
 
 /**
+ * The daemon's conflict-listing degrade (`conflicts_list`, lib.rs): a row
+ * whose serialized size passes the conflict row frame cap ships as metadata
+ * instead of refusing the page. A row under the cap carries its bodies in
+ * band, exactly as served.
+ *
+ * EVERY body goes, not only the ones over the in-band cap: a row crosses on
+ * the SUM of its parts, so the daemon withholds them all
+ * (`withhold_all_conflict_side_texts`). Withholding only the individually
+ * over-cap ones here would leave this fixture serving in-band bodies where the
+ * daemon serves digests, and every desktop test reading them would certify a
+ * hydration path production never takes.
+ */
+export function conflictListRowForWire(conflict: JsonObject): JsonObject {
+  return utf8Length(JSON.stringify(conflict)) > CONFLICT_ROW_HARD_CAP_BYTES
+    ? withheldConflictForWire(conflict)
+    : conflict;
+}
+
+/**
+ * The daemon's `withhold_all_conflict_side_texts` (lib.rs): every side body
+ * withheld, whatever its own size, each leaving the digest and the limit the
+ * caller hydrates from.
+ */
+export function withheldConflictForWire(conflict: JsonObject): JsonObject {
+  return mapConflictSnapshots(conflict, (snapshot) =>
+    typeof snapshot.text === "string"
+      ? { ...snapshot, text: null, inbandLimitBytes: MAX_DESKTOP_CAPTURE_TEXT_BYTES }
+      : snapshot,
+  );
+}
+
+/**
  * The daemon's `settled_conflict_json` (lib.rs): the SAME withholding rule
  * over every side of the conflict a resolution closed, so no part of that
  * answer grows with a body.
  */
 export function settledConflictForWire(conflict: JsonObject): JsonObject {
-  const settled = { ...conflict };
+  return mapConflictSnapshots(conflict, settledSnapshotForWire);
+}
+
+/** Every side snapshot a conflict carries, rebuilt through `serve`. */
+function mapConflictSnapshots(
+  conflict: JsonObject,
+  serve: (snapshot: JsonObject) => JsonObject,
+): JsonObject {
+  const served = { ...conflict };
   for (const side of ["base", "current", "incoming"] as const) {
-    const state = settled[side];
+    const state = served[side];
     if (state === null || typeof state !== "object" || Array.isArray(state)) continue;
     const snapshot = (state as JsonObject).snapshot;
     if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
       continue;
     }
-    settled[side] = {
+    served[side] = {
       ...(state as JsonObject),
-      snapshot: settledSnapshotForWire(snapshot as JsonObject),
+      snapshot: serve(snapshot as JsonObject),
     };
   }
-  return settled;
+  return served;
 }
 
 const ACCEPTED_ORIGINS = new Set<string>([

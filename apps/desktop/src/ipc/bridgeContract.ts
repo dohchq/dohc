@@ -85,8 +85,8 @@ const PATH_STRING = z.string().min(1).max(4096);
 // arrives. The daemon caps one wire string at 8 MiB (`WireLimits`,
 // `crates/dohc-engine-protocol/src/limits.rs`), so a larger body reaches the
 // renderer only by blob hydration. `versionedText.read` and the moment
-// timeline hydrate, and compare rows inherit that through `listTextFiles`.
-// Conflict listing is the one lane that does not — see VERSION_TEXT.
+// timeline hydrate, compare rows inherit that through `listTextFiles`, and
+// conflict listing hydrates its withheld sides too (#537) — see VERSION_TEXT.
 //
 // One REQUEST field shares the schema — the combined conflict resolution at
 // VERSION_TEXT. There this bound is only a ceiling on what crosses IPC; the
@@ -1653,15 +1653,18 @@ export const WORKSPACE_VERSION_NAME_MAX = 80;
 // hydrates each differing path by `readTextFile` -> `readTextBlob`, so a
 // compare side at the engine's contract does arrive.
 //
-// Conflict listing is the exception. The daemon serializes a conflict's three
-// sides in band and refuses the page with `conflict-row-exceeds-wire-limit`
-// above 8 MiB minus envelope headroom
-// (`crates/dohc-workspace-engine/src/lib.rs:244-248,7482-7491`), and
-// `listTextConflicts` has no hydration branch. So this raise fixes the 2 MB to
-// ~8 MB band, where the bridge was the only rejecting gate, and #537 tracks
-// the tail above it. The bound stays the engine's storage contract rather than
-// the transport's current ceiling: a second hand-copied constant is the drift
-// #517 was filed about, and it would have to move again when #537 lands.
+// Conflict listing keeps up too (#537): a row past 8 MiB minus envelope
+// headroom is degraded to withheld metadata rather than refused
+// (`conflicts_list`, crates/dohc-workspace-engine/src/lib.rs), and
+// `listTextConflicts` hydrates each withheld side through
+// `versionedText.readBlob`. So a conflict side at the engine's storage
+// contract arrives on every lane this bound covers.
+//
+// The bound stays the engine's storage contract rather than any transport
+// ceiling: a second hand-copied constant is the drift #517 was filed about.
+// The one place the client mirrors the frame cap is `engineTextLimits.ts`,
+// where `CONFLICT_ROW_HARD_CAP_BYTES` is DERIVED from the frame constant the
+// drift guard already covers.
 //
 // The combined resolution (`keep-combined` below) is the one REQUEST use, and
 // its contract is NOT this one: the engine bounds a combined resolution by the

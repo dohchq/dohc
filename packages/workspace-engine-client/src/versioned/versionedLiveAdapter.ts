@@ -11,6 +11,7 @@ import {
   WORKSPACE_METHOD,
   decodeWorkspaceResult,
   type CaptureFlushResult,
+  type ConflictFileState,
   type ConflictListParams,
   type ConflictOpenParams,
   type ConflictOpenResult,
@@ -40,6 +41,7 @@ import {
   type VersionedTextReadValue,
   type VersionRecord,
 } from "./versionedWireContract";
+import { CONFLICT_ROW_HARD_CAP_BYTES } from "./engineTextLimits";
 
 export class VersionedAdapterCapabilityError extends Error {
   constructor(message: string) {
@@ -62,6 +64,46 @@ export interface VersionedLiveAdapterOptions {
 }
 
 const LIST_TEXT_FILE_HYDRATION_CONCURRENCY = 8;
+
+/**
+ * The most reconstructed body text one hydrated `conflicts.list` page may
+ * retain.
+ *
+ * DERIVED from the transport, not chosen: the daemon answers one
+ * `conflicts.list` inside a single control frame, so any page it served with
+ * bodies IN BAND is already at most `CONFLICT_ROW_HARD_CAP_BYTES`. Hydration
+ * puts back only what the daemon withheld, so holding the reconstructed page
+ * to the same bound keeps a caller retaining no more than the daemon itself
+ * could have sent.
+ *
+ * The concurrency limit above does not do this job. It bounds how many blob
+ * reads run at once, not how many bytes survive them — a page of 16 degraded
+ * conflicts whose three sides each approach `MAX_TEXT_BYTES` is a few
+ * kilobytes of withheld metadata on the wire and 480 MiB once rebuilt, which
+ * then crosses Electron IPC.
+ *
+ * A page is cut to this budget BEFORE any body is fetched, using the
+ * `byteLength` every withheld side already carries, so the bytes are never
+ * transferred rather than transferred and dropped. One conflict always
+ * survives the cut, or a caller could not make progress; a single conflict
+ * whose three sides are each at `MAX_TEXT_BYTES` still costs 30 MiB, which is
+ * the price of returning it at all.
+ */
+const HYDRATED_CONFLICT_PAGE_BYTE_BUDGET = CONFLICT_ROW_HARD_CAP_BYTES;
+
+/**
+ * What one conflict's three sides would retain once hydrated: the body a side
+ * already carries, or the `byteLength` a withheld side promises.
+ */
+function hydratedConflictByteCost(conflict: ConflictRecord): number {
+  let total = 0;
+  for (const state of [conflict.base, conflict.current, conflict.incoming]) {
+    const snapshot = state.snapshot;
+    if (snapshot === null) continue;
+    total += snapshot.text === null ? snapshot.byteLength : snapshot.text.length;
+  }
+  return total;
+}
 const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
 // JSON byte arrays are collections, so the negotiated collection bound is
 // stricter than the content-size bound used by base64/blob transports.
@@ -582,6 +624,12 @@ export class VersionedLiveAdapter {
     workspaceId: string;
     status?: "open" | "resolved";
     afterConflictId?: string;
+    /**
+     * `"withheld"` returns the daemon's page untouched, bodies still absent.
+     * A caller that reads only ids, paths or counts asks for this: hydrating
+     * for it transfers every body just to discard it.
+     */
+    bodies?: "hydrate" | "withheld";
   }): Promise<{
     conflicts: ConflictRecord[];
     nextAfterConflictId: string | null;
@@ -597,10 +645,88 @@ export class VersionedLiveAdapter {
       WORKSPACE_METHOD.conflictsList,
       params,
     );
+    if (input.bodies === "withheld") {
+      return {
+        conflicts: page.conflicts,
+        nextAfterConflictId: page.nextAfterConflictId,
+      };
+    }
+    // Cut the page to its byte budget BEFORE fetching anything, using the
+    // `byteLength` each withheld side already carries. Sizing first means the
+    // bodies past the budget are never transferred, rather than transferred
+    // and then dropped. One conflict always survives, or the cursor could not
+    // advance.
+    const affordable: ConflictRecord[] = [];
+    let retained = 0;
+    for (const conflict of page.conflicts) {
+      const cost = hydratedConflictByteCost(conflict);
+      if (
+        affordable.length > 0 &&
+        retained + cost > HYDRATED_CONFLICT_PAGE_BYTE_BUDGET
+      ) {
+        break;
+      }
+      affordable.push(conflict);
+      retained += cost;
+    }
+    // A row past the daemon's conflict row frame cap arrives with its side
+    // bodies withheld. Hydrate them here — the branch `readTextFile` already
+    // has — so every caller still receives full sides. Bounded over ONE page,
+    // because this adapter passes the daemon's continuation through (#562)
+    // instead of draining every page.
+    const conflicts = await mapWithConcurrency(
+      affordable,
+      LIST_TEXT_FILE_HYDRATION_CONCURRENCY,
+      async (conflict) => {
+        // Sides in sequence, so the concurrency bound counts blob reads —
+        // three parallel sides per row would triple it.
+        const base = await this.hydrateConflictSide(
+          input.workspaceId,
+          conflict.base,
+        );
+        const current = await this.hydrateConflictSide(
+          input.workspaceId,
+          conflict.current,
+        );
+        const incoming = await this.hydrateConflictSide(
+          input.workspaceId,
+          conflict.incoming,
+        );
+        return base === conflict.base &&
+          current === conflict.current &&
+          incoming === conflict.incoming
+          ? conflict
+          : { ...conflict, base, current, incoming };
+      },
+    );
+    // A page cut by the budget continues from its own last row, not the
+    // daemon's — the rows dropped here have not been served yet.
     return {
-      conflicts: page.conflicts,
-      nextAfterConflictId: page.nextAfterConflictId,
+      conflicts,
+      nextAfterConflictId:
+        affordable.length < page.conflicts.length
+          ? (affordable[affordable.length - 1]?.id ?? null)
+          : page.nextAfterConflictId,
     };
+  }
+
+  private async hydrateConflictSide(
+    workspaceId: string,
+    state: ConflictFileState,
+  ): Promise<ConflictFileState> {
+    const snapshot = state.snapshot;
+    if (snapshot === null || snapshot.text !== null) return state;
+    const text = await this.readTextBlob({
+      workspaceId,
+      sha256: snapshot.blobSha256,
+    });
+    if (text === null) {
+      throw new DaemonProtocolError(
+        "The daemon could not hydrate a withheld conflict side's text blob.",
+      );
+    }
+    const { inbandLimitBytes: _inbandLimitBytes, ...metadata } = snapshot;
+    return { ...state, snapshot: { ...metadata, text } };
   }
 
   async openTextConflict(
