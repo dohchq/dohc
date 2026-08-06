@@ -11195,28 +11195,18 @@ fn map_runtime(error: RuntimeError) -> WireError {
     // (afterBackoff). Flattening it to Internal (retry: no) is what left a
     // locked file's save landing only on the next unrelated settle (#554).
     //
-    // Matched on the VARIANT, never on `code()` (#595 round 8): the code
-    // delegates through `MaterializeError::Storage`, so a busy SQLite handle
-    // answers "file-locked" too — and the desktop would then tell the user
-    // another program has their DOCUMENT open while retrying a database
-    // contention. Storage contention gets its own message below.
-    if let RuntimeError::Materialize(materialize) = &error {
-        return match materialize {
-            dohc_engine_files::MaterializeError::FileLocked => {
-                wire(ErrorCode::Overloaded, "file-locked")
-            }
-            // Every other materialization failure keeps the prior mapping
-            // (the tail match below routed them to Internal). That INCLUDES
-            // a busy engine database (#595 round 14): matching the VARIANT is
-            // what stops it being reported as the user's file being locked,
-            // and no second wire message is needed to do that. An earlier
-            // `engine-store-busy` / Overloaded arm promised a retry after
-            // backoff that nothing performs — the desktop retries only
-            // `file-locked` — and a contract that advertises an unperformed
-            // retry is worse than an honest terminal answer. The real retry
-            // is tracked separately.
-            _ => wire(ErrorCode::Internal, "workspace operation failed"),
-        };
+    // Matched on the VARIANT, never on `code()`: the code delegates through
+    // `MaterializeError::Storage`, so a busy SQLite handle answers
+    // "file-locked" too — and the desktop would then tell the user another
+    // program has their DOCUMENT open while it retried a database contention.
+    // Every other materialization failure — a busy engine database included —
+    // falls through to the Internal tail below. Only the artifact lock has a
+    // retry behind it, so only the artifact lock may say `afterBackoff`.
+    if matches!(
+        &error,
+        RuntimeError::Materialize(dohc_engine_files::MaterializeError::FileLocked)
+    ) {
+        return wire(ErrorCode::Overloaded, "file-locked");
     }
     if matches!(
         &error,

@@ -2605,6 +2605,35 @@ async function lockedRebindCapture(prefix: string) {
   return { capture, state, loopback, workspaceId, rootPath };
 }
 
+/**
+ * Open a document and journal ONE local edit through a renderer mirror.
+ *
+ * This is the prologue a debt test needs before it can put the path under a
+ * lock, and nothing more. Everything a test actually asserts on — when the
+ * lock goes on, which failure the fake raises, the order of close and delete,
+ * what the journal ends up holding — stays written out in the test, because in
+ * most of these the ORDER is the point. A test whose prologue differs at all
+ * keeps its own; four do.
+ */
+async function openWithOneEdit(
+  capture: WorkspaceEngineCapture,
+  text: string,
+): Promise<{
+  session: Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>;
+  mirror: Y.Doc;
+}> {
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, session.initialUpdate);
+  const before = Y.encodeStateVector(mirror);
+  mirror.getText("plainText").insert(0, text);
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
+  return { session, mirror };
+}
+
 it("re-arms a pending locked settle on the generation that replaces a dead one", async () => {
   // #595 codex P2: the locked retry ladder lives in the generation and dies
   // with it. The adoption must ask the replacement to settle when a locked
@@ -2687,15 +2716,7 @@ it("pays a locked close debt by itself once the lock releases", async () => {
   // entry outlives them both and retries the teardown (which re-runs the
   // pre-close settle) until the lock releases.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-locked-close-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "closing edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "closing edit");
 
   state.locked = true;
   await expect(session.close()).rejects.toThrow("file-locked");
@@ -2714,15 +2735,7 @@ it("a close that fails for a non-lock cause is not retried by the capture layer"
   // failure keeps the failing-close entry for the existing force-close and
   // teardown paths, with no timer behind it.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-terminal-close-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "stranded edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "stranded edit");
 
   state.closeFailure = new Error("persist-failed");
   await expect(session.close()).rejects.toThrow("persist-failed");
@@ -2753,15 +2766,7 @@ it("pays a locked close debt even when a replicated release succeeds", async () 
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-replicated-close-",
   );
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "replicated edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "replicated edit");
 
   state.locked = true;
   state.replicated = true;
@@ -2783,15 +2788,7 @@ it("a replicated release with a non-lock settle failure arms no detached retry",
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-replicated-terminal-",
   );
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "terminal edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "terminal edit");
 
   state.replicated = true;
   state.closeSettleFailure = new Error("persist-failed");
@@ -2817,15 +2814,7 @@ it("the version fence drops a detached locked retry after a switch", async () =>
   const { capture, state, loopback, workspaceId } = await lockedRebindCapture(
     "dohc-ydoc-fence-drop-",
   );
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "old version edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "old version edit");
 
   state.locked = true;
   state.replicated = true;
@@ -2882,15 +2871,7 @@ it("a reopen before the timer fires receives the locked debt, not silence", asyn
   // asks the live session to settle, and that session's own machinery owns
   // it from there.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-debt-transfer-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "transferred edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "transferred edit");
 
   state.locked = true;
   state.replicated = true;
@@ -2926,15 +2907,7 @@ it("a rename drains the detached locked debt before touching disk", async () => 
     "dohc-ydoc-rename-drain-",
   );
   await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "renamed edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "renamed edit");
 
   state.locked = true;
   state.replicated = true;
@@ -2959,15 +2932,7 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
   // vacate cancels the debt with a trace. Nothing durable is lost: the
   // edits stay in the object's lineage.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-delete-cancel-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "deleted edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "deleted edit");
 
   state.locked = true;
   state.replicated = true;
@@ -3101,15 +3066,7 @@ it("a FAILED delete restores the detached locked debt instead of cancelling it",
   // still there. The finisher takes the outcome: a failed delete restores
   // and re-arms, so the release still lands the write.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-delete-failed-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "survives a failed delete");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "survives a failed delete");
 
   state.locked = true;
   state.replicated = true;
@@ -3140,15 +3097,7 @@ it("a rename REFUSES while its debt payment is still locked", async () => {
     "dohc-ydoc-rename-locked-",
   );
   await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "must not be lost");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "must not be lost");
 
   state.locked = true;
   state.replicated = true;
@@ -3179,15 +3128,7 @@ it("a failed release keeps the debt instead of dropping it", async () => {
   // failure reaches the handler, which retains and re-arms — the next
   // attempt completes the release.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-release-failed-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "release fails once");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "release fails once");
 
   state.locked = true;
   state.replicated = true;
@@ -3271,15 +3212,7 @@ it("refused renames never stack more than one retry ladder", async () => {
     "dohc-ydoc-one-timer-",
   );
   await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "one ladder only");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "one ladder only");
 
   state.locked = true;
   state.replicated = true;
@@ -3328,15 +3261,7 @@ it("a failing active-version read re-arms instead of stranding the debt", async 
   const { capture, state, loopback } = await lockedRebindCapture(
     "dohc-ydoc-version-read-fails-",
   );
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "survives a failed read");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "survives a failed read");
 
   state.locked = true;
   state.replicated = true;
@@ -3378,15 +3303,7 @@ it("a handoff to a live session keeps the debt when that settle fails", async ()
   // while the artifact stays stale until an unrelated action or a restart.
   // The handoff is awaited, and a failure keeps the debt.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-handoff-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "handed off");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "handed off");
 
   state.locked = true;
   state.replicated = true;
@@ -3425,15 +3342,7 @@ it("cancelling a debt releases the session whose close was refused", async () =>
   // then answers ydoc-session-busy until the daemon restarts. Cancelling
   // closes what it discards.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-discard-lease-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "leased edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "leased edit");
 
   state.locked = true;
   state.replicated = true;
@@ -3473,15 +3382,7 @@ it("a close that raced a newer update is not proof the write landed", async () =
   // projection that never reached Markdown. Ok from the close proves the
   // RELEASE, not the write.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-raced-close-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "raced edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "raced edit");
 
   state.locked = true;
   state.replicated = true;
@@ -3524,15 +3425,7 @@ it("a retained session's settle is never proof, because it stopped hearing the d
   // discharges the debt, no further session opens, and the peer edit never
   // reaches settledMarkdowns.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-deaf-proof-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "deaf proof");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "deaf proof");
 
   state.locked = true;
   state.replicated = true;
@@ -3547,15 +3440,23 @@ it("a retained session's settle is never proof, because it stopped hearing the d
   state.closeFailure = new Error("ydoc-unsettled-close");
   state.peerEditWhileRetained = true;
   await expect
-    .poll(() => state.settledMarkdowns.length, { timeout: 15_000 })
-    .toBeGreaterThan(0);
+    .poll(() => state.closeCalls.length, { timeout: 15_000 })
+    .toBeGreaterThan(1);
 
   // The release now succeeds, discharging the lease. The write is NOT
-  // discharged with it: a fresh session must settle the peer edit.
+  // discharged with it, so a FRESH session must open to settle the update the
+  // retained one never heard.
+  //
+  // The assertion is the new GENERATION, not the settled text. While the
+  // release was refused, the provider's escalation settled on its way out and
+  // that settle already carried the peer edit — so asserting on
+  // `settledMarkdowns` passes whether or not the debt survived. Only opening
+  // another session distinguishes them.
+  const generationAtRelease = state.generation;
   state.closeFailure = null;
   await expect
-    .poll(() => state.settledMarkdowns.join("\n"), { timeout: 25_000 })
-    .toContain("peer edit while retained");
+    .poll(() => state.generation, { timeout: 25_000 })
+    .toBeGreaterThan(generationAtRelease);
   await capture.stop();
 }, 45_000);
 
@@ -3568,15 +3469,7 @@ it("a settle held through a refused release stops being proof when an update lan
   // Markdown. The proof is asked at discharge time, so the update withdraws
   // it without any branch remembering to.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-proof-expiry-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "proof expires");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "proof expires");
 
   state.locked = true;
   state.replicated = true;
@@ -3614,15 +3507,7 @@ it("a cancelled debt whose release is refused keeps retrying that release", asyn
   // ydoc-session-busy until the daemon restarted. The debt goes back to the
   // registry — release-only — instead.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-lease-owner-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "leased twice");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "leased twice");
 
   state.locked = true;
   state.replicated = true;
@@ -3689,15 +3574,7 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
   // that permanent refusal every 10 seconds, reopening a session each time,
   // and never told the user the one thing they could act on.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-terminal-conflict-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "conflicting edit");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "conflicting edit");
 
   state.locked = true;
   state.replicated = true;
@@ -3745,15 +3622,7 @@ it("a settle that never reached the artifact is not proof the write landed", asy
   // the call comes back clean while the .md stays stale. Discharging the
   // debt there stranded the closed document's durable edit with no retry.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-unmaterialized-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "never written");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "never written");
 
   state.locked = true;
   state.replicated = true;
@@ -3788,15 +3657,7 @@ it("a materialization the engine refuses for good stops the ladder and says why"
   // conflict-only stop let that re-arm every ten seconds forever. The class
   // is "the wire said do not retry", not "the failure was a conflict".
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-terminal-io-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "unwritable target");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "unwritable target");
 
   state.locked = true;
   state.replicated = true;
@@ -3841,15 +3702,7 @@ it("a release the daemon refuses terminally still keeps the write ladder alive",
   // write, and the daemon kept the session's lease. Stopping there strands
   // both obligations. What separates them is which CALL raised it.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-terminal-release-");
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const rendererDoc = new Y.Doc();
-  Y.applyUpdate(rendererDoc, session.initialUpdate);
-  const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert(0, "release refused hard");
-  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const { session } = await openWithOneEdit(capture, "release refused hard");
 
   state.locked = true;
   state.replicated = true;

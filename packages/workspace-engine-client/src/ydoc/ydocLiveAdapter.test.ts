@@ -663,13 +663,13 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
-  it("retries a file-locked settle on a doubling delay until the lock releases", async () => {
-    // #554: a settle refused `file-locked` leaves the write durably pending
-    // in the engine — the ONLY missing piece is a later attempt. The provider
-    // re-arms itself on a doubling delay, so the save lands when the external
-    // handle releases instead of waiting for an unrelated future edit.
+  // A provider whose settle is refused `file-locked` until the test releases
+  // it, with the settle scheduler captured so the ladder can be driven a rung
+  // at a time. Shared by the two tests below; each drives it differently,
+  // because a debounced settle and an explicit flush are different behaviors.
+  async function openAgainstALockedFile(text: string) {
     const engine = seedPlaintextEngine();
-    let locked = true;
+    const lock = { held: true };
     const lockedRefusal = new DaemonRefusalError(
       { code: "OVERLOADED", message: "file-locked", retry: "afterBackoff" },
       new Error("daemon response"),
@@ -677,7 +677,9 @@ describe("YdocLiveAdapter", () => {
     const transport: EngineTransport = {
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
-        if (request.method === YDOC_METHOD.settle && locked) throw lockedRefusal;
+        if (request.method === YDOC_METHOD.settle && lock.held) {
+          throw lockedRefusal;
+        }
         return engine.sendRequest(request);
       },
     };
@@ -706,11 +708,21 @@ describe("YdocLiveAdapter", () => {
         };
       },
     });
+    await provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (body) => {
+        body.insert(0, text);
+      }),
+    );
+    return { provider, lock, lockedRefusal, settleErrors, settled, delays, scheduled };
+  }
 
-    const update = plaintextUpdate(provider.initialUpdate, (text) => {
-      text.insert(0, "typed against a locked file");
-    });
-    await provider.applyLocalUpdate(update);
+  it("retries a file-locked settle on a doubling delay until the lock releases", async () => {
+    // #554: a settle refused `file-locked` leaves the write durably pending
+    // in the engine — the ONLY missing piece is a later attempt. The provider
+    // re-arms itself on a doubling delay, so the save lands when the external
+    // handle releases instead of waiting for an unrelated future edit.
+    const { provider, lock, lockedRefusal, settleErrors, settled, delays, scheduled } =
+      await openAgainstALockedFile("typed against a locked file");
 
     // Fire the armed settle; while the lock holds, every failure re-arms the
     // next attempt itself: debounce, then doubling — 100, 100, 200, 400 —
@@ -728,7 +740,7 @@ describe("YdocLiveAdapter", () => {
     expect(delays).toEqual([100, 100, 200, 400]);
 
     // The lock releases; the pending retry lands the write by itself.
-    locked = false;
+    lock.held = false;
     const { fn: retry } = scheduled.shift()!;
     retry();
     for (let tick = 0; tick < 50 && settled.length === 0; tick += 1) {
@@ -745,45 +757,12 @@ describe("YdocLiveAdapter", () => {
     // settleNow rejects to its caller — a delete or merge must fail loudly —
     // but the write it left pending is the same one, so the background retry
     // is armed as well.
-    const engine = seedPlaintextEngine();
-    let locked = true;
-    const lockedRefusal = new DaemonRefusalError(
-      { code: "OVERLOADED", message: "file-locked", retry: "afterBackoff" },
-      new Error("daemon response"),
-    );
-    const transport: EngineTransport = {
-      onEvent: (handler) => engine.onEvent(handler),
-      async sendRequest(request) {
-        if (request.method === YDOC_METHOD.settle && locked) throw lockedRefusal;
-        return engine.sendRequest(request);
-      },
-    };
-    const settled: unknown[] = [];
-    const scheduled: Array<{ fn: () => void; ms: number }> = [];
-    const provider = await openEngineYdocProviderSession({
-      transport,
-      workspace: WORKSPACE,
-      versionId: VERSION,
-      path: PATH,
-      contentKind: "plaintext",
-      settleDebounceMs: 100,
-      onRemoteUpdate: () => undefined,
-      onSettled: (result) => {
-        settled.push(result);
-      },
-      scheduleSettle: (fn, ms) => {
-        scheduled.push({ fn, ms });
-        return () => {
-          const index = scheduled.findIndex((entry) => entry.fn === fn);
-          if (index >= 0) scheduled.splice(index, 1);
-        };
-      },
-    });
+    const { provider, lock, lockedRefusal, settled, scheduled } =
+      await openAgainstALockedFile("flushed against a locked file");
 
-    const update = plaintextUpdate(provider.initialUpdate, (text) => {
-      text.insert(0, "flushed against a locked file");
-    });
-    await provider.applyLocalUpdate(update);
+    // The debounced settle the edit armed is superseded by the explicit flush,
+    // so the ladder below is the flush's own.
+    scheduled.length = 0;
 
     await expect(provider.settleNow()).rejects.toBe(lockedRefusal);
     for (let tick = 0; tick < 50 && scheduled.length === 0; tick += 1) {
@@ -791,7 +770,7 @@ describe("YdocLiveAdapter", () => {
     }
     expect(scheduled.map((entry) => entry.ms)).toEqual([100]);
 
-    locked = false;
+    lock.held = false;
     scheduled.shift()!.fn();
     for (let tick = 0; tick < 50 && settled.length === 0; tick += 1) {
       await Promise.resolve();
