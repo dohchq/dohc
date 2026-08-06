@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, parse, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -2342,7 +2342,7 @@ describe("a symlink cannot alias a reserved area", () => {
     it("refuses the directory, and nothing appears inside .dohc", async () => {
       await withDanglingAlias(async (ctx) => {
         const made = await createWorkspaceDirectory(ctx, { path: "meta/sneaky" });
-        expect(made.ok).toBe(false);
+        expect(refusalReason(made)).toMatch(/no target|reserved/i);
         await expect(stat(join(ctx.root, ".dohc", "sneaky"))).rejects.toThrow();
       });
     });
@@ -2355,7 +2355,7 @@ describe("a symlink cannot alias a reserved area", () => {
           fromPath: "note.md",
           toPath: "meta/note.md",
         });
-        expect(moved.ok).toBe(false);
+        expect(refusalReason(moved)).toMatch(/no target|reserved/i);
         await expect(stat(join(ctx.root, ".dohc", "note.md"))).rejects.toThrow();
         expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("visible");
       });
@@ -2367,7 +2367,7 @@ describe("a symlink cannot alias a reserved area", () => {
           path: "meta/settings.local.json",
           content: OPTED_OUT,
         });
-        expect(written.ok).toBe(false);
+        expect(refusalReason(written)).toMatch(/no target|reserved/i);
         await expect(stat(join(ctx.root, ".dohc", "settings.local.json"))).rejects.toThrow();
       });
     });
@@ -2535,6 +2535,36 @@ describe("a guard that decides authority reads the resolved path", () => {
         lstatOverride.path = null;
         lstatOverride.results = [];
       }
+    });
+  });
+
+  // The workspace folder can go missing or unmount under a running server.
+  // Every path in it then fails on the ROOT, and reporting that as a symlink
+  // escaping the workspace sends an agent to audit a path that is fine.
+  it("names the workspace root, not the path, when the root will not resolve", async () => {
+    await withWorkspace(async (ctx) => {
+      const gone = { ...ctx, root: join(ctx.root, "gone") };
+      const reason = refusalReason(await safeResolve(gone, "note.md"));
+      expect(reason).toContain("ENOENT");
+      expect(reason).toMatch(/workspace root/i);
+      expect(reason).not.toMatch(/escapes workspace/i);
+    });
+  });
+
+  // A filesystem root is the one path realpath returns WITH its separator, so
+  // a workspace opened at one would compare against `C:\\` or `//` and refuse
+  // every path inside itself as an escape.
+  it("resolves inside a workspace whose root is the filesystem root", async () => {
+    await withWorkspace(async (ctx) => {
+      const fsRoot = parse(ctx.root).root;
+      const resolved = await safeResolve(
+        { ...ctx, root: fsRoot },
+        relative(fsRoot, ctx.root).split(sep).join("/"),
+      );
+      expect(resolved).toMatchObject({
+        ok: true,
+        realRelative: relative(fsRoot, ctx.root).split(sep).join("/"),
+      });
     });
   });
 

@@ -123,6 +123,7 @@ const SEARCH_PREVIEW_CHARS = 200;
 type RealTarget =
   | { ok: true; relative: string }
   | { ok: false; reason: "escapes-workspace" }
+  | { ok: false; reason: "unreadable-root"; code: string }
   | { ok: false; reason: "dangling-symlink" }
   | { ok: false; reason: "unresolvable-symlink"; code: string }
   | { ok: false; reason: "unreadable-path"; code: string };
@@ -136,9 +137,12 @@ async function realRelativeInRoot(root: string, absolute: string): Promise<RealT
   let realRoot: string;
   try {
     realRoot = await realpath(root);
-  } catch {
-    return { ok: false, reason: "escapes-workspace" };
+  } catch (error) {
+    return { ok: false, reason: "unreadable-root", code: errnoCode(error) ?? UNNAMED_ERROR };
   }
+  // A filesystem root realpaths WITH its separator (`C:\`, `/`); nothing else
+  // does. Drop it so one prefix test and one slice serve both.
+  if (realRoot.endsWith(sep)) realRoot = realRoot.slice(0, -1);
   const absentTail: string[] = [];
   let probe = absolute;
   for (;;) {
@@ -160,22 +164,18 @@ async function realRelativeInRoot(root: string, absolute: string): Promise<RealT
       const realpathCode = errnoCode(error) ?? UNNAMED_ERROR;
       const climbable = ABSENT_CODES.has(realpathCode) || realpathCode === "ELOOP";
       if (!climbable) return { ok: false, reason: "unreadable-path", code: realpathCode };
-      const presence = await lstat(probe).then(
-        () => "present",
-        (cause: unknown) => {
-          const code = errnoCode(cause) ?? UNNAMED_ERROR;
-          return ABSENT_CODES.has(code) ? "absent" : code;
-        },
-      );
-      if (presence === "present") {
+      try {
+        await lstat(probe);
         // The link is there and realpath will not follow it. ENOENT proves the
         // target is missing; ELOOP proves a cycle. Only the first is dangling.
         return ABSENT_CODES.has(realpathCode)
           ? { ok: false, reason: "dangling-symlink" }
           : { ok: false, reason: "unresolvable-symlink", code: realpathCode };
-      }
-      if (presence !== "absent") {
-        return { ok: false, reason: "unreadable-path", code: presence };
+      } catch (cause) {
+        const code = errnoCode(cause) ?? UNNAMED_ERROR;
+        if (!ABSENT_CODES.has(code)) {
+          return { ok: false, reason: "unreadable-path", code };
+        }
       }
       const parent = dirname(probe);
       if (parent === probe) return { ok: false, reason: "escapes-workspace" };
@@ -247,9 +247,10 @@ async function safeResolve(
 }
 
 // A path the resolver could not place. Each cause gets its own next step: a
-// missing target can be created, a cycle cannot, and a filesystem error is
-// about the path's permissions rather than its spelling. One message for all
-// three would send an agent to fix the wrong thing.
+// missing target can be created, a cycle cannot, a filesystem error is about
+// the path's permissions rather than its spelling, and an unreadable workspace
+// root is not about this path at all. One message for all of them would send an
+// agent to fix the wrong thing.
 function unresolvedPathRefusal(
   target: Extract<RealTarget, { ok: false }>,
   relativePath: string,
@@ -257,6 +258,12 @@ function unresolvedPathRefusal(
   switch (target.reason) {
     case "escapes-workspace":
       return `path rejected (symlink escapes workspace): ${relativePath}`;
+    case "unreadable-root":
+      return (
+        `path rejected (dohc could not resolve the workspace root: ${target.code}): ` +
+        `${relativePath}. The workspace folder failed, not this path. Check that ` +
+        `the workspace folder is present and readable.`
+      );
     case "dangling-symlink":
       return (
         `path rejected (a symlink on this path has no target): ${relativePath}. ` +
