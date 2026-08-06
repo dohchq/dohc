@@ -50,6 +50,7 @@ import {
 import { rendererMarks } from "../performance/rendererMarks";
 import {
   chatMentionOpenTarget,
+  chatsOffCopy,
   chatsNavigationChangesDestination,
   chatsNavigationLeavesConversation,
   chatsNavigationRequiresRemount,
@@ -3080,9 +3081,9 @@ describe("history page", () => {
     expect(placeholder.textContent).not.toContain("turned off in Settings");
 
     // Activity pushes take the no-engine refresh path too — the pin that
-    // kills the recurring listEngineMoments error loop. (Residual outside
-    // this vector: before the FIRST status lands, one engine fetch can still
-    // fire and error once — a single IPC round-trip, not a loop.)
+    // kills the recurring listEngineMoments error loop. The residual this
+    // used to name — one engine fetch firing before the FIRST status lands —
+    // is closed by the test below.
     const statusCalls = bridge.getSyncStatus.mock.calls.length;
     act(() => {
       bridge.emitWorkspaceActivity();
@@ -3091,6 +3092,75 @@ describe("history page", () => {
       expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(statusCalls),
     );
     expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+  });
+
+  // #637 item 2: the window before main's capture decision. The refresh runs
+  // on ANY workspace's activity event, so it is not bounded by this
+  // workspace's open resolving — and in that window `statusSaysNoRecorder`
+  // reads a missing or default status as a recorder, so the engine branch
+  // asked for moments main was about to refuse. The rail could not state the
+  // answer either: it does not have one yet.
+  it("asks for no history before main's capture decision lands", async () => {
+    const FAILED_HISTORY_STATUS = {
+      ...SYNC_STATUS,
+      historyRecordingOff: true,
+      historyRecordingUnavailable: true,
+    };
+    const decision = deferred<typeof FAILED_HISTORY_STATUS>();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(() => decision.promise);
+    // Main's answer while the build runs: the entry exists, and its recorder
+    // fields are still the defaults it registered before awaiting the build.
+    let decided = false;
+    bridge.getSyncStatus = vi.fn(async () =>
+      decided ? FAILED_HISTORY_STATUS : SYNC_STATUS,
+    );
+    bridge.listEngineMoments = vi.fn(async (): Promise<never> => {
+      throw new Error("Engine history is not enabled for this workspace.");
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    // The premise: the renderer's own read said engine-ON, and the decision
+    // has not landed.
+    await screen.findByTestId("titlebar-chats-sidebar");
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    await user.click(screen.getByTestId("activity-history"));
+
+    await act(async () => {
+      bridge.emitWorkspaceActivity();
+      await Promise.resolve();
+    });
+    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+    // And the rail claims nothing while it knows nothing: a placeholder here
+    // would name a cause main has not established (#542).
+    expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
+    expect(screen.queryByTestId("history-load-failed")).toBeNull();
+
+    // The decision lands, and it is the failure. Now the rail may speak.
+    await act(async () => {
+      decided = true;
+      decision.resolve(FAILED_HISTORY_STATUS);
+      await decision.promise;
+    });
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    expect(placeholder.textContent).toContain(
+      "dohc could not start recording history for this workspace.",
+    );
+    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+  });
+
+  // The other half of that branch: a healthy workspace's history must still
+  // load. Without this, holding the rail in its load state forever keeps the
+  // test above green.
+  it("loads history once main's capture decision says a recorder exists", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
   });
 
   // #505 on this surface: the recorder failed to build. Nothing records, but
@@ -6060,21 +6130,26 @@ describe("versions surface after a failed capture build", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The same window, entered the way production actually enters it: with a
-  // status that EXISTS and says nothing is wrong, because main has not
-  // decided yet.
+  // The same window, entered the way production actually enters it: through
+  // an activity refresh, while main's entry still holds the defaults it
+  // registered before it awaited the capture build.
   //
-  // `workspaceActivity.open` registers the workspace's entry BEFORE it awaits
-  // the capture build — it must, so a batch settling during the build finds a
-  // slot — and until the build answers, that entry still holds
-  // `historyRecordingOff: false` and `historyRecordingUnavailable: false`.
-  // Any workspace's activity event makes this shell refresh, and while the
-  // renderer's own settings read is still in flight `refreshHistory` takes
-  // its opted-out branch and commits that half-filled status. Reading it as
-  // "there is a recorder" is the same defect as reading a missing status that
-  // way, one indirection along — so the gate waits for the DECISION, which
-  // only `openWorkspace` returning can report.
-  it("asks for no versions while main's status is still a default", async () => {
+  // `workspaceActivity.open` registers that entry BEFORE the build — it must,
+  // so a batch settling during the build finds a slot — and until the build
+  // answers it holds `historyRecordingOff: false` and
+  // `historyRecordingUnavailable: false`. Any workspace's activity event
+  // makes this shell refresh, so the refresh is what used to read those
+  // defaults and commit them as a status. Reading THAT as "there is a
+  // recorder" is the same defect as reading a missing status that way, one
+  // indirection along.
+  //
+  // The refresh no longer reads them at all (#637): before the decision it
+  // returns, because both of its branches are wrong in this window — and the
+  // status it used to commit could arrive AFTER the decided one and put the
+  // defaults back. So this pins two things at once: the refresh asks main
+  // nothing here, and the gate stays shut through the whole window on the
+  // decision alone.
+  it("asks main for nothing while its capture decision is still pending", async () => {
     const settings = deferred<WorkspaceSettingsResult>();
     const decision = deferred<typeof FAILED_STATUS>();
     const bridge = makeEngineBridge(Promise.resolve(null));
@@ -6094,14 +6169,16 @@ describe("versions surface after a failed capture build", () => {
     });
     renderShell(bridge);
 
-    // Another workspace records a batch. The shell refreshes, and with its own
-    // read still in flight it commits that pre-decision status.
+    // Another workspace records a batch. The shell refreshes — and asks main
+    // for nothing, because the only status available to it here is the
+    // pre-decision default.
     await act(async () => {
       bridge.emitWorkspaceActivity();
       await Promise.resolve();
     });
-    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
-    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true");
+    expect(bridge.getSyncStatus).not.toHaveBeenCalled();
+    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
 
     // Now the renderer's read answers engine-ON. Every input the old gate had
     // now says "recorder", and main has still decided nothing.
@@ -6238,12 +6315,73 @@ describe("version-compare off copy", () => {
   });
 });
 
+// The same rule on the Chats surfaces (#628). Whatever main established about
+// the RECORDER, none of it establishes that no chat exists: chats live on disk
+// and outlive a session whose capture failed to build, an engine the user
+// switched off, and a settings file dohc could not read.
+describe("chats off copy", () => {
+  const base = {
+    state: "synced" as const,
+    pendingChangeCount: 0,
+    lastSyncedAtMs: null,
+    historyRecordingUnavailable: false,
+    historyShareView: false,
+  };
+
+  it("calls a failed capture build unavailable, never empty", () => {
+    // #505's cause. `historyRecordingOff` rides with it, and reading that
+    // first would turn a startup failure into a claim about durable data.
+    const copy = chatsOffCopy({
+      ...base,
+      historyRecordingOff: true,
+      historyRecordingUnavailable: true,
+    });
+    expect(copy).toBe(
+      "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.",
+    );
+    expect(copy).not.toContain("no chats");
+  });
+
+  it("calls the opt-out off, never empty", () => {
+    const copy = chatsOffCopy({ ...base, historyRecordingOff: true });
+    expect(copy).toContain("Chats are off for this workspace.");
+    expect(copy).toContain("Settings → Advanced");
+    expect(copy).not.toContain("no chats");
+  });
+
+  // The Next has to be the one that works. Main decides the recorder once per
+  // app session — `openWorkspaceActivity` retains every workspace it opens and
+  // `workspaceActivity.open` no-ops for one it already watches — so leaving
+  // the workspace and coming back re-reads the flag nowhere.
+  it("tells the user to restart, not to reopen the workspace", () => {
+    const copy = chatsOffCopy({ ...base, historyRecordingOff: true });
+    expect(copy).toContain("Turn it on. Then restart dohc to use chats.");
+    expect(copy).not.toContain("reopen");
+  });
+
+  it("names the unreadable settings file instead of blaming the toggle", () => {
+    // #483: the opt-out line above names Settings, and nobody touched it.
+    const copy = chatsOffCopy({
+      ...base,
+      historyRecordingOff: true,
+      settingsWarning: "dohc could not read /w/x/.dohc/settings.json.",
+    });
+    expect(copy).toBe("dohc could not read /w/x/.dohc/settings.json.");
+  });
+
+  it("claims nothing when main established nothing", () => {
+    // The renderer's own read failed. It proves nothing either way (#542).
+    const copy = chatsOffCopy(base);
+    expect(copy).toContain("dohc could not confirm whether this workspace has chats.");
+    expect(copy).not.toContain("no chats");
+  });
+});
+
 // #615: a shared view gets no capture, so main refuses listChatChannels,
 // listFileChats, syncDms and listChatFileMentions — the panel, the tab and the
 // titlebar button all offered a capability the share never had, and showed the
-// refusal as an error. These pins cover the SHARE fact only, which is all the
-// chats gate reads; a failed capture build on a normal workspace still reaches
-// every one of these calls, and #628 owns that.
+// refusal as an error. These pins cover the SHARE fact only; the failed
+// capture build on a normal workspace is the describe below (#628).
 describe("shared view chats surface", () => {
   it("offers no Chats on a shared view and never asks main for them", async () => {
     // The stored state opens with the Chats panel visible, so an ungated
@@ -6293,6 +6431,10 @@ describe("shared view chats surface", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
+  // The other half of BOTH gates: a healthy engine workspace gets the real
+  // panel. Without this, hiding Chats from every workspace — or replacing the
+  // panel with the failed-capture placeholder on every one — keeps the share
+  // pins above and the #628 pins below green.
   it("keeps Chats for a workspace that is not a shared view", async () => {
     const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
@@ -6300,6 +6442,7 @@ describe("shared view chats surface", () => {
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
     await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
+    expect(screen.queryByTestId("chats-panel-off")).toBeNull();
   });
 
   // The graph's chat-mentions toggle, on its own. The test above proves the
@@ -6398,6 +6541,167 @@ describe("shared view chats surface", () => {
       }),
     );
   });
+
+  // The ordering interaction #626 found, on this surface. A shared view's
+  // status ALSO says no recorder, so once one lands the status clause alone
+  // would produce the same result and the share clause would survive
+  // deletion. Holding the status pending is what isolates it: `isShareView`
+  // is a synchronous registry fact, and it is the only thing that can answer
+  // in this window.
+  it("states the shared-view fact for a persisted Chats tab before any status arrives", async () => {
+    const status = deferred<typeof SHARE_STATUS>();
+    const bridge = makeShareBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [CHATS_TAB_PATH],
+        activeTab: CHATS_TAB_PATH,
+      }),
+    );
+    bridge.openWorkspace = vi.fn(() => status.promise);
+    bridge.getSyncStatus = vi.fn(() => status.promise);
+    renderShell(bridge, SHARE_VIEW);
+
+    const placeholder = await screen.findByTestId("chats-page-share-view");
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    expect(placeholder.textContent).toContain("A shared view has no chats.");
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+  });
+});
+
+// #628: the same class as #620, one surface over. On a workspace that is NOT
+// a shared view but whose capture build failed, main refuses every Chats call
+// — and the shell offered the panel, the tab and the mention surfaces anyway,
+// because they read the renderer's own engine flag and nothing else.
+//
+// Chats is a persistent sidebar rather than a tab, so the copy decision is
+// not the one #615 made: hiding it would remove a fixture of the window from
+// a workspace that has chats on disk. The panel stays and states the fact.
+describe("chats surface after a failed capture build", () => {
+  const FAILED_STATUS = {
+    ...SYNC_STATUS,
+    historyRecordingOff: true,
+    historyRecordingUnavailable: true,
+  };
+
+  // Main's real answers once the capture build failed: every Chats call goes
+  // through requireEngineCapture, which has no capture to hand it.
+  function makeFailedCaptureBridge() {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    bridge.openWorkspace = vi.fn(async () => FAILED_STATUS);
+    bridge.getSyncStatus = vi.fn(async () => FAILED_STATUS);
+    for (const call of [
+      "listChatChannels",
+      "listChannelThreads",
+      "listFileChats",
+      "listChatFileMentions",
+      "syncDms",
+    ] as const) {
+      bridge[call] = vi.fn(async (): Promise<never> => {
+        throw new Error("Chats are not enabled for this workspace.");
+      });
+    }
+    return bridge;
+  }
+
+  it("states the fact in the Chats sidebar and asks main for no chats", async () => {
+    const bridge = makeFailedCaptureBridge();
+    renderShell(bridge);
+
+    // Both halves of the premise: the renderer's own read said engine-ON —
+    // the titlebar button renders on that read alone — and main's status has
+    // landed carrying the failure.
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    // The sidebar is still there. It is the fixture the user left open, and
+    // the workspace's chats are on disk — the capture build is what failed.
+    expect(screen.getByTestId("chats-panel")).toBeTruthy();
+    const placeholder = await screen.findByTestId("chats-panel-off");
+    // One line, per the empty-state recipe (copy.md), chosen by the cause main
+    // established: a build failure, so it says what dohc could not do and the
+    // one next step that can change it. It must never say the workspace has
+    // no chats — those outlive a session whose capture failed to build.
+    expect(placeholder.textContent).toContain(
+      "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.",
+    );
+    expect(placeholder.textContent).not.toContain("no chats");
+    expect(placeholder.className).toContain("text-sm");
+    expect(placeholder.className).toContain("text-muted");
+
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+    expect(bridge.listFileChats).not.toHaveBeenCalled();
+    expect(bridge.syncDms).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The linked-mentions panel rides every markdown open, and
+  // listChatFileMentions goes through requireEngineCapture like every other
+  // Chats call. Its own `.catch` swallows the refusal, which is why nothing
+  // caught it (#615's last ungated call, from the other cause).
+  it("asks for no chat mentions when a file opens", async () => {
+    const bridge = makeFailedCaptureBridge();
+    renderShell(bridge);
+
+    // The premise: the file really opened, so the panel that issues the call
+    // really mounted.
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(bridge.getBacklinks).toHaveBeenCalled());
+    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("states the fact for a persisted Chats tab instead of a page that can only fail", async () => {
+    const bridge = makeFailedCaptureBridge();
+    bridge.getWorkspaceUiState = vi.fn(async () => ({
+      ...STORED_STATE,
+      tabs: [CHATS_TAB_PATH],
+      activeTab: CHATS_TAB_PATH,
+    }));
+    renderShell(bridge);
+
+    const placeholder = await screen.findByTestId("chats-page-off");
+    expect(placeholder.textContent).toContain(
+      "dohc could not open chats for this workspace.",
+    );
+    // The line that used to stand here blamed a Settings flag for all three
+    // causes, including this one.
+    expect(placeholder.textContent).not.toContain("aren't enabled");
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The window before the decision, entered the way production enters it: the
+  // renderer's own read answers first, and main's registry entry still holds
+  // the defaults it registered before awaiting the capture build. Every input
+  // the gate has says "recorder", and main has decided nothing.
+  it("asks for no chats before main's capture decision lands", async () => {
+    const decision = deferred<typeof FAILED_STATUS>();
+    const bridge = makeFailedCaptureBridge();
+    bridge.openWorkspace = vi.fn(() => decision.promise);
+    let decided = false;
+    bridge.getSyncStatus = vi.fn(async () => (decided ? FAILED_STATUS : SYNC_STATUS));
+    renderShell(bridge);
+
+    await screen.findByTestId("titlebar-chats-sidebar");
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+    // The panel is mounted and states nothing: neither read the shell has
+    // done proves anything about what main decided (#542).
+    expect(screen.getByTestId("chats-panel")).toBeTruthy();
+    expect(screen.queryByTestId("chats-panel-off")).toBeNull();
+
+    await act(async () => {
+      decided = true;
+      decision.resolve(FAILED_STATUS);
+      await decision.promise;
+    });
+    expect(await screen.findByTestId("chats-panel-off")).toBeTruthy();
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
 });
 
 // #621: virtual tabs survive restore, so a moment-diff tab outlives the
@@ -6447,6 +6751,167 @@ describe("shared view moment-diff tab", () => {
       }),
     );
     expect(screen.queryByTestId("moment-diff-share-view")).toBeNull();
+    expect(screen.queryByTestId("moment-diff-off")).toBeNull();
+  });
+
+  // The ordering interaction #626 found. A shared view's status also says no
+  // recorder, so holding it pending is what isolates the synchronous share
+  // fact from the status clause that would otherwise mask it.
+  it("states the shared-view fact before any status arrives", async () => {
+    const status = deferred<typeof SHARE_STATUS>();
+    const bridge = makeShareBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [MOMENT_TAB],
+        activeTab: MOMENT_TAB,
+      }),
+    );
+    bridge.openWorkspace = vi.fn(() => status.promise);
+    bridge.getSyncStatus = vi.fn(() => status.promise);
+    renderShell(bridge, SHARE_VIEW);
+
+    const placeholder = await screen.findByTestId("moment-diff-share-view");
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    expect(placeholder.textContent).toContain("A shared view records no history.");
+    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
+  });
+});
+
+// #637 item 1: the same tab, the other cause. #621 gated it on the share fact
+// alone, so a workspace whose recorder failed to build still mounted
+// EngineMomentDiffPage — which calls readEngineMoment on mount and falls into
+// its own error state. Reached by opening a moment diff while healthy and
+// restarting after a failed build.
+describe("moment-diff tab after a failed capture build", () => {
+  const MOMENT_TAB = momentDiffTabPath("m-1");
+  const FAILED_STATUS = {
+    ...SYNC_STATUS,
+    historyRecordingOff: true,
+    historyRecordingUnavailable: true,
+  };
+
+  it("states the capability instead of a page that can only fail", async () => {
+    const status = deferred<typeof FAILED_STATUS>();
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [MOMENT_TAB],
+        activeTab: MOMENT_TAB,
+      }),
+    );
+    bridge.openWorkspace = vi.fn(() => status.promise);
+    bridge.getSyncStatus = vi.fn(() => status.promise);
+    bridge.readEngineMoment = vi.fn(async (): Promise<never> => {
+      throw new Error("Engine history is not enabled for this workspace.");
+    });
+    renderShell(bridge);
+
+    // Before the decision lands the tab mounts no page AND claims nothing:
+    // the renderer's own read proves nothing about what main recorded (#542).
+    await screen.findByTestId("titlebar-chats-sidebar");
+    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
+    expect(screen.queryByTestId("moment-diff-off")).toBeNull();
+    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
+
+    await act(async () => {
+      status.resolve(FAILED_STATUS);
+      await status.promise;
+    });
+
+    // The History placeholder's line for this cause: one cause, one sentence,
+    // wherever it is stated. It says what dohc could not do — never that the
+    // workspace has no history, which the restart it prescribes would undo.
+    const placeholder = await screen.findByTestId("moment-diff-off");
+    expect(placeholder.textContent).toContain(
+      "dohc could not start recording history for this workspace.",
+    );
+    expect(placeholder.textContent).toContain("Restart dohc to try again.");
+    expect(placeholder.className).toContain("text-sm");
+    expect(placeholder.className).toContain("text-muted");
+    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
+    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The other ordering, which the tests above cannot reach because their open
+  // is the slow one (#637, codex r2). Main decides the recorder once per app
+  // session and RETAINS the workspace, so re-entering a healthy workspace
+  // mid-session resolves `openWorkspace` off that retained entry — before the
+  // renderer's own settings read, which is a real file read, has answered.
+  // `engineEnabled` still holds its "no answer" false in that window, so the
+  // tab took the unavailable branch and stated a restart main never asked for,
+  // then flipped to the diff.
+  it("states nothing while the settings read is still in flight", async () => {
+    const settings = deferred<WorkspaceSettingsResult>();
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [MOMENT_TAB],
+        activeTab: MOMENT_TAB,
+      }),
+    );
+    bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
+    renderShell(bridge);
+
+    // The premise: main's decision has landed, and it says a recorder exists.
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    // MUTATION: read the capture decision alone -> "History is unavailable.
+    // dohc could not confirm…", on a workspace whose history is fine.
+    expect(screen.queryByTestId("moment-diff-off")).toBeNull();
+    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
+    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
+
+    await act(async () => {
+      settings.resolve({
+        settings: {
+          ...DEFAULT_WORKSPACE_SETTINGS,
+          experimental: {
+            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+            workspaceEngineAlpha: true,
+          },
+        },
+        source: "stored",
+      });
+      await settings.promise;
+    });
+
+    // Both answers are in, and they agree: the real page, asking main for the
+    // moment the tab was opened on.
+    await waitFor(() =>
+      expect(bridge.readEngineMoment).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        momentId: "m-1",
+      }),
+    );
+    expect(screen.queryByTestId("moment-diff-off")).toBeNull();
+  });
+
+  // The half that keeps the wait from becoming a forever-load: the settings
+  // read can FAIL, and a failure is an answer. Held as "pending" it would
+  // leave this tab spinning for the rest of the session.
+  it("states the capability once the settings read fails", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [MOMENT_TAB],
+        activeTab: MOMENT_TAB,
+      }),
+    );
+    bridge.getWorkspaceSettings = vi.fn(async (): Promise<never> => {
+      throw new Error("transient read failure");
+    });
+    renderShell(bridge);
+
+    // The renderer's read failed and main said nothing was wrong, so this
+    // surface knows only what IT could not do — no cause, no claim about what
+    // the workspace has (#542).
+    const placeholder = await screen.findByTestId("moment-diff-off");
+    expect(placeholder.textContent).toContain("History is unavailable.");
+    expect(placeholder.textContent).not.toContain("Settings");
+    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
+    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
   });
 });
 
