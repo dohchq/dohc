@@ -6349,6 +6349,16 @@ describe("chats off copy", () => {
     expect(copy).not.toContain("no chats");
   });
 
+  // The Next has to be the one that works. Main decides the recorder once per
+  // app session — `openWorkspaceActivity` retains every workspace it opens and
+  // `workspaceActivity.open` no-ops for one it already watches — so leaving
+  // the workspace and coming back re-reads the flag nowhere.
+  it("tells the user to restart, not to reopen the workspace", () => {
+    const copy = chatsOffCopy({ ...base, historyRecordingOff: true });
+    expect(copy).toContain("Turn it on. Then restart dohc to use chats.");
+    expect(copy).not.toContain("reopen");
+  });
+
   it("names the unreadable settings file instead of blaming the toggle", () => {
     // #483: the opt-out line above names Settings, and nobody touched it.
     const copy = chatsOffCopy({
@@ -6827,6 +6837,87 @@ describe("moment-diff tab after a failed capture build", () => {
     expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
     expect(bridge.readEngineMoment).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The other ordering, which the tests above cannot reach because their open
+  // is the slow one (#637, codex r2). Main decides the recorder once per app
+  // session and RETAINS the workspace, so re-entering a healthy workspace
+  // mid-session resolves `openWorkspace` off that retained entry — before the
+  // renderer's own settings read, which is a real file read, has answered.
+  // `engineEnabled` still holds its "no answer" false in that window, so the
+  // tab took the unavailable branch and stated a restart main never asked for,
+  // then flipped to the diff.
+  it("states nothing while the settings read is still in flight", async () => {
+    const settings = deferred<WorkspaceSettingsResult>();
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [MOMENT_TAB],
+        activeTab: MOMENT_TAB,
+      }),
+    );
+    bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
+    renderShell(bridge);
+
+    // The premise: main's decision has landed, and it says a recorder exists.
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    // MUTATION: read the capture decision alone -> "History is unavailable.
+    // dohc could not confirm…", on a workspace whose history is fine.
+    expect(screen.queryByTestId("moment-diff-off")).toBeNull();
+    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
+    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
+
+    await act(async () => {
+      settings.resolve({
+        settings: {
+          ...DEFAULT_WORKSPACE_SETTINGS,
+          experimental: {
+            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+            workspaceEngineAlpha: true,
+          },
+        },
+        source: "stored",
+      });
+      await settings.promise;
+    });
+
+    // Both answers are in, and they agree: the real page, asking main for the
+    // moment the tab was opened on.
+    await waitFor(() =>
+      expect(bridge.readEngineMoment).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        momentId: "m-1",
+      }),
+    );
+    expect(screen.queryByTestId("moment-diff-off")).toBeNull();
+  });
+
+  // The half that keeps the wait from becoming a forever-load: the settings
+  // read can FAIL, and a failure is an answer. Held as "pending" it would
+  // leave this tab spinning for the rest of the session.
+  it("states the capability once the settings read fails", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: [MOMENT_TAB],
+        activeTab: MOMENT_TAB,
+      }),
+    );
+    bridge.getWorkspaceSettings = vi.fn(async (): Promise<never> => {
+      throw new Error("transient read failure");
+    });
+    renderShell(bridge);
+
+    // The renderer's read failed and main said nothing was wrong, so this
+    // surface knows only what IT could not do — no cause, no claim about what
+    // the workspace has (#542).
+    const placeholder = await screen.findByTestId("moment-diff-off");
+    expect(placeholder.textContent).toContain("History is unavailable.");
+    expect(placeholder.textContent).not.toContain("Settings");
+    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
+    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
   });
 });
 

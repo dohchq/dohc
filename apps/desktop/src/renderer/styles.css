@@ -3374,8 +3374,12 @@ mark.dohc-highlight,
   line-height: 1.35;
 }
 
+/* Empty, it collapses to nothing — but it is still RENDERED. `display: none`
+ * takes the region out of the accessibility tree, so the instruction would
+ * arrive at the same moment as the region that carries it, which is the case
+ * screen readers announce unreliably. */
 .dohc-document-menu-status:empty {
-  display: none;
+  padding: 0;
 }
 
 /* TeX math (KaTeX). The `.katex` typesetting itself comes from the bundled

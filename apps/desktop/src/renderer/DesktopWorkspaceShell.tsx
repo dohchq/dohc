@@ -351,7 +351,13 @@ export function chatsOffCopy(syncStatus: SyncStatusResult | null): string {
   if (syncStatus?.historyRecordingOff) {
     // The real opt-out. The engine is off, so chats cannot be opened here —
     // which is not the same as there being none.
-    return "Chats are off for this workspace. The workspace engine is turned off in Settings → Advanced. Turn it on and reopen the workspace to use chats.";
+    //
+    // RESTART, not reopen: main decides the recorder once per workspace per
+    // app session — `openWorkspaceActivity` retains every workspace it opens
+    // and `workspaceActivity.open` no-ops for one it already watches — so
+    // leaving the workspace and coming back re-reads the flag nowhere. Same
+    // instruction the settings warning gives, for the same reason.
+    return "Chats are off for this workspace. The workspace engine is turned off in Settings → Advanced. Turn it on. Then restart dohc to use chats.";
   }
   // Main has not said anything is wrong, so the renderer's own read failing
   // is all this surface knows. No cause, and no claim about what exists.
@@ -1843,7 +1849,20 @@ export function DesktopWorkspaceShell(props: {
   // source, and the linked Chats rail all key off this one per-workspace
   // capability, read once from the existing settings IPC below — never a
   // second settings read.
-  const [engineEnabled, setEngineEnabled] = useState(false);
+  //
+  // The answer is kept WITH the workspace it answered for, so "no answer yet"
+  // and "answered off" are never the same state — a bare `false` cannot say
+  // which, and the surfaces below must not state a capability from a read
+  // that has not happened. A read for another workspace is discarded here
+  // rather than retracted by an effect, so switching away and back cannot
+  // leave the previous workspace's answer standing over a pending one.
+  const [engineRead, setEngineRead] = useState<{
+    workspaceId: string;
+    enabled: boolean;
+  } | null>(null);
+  const engineReadForWorkspace =
+    engineRead?.workspaceId === workspaceId ? engineRead : null;
+  const engineEnabled = engineReadForWorkspace?.enabled ?? false;
   // A shared view has no engine history surface regardless of that read
   // (#540): it materializes no settings file, so the default flag reads ON —
   // but the share's open deliberately installed no capture, and every
@@ -2285,7 +2304,15 @@ export function DesktopWorkspaceShell(props: {
   // graph's chat mentions and the linked-mentions panel — so the fact is
   // decided once. A surface that re-derives it drifts, which is exactly how
   // the compare tab kept mounting after #614 gated the selector.
-  const captureDecided = captureDecidedFor === workspaceId;
+  //
+  // BOTH reads, because a surface that states a capability must have both
+  // answers. Main's open resolves immediately for a workspace it already
+  // retains, so a healthy workspace re-entered mid-session reaches the
+  // decision while the settings read is still in flight — `engineEnabled`
+  // still holds its "no answer" false, and every branch below would state an
+  // unavailability that main never reported (#637, codex r2).
+  const captureDecided =
+    captureDecidedFor === workspaceId && engineReadForWorkspace !== null;
   const captureAvailable =
     engineSurfacesExist && captureDecided && !statusSaysNoRecorder(syncStatus);
   // Bumped after a version switch/merge/conflict resolution so open editors
@@ -2298,18 +2325,26 @@ export function DesktopWorkspaceShell(props: {
   // surfaces the shell offers (versions and chats).
   useEffect(() => {
     let cancelled = false;
-    setEngineEnabled(false);
     void bridge()
       .getWorkspaceSettings({ workspaceId })
       .then((result) => {
         if (cancelled) return;
-        setEngineEnabled(result.settings.experimental.workspaceEngineAlpha);
+        setEngineRead({
+          workspaceId,
+          enabled: result.settings.experimental.workspaceEngineAlpha,
+        });
       })
       .catch(() => {
         // Settings unavailable reads as flag off — never a broken shell.
         // Capability only, fail-closed (#329): the surface hides, but what
         // the placeholder then SAYS comes from main's status. This failure
         // must never be translated into an asserted opt-out (#542).
+        //
+        // It is still an ANSWER. Recording it is what releases the surfaces
+        // below from their load state; a failure held as "pending" would
+        // leave a persisted tab spinning for the rest of the session.
+        if (cancelled) return;
+        setEngineRead({ workspaceId, enabled: false });
       });
     return () => {
       cancelled = true;

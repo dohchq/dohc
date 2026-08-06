@@ -67,15 +67,22 @@ export function DocumentMenu(props: {
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Every attempt gets a number, and only the newest one may speak. A
+  // clipboard write settles after the click that started it, so its outcome
+  // can land on a menu that has moved on — over a refusal the user is still
+  // reading, and with a timer that then closes the menu under them.
+  const attempts = useRef(0);
 
   useEffect(() => {
     if (!open) return;
     setSelected(0);
-    // A freshly opened menu says nothing about the last one. The timer goes
-    // with it: left running, a confirmation's pending auto-close would shut
-    // this menu instead of the one it belonged to.
+    // A freshly opened menu says nothing about the last one, and that
+    // includes an attempt still in flight from it. The timer goes too: left
+    // running, a confirmation's pending auto-close would shut this menu
+    // instead of the one it belonged to.
     setFeedback({});
     setInstruction("");
+    attempts.current += 1;
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     menuRef.current?.focus();
     // On every close path (Escape, outside pointer-down, post-feedback
@@ -148,7 +155,7 @@ export function DocumentMenu(props: {
     }
   }
 
-  async function copyAsMarkdown() {
+  async function copyAsMarkdown(attempt: number) {
     const serialized = serializeOrFail(
       "copy-markdown",
       "Couldn't copy",
@@ -166,12 +173,16 @@ export function DocumentMenu(props: {
     }
     const write = navigator.clipboard?.writeText(markdown);
     if (!write) return;
+    let label = "Copied";
     try {
       await write;
-      showFeedback("copy-markdown", "Copied");
     } catch {
-      showFeedback("copy-markdown", "Couldn't copy");
+      label = "Couldn't copy";
     }
+    // A later attempt already answered. Its answer is what the menu shows,
+    // and this one describes a click the user has moved past.
+    if (attempt !== attempts.current) return;
+    showFeedback("copy-markdown", label);
   }
 
   async function exportDocument(kind: "markdown" | "html" | "pdf") {
@@ -229,10 +240,13 @@ export function DocumentMenu(props: {
   }
 
   function runItem(id: DocumentMenuItemId) {
+    const attempt = ++attempts.current;
     if (id === "copy-markdown") {
-      void copyAsMarkdown();
+      void copyAsMarkdown(attempt);
       return;
     }
+    // The export path needs no token: it decides everything it says before
+    // its first await, and closes the menu before the bridge call.
     void exportDocument(
       id === "export-pdf" ? "pdf" : id === "export-html" ? "html" : "markdown",
     );

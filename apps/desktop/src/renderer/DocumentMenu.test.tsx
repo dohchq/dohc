@@ -41,6 +41,16 @@ function nextClipboardWrite(): Promise<string> {
   });
 }
 
+// A clipboard write the test settles itself, for the out-of-order cases: the
+// component must not act on an attempt the user has moved past.
+function deferredWrite() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 function nextExport(): Promise<ExportDocumentFileCall> {
   return new Promise((resolve) => {
     pendingExport = resolve;
@@ -387,6 +397,91 @@ describe("DocumentMenu", () => {
     await act(async () => {});
     expect(screen.getByText("Copied")).toBeTruthy();
     expect(screen.getByTestId("document-menu-status").textContent).toBe("");
+  });
+
+  // codex r2 on #684: a clipboard write settles after the click that started
+  // it, and a refusal now stands until the user closes the menu — so the late
+  // "Copied" landed on top of an instruction the user was still reading, and
+  // started the timer that closes the menu under them.
+  it("ignores a clipboard write that settles after a later action answered", async () => {
+    const user = userEvent.setup();
+    stubClipboard();
+    const write = deferredWrite();
+    writeText.mockImplementationOnce(() => write.promise);
+    let markdown: string | null = MARKDOWN;
+    render(
+      <DocumentMenu
+        workspaceId="ws-1"
+        suggestedName="Plan"
+        getMarkdown={() => markdown}
+      />,
+    );
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    expect(writeText).toHaveBeenCalledTimes(1);
+
+    // The editor went away while that write was in flight, and the next
+    // action is refused. This is what the user is now reading.
+    markdown = null;
+    await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+    await act(async () => {});
+    expect(screen.getByTestId("document-menu-status").textContent).toBe(
+      "You can export this document when it opens.",
+    );
+
+    // The old write finally lands.
+    await act(async () => {
+      write.resolve();
+      await write.promise;
+    });
+
+    // MUTATION: let it speak -> the instruction is erased, the export item
+    // reads "Copied", and the menu closes 1.2s later.
+    expect(screen.getByTestId("document-menu-status").textContent).toBe(
+      "You can export this document when it opens.",
+    );
+    expect(
+      screen.getByTestId("document-menu-item-export-markdown").textContent,
+    ).toBe("Document not open");
+    expect(screen.queryByText("Copied")).toBeNull();
+    await waitFor(
+      () =>
+        expect(
+          screen.getByTestId("document-menu-item-export-markdown").textContent,
+        ).toBe("Export as Markdown…"),
+      { timeout: FEEDBACK_MS * 4 },
+    );
+    expect(screen.queryByRole("menu")).not.toBeNull();
+  });
+
+  // The same staleness across a close: the menu the write belonged to is gone,
+  // and the fresh one says nothing about the last one — a "Copied" here would
+  // also close a menu the user just opened.
+  it("ignores a clipboard write that settles after the menu reopened", async () => {
+    const user = userEvent.setup();
+    stubClipboard();
+    const write = deferredWrite();
+    writeText.mockImplementationOnce(() => write.promise);
+    renderMenu();
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByTestId("document-menu-trigger"));
+
+    await act(async () => {
+      write.resolve();
+      await write.promise;
+    });
+
+    // MUTATION: let it speak -> this menu shows "Copied" for an attempt that
+    // belonged to the last one, and closes on its timer.
+    expect(screen.queryByText("Copied")).toBeNull();
+    expect(
+      screen.getByTestId("document-menu-item-copy-markdown").textContent,
+    ).toBe("Copy as Markdown");
+    expect(screen.queryByRole("menu")).not.toBeNull();
   });
 
   // codex r23: NULL is the refusal this menu expects; a THROW is not. The

@@ -90,6 +90,23 @@ describe("editor tab strip css", () => {
   });
 });
 
+describe("document menu status css", () => {
+  // #666, codex r2 on #684: the menu's status line is a `role="status"` live
+  // region that mounts empty, so a screen reader is already watching it when
+  // the refusal's instruction arrives. `display: none` takes it back out of
+  // the accessibility tree, which puts the region and its text on screen in
+  // the same paint — the case screen readers announce unreliably, and the one
+  // this region exists to avoid.
+  it("keeps the empty live region rendered instead of hiding it", () => {
+    const empty = cssRule(".dohc-document-menu-status:empty");
+
+    expect(empty).not.toContain("display: none");
+    expect(empty).not.toContain("visibility: hidden");
+    // It still takes no room: an empty block box with no padding is 0 high.
+    expect(empty).toContain("padding: 0;");
+  });
+});
+
 describe("workbench cursor css", () => {
   it("uses a pointer cursor for clickable app chrome", () => {
     const clickableChrome = cssRule(
