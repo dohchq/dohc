@@ -302,7 +302,31 @@ export class EngineWorkspaceSessions {
     // failure of its own to name, and a refusal that names none sends the
     // reader looking for the wrong thing.
     lastError: unknown;
+    // THE REGION IS THE OPEN, AND NOTHING BEYOND IT.
+    //
+    // An async context is inherited by everything created inside it, and a
+    // document open INSTALLS things that outlive it: the settle debounce
+    // timer, the remote-update subscription, the save-state reporter, an
+    // armed backoff. Node timers keep the context they were created in, so
+    // those callbacks kept reading as work inside the abandonable open
+    // region — for the whole life of the session. A settle for an edit the
+    // engine had already ACCEPTED would then be refused by a budget spent
+    // during the open, or stopped by quit, which is the one thing this class
+    // must never do to an accepted write (#564, codex r22).
+    //
+    // The context cannot be un-inherited, so the REGION ends instead: every
+    // reader asks `activeBudget()`, and that answers undefined once the task
+    // has returned. One statement, and it covers every callback the open
+    // installs rather than each one separately.
+    ended: boolean;
   }>();
+
+  // The ambient budget, but only while its region is still running. See
+  // `ended` above: a context that outlived the open is not a region.
+  private activeBudget() {
+    const budget = this.retryBudgets.getStore();
+    return budget === undefined || budget.ended ? undefined : budget;
+  }
 
   constructor(
     private readonly source: EngineDaemonClientSource,
@@ -435,23 +459,29 @@ export class EngineWorkspaceSessions {
     // Nothing user-visible is lost: a bounded region is the abandonable kind
     // by construction, and an opening document is read-only (#533).
     if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();
-    return await this.retryBudgets.run(
-      {
-        budgetMs,
-        failedAtMs: null,
-        startedAtMs: this.now(),
-        failedAttempts: 0,
-        lastError: undefined,
-      },
-      task,
-    );
+    const budget = {
+      budgetMs,
+      failedAtMs: null as number | null,
+      startedAtMs: this.now(),
+      failedAttempts: 0,
+      lastError: undefined as unknown,
+      ended: false,
+    };
+    try {
+      return await this.retryBudgets.run(budget, task);
+    } finally {
+      // The open has returned, so the region is over — whatever still holds
+      // its context. Everything the session installed reads as ordinary work
+      // from here, which is what it is.
+      budget.ended = true;
+    }
   }
 
   // One failed daemon attempt, counted on the ambient budget so the refusal
   // can report what the WAIT actually cost rather than one ladder's share.
   // The first failure also starts the budget's clock: see `failedAtMs`.
   private noteBudgetAttempt(cause?: unknown): void {
-    const budget = this.retryBudgets.getStore();
+    const budget = this.activeBudget();
     if (budget === undefined) return;
     budget.failedAttempts += 1;
     budget.failedAtMs ??= this.now();
@@ -488,7 +518,7 @@ export class EngineWorkspaceSessions {
    * dropped.
    */
   private assertRegionLive(workspaceId: string): void {
-    const budget = this.retryBudgets.getStore();
+    const budget = this.activeBudget();
     if (budget === undefined) return;
     if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();
     // A healthy attempt costs the budget nothing, however long it took, so a
@@ -501,7 +531,7 @@ export class EngineWorkspaceSessions {
   // ladder, on any path. A run outside a region is not bounded here, and that
   // is deliberate: only work a caller marked abandonable may be abandoned.
   private throwPastRetryDeadline(workspaceId: string, cause: unknown): void {
-    const budget = this.retryBudgets.getStore();
+    const budget = this.activeBudget();
     if (budget === undefined || budget.failedAtMs === null) return;
     const now = this.now();
     const spentMs = now - budget.failedAtMs;
@@ -574,7 +604,7 @@ export class EngineWorkspaceSessions {
     // the failure (#564, codex P1). An open that cannot finish is abandoned;
     // a write already accepted is not.
     //
-    const abandonable = this.retryBudgets.getStore() !== undefined;
+    const abandonable = this.activeBudget() !== undefined;
     if (this.shuttingDown && abandonable) {
       return "stop";
     }
@@ -599,7 +629,7 @@ export class EngineWorkspaceSessions {
     );
     // Same scope as before the wait: quit ends a bounded region's retries, and
     // only a bounded region's.
-    if (this.shuttingDown && this.retryBudgets.getStore() !== undefined) {
+    if (this.shuttingDown && this.activeBudget() !== undefined) {
       return "stop";
     }
     checkDeadline();

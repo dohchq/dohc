@@ -1670,6 +1670,94 @@ describe("EngineWorkspaceSessions", () => {
       expect(closeStarted).toBeGreaterThan(0);
     });
 
+    it("lets a settle armed during the open run after the region ends", async () => {
+      // codex r22, and the round-9 asymmetry wearing an async-context coat.
+      // A document open INSTALLS things that outlive it — the settle debounce
+      // timer, the remote-update subscription, the save-state reporter — and a
+      // Node timer keeps the async context it was created in. So the session's
+      // later work kept reading as work inside the ABANDONABLE open region,
+      // for the whole life of the session: a settle for an edit the engine had
+      // already accepted would be refused by a budget spent during the open.
+      // That is the one thing this class must never do to an accepted write.
+      const workspace = await tempWorkspace("workspace-settle-after-region");
+      const client = new MockClient("handle-settle-after");
+      let nowMs = 5_000;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      // A real timer, armed INSIDE the region, exactly as the provider arms
+      // its settle debounce while the open runs. A plain closure would not
+      // reproduce this: it is the timer that carries the context.
+      let settle!: Promise<unknown>;
+      await sessions.withRetryBudget(2_000, async () => {
+        let attempts = 0;
+        await sessions.run(
+          workspace,
+          async () => {
+            attempts += 1;
+            // One failure starts the budget's clock, and the retry binds.
+            if (attempts === 1) throw { code: "transport-error" };
+            return "bound";
+          },
+          { retryTransportErrors: true },
+        );
+        settle = new Promise((resolve, reject) => {
+          setTimeout(() => {
+            // The accepted edit's settle, on the live session.
+            sessions
+              .run(workspace, async () => "settled")
+              .then(resolve, reject);
+          }, 0);
+        });
+        // The open spends the rest of its window before returning.
+        nowMs += 5_000;
+      });
+
+      // MUTATION: leave the region live after the task returns -> this settle
+      // reads as abandonable work on a spent budget and rejects with
+      // EngineWorkspaceRetryDeadlineError, losing an accepted update.
+      await expect(settle).resolves.toBe("settled");
+    });
+
+    it("lets a settle armed during the open survive quit", async () => {
+      // The same leak, reached through `beginShutdown` instead of the clock:
+      // an abandonable region stops retrying at quit, and a live document's
+      // settle is not abandonable.
+      const workspace = await tempWorkspace("workspace-settle-after-quit");
+      const client = new MockClient("handle-settle-quit");
+      const sessions = new EngineWorkspaceSessions({
+        currentClient: () => client,
+      });
+
+      let settle!: Promise<unknown>;
+      await sessions.withRetryBudget(60_000, async () => {
+        await sessions.run(workspace, async () => "bound");
+        settle = new Promise((resolve, reject) => {
+          setTimeout(() => {
+            let attempts = 0;
+            sessions
+              .run(
+                workspace,
+                async () => {
+                  attempts += 1;
+                  // The daemon blips once; an accepted write retries through
+                  // it even at quit.
+                  if (attempts === 1) throw { code: "transport-error" };
+                  return "settled";
+                },
+                { retryTransportErrors: true },
+              )
+              .then(resolve, reject);
+          }, 0);
+        });
+      });
+      sessions.beginShutdown();
+
+      await expect(settle).resolves.toBe("settled");
+    });
+
     it("keeps running a region whose budget clock never started", async () => {
       // The invariant the gate must not break: a healthy attempt costs the
       // budget nothing, however long it takes, so a region that has not
