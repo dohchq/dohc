@@ -340,7 +340,6 @@ export class EngineWorkspaceSessions {
     operation: (binding: EngineWorkspaceBinding) => Promise<T>,
     options: EngineWorkspaceRunOptions = {},
   ): Promise<T> {
-    this.refuseSpentRegion(workspace.workspaceId);
     const entry = await this.acquire(workspace.workspaceId);
     try {
       const maxAttempts = options.retryTransportErrors
@@ -355,12 +354,12 @@ export class EngineWorkspaceSessions {
           options,
           rebindStarted,
         );
-        // AGAIN, because the rebind above can take the whole window with it:
-        // its own ladder waits and retries, and the check before it answered
-        // for a budget that was still live (#564, codex r17). The operation
-        // this admits may be a `ydoc.open`, which carries no deadline of its
-        // own — the exact call this region exists to bound.
-        this.refuseSpentRegion(workspace.workspaceId);
+        // The second door: the operation is daemon work this class does not
+        // issue itself, and the rebind above can take the whole window with it
+        // (#564, codex r17). What it admits may be a `ydoc.open`, which
+        // carries no deadline of its own — the exact call this region exists
+        // to bound.
+        this.assertRegionLive(workspace.workspaceId);
         try {
           return await operation(binding);
         } catch (error) {
@@ -462,22 +461,32 @@ export class EngineWorkspaceSessions {
   }
 
   /**
-   * The two questions every run in a bounded region asks BEFORE it starts.
+   * THE INVARIANT: no daemon request starts after the region's budget or its
+   * shutdown fired, whatever the caller awaited in between.
    *
-   * They used to be asked only at region entry and after a failure, which
-   * leaves the same hole twice: a call that fails, RECOVERS and returns leaves
-   * the budget spent with nothing left to notice it, and a call that begins
-   * after `beginShutdown` was never checked at all when the flag flipped
-   * between two calls. Either way the next call ran unbounded — in the
-   * document open, a recovered version read admitting the provider open past
-   * the window, holding the capture chain with no deadline left to stop it.
-   * That is the hold #564 exists to bound (#564, codex r15).
+   * Three review rounds found the same hole in three different awaits — the
+   * gap between two runs (r15), the rebind ladder inside a run (r17), and the
+   * wait for a closing entry (r18). One defect wearing three hats: a check
+   * that answers for the instant it runs, placed where an await can follow it.
+   * A fourth caller would have been the fourth hat, so the check moved to the
+   * DOORS daemon work leaves through, and every path reaches one of them:
+   *
+   * - `open`, at the top of its loop. Every `workspace.open` this class issues
+   *   goes through there, and re-asking each iteration covers the churned
+   *   client, the armed backoff, and the queued `entry.opening` with one line.
+   * - `operation(binding)`, which is the caller's own daemon work.
+   *
+   * TWO doors, not three. `run` used to ask a third time at its own entry
+   * (r15's gate), and once the doors existed that call could be deleted with
+   * every r15 test still red under its own mutation — the open door answers
+   * first, whether the caller waited on a closing entry or nothing at all. A
+   * check nothing can fail is not a gate.
    *
    * Outside a region this does nothing: work that is not abandonable keeps
    * retrying at quit on purpose, because an accepted write must not be
    * dropped.
    */
-  private refuseSpentRegion(workspaceId: string): void {
+  private assertRegionLive(workspaceId: string): void {
     const budget = this.retryBudgets.getStore();
     if (budget === undefined) return;
     if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();
@@ -730,7 +739,13 @@ export class EngineWorkspaceSessions {
         return await this.open(workspace, entry, options);
       } catch (error) {
         if (error instanceof EngineWorkspaceRebindError) throw error;
-        if (error instanceof EngineWorkspaceRetryDeadlineError) throw error;
+        // A region's terminal refusals are not ladder failures: counting one
+        // would put a phantom attempt on the budget and could start its clock
+        // on something that never touched the daemon. The door above raises
+        // both, so both leave through here untouched. (Structural: with the
+        // region gates in place, a quit refusal cannot reach the wrapping
+        // branch below, so no test can tell the wrap from the rethrow.)
+        if (isEngineWorkspaceOpenRefusedError(error)) throw error;
         lastError = error;
         this.noteBudgetAttempt(error);
         // EVERY retry decision this ladder makes settles here, including the
@@ -766,6 +781,10 @@ export class EngineWorkspaceSessions {
     options: EngineWorkspaceRunOptions,
   ): Promise<EngineWorkspaceBinding> {
     for (let attempt = 1; ; attempt += 1) {
+      // The door. Every workspace.open this class issues passes here, so this
+      // is where the region's invariant is enforced rather than at each of the
+      // awaits that can precede it.
+      this.assertRegionLive(workspace.workspaceId);
       const client = this.source.currentClient();
       if (entry.binding?.client === client) return entry.binding;
       if (entry.binding?.client !== client) entry.binding = null;

@@ -1494,6 +1494,125 @@ describe("EngineWorkspaceSessions", () => {
       expect(operations).toBe(0);
     });
 
+    // The THIRD await found holding this hole, which is why the check moved to
+    // the doors instead of gaining a third caller. A run that arrives while the
+    // entry is closing waits for that close — and a `workspace.close` is a
+    // daemon round trip, so the window can go by inside it. The run then walked
+    // on into a 2 s `workspace.open` with nothing left to stop it.
+    //
+    // What it costs is the OPEN, not the answer: the gate after the rebind
+    // still refuses the operation, so the run fails either way. It fails after
+    // holding the capture chain through a 2 s `workspace.open` that had no
+    // business starting — which is the hold, and the thing to count.
+    function closingEntryHarness(options: {
+      onClose: (advance: () => void) => void;
+      nowRef: { ms: number };
+      opensAfterClose: { count: number };
+    }) {
+      let closed = false;
+      const client: EngineDaemonClient = {
+        close: () => undefined,
+        async sendRequest(request) {
+          if (request.method === "workspace.close") {
+            closed = true;
+            options.onClose(() => {
+              options.nowRef.ms += 5_000;
+            });
+            return { id: request.id, result: { closed: true } };
+          }
+          if (closed) options.opensAfterClose.count += 1;
+          return { id: request.id, result: { workspace: "closing-wait" } };
+        },
+      };
+      return client;
+    }
+
+    it("refuses an open that waited out the window on a closing entry", async () => {
+      const workspace = await tempWorkspace("workspace-closing-wait");
+      const nowRef = { ms: 5_000 };
+      const opensAfterClose = { count: 0 };
+      let operations = 0;
+      const client = closingEntryHarness({
+        nowRef,
+        opensAfterClose,
+        // The close IS the wait: the budget goes by inside it.
+        onClose: (advance) => advance(),
+      });
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowRef.ms, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .withRetryBudget(2_000, async () => {
+          // One failure starts the clock, and the retry succeeds well inside
+          // the window — so the gate at the top of `run` has nothing to refuse.
+          let attempts = 0;
+          await sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              if (attempts === 1) throw { code: "transport-error" };
+              return "recovered";
+            },
+            { retryTransportErrors: true },
+          );
+          // Now the entry starts closing, and this run queues behind it.
+          const closing = sessions.closeWorkspace(workspace.workspaceId);
+          const queued = sessions.run(workspace, async () => {
+            operations += 1;
+            return "held the chain";
+          });
+          await closing;
+          return await queued;
+        })
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(operations).toBe(0);
+      // MUTATION: check the region only at `run` entry and after the rebind ->
+      // a `workspace.open` is issued on a budget the closing wait had already
+      // spent, and the capture chain waits out its 2 s deadline for nothing.
+      expect(opensAfterClose.count).toBe(0);
+    });
+
+    it("refuses an open that waited out a quit on a closing entry", async () => {
+      const workspace = await tempWorkspace("workspace-closing-quit");
+      const nowRef = { ms: 5_000 };
+      const opensAfterClose = { count: 0 };
+      let operations = 0;
+      let sessions!: EngineWorkspaceSessions;
+      const client = closingEntryHarness({
+        nowRef,
+        opensAfterClose,
+        // Quit arrives while the close is in flight, so nothing this run has
+        // already checked knows about it.
+        onClose: () => sessions.beginShutdown(),
+      });
+      sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowRef.ms, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .withRetryBudget(60_000, async () => {
+          await sessions.run(workspace, async () => "first");
+          const closing = sessions.closeWorkspace(workspace.workspaceId);
+          const queued = sessions.run(workspace, async () => {
+            operations += 1;
+            return "held the chain";
+          });
+          await closing;
+          return await queued;
+        })
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      expect(operations).toBe(0);
+      // Nothing new starts during teardown, whatever it waited on.
+      expect(opensAfterClose.count).toBe(0);
+    });
+
     it("keeps running a region whose budget clock never started", async () => {
       // The invariant the gate must not break: a healthy attempt costs the
       // budget nothing, however long it takes, so a region that has not
