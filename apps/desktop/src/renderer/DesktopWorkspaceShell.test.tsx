@@ -69,8 +69,18 @@ import {
   momentDiffTabPath,
   versionCompareTabPath,
 } from "./workbench/workbenchState";
-import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
+import {
+  captureOrphanedDraft,
+  resetOrphanedDrafts,
+  useAllOrphanedDrafts,
+} from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
+
+// The close dialog's list, standing on its own: the guard subscribes and hands
+// the rows down, so a test of the LIST needs the same one-line subscriber.
+function GlobalRecoveryList() {
+  return <RecoveryList rows={useAllOrphanedDrafts()} showWorkspace />;
+}
 
 const WORKSPACE: Workspace = {
   workspaceId: "ws-shell-test",
@@ -7263,7 +7273,7 @@ describe("set-aside draft recovery", () => {
     // The same global list the close dialog embeds.
     // MUTATION (label wiring): drop the shell's noteWorkspaceLabel effect —
     // the row falls back to the raw workspace id.
-    render(<RecoveryList />);
+    render(<GlobalRecoveryList />);
     expect(screen.getByTestId("recovery-list-workspace").textContent).toBe(
       "personal",
     );
@@ -7326,8 +7336,8 @@ describe("set-aside draft recovery", () => {
   // #579 review r18: a SUCCESSFUL switch announces before its selector
   // refresh, and announcing again after that refresh fails would bump the
   // version epoch a second time — the same-version reopen moves whatever the
-  // user typed in between into set-aside recovery, which is in-memory only
-  // and dies on the next reload.
+  // user typed in between into set-aside recovery — a notice the user then
+  // has to answer.
   //
   // What this test pins is the OUTCOME: one switch, one reopen. It does not
   // pin the `announced` guard that also enforces it — removing that guard
@@ -7448,9 +7458,7 @@ describe("set-aside draft recovery", () => {
     );
 
     // ...and with nothing left, the surface says so rather than implying a
-    // draft that is not there. This is the same state a reload, quit,
-    // update-restart or renderer crash leaves behind, because the store is
-    // in-memory by design.
+    // draft that is not there.
     expect(screen.getByTestId("notice-center").textContent).toContain(
       "All clear",
     );

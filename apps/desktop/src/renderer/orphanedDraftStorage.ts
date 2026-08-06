@@ -32,7 +32,7 @@ export const ORPHANED_DRAFT_STORAGE_KEY = "dohc-set-aside-drafts";
 // call (the same rule the in-memory store follows for a deleted path).
 export const ORPHANED_DRAFT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
-export type StoredOrphanedDraft = {
+type StoredOrphanedDraft = {
   id: number;
   workspaceId: string;
   path: string;
@@ -45,7 +45,7 @@ export type StoredOrphanedDraft = {
 // the engine floor could not normalize, and a store that cannot classify a
 // path does not get to guess it is safe. Unpersistable drafts keep their
 // in-memory copy, and the close warning is the last line for them.
-export function isPersistableDraftPath(path: string): boolean {
+function isPersistableDraftPath(path: string): boolean {
   return classifyEngineFilePathForRead(path).kind === "tracked";
 }
 

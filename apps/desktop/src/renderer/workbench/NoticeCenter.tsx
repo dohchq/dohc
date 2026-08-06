@@ -472,15 +472,10 @@ export function NoticeCenter(props: {
                       ? "1 set-aside edit is waiting"
                       : `${recoveryRows.length} set-aside edits are waiting`}
                   </p>
-                  {/* No lifetime claim here (#600): a set-aside edit is
-                      written on capture and restored at launch, so "they live
-                      only in this window" became false. The close warning
-                      names the ones storage could not keep, at the moment
-                      that matters. */}
                   <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
                     Copy an edit to keep its text. Dismiss deletes it for good.
                   </p>
-                  <RecoveryList workspaceId={props.workspaceId} />
+                  <RecoveryList rows={recoveryRows} />
                 </section>
               ) : null}
             <ul className="m-0 list-none p-0">

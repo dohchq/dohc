@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import { DesktopRoot } from "./DesktopRoot";
 import { AppErrorBoundary, installGlobalErrorReporters } from "./ErrorBoundary";
 import { RecoveryCloseGuard } from "./RecoveryCloseGuard";
+import { restoreOrphanedDrafts } from "./orphanedDrafts";
 import { initTheme } from "./theme";
 import "@fontsource-variable/inter";
 import "@fontsource/ibm-plex-mono/400.css";
@@ -11,15 +12,19 @@ import "./styles.css";
 
 initTheme();
 installGlobalErrorReporters();
+// Before the root renders (#600): the set-aside recoveries the last app run
+// left behind go back into the store, so the first paint already carries their
+// notices and nothing has to re-render to find them.
+restoreOrphanedDrafts();
 
 const container = document.getElementById("root");
 if (container) {
   // AppErrorBoundary: an uncaught render error must show the branded
   // recovery screen (reload button), never unmount to a blank window.
-  // RecoveryCloseGuard sits ABOVE it (#579 review, r5): it restores the
-  // set-aside drafts at launch (#600) and announces the ones storage could
-  // not keep before the crash screen's reload destroys them. A guard inside
-  // the crashed tree would unmount with it and do neither.
+  // RecoveryCloseGuard sits ABOVE it (#579 review, r5): the crash screen's
+  // reload must not destroy the set-aside drafts storage could not keep
+  // (#600) unannounced, and a guard inside the crashed tree would unmount
+  // with it.
   createRoot(container).render(
     <RecoveryCloseGuard>
       <AppErrorBoundary>

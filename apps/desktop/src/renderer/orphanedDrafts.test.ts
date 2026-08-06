@@ -107,8 +107,9 @@ describe("orphanedDrafts persistence (#600)", () => {
     vi.restoreAllMocks();
   });
 
-  it("brings the notice back on the same file with the same text", async () => {
+  it("brings every notice back on the same file, with the same text, oldest first", async () => {
     captureOrphanedDraft("ws-1", "notes/plan.md", "# Plan\n\nTyped, unsaved.");
+    captureOrphanedDraft("ws-1", "notes/plan.md", "# Plan\n\nTyped again.");
     // MUTATION (capture): stop calling storeDraft. Nothing reaches storage
     // and the relaunched app has no notice at all.
     const next = await relaunch();
@@ -116,28 +117,9 @@ describe("orphanedDrafts persistence (#600)", () => {
       draftsFor(next.useOrphanedDrafts, "ws-1", "notes/plan.md").map(
         (draft) => draft.text,
       ),
-    ).toEqual(["# Plan\n\nTyped, unsaved."]);
+    ).toEqual(["# Plan\n\nTyped, unsaved.", "# Plan\n\nTyped again."]);
     // A restored draft is durable, so nothing stays behind the close warning.
     expect(next.atRiskOrphanedDraftIds()).toEqual([]);
-  });
-
-  it("restores every draft on a path, oldest first", async () => {
-    captureOrphanedDraft("ws-1", "a.md", "first");
-    captureOrphanedDraft("ws-1", "a.md", "second");
-    const next = await relaunch();
-    expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-    ).toEqual(["first", "second"]);
-  });
-
-  it("restores nothing twice, however often it runs", async () => {
-    captureOrphanedDraft("ws-1", "a.md", "once");
-    const next = await relaunch();
-    next.restoreOrphanedDrafts();
-    // MUTATION (idempotence): drop the storedIds guard in
-    // restoreOrphanedDrafts. One notice becomes two, each with a Dismiss the
-    // user has to answer.
-    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(1);
   });
 
   it("never writes a secret-classified path to plaintext storage", async () => {

@@ -86,14 +86,12 @@ export function captureOrphanedDraft(
 
 // Startup restore (#600): the persisted recoveries land in the SAME store the
 // in-document notice, the tab dot, the notice center, and the close warning
-// already read, so every one of those surfaces works unchanged. Synchronous
-// and keyed by workspace, so there is no in-flight response that could repaint
-// a workspace the user has switched away from.
+// already read, so every one of those surfaces works unchanged. Called once,
+// from main.tsx before the root renders — synchronous, before any subscriber
+// or any workspace exists, so there is nothing to notify and no in-flight
+// response that could repaint a workspace the user has switched away from.
 export function restoreOrphanedDrafts(nowMs: number = Date.now()): void {
   for (const row of loadStoredDrafts(nowMs)) {
-    // Idempotent: an id this run already holds is the SAME draft, and a
-    // second restore must not turn one notice into two.
-    if (storedIds.has(row.id)) continue;
     const key = keyFor(row.workspaceId, row.path);
     drafts.set(key, [
       ...(drafts.get(key) ?? EMPTY),
@@ -104,7 +102,6 @@ export function restoreOrphanedDrafts(nowMs: number = Date.now()): void {
     // row; this run's captures continue past the highest one restored.
     if (row.id >= nextId) nextId = row.id + 1;
   }
-  scheduleNotify();
 }
 
 export function dismissOrphanedDraft(
@@ -193,23 +190,18 @@ export function useOrphanedDraftPaths(workspaceId: string): ReadonlySet<string> 
   });
 }
 
-// Whether ANY workspace still holds a set-aside draft an exit would DESTROY.
-// The close warning keys off this (#579 review, r4): closing the window is
-// irreversible for these, and the user must be told before it runs.
+// Every set-aside draft an exit would DESTROY, by id. The close warning keys
+// off this (#579 review, r4): losing these is irreversible, and the user must
+// be told before it runs. It compares the LIVE list against the ids the user
+// approved losing (#579 review, r13) — a count alone cannot tell "the same two
+// drafts" from "one dismissed and one new". A draft the list does not contain
+// was in no warning, and the exit stops for it.
 //
 // A persisted draft is not one of them (#600) — it comes back on the next
 // launch, and calling it lost would be a lie about durability on every quit.
 // What is left behind the warning is what nothing else can bring back: a
-// secret-classified path the plaintext store refuses, and a draft whose
-// write storage refused.
-export function atRiskOrphanedDraftCount(): number {
-  return atRiskOrphanedDraftIds().length;
-}
-
-// Every at-risk draft's id. The close guard compares this LIVE list against
-// the ids the user approved losing (#579 review, r13) — a count alone cannot
-// tell "the same two drafts" from "one dismissed and one new". A draft the
-// list does not contain was in no warning, and the exit stops for it.
+// secret-classified path the plaintext store refuses, and a draft whose write
+// storage refused.
 export function atRiskOrphanedDraftIds(): readonly number[] {
   const ids: number[] = [];
   for (const kept of drafts.values()) {
