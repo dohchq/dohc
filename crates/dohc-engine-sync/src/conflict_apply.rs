@@ -1276,14 +1276,6 @@ fn map_domain(error: DomainError) -> SyncError {
         DomainError::ConflictMetadataTooLarge { .. } => SyncError::InvalidInput {
             reason: "replicated conflict metadata exceeds the conflicts.list row budget",
         },
-        // Named for the same reason, and unreachable for the same reason:
-        // `ReplicationEnvelope::validate` bounds a peer's identifiers at
-        // `model::MAX_IDENTIFIER_BYTES` before any apply runs. The arm says
-        // which bound broke rather than "invalid" if that ever stops being
-        // true (#654).
-        DomainError::IdentifierTooLong { .. } => SyncError::InvalidInput {
-            reason: "replicated conflict identifier exceeds MAX_IDENTIFIER_BYTES",
-        },
         _ => SyncError::InvalidInput {
             reason: "replicated conflict operation is invalid",
         },

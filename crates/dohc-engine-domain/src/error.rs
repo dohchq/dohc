@@ -108,12 +108,12 @@ pub enum DomainError {
         observed_bytes: usize,
     },
 
-    /// An identifier passed the engine-wide length bound. Every identifier the
-    /// domain persists is echoed by the answers that report it — an object id
-    /// rides a resolve answer six times — so an unbounded one turns a request
-    /// that fits its frame into a response that cannot. Carries the numbers
-    /// because a caller that cannot see them cannot tell a one-byte overrun
-    /// from a megabyte of junk.
+    /// An identifier a caller minted passed the engine-wide length bound.
+    /// Every such identifier is echoed by the answer that reports the write —
+    /// an object id rides a write answer three times — so an unbounded one
+    /// turns a request that fits its frame into a response that cannot.
+    /// Carries the numbers because a caller that cannot see them cannot tell a
+    /// one-byte overrun from a megabyte of junk.
     #[error(
         "identifier {field} exceeds MAX_IDENTIFIER_BYTES: limit {limit_bytes} bytes, \
          observed {observed_bytes} bytes"

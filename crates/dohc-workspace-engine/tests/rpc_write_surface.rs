@@ -161,6 +161,77 @@ async fn write_response_shape_contains_object_snapshot_moment_and_deduped() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_over_long_write_identifier_is_refused_by_name() {
+    // #654. THE PATH WITH NO GUARD. `versionedText.write` takes the caller's
+    // `objectId` and `momentId` and serves each of them three times in its
+    // answer — `object.id`, `snapshot.objectId`, `moment.objectId`, and the
+    // moment id across the snapshot and the moment. Nothing here reserves
+    // response bytes the way `conflicts.resolve` does, so before this bound a
+    // 3 MB id fit one 8 MiB request frame and came back as a ~9 MB answer the
+    // daemon's writer treats as fatal — after the write had committed.
+    //
+    // MUTATION: drop `bounded_identifier` from `normalized_write_input` and
+    // the write commits instead of refusing. MUTATION: map `IdentifierTooLong`
+    // through the static tail of `map_runtime` and the message loses its
+    // numbers.
+    let (_scratch, transport, handle) = fixture("over-long-write-identifier").await;
+    let limit = dohc_engine_storage::MAX_IDENTIFIER_BYTES;
+    let over_long = "x".repeat(limit + 1);
+
+    for (id, field, object_id, moment_id) in [
+        (2, "object_id", over_long.as_str(), "moment-ok"),
+        (3, "moment_id", "object-ok", over_long.as_str()),
+    ] {
+        let refused = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    id,
+                    "versionedText.write",
+                    Some(handle.clone()),
+                    json!({
+                        "versionId": "main",
+                        "path": "bounded.md",
+                        "text": "body",
+                        "origin": "api",
+                        "objectId": object_id,
+                        "momentId": moment_id,
+                    }),
+                ),
+            )
+            .await
+            .expect_err("an identifier past the engine-wide bound must be refused");
+        assert_eq!(refused.code, ErrorCode::PayloadTooLarge);
+        assert_eq!(
+            refused.message,
+            format!(
+                "identifier {field} exceeds MAX_IDENTIFIER_BYTES: limit {limit} bytes, \
+                 observed {} bytes",
+                limit + 1
+            ),
+        );
+    }
+
+    // Nothing was written, and an ordinary write on the same path still works.
+    let written = call(
+        &transport,
+        &handle,
+        4,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "path": "bounded.md",
+            "text": "body",
+            "origin": "api",
+            "objectId": "object-ok",
+            "momentId": "moment-ok",
+        }),
+    )
+    .await;
+    assert_eq!(written["deduped"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_mutations_persist_summary_and_correlation_metadata() {
     let (_scratch, transport, handle) = fixture("mutation-provenance").await;
     let result = call(

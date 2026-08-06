@@ -8,9 +8,13 @@
 /// is simpler than the TS `Buffer.byteLength` detour).
 pub const MAX_DOCUMENT_BODY_BYTES: usize = 256 * 1024;
 
-/// Maximum length of any identifier the engine persists, in UTF-8 bytes:
-/// workspace, version, object, moment and conflict ids on every layer's write
-/// path.
+/// Maximum length of an identifier a caller mints on a write, in UTF-8 bytes:
+/// workspace, version, object and moment ids on every layer's write path.
+///
+/// NOT the bound on a conflict row's identifiers. Those are bounded by
+/// `CONFLICT_METADATA_BUDGET_BYTES`, a rule derived from what one
+/// `conflicts.list` page can serve rather than from what a caller mints, and it
+/// deliberately admits a much longer id.
 ///
 /// MEASURED against the identifiers the product actually mints, not chosen.
 /// `dohc-engine-domain/tests/identifier_bounds.rs` measures them:
@@ -20,13 +24,13 @@ pub const MAX_DOCUMENT_BODY_BYTES: usize = 256 * 1024;
 /// a hex SHA-256 — is 71. This bound sits about seven times past that widest
 /// healthy identifier.
 ///
-/// It exists because identifiers are ECHOED. One resolve answer serves an
-/// object id six times and each moment id three (#654), so an unbounded id
-/// turns a request that fits its 8 MiB control frame into a response that
-/// cannot — after the mutation has committed. `dohc-engine-collab`
-/// (`DocKey::new`) and `dohc-engine-sync` (`model::unbounded_clause`) have
-/// enforced this number since they were written; the domain's write path was
-/// the outlier.
+/// It exists because identifiers are ECHOED. A `versionedText.write` answer
+/// serves the caller's object id three times and its moment id twice, and
+/// reserves no response bytes for either (#654), so an unbounded id turned a
+/// request that fits its 8 MiB control frame into a response that cannot —
+/// after the write had committed. `dohc-engine-collab` (`DocKey::new`) and
+/// `dohc-engine-sync` (`model::unbounded_clause`) have enforced this number
+/// since they were written; the domain's write path was the outlier.
 pub const MAX_IDENTIFIER_BYTES: usize = 512;
 
 /// The schema fingerprint this build owns. Persisted in `PRAGMA user_version`

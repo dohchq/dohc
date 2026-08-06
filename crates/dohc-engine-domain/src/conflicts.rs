@@ -5,8 +5,8 @@ use crate::records::{
     DeleteResult, DeleteTextFile, RenameResult, TextSnapshot, WriteResult, WriteText,
 };
 use crate::store::{
-    VersionedTextStore, bounded_identifier, delete_text_in_tx, hash_fields, lookup_request,
-    moment_exists, next_moment_order, record_request, validate_delete_input, validate_identifier,
+    VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, moment_exists,
+    next_moment_order, record_request, validate_delete_input, validate_identifier,
     validate_moment_id, validate_path, validate_write_input, version_is_active, write_text_in_tx,
 };
 use dohc_engine_storage::{
@@ -548,27 +548,14 @@ pub fn insert_text_conflict_if_absent(
             observed_bytes,
         });
     }
-    // And the same gate for identifiers (#654). The row budget bounds their
-    // SUM, which is not the same rule: a single 100 KiB conflict id passes the
-    // sum and then fails `resolve_text_conflict_with`, leaving a conflict a
-    // peer opened that nobody can ever resolve. Bounding each id here is what
-    // makes that unreachable rather than merely unlikely.
-    validate_identifier(&conflict.conflict_id, "conflict_id")?;
-    validate_identifier(&conflict.workspace_id, "workspace_id")?;
-    validate_identifier(&conflict.target_version_id, "version_id")?;
-    validate_identifier(&conflict.source_version_id, "version_id")?;
-    for side in [&conflict.base, &conflict.current, &conflict.incoming] {
-        if let Some(object_id) = &side.binary_object_id {
-            validate_identifier(object_id, "object_id")?;
-        }
-        if let Some(moment_id) = &side.binary_latest_moment_id {
-            validate_identifier(moment_id, "moment_id")?;
-        }
-        if let Some(snapshot) = &side.snapshot {
-            validate_identifier(&snapshot.object_id, "object_id")?;
-            validate_identifier(&snapshot.latest_moment_id, "moment_id")?;
-        }
-    }
+    // NOT ALSO `MAX_IDENTIFIER_BYTES` (#654). A conflict row's identifiers are
+    // already bounded here, by a rule derived from what the listing can serve
+    // rather than from what a caller mints: the budget above counts the
+    // conflict id at BOTH copies the page emits, so an id the page could not
+    // carry twice is refused. Adding the write path's tighter bound on top
+    // would refuse rows this one measured as serveable, and the identifier a
+    // resolution actually spends is the request's, not the row's.
+    //
     // Validate sides BEFORE the duplicate-id shortcut: an invalid or
     // unhydrated binary side must fail closed even when it reuses an existing
     // conflict id, or a replicated open would be acked without ever passing
@@ -788,18 +775,15 @@ impl VersionedTextStore<'_> {
     where
         F: FnOnce(&Transaction<'_>, &ResolveTextConflictResult) -> Result<(), DomainError>,
     {
-        validate_identifier(&input.workspace_id, "workspace_id")?;
-        validate_identifier(&input.conflict_id, "conflict_id")?;
-        // The three identifiers this request contributes to its OWN answer.
-        // Each rides the write and delete blocks several times over
-        // (`resolve_answer_beside_conflict_bytes` counts twelve places), so an
-        // unbounded one turns a request inside its frame into an answer past
-        // it. Length only: a resolution that neither writes nor deletes never
-        // spends them, and the branches that do run them through
-        // `validate_write_input` / `validate_delete_input` (#654).
-        bounded_identifier(&input.object_id, "object_id")?;
-        bounded_identifier(&input.write_moment_id, "moment_id")?;
-        bounded_identifier(&input.delete_moment_id, "moment_id")?;
+        // Non-empty only. What this request contributes to its own answer is
+        // bounded by the reservation the caller passes in
+        // `conflict_answer_budget_bytes`, measured against the frame that has
+        // to carry the answer; the write and delete branches that actually
+        // spend `object_id` and the moment ids run them through
+        // `validate_write_input` / `validate_delete_input`, which is where the
+        // engine-wide identifier bound lives (#654).
+        validate_path_like_id(&input.workspace_id, "workspace_id")?;
+        validate_path_like_id(&input.conflict_id, "conflict_id")?;
         let (resolution_kind, merged_text) = match &input.resolution {
             ResolveConflictKind::KeepCurrent => ("keep-current", ""),
             ResolveConflictKind::ApplyIncoming => ("apply-incoming", ""),
@@ -1519,6 +1503,14 @@ fn delete_input(input: &ResolveTextConflict, version_id: &str, path: &str) -> De
         metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
+    }
+}
+
+fn validate_path_like_id(value: &str, reason: &'static str) -> Result<(), DomainError> {
+    if value.is_empty() {
+        Err(DomainError::InvalidInput { reason })
+    } else {
+        Ok(())
     }
 }
 
