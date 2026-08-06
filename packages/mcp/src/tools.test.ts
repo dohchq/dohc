@@ -1,5 +1,6 @@
 import {
   chmod,
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
@@ -11,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, parse, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -2148,6 +2149,597 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
       await expect(
         stat(join(ctx.root, "sites", "landing", "package.json")),
       ).rejects.toThrow();
+    });
+  });
+});
+
+// #638. The reserved rule used to read the path as SPELLED, and containment
+// was proved only INTO the root -- never OUT of .dohc. So an in-workspace
+// symlink named anything but `.dohc` carried every mutating tool straight into
+// the workspace's control plane: the probe on the issue wrote
+// `experimental.workspaceEngineAlpha: false` through one, and a delete through
+// the same alias moved the settings file to trash, silently dropping the
+// workspace's engine opt-out.
+//
+// Every case below is decided on the RESOLVED path, which is what makes the
+// spelling irrelevant. Revert safeResolve to the lexical check alone and each
+// one fails.
+describe("a symlink cannot alias a reserved area", () => {
+  const settingsPath = (root: string) => join(root, ".dohc", "settings.local.json");
+  const OPTED_OUT = JSON.stringify({
+    ...DEFAULT_WORKSPACE_SETTINGS,
+    experimental: { workspaceEngineAlpha: false },
+  });
+
+  // A workspace holding a real `.dohc` with an engine opt-out in it, plus
+  // `meta -> .dohc`: an ordinary-looking folder whose real path is reserved.
+  async function withDohcAlias<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
+    return withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+      await writeFile(settingsPath(ctx.root), OPTED_OUT);
+      await symlink(join(ctx.root, ".dohc"), join(ctx.root, "meta"), "dir");
+      return fn(ctx);
+    });
+  }
+
+  // The refusal has to name the constraint an agent hit, and the resolved
+  // WORKSPACE-RELATIVE path is what names it -- an absolute host path would
+  // say where the workspace lives, which no agent asked for.
+  function expectsReservedRefusal(reason: string) {
+    expect(reason).toMatch(/reserved/i);
+    expect(reason).toContain(".dohc");
+    expect(reason).not.toContain(tmpdir());
+  }
+
+  it("refuses safeResolve for a path whose real target is inside .dohc", async () => {
+    await withDohcAlias(async (ctx) => {
+      for (const path of ["meta", "meta/settings.local.json", "meta/trash/x.md"]) {
+        const resolved = await safeResolve(ctx, path);
+        expect(resolved.ok, path).toBe(false);
+        expectsReservedRefusal(refusalReason(resolved));
+      }
+    });
+  });
+
+  it("refuses the write, and the engine opt-out still reads off", async () => {
+    await withDohcAlias(async (ctx) => {
+      const written = await writeWorkspaceFile(ctx, {
+        path: "meta/settings.local.json",
+        content: JSON.stringify({
+          ...DEFAULT_WORKSPACE_SETTINGS,
+          experimental: { workspaceEngineAlpha: true },
+        }),
+      });
+      expect(written.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(written));
+
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+    });
+  });
+
+  it("refuses the delete, and the settings file is still where it was", async () => {
+    await withDohcAlias(async (ctx) => {
+      const deleted = await deleteWorkspacePath(ctx, { path: "meta/settings.local.json" });
+      expect(deleted.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(deleted));
+
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+    });
+  });
+
+  it("refuses a move whose source or destination resolves into .dohc", async () => {
+    await withDohcAlias(async (ctx) => {
+      await writeFile(join(ctx.root, "note.md"), "visible");
+
+      const out = await moveWorkspacePath(ctx, {
+        fromPath: "meta/settings.local.json",
+        toPath: "stolen.json",
+      });
+      expect(out.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(out));
+
+      const into = await moveWorkspacePath(ctx, {
+        fromPath: "note.md",
+        toPath: "meta/note.md",
+      });
+      expect(into.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(into));
+
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("visible");
+      await expect(stat(join(ctx.root, "stolen.json"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses the directory, and no directory appears inside .dohc", async () => {
+    await withDohcAlias(async (ctx) => {
+      const made = await createWorkspaceDirectory(ctx, { path: "meta/sneaky" });
+      expect(made.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(made));
+      await expect(stat(join(ctx.root, ".dohc", "sneaky"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses the read, so .dohc stays unreadable under any spelling", async () => {
+    await withDohcAlias(async (ctx) => {
+      const read = await readWorkspaceFile(ctx, { path: "meta/settings.local.json" });
+      expect(read.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(read));
+    });
+  });
+
+  // Reading or writing THROUGH the alias is the attack; removing the alias is
+  // the cleanup, and refusing that left an agent unable to undo the very thing
+  // the guard is warning about. A rename moves the link and never opens it.
+  it("deletes the alias itself, and .dohc keeps every byte", async () => {
+    await withDohcAlias(async (ctx) => {
+      await expect(deleteWorkspacePath(ctx, { path: "meta" })).resolves.toMatchObject({
+        ok: true,
+        trashed: true,
+      });
+      await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+    });
+  });
+
+  it("renames the alias, and it is still only an alias", async () => {
+    await withDohcAlias(async (ctx) => {
+      await expect(
+        moveWorkspacePath(ctx, { fromPath: "meta", toPath: "old-meta" }),
+      ).resolves.toMatchObject({ ok: true });
+      await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
+      expect((await lstat(join(ctx.root, "old-meta"))).isSymbolicLink()).toBe(true);
+      // Moving it does not launder it: the new spelling reads .dohc too.
+      expectsReservedRefusal(
+        refusalReason(await readWorkspaceFile(ctx, { path: "old-meta/settings.local.json" })),
+      );
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+    });
+  });
+
+  // The entry is the object for an ordinary link too -- deleting a shortcut
+  // must not delete what it points at.
+  it("deletes a live link to an ordinary folder without touching the folder", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "notes"), { recursive: true });
+      await writeFile(join(ctx.root, "notes", "day.md"), "kept\n");
+      await symlink(join(ctx.root, "notes"), join(ctx.root, "shortcut"), "dir");
+
+      await expect(deleteWorkspacePath(ctx, { path: "shortcut" })).resolves.toMatchObject({
+        ok: true,
+      });
+      await expect(lstat(join(ctx.root, "shortcut"))).rejects.toThrow();
+      expect(await readFile(join(ctx.root, "notes", "day.md"), "utf8")).toBe("kept\n");
+    });
+  });
+
+  // Holding back the final name does not skip the reserved rule: the parent
+  // still resolves, and the rule reads that real path plus this name.
+  it("still refuses deleting a live link that sits inside an aliased .dohc", async () => {
+    await withDohcAlias(async (ctx) => {
+      await mkdir(join(ctx.root, "notes"), { recursive: true });
+      await symlink(join(ctx.root, "notes"), join(ctx.root, ".dohc", "inner"), "dir");
+
+      const deleted = await deleteWorkspacePath(ctx, { path: "meta/inner" });
+      expectsReservedRefusal(refusalReason(deleted));
+      expect((await lstat(join(ctx.root, ".dohc", "inner"))).isSymbolicLink()).toBe(true);
+    });
+  });
+
+  // shared-with-me is a WRITE reservation: mount refresh owns it, agents read
+  // it. An alias must inherit exactly that split, not more and not less.
+  it("refuses a write through an alias of shared-with-me but still reads it", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "shared-with-me", "acme"), { recursive: true });
+      await writeFile(join(ctx.root, "shared-with-me", "acme", "plan.md"), "theirs");
+      await symlink(join(ctx.root, "shared-with-me"), join(ctx.root, "inbox"), "dir");
+
+      const written = await writeWorkspaceFile(ctx, {
+        path: "inbox/acme/plan.md",
+        content: "mine",
+      });
+      expect(written.ok).toBe(false);
+      expect(refusalReason(written)).toMatch(/reserved/i);
+      expect(await readFile(join(ctx.root, "shared-with-me", "acme", "plan.md"), "utf8")).toBe(
+        "theirs",
+      );
+
+      await expect(
+        readWorkspaceFile(ctx, { path: "inbox/acme/plan.md" }),
+      ).resolves.toMatchObject({ ok: true, content: "theirs" });
+    });
+  });
+
+  // Site tools EXECUTE the site. shared-with-me is readable, so safeResolve
+  // lets an alias of it through on purpose — which means the "do not run
+  // someone else's shared code" gate is the one that has to read the resolved
+  // path. Judged on the spelling, `mine -> shared-with-me/alex` runs it.
+  it("refuses to run a site whose real root is a mounted share", async () => {
+    await withWorkspace(async (ctx) => {
+      const shared = join(ctx.root, "shared-with-me", "alex", "landing");
+      await mkdir(shared, { recursive: true });
+      await writeFile(join(shared, "index.html"), "<h1>theirs</h1>");
+      await writeFile(
+        join(shared, "package.json"),
+        JSON.stringify({ name: "landing", scripts: { build: "echo pwned" } }),
+      );
+      await symlink(join(ctx.root, "shared-with-me", "alex"), join(ctx.root, "mine"), "dir");
+
+      // These tools return wide unions, so the refusal is read positionally:
+      // a result without `reason` did not refuse, which is the failure.
+      for (const result of [
+        await buildSite(ctx, { siteRoot: "mine/landing" }),
+        await testSite(ctx, { siteRoot: "mine/landing" }),
+        await addSiteSdk(ctx, { siteRoot: "mine/landing" }),
+      ]) {
+        expect(result.ok).toBe(false);
+        expect("reason" in result ? result.reason : "no refusal").toMatch(/mounted share/i);
+      }
+    });
+  });
+
+  // A DANGLING alias is the ordering trap. With no `.dohc` on disk yet,
+  // realpath fails for the alias itself, so a walk that treats every
+  // unresolvable component as "not there yet" reports an ordinary path. Then
+  // the mutator calls ensureRecordable, which CREATES `.dohc` -- the alias
+  // goes live between the check and the operation, and the operation follows
+  // it in. A component that exists cannot be absent, so lstat decides this,
+  // not realpath.
+  describe("through an alias that is still dangling", () => {
+    async function withDanglingAlias<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
+      return withWorkspace(async (ctx) => {
+        // Deliberately NOT created: the alias points at a `.dohc` that does
+        // not exist until a mutator makes it.
+        await symlink(join(ctx.root, ".dohc"), join(ctx.root, "meta"), "dir");
+        await expect(stat(join(ctx.root, ".dohc"))).rejects.toThrow();
+        return fn(ctx);
+      });
+    }
+
+    it("refuses the directory, and nothing appears inside .dohc", async () => {
+      await withDanglingAlias(async (ctx) => {
+        const made = await createWorkspaceDirectory(ctx, { path: "meta/sneaky" });
+        expect(refusalReason(made)).toMatch(/no target|reserved/i);
+        await expect(stat(join(ctx.root, ".dohc", "sneaky"))).rejects.toThrow();
+      });
+    });
+
+    it("refuses the move, and nothing lands inside .dohc", async () => {
+      await withDanglingAlias(async (ctx) => {
+        await writeFile(join(ctx.root, "note.md"), "visible");
+
+        const moved = await moveWorkspacePath(ctx, {
+          fromPath: "note.md",
+          toPath: "meta/note.md",
+        });
+        expect(refusalReason(moved)).toMatch(/no target|reserved/i);
+        await expect(stat(join(ctx.root, ".dohc", "note.md"))).rejects.toThrow();
+        expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("visible");
+      });
+    });
+
+    it("refuses the write, and no file appears inside .dohc", async () => {
+      await withDanglingAlias(async (ctx) => {
+        const written = await writeWorkspaceFile(ctx, {
+          path: "meta/settings.local.json",
+          content: OPTED_OUT,
+        });
+        expect(refusalReason(written)).toMatch(/no target|reserved/i);
+        await expect(stat(join(ctx.root, ".dohc", "settings.local.json"))).rejects.toThrow();
+      });
+    });
+
+    // Refusing every path with a broken link on it takes away the one
+    // operation that FIXES a broken link. Delete and a move's source rename
+    // the entry, so the alias is the object here, not a route into `.dohc`.
+    it("deletes the broken link itself, and .dohc survives it", async () => {
+      await withDanglingAlias(async (ctx) => {
+        await expect(deleteWorkspacePath(ctx, { path: "meta" })).resolves.toMatchObject({
+          ok: true,
+          trashed: true,
+        });
+        // The link entry is gone. `.dohc` exists only because the delete's own
+        // ensureRecordable made it -- which is the check-then-create window the
+        // refusal guards, and renaming the entry closes it without following.
+        await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
+        expect((await stat(join(ctx.root, ".dohc"))).isDirectory()).toBe(true);
+      });
+    });
+
+    it("renames the broken link, and it is still a broken link", async () => {
+      await withDanglingAlias(async (ctx) => {
+        await expect(
+          moveWorkspacePath(ctx, { fromPath: "meta", toPath: "broken" }),
+        ).resolves.toMatchObject({ ok: true });
+        await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
+        expect((await lstat(join(ctx.root, "broken"))).isSymbolicLink()).toBe(true);
+        expect((await stat(join(ctx.root, ".dohc"))).isDirectory()).toBe(true);
+      });
+    });
+
+    // The relaxation is the LAST component only. A broken link partway along a
+    // path is still a route, and where it leads is still unknown.
+    it("still refuses a delete THROUGH the broken link", async () => {
+      await withDanglingAlias(async (ctx) => {
+        const deleted = await deleteWorkspacePath(ctx, { path: "meta/settings.local.json" });
+        expect(refusalReason(deleted)).toMatch(/no target/i);
+      });
+    });
+
+    // Climbing past the link does not skip the reserved re-decision: the
+    // parent's REAL path plus this name is what the rule reads.
+    it("still refuses deleting a broken link that really sits inside .dohc", async () => {
+      await withWorkspace(async (ctx) => {
+        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+        await symlink(join(ctx.root, ".dohc", "absent"), join(ctx.root, ".dohc", "broken"), "dir");
+        await symlink(join(ctx.root, ".dohc"), join(ctx.root, "alias"), "dir");
+
+        const deleted = await deleteWorkspacePath(ctx, { path: "alias/broken" });
+        expect(refusalReason(deleted)).toMatch(/reserved/i);
+        expect((await lstat(join(ctx.root, ".dohc", "broken"))).isSymbolicLink()).toBe(true);
+      });
+    });
+  });
+
+  // The refusal must name the rule that ACTUALLY rejected the path. An alias
+  // into .git is refused by the ignored-area rule, and a message claiming
+  // dohc reserves ".dohc and shared-with-me" would send an agent looking for
+  // a reservation that had nothing to do with it.
+  it("names the ignored area it hit, not the .dohc reservation", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, ".git", "refs"), { recursive: true });
+      await symlink(join(ctx.root, ".git"), join(ctx.root, "history"), "dir");
+
+      const reason = refusalReason(await safeResolve(ctx, "history/config"));
+      expect(reason).toContain(".git");
+      expect(reason).not.toContain("shared-with-me");
+    });
+  });
+
+  // The guard is about WHERE a path lands, not about symlinks being suspect.
+  // An in-workspace symlink to an ordinary folder must keep working, or the
+  // fix has traded one wrong answer for another.
+  it("still writes, reads and deletes through a symlink to an ordinary folder", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "notes"), { recursive: true });
+      await symlink(join(ctx.root, "notes"), join(ctx.root, "shortcut"), "dir");
+
+      await expect(
+        writeWorkspaceFile(ctx, { path: "shortcut/day.md", content: "hello\n" }),
+      ).resolves.toMatchObject({ ok: true });
+      expect(await readFile(join(ctx.root, "notes", "day.md"), "utf8")).toBe("hello\n");
+
+      await expect(
+        readWorkspaceFile(ctx, { path: "shortcut/day.md" }),
+      ).resolves.toMatchObject({ ok: true, content: "hello\n" });
+
+      await expect(
+        deleteWorkspacePath(ctx, { path: "shortcut/day.md" }),
+      ).resolves.toMatchObject({ ok: true });
+      await expect(stat(join(ctx.root, "notes", "day.md"))).rejects.toThrow();
+    });
+  });
+});
+
+// #638 on the surfaces next door. safeResolve hands every tool BOTH spellings
+// of a path; a guard that decides authority has to read the resolved one. Each
+// case here passes its guard on the name the agent asked for, and the guard is
+// the last thing standing between the alias and the bytes behind it.
+describe("a guard that decides authority reads the resolved path", () => {
+  const marker = "MCP_ALIAS_LEAK_31";
+
+  async function importedDatabase(ctx: ToolContext, path: string): Promise<Buffer> {
+    await writeFile(join(ctx.root, "people.csv"), `id,name\n1,${marker}\n`);
+    const imported = await importData(ctx, {
+      sourcePath: "people.csv",
+      databasePath: path,
+      tableName: "people",
+    });
+    expect(imported).toMatchObject({ ok: true });
+    return readFile(join(ctx.root, path));
+  }
+
+  it("refuses an import whose source really is a secret file", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, ".env.csv"), `k,v\nAPI_KEY,${marker}\n`);
+      await symlink(join(ctx.root, ".env.csv"), join(ctx.root, "data.csv"));
+
+      const imported = await importData(ctx, {
+        sourcePath: "data.csv",
+        databasePath: "people.sqlite",
+        tableName: "people",
+      });
+      expect(imported).toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
+      expect(JSON.stringify(imported)).not.toContain(marker);
+      // An import republishes what it reads, so the denial has to leave no
+      // database behind either.
+      await expect(stat(join(ctx.root, "people.sqlite"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses a query whose database really is a secret file", async () => {
+    await withWorkspace(async (ctx) => {
+      const bytes = await importedDatabase(ctx, "people.sqlite");
+      await writeFile(join(ctx.root, ".env.sqlite"), bytes);
+      await symlink(join(ctx.root, ".env.sqlite"), join(ctx.root, "records.sqlite"));
+
+      const queried = await queryDatabase(ctx, {
+        databasePath: "records.sqlite",
+        sql: "SELECT name FROM people",
+      });
+      expect(queried).toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
+      expect(JSON.stringify(queried)).not.toContain(marker);
+    });
+  });
+
+  // The visible-database rule is read off the NAME, so an alias carries its
+  // own: a sidecar is transient and never a standalone file, and an alias that
+  // spells `.sqlite` must not turn one into a queryable database.
+  it("refuses a query whose database really is a sidecar", async () => {
+    await withWorkspace(async (ctx) => {
+      const bytes = await importedDatabase(ctx, "people.sqlite");
+      await writeFile(join(ctx.root, "people.sqlite-wal"), bytes);
+      await symlink(join(ctx.root, "people.sqlite-wal"), join(ctx.root, "records.sqlite"));
+
+      const queried = await queryDatabase(ctx, {
+        databasePath: "records.sqlite",
+        sql: "SELECT name FROM people",
+      });
+      expect(queried).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("not a visible database"),
+      });
+      expect(JSON.stringify(queried)).not.toContain(marker);
+    });
+  });
+
+  it("refuses a site scan whose folder really is the legacy one", async () => {
+    await withWorkspace(async (ctx) => {
+      const legacy = join(ctx.root, LEGACY_APPS_SEGMENT, "portal");
+      await mkdir(legacy, { recursive: true });
+      await writeFile(join(legacy, "index.html"), "<h1>legacy</h1>");
+      await symlink(join(ctx.root, LEGACY_APPS_SEGMENT), join(ctx.root, "shortcut"), "dir");
+
+      const scanned = await detectSites(ctx, { path: "shortcut/portal" });
+      expect(scanned).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining(LEGACY_APPS_SEGMENT),
+      });
+    });
+  });
+
+  it("refuses to create a site whose folder really is the legacy one", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, LEGACY_APPS_SEGMENT), { recursive: true });
+      await symlink(join(ctx.root, LEGACY_APPS_SEGMENT), join(ctx.root, "shortcut"), "dir");
+
+      const created = await createSite(ctx, { path: "shortcut/fresh" });
+      expect(created).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining(LEGACY_APPS_SEGMENT),
+      });
+      await expect(stat(join(ctx.root, LEGACY_APPS_SEGMENT, "fresh"))).rejects.toThrow();
+    });
+  });
+
+  // Climbing past a component realpath cannot resolve is safe only when
+  // NOTHING is there. A permission error answers neither question, and reading
+  // it as absence appends the component as spelling -- which is the exact
+  // input the reserved rule must never decide on.
+  it("refuses a path whose presence the filesystem would not report", async () => {
+    await withWorkspace(async (ctx) => {
+      // Dangling on purpose: realpath stops at `meta`, so lstat is what says
+      // whether anything is there, and here lstat cannot say.
+      await symlink(join(ctx.root, ".dohc"), join(ctx.root, "meta"), "dir");
+      lstatOverride.path = join(ctx.root, "meta");
+      lstatOverride.results = [errnoError("EACCES")];
+      try {
+        const resolved = await safeResolve(ctx, "meta/sneaky");
+        expect(resolved.ok).toBe(false);
+        const reason = refusalReason(resolved);
+        expect(reason).toContain("EACCES");
+        expect(reason).toMatch(/could not check/i);
+      } finally {
+        lstatOverride.path = null;
+        lstatOverride.results = [];
+      }
+    });
+  });
+
+  // The workspace folder can go missing or unmount under a running server.
+  // Every path in it then fails on the ROOT, and reporting that as a symlink
+  // escaping the workspace sends an agent to audit a path that is fine.
+  it("names the workspace root, not the path, when the root will not resolve", async () => {
+    await withWorkspace(async (ctx) => {
+      const gone = { ...ctx, root: join(ctx.root, "gone") };
+      const reason = refusalReason(await safeResolve(gone, "note.md"));
+      expect(reason).toContain("ENOENT");
+      expect(reason).toMatch(/workspace root/i);
+      expect(reason).not.toMatch(/escapes workspace/i);
+    });
+  });
+
+  // A filesystem root is the one path realpath returns WITH its separator, so
+  // a workspace opened at one would compare against `C:\\` or `//` and refuse
+  // every path inside itself as an escape.
+  it("resolves inside a workspace whose root is the filesystem root", async () => {
+    await withWorkspace(async (ctx) => {
+      const fsRoot = parse(ctx.root).root;
+      const resolved = await safeResolve(
+        { ...ctx, root: fsRoot },
+        relative(fsRoot, ctx.root).split(sep).join("/"),
+      );
+      expect(resolved).toMatchObject({
+        ok: true,
+        realRelative: relative(fsRoot, ctx.root).split(sep).join("/"),
+      });
+    });
+  });
+
+  // A cycle and a missing target both stop realpath, and they owe different
+  // next steps: the missing target can be created, the cycle cannot.
+  it("tells a symlink cycle apart from a symlink with no target", async () => {
+    await withWorkspace(async (ctx) => {
+      await symlink(join(ctx.root, "pong"), join(ctx.root, "ping"), "dir");
+      await symlink(join(ctx.root, "ping"), join(ctx.root, "pong"), "dir");
+      await symlink(join(ctx.root, "absent"), join(ctx.root, "alias"), "dir");
+
+      const cycle = refusalReason(await safeResolve(ctx, "ping"));
+      expect(cycle).toContain("ELOOP");
+      expect(cycle).not.toMatch(/create the target/i);
+
+      expect(refusalReason(await safeResolve(ctx, "alias"))).toMatch(/create the target/i);
+    });
+  });
+
+  // Same cleanup gap as the dangling link, one errno over: a link that leads
+  // in a circle can only be removed, and refusing every path that touches one
+  // refuses the removal too. A rename moves the entry without asking where it
+  // points, so a cycle at the END of the path is the thing being deleted.
+  describe("through a link that leads in a circle", () => {
+    async function withCycle<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
+      return withWorkspace(async (ctx) => {
+        await symlink(join(ctx.root, "pong"), join(ctx.root, "ping"), "dir");
+        await symlink(join(ctx.root, "ping"), join(ctx.root, "pong"), "dir");
+        return fn(ctx);
+      });
+    }
+
+    it("deletes the looping link, and the other half stays behind", async () => {
+      await withCycle(async (ctx) => {
+        await expect(deleteWorkspacePath(ctx, { path: "ping" })).resolves.toMatchObject({
+          ok: true,
+          trashed: true,
+        });
+        await expect(lstat(join(ctx.root, "ping"))).rejects.toThrow();
+        // Broken, not chased: pong is still a link, and now leads nowhere.
+        expect((await lstat(join(ctx.root, "pong"))).isSymbolicLink()).toBe(true);
+        await expect(stat(join(ctx.root, "pong"))).rejects.toThrow();
+      });
+    });
+
+    it("renames the looping link, and it is still a link", async () => {
+      await withCycle(async (ctx) => {
+        await expect(
+          moveWorkspacePath(ctx, { fromPath: "ping", toPath: "loop" }),
+        ).resolves.toMatchObject({ ok: true });
+        await expect(lstat(join(ctx.root, "ping"))).rejects.toThrow();
+        expect((await lstat(join(ctx.root, "loop"))).isSymbolicLink()).toBe(true);
+      });
+    });
+
+    // Only the FINAL name is held back. The cycle is a parent here, so it is
+    // still a route to somewhere unknown and still has to be resolved.
+    it("still refuses a delete THROUGH the looping link", async () => {
+      await withCycle(async (ctx) => {
+        const deleted = await deleteWorkspacePath(ctx, { path: "ping/note.md" });
+        const reason = refusalReason(deleted);
+        expect(reason).toContain("ELOOP");
+        expect(reason).toMatch(/cannot be resolved/i);
+      });
     });
   });
 });

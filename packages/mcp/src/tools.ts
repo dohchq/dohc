@@ -16,6 +16,7 @@ import {
   frameworkConfigName,
   hasIgnoredSegment,
   hasWebDependency,
+  isDohcMetadataPath,
   mediaTypeForPath,
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
@@ -108,45 +109,137 @@ const HARD_SEARCH_MAX_RESULTS = 1000;
 const DEFAULT_SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const SEARCH_PREVIEW_CHARS = 200;
 
-// Is `absolute` REALLY inside `root` after resolving symlinks? Lexical
+// WHERE does `absolute` really land inside `root`, after symlinks? Lexical
 // containment (the path validators) stops ../ and friends, but a symlink that
-// already exists inside the workspace can still point outside it; every later
-// fs call would follow it. We realpath the deepest EXISTING ancestor (the file
-// itself for reads, its parent chain for not-yet-created targets) and require
-// it to stay under the canonical root. The root itself may legitimately be a
-// symlink, so we compare against realpath(root). Fails closed on any error.
-async function isWithinRealRoot(root: string, absolute: string): Promise<boolean> {
+// already exists inside the workspace can point anywhere; every later fs call
+// would follow it. We realpath the deepest EXISTING ancestor (the file itself
+// for reads, its parent chain for not-yet-created targets) and require it to
+// stay under the canonical root. The root itself may legitimately be a symlink,
+// so we compare against realpath(root).
+//
+// Returns the real path RELATIVE to the canonical root, with the still-absent
+// tail appended — the answer callers need to judge where the operation lands,
+// not just whether it is inside. Every failure refuses.
+type RealTarget =
+  | { ok: true; relative: string }
+  | { ok: false; reason: "escapes-workspace" }
+  | { ok: false; reason: "unreadable-root"; code: string }
+  | { ok: false; reason: "dangling-symlink" }
+  | { ok: false; reason: "unresolvable-symlink"; code: string }
+  | { ok: false; reason: "unreadable-path"; code: string };
+
+// The only two errnos that mean NOTHING is at a path. Every other one leaves
+// the question unanswered, and an unanswered question is not a "no".
+const ABSENT_CODES = new Set(["ENOENT", "ENOTDIR"]);
+const UNNAMED_ERROR = "unknown error";
+
+// `noFollow` says the caller mutates the ENTRY at `absolute` rather than
+// reading or writing through it -- delete and a move's source, both of which
+// rename the entry itself. Its final name is then held back and only the
+// PARENT chain is resolved, because where that entry POINTS is not the
+// question: a link there is the thing being removed, whether it is live,
+// broken, or looping. The parent must still resolve inside the root, and
+// safeResolve still decides the reserved rule on the parent's real path plus
+// this name, so an alias INSIDE a reserved area still refuses.
+async function realRelativeInRoot(
+  root: string,
+  absolute: string,
+  noFollow = false,
+): Promise<RealTarget> {
   let realRoot: string;
   try {
     realRoot = await realpath(root);
-  } catch {
-    return false;
+  } catch (error) {
+    return { ok: false, reason: "unreadable-root", code: errnoCode(error) ?? UNNAMED_ERROR };
   }
+  // A filesystem root realpaths WITH its separator (`C:\`, `/`); nothing else
+  // does. Drop it so one prefix test and one slice serve both.
+  if (realRoot.endsWith(sep)) realRoot = realRoot.slice(0, -1);
+  const absentTail: string[] = [];
   let probe = absolute;
-  for (;;) {
-    try {
-      const real = await realpath(probe);
-      return real === realRoot || real.startsWith(realRoot + sep);
-    } catch {
-      const parent = dirname(probe);
-      if (parent === probe) return false; // reached fs root without resolving
-      probe = parent;
-    }
+  if (noFollow) {
+    // Never empty, never "." or ".." -- validateUserMaterializePath drops both,
+    // so this is always a real component below the root.
+    absentTail.push(basename(absolute));
+    probe = dirname(absolute);
   }
+  for (;;) {
+    let real: string;
+    try {
+      real = await realpath(probe);
+    } catch (error) {
+      // A component realpath cannot resolve is only safe to call "not there
+      // yet" when NOTHING is there. A dangling symlink is present, and
+      // whatever creates its target later decides where this path lands.
+      // That is not hypothetical here: a mutator calls ensureRecordable
+      // immediately after this check, which CREATES `.dohc` — so a dangling
+      // `meta -> .dohc` would go live between the check and the operation.
+      // lstat separates absent from present; realpath cannot.
+      //
+      // A permission or I/O error answers neither question. Climbing past it
+      // would append the component as spelling, and spelling is exactly what
+      // the reserved rule must not decide on (#638) — so it refuses instead.
+      const realpathCode = errnoCode(error) ?? UNNAMED_ERROR;
+      const climbable = ABSENT_CODES.has(realpathCode) || realpathCode === "ELOOP";
+      if (!climbable) return { ok: false, reason: "unreadable-path", code: realpathCode };
+      try {
+        await lstat(probe);
+        // The link is there and realpath will not follow it. ENOENT proves the
+        // target is missing; ELOOP proves a cycle. Only the first is dangling.
+        // A no-follow caller never reaches here for its own entry -- that name
+        // was held back above -- so this is always a link PARTWAY along the
+        // path, and where it leads is a question that still has to be answered.
+        return ABSENT_CODES.has(realpathCode)
+          ? { ok: false, reason: "dangling-symlink" }
+          : { ok: false, reason: "unresolvable-symlink", code: realpathCode };
+      } catch (cause) {
+        const code = errnoCode(cause) ?? UNNAMED_ERROR;
+        if (!ABSENT_CODES.has(code)) {
+          return { ok: false, reason: "unreadable-path", code };
+        }
+      }
+      const parent = dirname(probe);
+      if (parent === probe) return { ok: false, reason: "escapes-workspace" };
+      absentTail.unshift(basename(probe));
+      probe = parent;
+      continue;
+    }
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+      return { ok: false, reason: "escapes-workspace" };
+    }
+    const resolved = real === realRoot ? "" : real.slice(realRoot.length + 1);
+    return {
+      ok: true,
+      relative: [...resolved.split(sep), ...absentTail].filter(Boolean).join("/"),
+    };
+  }
+}
+
+async function isWithinRealRoot(root: string, absolute: string): Promise<boolean> {
+  return (await realRelativeInRoot(root, absolute)).ok;
 }
 
 // A tool's path arg, resolved to an absolute path INSIDE the root, or a reason
 // it was refused. Centralizes BOTH guards so no tool can forget them: lexical
 // validation (traversal/encoding/reserved) then realpath containment (symlink
 // escape). Async because the symlink check touches the filesystem.
+// `normalized` is the path as SPELLED (what the agent asked for, what tool
+// results and change records report). `realRelative` is where it actually
+// lands, root-relative, after symlinks — the only safe input to a guard that
+// decides authority from a path.
 async function safeResolve(
   ctx: ToolContext,
   relativePath: string,
-  access: "read" | "write" = "write",
-): Promise<{ ok: true; absolute: string; normalized: string } | { ok: false; reason: string }> {
+  access: "read" | "write" | "entry" = "write",
+): Promise<
+  | { ok: true; absolute: string; normalized: string; realRelative: string }
+  | { ok: false; reason: string }
+> {
   // "write" (the default — fail closed) refuses the reserved shared-with-me
   // projection; "read" allows it (share mounts exist to be read by agents)
   // while keeping traversal/encoding/ignored-segment guards identical.
+  // "entry" is "write" for every rule, and additionally says the caller renames
+  // the entry itself rather than following it — see realRelativeInRoot.
   const validated =
     access === "read"
       ? validateUserReadPath(relativePath)
@@ -155,10 +248,100 @@ async function safeResolve(
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }
   const absolute = join(ctx.root, validated.normalized);
-  if (!(await isWithinRealRoot(ctx.root, absolute))) {
-    return { ok: false, reason: `path rejected (symlink escapes workspace): ${relativePath}` };
+  const target = await realRelativeInRoot(ctx.root, absolute, access === "entry");
+  if (!target.ok) {
+    return { ok: false, reason: unresolvedPathRefusal(target, relativePath) };
   }
-  return { ok: true, absolute, normalized: validated.normalized };
+  const realRelative = target.relative;
+  // The check above judged the path as SPELLED. An in-workspace symlink can
+  // spell a reserved area under any other name (#638), so the SAME reservation
+  // is decided again on where the path really lands. Enumerating spellings is
+  // the losing side of this; the resolved path ends the game.
+  const refused = resolvedAreaRefusal(realRelative, access);
+  if (refused) {
+    return {
+      ok: false,
+      reason:
+        `path rejected (symlink resolves into ${refused.article} ${refused.kind} area): ` +
+        `${relativePath} resolves to ${realRelative}. ${refused.explain}`,
+    };
+  }
+  return { ok: true, absolute, normalized: validated.normalized, realRelative };
+}
+
+// A path the resolver could not place. Each cause gets its own next step: a
+// missing target can be created, a cycle cannot, a filesystem error is about
+// the path's permissions rather than its spelling, and an unreadable workspace
+// root is not about this path at all. One message for all of them would send an
+// agent to fix the wrong thing.
+function unresolvedPathRefusal(
+  target: Extract<RealTarget, { ok: false }>,
+  relativePath: string,
+): string {
+  switch (target.reason) {
+    case "escapes-workspace":
+      return `path rejected (symlink escapes workspace): ${relativePath}`;
+    case "unreadable-root":
+      return (
+        `path rejected (dohc could not resolve the workspace root: ${target.code}): ` +
+        `${relativePath}. The workspace folder failed, not this path. Check that ` +
+        `the workspace folder is present and readable.`
+      );
+    case "dangling-symlink":
+      return (
+        `path rejected (a symlink on this path has no target): ${relativePath}. ` +
+        `dohc cannot tell where the path leads. Create the target first, or use ` +
+        `a path with no symlink.`
+      );
+    case "unresolvable-symlink":
+      return (
+        `path rejected (a symlink on this path cannot be resolved: ${target.code}): ` +
+        `${relativePath}. dohc cannot tell where the path leads. Use a path with ` +
+        `no symlink.`
+      );
+    case "unreadable-path":
+      return (
+        `path rejected (dohc could not check where this path leads: ${target.code}): ` +
+        `${relativePath}. Fix the error on this path, or use another path.`
+      );
+  }
+}
+
+// WHICH rule refuses this resolved path, or null when none does. It names the
+// matched rule rather than answering yes/no, because a refusal has to state the
+// constraint it actually hit: an alias landing in `.git` is not refused by the
+// `.dohc` reservation, and saying so would send an agent to the wrong rule.
+// Same predicates the lexical validators use, in the same read/write split.
+// `.dohc` is checked before the ignored segments it also belongs to, so the
+// more specific rule wins.
+function resolvedAreaRefusal(
+  realRelative: string,
+  access: "read" | "write" | "entry",
+): { kind: "reserved" | "ignored"; article: "a" | "an"; explain: string } | null {
+  if (isDohcMetadataPath(realRelative)) {
+    return {
+      kind: "reserved",
+      article: "a",
+      explain: "dohc reserves .dohc for workspace state. Use a path in your own files.",
+    };
+  }
+  if (access !== "read" && isSharedWithMePath(realRelative)) {
+    return {
+      kind: "reserved",
+      article: "a",
+      explain:
+        "dohc reserves shared-with-me for share mounts. Copy the file into your own files first.",
+    };
+  }
+  const ignored = realRelative.split("/").find((segment) => hasIgnoredSegment(segment));
+  if (ignored) {
+    return {
+      kind: "ignored",
+      article: "an",
+      explain: `dohc does not manage ${ignored}. Use a path in your own files.`,
+    };
+  }
+  return null;
 }
 
 async function safeResolveForMutation(
@@ -637,6 +820,14 @@ function isSecretWorkspacePath(normalizedPath: string): boolean {
   return classifyEngineFilePathForRead(normalizedPath).kind === "secret";
 }
 
+// The secret floor decided on BOTH spellings of a resolved path. The name the
+// agent asked for is not the name the bytes come from: `notes.md -> .env`
+// passes a check on the request and reads the secret anyway, and every tool
+// that opens a file follows the link. Neither spelling may classify as secret.
+function isSecretResolvedPath(resolved: { normalized: string; realRelative: string }): boolean {
+  return isSecretWorkspacePath(resolved.normalized) || isSecretWorkspacePath(resolved.realRelative);
+}
+
 export async function readWorkspaceFile(
   ctx: ToolContext,
   args: {
@@ -648,29 +839,8 @@ export async function readWorkspaceFile(
 ) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  if (isSecretWorkspacePath(resolved.normalized)) {
+  if (isSecretResolvedPath(resolved)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
-  }
-  // The alias check above classifies the REQUESTED path, but the read below
-  // follows symlinks: an in-workspace link (notes.md -> .env) passes both
-  // guards while the bytes come from the secret. Classify the resolved real
-  // target too, so no alias can read protected contents.
-  const realTarget = await realpath(resolved.absolute).catch(() => null);
-  if (realTarget) {
-    const realRoot = await realpath(ctx.root).catch(() => null);
-    if (!realRoot) {
-      return { ok: false as const, reason: `path rejected (workspace root unresolvable): ${args.path}` };
-    }
-    if (realTarget === realRoot || realTarget.startsWith(realRoot + sep)) {
-      const relativeReal = realTarget
-        .slice(realRoot.length)
-        .split(sep)
-        .filter((segment) => segment.length > 0)
-        .join("/");
-      if (relativeReal && isSecretWorkspacePath(relativeReal)) {
-        return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
-      }
-    }
   }
   try {
     const maxBytes = Math.min(
@@ -1034,7 +1204,9 @@ export async function moveWorkspacePath(
   ctx: ToolContext,
   args: { fromPath: string; toPath: string; overwrite?: boolean; summary?: string },
 ) {
-  const from = await safeResolve(ctx, args.fromPath);
+  // The source is renamed as an entry (a link moves as a link); the
+  // destination is created, so it keeps the following "write" rules.
+  const from = await safeResolve(ctx, args.fromPath, "entry");
   if (!from.ok) return { ok: false as const, reason: from.reason };
   const to = await safeResolve(ctx, args.toPath);
   if (!to.ok) return { ok: false as const, reason: to.reason };
@@ -1071,7 +1243,8 @@ export async function deleteWorkspacePath(
   ctx: ToolContext,
   args: { path: string; summary?: string },
 ) {
-  const resolved = await safeResolve(ctx, args.path);
+  // Renamed into the trash as an entry: a broken link is deleted, not followed.
+  const resolved = await safeResolve(ctx, args.path, "entry");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
@@ -1744,9 +1917,11 @@ export async function detectSites(
   const start =
     args.path && args.path.trim().length > 0
       ? await safeResolve(ctx, args.path, "read")
-      : { ok: true as const, absolute: ctx.root, normalized: "" };
+      : { ok: true as const, absolute: ctx.root, normalized: "", realRelative: "" };
   if (!start.ok) return { ok: false as const, reason: start.reason };
-  const allowed = sitePathAllowed(start.normalized);
+  // Where the scan really lands decides the rule (#638): `sites -> .apps`
+  // spells an ordinary folder and reads the legacy tree site tools disown.
+  const allowed = sitePathAllowed(start.realRelative);
   if (!allowed.ok) return allowed;
 
   const info = await lstat(start.absolute).catch(() => null);
@@ -1787,7 +1962,7 @@ export async function createSite(
   const root = await safeResolve(ctx, args.path);
   if (!root.ok) return { ok: false as const, reason: root.reason };
   if (!root.normalized) return { ok: false as const, reason: "site path must name a folder" };
-  const allowed = sitePathAllowed(root.normalized);
+  const allowed = sitePathAllowed(root.realRelative);
   if (!allowed.ok) return allowed;
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
@@ -1938,7 +2113,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
   for (const file of files) {
     const resolved = await safeResolve(ctx, file.path);
     if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-    const fileAllowed = sitePathAllowed(resolved.normalized);
+    const fileAllowed = sitePathAllowed(resolved.realRelative);
     if (!fileAllowed.ok) return fileAllowed;
     if (
       resolved.normalized !== root.normalized &&
@@ -1997,14 +2172,17 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
   // the site into the user's own files makes it runnable. The check is the
   // shared case-insensitive/alias-normalizing predicate, NOT a literal
   // compare: normalized paths preserve casing, and "Shared-With-Me/…" names
-  // the same directory on case-insensitive filesystems (CodeRabbit).
-  if (isSharedWithMePath(root.normalized)) {
+  // the same directory on case-insensitive filesystems (CodeRabbit). Both
+  // gates read the RESOLVED path (#638): reads may enter shared-with-me, so
+  // safeResolve lets an alias of it through, and judging the spelling would
+  // let `mine -> shared-with-me/alex` run someone else's shared code.
+  if (isSharedWithMePath(root.realRelative)) {
     return {
       ok: false as const,
       reason: `site root is a mounted share (read-only): ${siteRoot} — copy it into your own files to run it`,
     };
   }
-  const allowed = sitePathAllowed(root.normalized);
+  const allowed = sitePathAllowed(root.realRelative);
   if (!allowed.ok) return allowed;
   const info = await lstat(root.absolute).catch(() => null);
   if (!info) return { ok: false as const, reason: `site root not found: ${siteRoot}` };
@@ -2351,6 +2529,16 @@ export async function publishSite(ctx: ToolContext, args: { siteRoot: string }) 
 
 // --- dohc_import_data -------------------------------------------------------
 
+// A VISIBLE user database under BOTH spellings. The strategy is read off the
+// name, so an alias carries its own: `records.sqlite -> notes/data.sqlite-wal`
+// spells a database while the bytes are a sidecar. Both names must qualify.
+function isVisibleDatabase(resolved: { normalized: string; realRelative: string }): boolean {
+  return (
+    databaseSyncStrategy(resolved.normalized) === "operation-log" &&
+    databaseSyncStrategy(resolved.realRelative) === "operation-log"
+  );
+}
+
 // Imports a delimited/structured source into a NEW visible .sqlite, written
 // safely under the root. Refuses a hidden-internal (.dohc) or sidecar target —
 // only a visible user database is a valid import destination.
@@ -2363,14 +2551,14 @@ export async function importData(
   // Same secret floor as read/search: an import is a read of the source,
   // and importing a secret-classified file (".env.csv", mounted or local)
   // into a visible database would launder its contents past the denial.
-  if (isSecretWorkspacePath(sourceRel.normalized)) {
+  if (isSecretResolvedPath(sourceRel)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
   }
   const dbRel = await safeResolve(ctx, args.databasePath);
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
-  if (databaseSyncStrategy(dbRel.normalized) !== "operation-log") {
+  if (!isVisibleDatabase(dbRel)) {
     return { ok: false as const, reason: `not a visible database target: ${args.databasePath}` };
   }
 
@@ -2426,12 +2614,12 @@ export async function queryDatabase(
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
   // Secret floor before any bytes open: a secret-classified database name
   // (".env.sqlite", mounted or local) is denied like any other secret read.
-  if (isSecretWorkspacePath(dbRel.normalized)) {
+  if (isSecretResolvedPath(dbRel)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
   }
   // Only a VISIBLE user database (parity with import_data): never a sidecar,
   // hidden internal, or a non-db file that merely contains SQLite bytes.
-  if (databaseSyncStrategy(dbRel.normalized) !== "operation-log") {
+  if (!isVisibleDatabase(dbRel)) {
     return { ok: false as const, reason: `not a visible database: ${args.databasePath}` };
   }
   if (!isReadOnlySelect(args.sql)) {
