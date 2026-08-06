@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,7 +16,7 @@ import {
   type EngineWorkspaceRunOptions,
 } from "@dohc/workspace-engine-client/daemon";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import {
   YDOC_OPEN_RETRY_DEADLINE_MS,
   YDocOpenRacedError,
@@ -43,7 +43,7 @@ afterEach(async () => {
 });
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-deadline-"));
+  const root = await createTestScratch("dohc-ydoc-deadline-");
   roots.push(root);
   return root;
 }
