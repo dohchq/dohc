@@ -24,7 +24,7 @@ const ITEMS: ReadonlyArray<{ id: DocumentMenuItemId; label: string }> = [
 // How long a quiet inline confirmation ("Copied") replaces an item's label —
 // mirrors the code-block copy button's "copy" → "copied" swap
 // (editor/codeBlockChrome.tsx).
-const FEEDBACK_MS = 1200;
+export const FEEDBACK_MS = 1200;
 
 // What every action says when the document has no serializer: the editor is
 // not showing this document, so there is nothing honest to copy or export.
@@ -52,14 +52,17 @@ export function DocumentMenu(props: {
 }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState(0);
-  // A refusal owes the user a next step (docs/brand/copy.md), and an inline
-  // label that swaps for 1.2s has no room for one. The label states what is
-  // true; the instruction is stated in the menu's status line, which every
-  // user reaches — a tooltip is not one, because focus stays on the menu
-  // container and never presents it (#666).
+  // The transient half: an item's label swaps for 1.2s to say what happened.
   const [feedback, setFeedback] = useState<
-    Partial<Record<DocumentMenuItemId, { label: string; instruction?: string }>>
+    Partial<Record<DocumentMenuItemId, string>>
   >({});
+  // The lasting half. A refusal owes the user a next step
+  // (docs/brand/copy.md), and a label that swaps for 1.2s has no room for one
+  // and no time to be read. It is stated in the menu's status line, which
+  // every user reaches — a tooltip is not one, because focus stays on the
+  // menu container and never presents it (#666). It stands until the user
+  // closes the menu or another action supersedes it, never on a timer.
+  const [instruction, setInstruction] = useState("");
   const containerRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -68,6 +71,12 @@ export function DocumentMenu(props: {
   useEffect(() => {
     if (!open) return;
     setSelected(0);
+    // A freshly opened menu says nothing about the last one. The timer goes
+    // with it: left running, a confirmation's pending auto-close would shut
+    // this menu instead of the one it belonged to.
+    setFeedback({});
+    setInstruction("");
+    if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     menuRef.current?.focus();
     // On every close path (Escape, outside pointer-down, post-feedback
     // auto-close) the menu div unmounts and focus would fall to document.body,
@@ -99,18 +108,23 @@ export function DocumentMenu(props: {
   // the replacement timer only ever clears the newest item, so a second
   // refusal inside the window left the first item showing its refusal with
   // nothing left to retire it.
+  //
+  // A next step is what tells the two outcomes apart. A confirmation is over
+  // once it is read, so the timer retires the label and closes the menu. A
+  // refusal is not: closing takes its instruction off the screen, which is
+  // how the tooltip failed keyboard users in the first place. So the timer
+  // retires the label and the menu stays, until the user closes it.
   function showFeedback(
     id: DocumentMenuItemId,
     label: string,
-    instruction?: string,
+    nextStep?: string,
   ) {
-    setFeedback({
-      [id]: instruction === undefined ? { label } : { label, instruction },
-    });
+    setFeedback({ [id]: label });
+    setInstruction(nextStep ?? "");
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     feedbackTimer.current = setTimeout(() => {
       setFeedback({});
-      setOpen(false);
+      if (nextStep === undefined) setOpen(false);
     }, FEEDBACK_MS);
   }
 
@@ -227,12 +241,6 @@ export function DocumentMenu(props: {
   const move = (delta: number) =>
     setSelected((current) => (current + delta + ITEMS.length) % ITEMS.length);
 
-  // One instruction at a time, because one feedback is held at a time.
-  const instruction =
-    ITEMS.map((item) => feedback[item.id]?.instruction).find(
-      (text): text is string => text !== undefined,
-    ) ?? "";
-
   return (
     <div className="dohc-document-menu" ref={containerRef}>
       <IconButton
@@ -288,14 +296,15 @@ export function DocumentMenu(props: {
               onMouseEnter={() => setSelected(index)}
               onClick={() => runItem(item.id)}
             >
-              {feedback[item.id]?.label ?? item.label}
+              {feedback[item.id] ?? item.label}
             </button>
           ))}
-          {/* The refusal's next step, stated where every user reads it. It
-              mounts with the menu and stays empty until there is something to
-              say, so a screen reader is already watching the region when the
-              instruction arrives — a region that appears with its text is
-              announced unreliably. Empty, it paints nothing. */}
+          {/* The refusal's next step, stated where every user reads it, for as
+              long as the menu is open. It mounts with the menu and stays empty
+              until there is something to say, so a screen reader is already
+              watching the region when the instruction arrives — a region that
+              appears with its text is announced unreliably. Empty, it paints
+              nothing. */}
           <div
             data-testid="document-menu-status"
             className="dohc-document-menu-status"
