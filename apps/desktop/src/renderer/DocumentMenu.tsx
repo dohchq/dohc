@@ -34,6 +34,15 @@ function exportItemId(kind: "markdown" | "html" | "pdf"): DocumentMenuItemId {
 // (editor/codeBlockChrome.tsx).
 const FEEDBACK_MS = 1200;
 
+// What every action says when the document has no serializer: the editor is
+// not showing this document, so there is nothing honest to copy or export.
+// It states the fact and NOT the cause, because this menu cannot tell an
+// editor that is still opening from one that failed to — and copy.md says to
+// give a reason only when we know it. "document" is the noun this surface
+// already uses (the menu is "Document actions"), and the per-action next step
+// rides in each item's tooltip.
+const REFUSAL_LABEL = "Document not open";
+
 export function DocumentMenu(props: {
   workspaceId: string;
   // Filename stem (no extension) — becomes the export dialog's suggested
@@ -51,8 +60,11 @@ export function DocumentMenu(props: {
 }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState(0);
+  // A refusal owes the user a next step (docs/brand/copy.md), and an inline
+  // label that swaps for 1.2s has no room for one. The label states what is
+  // true; the tooltip carries the instruction.
   const [feedback, setFeedback] = useState<
-    Partial<Record<DocumentMenuItemId, string>>
+    Partial<Record<DocumentMenuItemId, { label: string; title?: string }>>
   >({});
   const containerRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -91,10 +103,10 @@ export function DocumentMenu(props: {
 
   // ONE timer, so one label. Merging into the previous feedback stranded it:
   // the replacement timer only ever clears the newest item, so a second
-  // refusal inside the window left the first item saying "Not ready yet" with
+  // refusal inside the window left the first item showing its refusal with
   // nothing left to retire it.
-  function showFeedback(id: DocumentMenuItemId, text: string) {
-    setFeedback({ [id]: text });
+  function showFeedback(id: DocumentMenuItemId, label: string, title?: string) {
+    setFeedback({ [id]: title === undefined ? { label } : { label, title } });
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     feedbackTimer.current = setTimeout(() => {
       setFeedback({});
@@ -105,7 +117,11 @@ export function DocumentMenu(props: {
   async function copyAsMarkdown() {
     const markdown = props.getMarkdown();
     if (markdown === null) {
-      showFeedback("copy-markdown", "Not ready yet");
+      showFeedback(
+        "copy-markdown",
+        REFUSAL_LABEL,
+        "You can copy this document when it opens.",
+      );
       return;
     }
     const write = navigator.clipboard?.writeText(markdown);
@@ -124,7 +140,11 @@ export function DocumentMenu(props: {
       // BEFORE closing: the feedback replaces the item's label, so a refusal
       // shown into a closed menu is a refusal the user never sees — the
       // export would just appear to do nothing.
-      showFeedback(exportItemId(kind), "Not ready yet");
+      showFeedback(
+        exportItemId(kind),
+        REFUSAL_LABEL,
+        "You can export this document when it opens.",
+      );
       return;
     }
     setOpen(false);
@@ -229,8 +249,9 @@ export function DocumentMenu(props: {
               className={`dohc-document-menu-item${index === selected ? " is-selected" : ""}`}
               onMouseEnter={() => setSelected(index)}
               onClick={() => runItem(item.id)}
+              title={feedback[item.id]?.title}
             >
-              {feedback[item.id] ?? item.label}
+              {feedback[item.id]?.label ?? item.label}
             </button>
           ))}
         </div>

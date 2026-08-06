@@ -221,7 +221,13 @@ describe("DocumentMenu", () => {
     await act(async () => {});
     // MUTATION: fall back to the empty cache -> "Copied", and the clipboard
     // holds nothing.
-    expect(screen.getByText("Not ready yet")).toBeTruthy();
+    const copyItem = screen.getByTestId("document-menu-item-copy-markdown");
+    expect(copyItem.textContent).toBe("Document not open");
+    // The label states the fact; the next step rides in the tooltip, because
+    // an inline label that swaps for 1.2s has no room for it.
+    expect(copyItem.getAttribute("title")).toBe(
+      "You can copy this document when it opens.",
+    );
     expect(writeText).not.toHaveBeenCalled();
 
     // The refusal leaves the menu open, so the export item is right there.
@@ -229,14 +235,15 @@ describe("DocumentMenu", () => {
     await act(async () => {});
     // ONE label, on the item the user just clicked. There is one timer, so a
     // second refusal inside its window retires the first item's label as it
-    // replaces the timer — otherwise the copy item keeps saying "Not ready
-    // yet" with nothing left to clear it (codex r14).
-    expect(screen.getAllByText("Not ready yet")).toHaveLength(1);
-    expect(
-      screen
-        .getByTestId("document-menu-item-export-markdown")
-        .textContent,
-    ).toContain("Not ready yet");
+    // replaces the timer — otherwise the copy item keeps its refusal with
+    // nothing left to clear it (codex r14).
+    expect(screen.getAllByText("Document not open")).toHaveLength(1);
+    const exportItem = screen.getByTestId("document-menu-item-export-markdown");
+    expect(exportItem.textContent).toBe("Document not open");
+    // Each action names its OWN next step.
+    expect(exportItem.getAttribute("title")).toBe(
+      "You can export this document when it opens.",
+    );
     // MUTATION: the same fallback -> a .md file containing one newline,
     // written as if it were the user's document.
     expect(exportDocumentFile).not.toHaveBeenCalled();

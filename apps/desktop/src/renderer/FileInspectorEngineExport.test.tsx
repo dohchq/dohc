@@ -101,7 +101,7 @@ describe("engine-mode export with no mounted serializer", () => {
 
     // MUTATION: gate the refusal on an EMPTY cache -> the stale read body is
     // exported as if it were the live document.
-    expect(await screen.findByText("Not ready yet")).toBeTruthy();
+    expect(await screen.findByText("Document not open")).toBeTruthy();
     expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
   });
 
