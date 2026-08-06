@@ -1,6 +1,7 @@
 //! Run-scoped scratch directories for test harnesses.
 
 use std::collections::hash_map::RandomState;
+use std::ffi::OsStr;
 use std::fs;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
@@ -178,15 +179,32 @@ fn safe_component(value: &str, fallback: &str) -> String {
 
 fn sweep_once(current_run: &Path) {
     SWEEP_STARTED.get_or_init(|| {
-        if let Some(parent) = current_run.parent()
-            && let Err(error) = sweep_old_runs(parent, current_run, SystemTime::now())
-        {
-            eprintln!(
-                "scratch sweep failed under {}: {error}; retry on the next test process",
-                parent.display()
-            );
-        }
+        sweep_managed_parent(current_run, SystemTime::now());
     });
+}
+
+fn sweep_managed_parent(current_run: &Path, now: SystemTime) {
+    let Some(parent) = managed_parent(current_run) else {
+        return;
+    };
+    if let Err(error) = sweep_old_runs(parent, current_run, now) {
+        eprintln!(
+            "scratch sweep failed under {}: {error}; retry on the next test process",
+            parent.display()
+        );
+    }
+}
+
+/// The parent the sweep owns, or `None` when the run root sits outside it.
+///
+/// `DOHC_TEST_SCRATCH_ROOT` names any absolute directory, so the run root's
+/// parent is only this crate's to delete from when it is the managed parent.
+/// The JS twin never derives this parent from the root for the same reason;
+/// see `sweepOldTestScratch` in `apps/desktop/src/workspaces/testTemp.ts`.
+fn managed_parent(current_run: &Path) -> Option<&Path> {
+    current_run
+        .parent()
+        .filter(|parent| parent.file_name() == Some(OsStr::new(SCRATCH_PARENT)))
 }
 
 fn sweep_old_runs(parent: &Path, current_run: &Path, now: SystemTime) -> io::Result<()> {
@@ -380,6 +398,58 @@ mod tests {
         assert!(
             live.exists(),
             "a run with recent work deep inside is live and must survive the sweep"
+        );
+    }
+
+    /// `DOHC_TEST_SCRATCH_ROOT` may name any absolute directory, and the
+    /// obvious reason to set it is a full `%TEMP%` — the incident this crate
+    /// exists for. A root on another disk makes that disk's directory the
+    /// sweep's parent, and every aged sibling there is somebody's own work.
+    #[test]
+    fn a_run_root_outside_the_managed_parent_sweeps_nothing() {
+        let harness = ScratchDir::new_named("outside-root").expect("scratch");
+        let outside = harness.join("a-developers-own-directory");
+        let run_root = outside.join("my-scratch");
+        let victim = outside.join("important-project");
+        let victim_file = victim.join("do-not-delete.txt");
+        fs::create_dir_all(&run_root).expect("handed-down root");
+        fs::create_dir_all(&victim).expect("victim");
+        fs::write(&victim_file, b"a year of work").expect("victim file");
+
+        let now = SystemTime::now();
+        let stale = FileTime::from_system_time(now - MAX_RUN_AGE - Duration::from_secs(60));
+        set_file_mtime(&victim_file, stale).expect("age the file");
+        set_file_mtime(&victim, stale).expect("age the directory");
+
+        sweep_managed_parent(&run_root, now);
+
+        assert!(
+            victim_file.exists(),
+            "a root outside {SCRATCH_PARENT} must not make its parent's siblings sweepable"
+        );
+    }
+
+    /// The gate hands down `<temp>/dohc-test-scratch/rust-gate-...`, so the
+    /// guard above must not stop the sweep the crate is for.
+    #[test]
+    fn a_run_root_under_the_managed_parent_still_sweeps() {
+        let harness = ScratchDir::new_named("managed-parent").expect("scratch");
+        let parent = harness.join(SCRATCH_PARENT);
+        let aged = parent.join("rust-gate-1234-000000000000dead");
+        let current = parent.join("rust-gate-5678-000000000000beef");
+        fs::create_dir_all(&aged).expect("aged run");
+        fs::create_dir_all(&current).expect("current run");
+
+        let now = SystemTime::now();
+        let stale = FileTime::from_system_time(now - MAX_RUN_AGE - Duration::from_secs(60));
+        set_file_mtime(&aged, stale).expect("age the run root");
+
+        sweep_managed_parent(&current, now);
+
+        assert!(!aged.exists(), "a handed-down gate root must still sweep");
+        assert!(
+            current.exists(),
+            "the current run must survive its own sweep"
         );
     }
 
