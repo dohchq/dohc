@@ -1131,6 +1131,42 @@ describe("mergeVersionIntoMain", () => {
     await engine.stop();
   });
 
+  it("resumes a merge without transferring conflict bodies", async () => {
+    // Re-running a merge RESUMES: the walk over open conflicts keeps their
+    // paths and discards everything else. Hydrating for it fetches every
+    // withheld body of every open conflict just to drop it — the operation is
+    // wrong, not merely expensive.
+    //
+    // MUTATION: drop `bodies: "withheld"` from the resume walk and the blob
+    // read for this body reappears.
+    const incomingBody = `draft ${"x".repeat(8_400_000)}\n`;
+    const root = await tempRoot();
+    await write(root, "plan.md", "base line\n");
+    const loopback = new ConflictLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = desktopOwnedVersionLoopbackCapture(root, loopback, requests);
+    engine.start();
+    await engine.flush();
+    await engine.createVersion("Draft");
+    const draftId = await versionIdByName(engine, "Draft");
+    await engine.switchVersion("main");
+    await write(root, "plan.md", "current line\n");
+    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    await engine.flush();
+    loopback.seedSettledText(WORKSPACE_ID, draftId, "plan.md", incomingBody);
+    expect((await engine.mergeVersionIntoMain(draftId)).conflictCount).toBe(1);
+
+    // Isolate the resume: the merge above read this body for its compare.
+    requests.length = 0;
+    expect((await engine.mergeVersionIntoMain(draftId)).conflictCount).toBe(1);
+    expect(
+      requests.filter(
+        (request) => request.method === VERSIONED_METHOD.textReadBlob,
+      ),
+    ).toHaveLength(0);
+    await engine.stop();
+  });
+
   it("resolves conflicts by keep-current, apply-incoming, and apply-merged", async () => {
     const root = await tempRoot();
     await write(root, "a.md", "base a\n");

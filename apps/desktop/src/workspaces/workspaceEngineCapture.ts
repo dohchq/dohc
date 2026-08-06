@@ -3394,6 +3394,9 @@ export function createWorkspaceEngineCapture(
             const page = await engine.listTextConflicts({
               workspaceId,
               status: "open",
+              // Paths only, like the compare walk above. Hydrating here would
+              // fetch every withheld body of every open conflict and keep none.
+              bodies: "withheld",
               ...(afterConflictId !== undefined ? { afterConflictId } : {}),
             });
             for (const conflict of page.conflicts) {

@@ -200,6 +200,26 @@ fn resolve_request_encoded_bytes(
         .saturating_add(params_bytes)
 }
 
+/// The encoded size of the response envelope that will carry this result —
+/// what the control frame actually holds. The mirror of
+/// `resolve_request_encoded_bytes`, and measured the same way: through the
+/// encoder the transport itself uses, with the result slot filled by an empty
+/// object and its two bytes taken back. Nothing is reserved and nothing is
+/// estimated, so a result one byte inside the frame still crosses.
+fn response_encoded_bytes(id: u64, result: &Value) -> usize {
+    let envelope =
+        dohc_engine_protocol::wire::Envelope::Response(dohc_engine_protocol::wire::Response {
+            id,
+            result: json!({}),
+        });
+    let envelope_bytes = serde_json::to_vec(&envelope).map_or(usize::MAX, |bytes| bytes.len());
+    let result_bytes = serde_json::to_vec(result).map_or(usize::MAX, |bytes| bytes.len());
+    // `- 2` drops the empty object measured in the result slot.
+    envelope_bytes
+        .saturating_sub(2)
+        .saturating_add(result_bytes)
+}
+
 fn encode_ydoc_state_base64(full_state: &[u8]) -> Result<String, WireError> {
     if full_state.len() > MAX_YDOC_STATE_WIRE_BYTES {
         return Err(wire(ErrorCode::Internal, "ydoc-state-exceeds-wire-limit"));
@@ -311,6 +331,14 @@ const CONFLICT_ROW_HARD_CAP_BYTES: usize =
 /// escaping is invisible to every other limit on this path: 4,194,304
 /// newlines are 4 MiB raw and 8 MiB encoded.
 const RESOLVE_REQUEST_FRAME_BYTES: usize =
+    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+/// What one whole RESPONSE is bounded by: the control frame that has to carry
+/// it. A per-row or per-body cap cannot stand in for this — a response serves
+/// more than its largest part (`conflicts.list` appends the continuation after
+/// its rows; `conflicts.resolve` answers a conflict, a write and a delete),
+/// and the daemon's writer treats an over-frame answer as fatal rather than
+/// answering it.
+const RESPONSE_FRAME_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
 const SEARCH_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
@@ -921,7 +949,7 @@ impl EngineService {
                     .await?
             }
             "conflicts.list" => {
-                self.conflicts_list(&ctx, request.workspace, request.params)
+                self.conflicts_list(&ctx, request.id, request.workspace, request.params)
                     .await?
             }
             "conflicts.open" => {
@@ -7551,6 +7579,7 @@ impl EngineService {
     async fn conflicts_list(
         &self,
         ctx: &RequestContext,
+        id: u64,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
@@ -7620,10 +7649,45 @@ impl EngineService {
                     .map(|conflict| conflict.conflict_id.clone())
             })
             .flatten();
-        Ok(json!({
+        let mut page = json!({
             "conflicts": rows[..included].to_vec(),
             "nextAfterConflictId": next_after_conflict_id,
-        }))
+        });
+        // The cap above bounds a ROW; the frame carries the PAGE. The
+        // continuation is appended AFTER the cut — a second copy of one row's
+        // id — and a body admitted in band can leave no room for it, so a row
+        // and a cursor that are each admissible still cross together. Measure
+        // the encoded response, and past the frame withhold every body on
+        // every row: the sum is what crossed, so the remedy is the sum.
+        //
+        // The withheld page fits. A fully withheld row costs its non-withheld
+        // strings plus scaffolding — `CONFLICT_METADATA_BUDGET_BYTES` plus
+        // `CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES`, both bounded before
+        // persistence — and that budget counts the conflict id TWICE, which is
+        // precisely the continuation's copy. A page of several rows is bounded
+        // instead by `CONFLICTS_PAGE_BYTE_BUDGET`, which admits a row after the
+        // first only while the running total stays inside it, and its
+        // continuation is one of those rows' ids.
+        if response_encoded_bytes(id, &page) > RESPONSE_FRAME_BYTES {
+            for row in page["conflicts"].as_array_mut().into_iter().flatten() {
+                withhold_all_conflict_side_texts(row);
+            }
+            let observed = response_encoded_bytes(id, &page);
+            if observed > RESPONSE_FRAME_BYTES {
+                // The last line of defense for the page, in the shape the row
+                // guard above already has: a named refusal beats an over-frame
+                // response the daemon's writer treats as fatal.
+                return Err(WireError::new(
+                    ErrorCode::LimitExceeded,
+                    format!(
+                        "conflict-page-exceeds-wire-limit: a conflicts.list response is capped \
+                         at the negotiated control frame of {RESPONSE_FRAME_BYTES} encoded \
+                         bytes; observed {observed} encoded bytes after withholding every body"
+                    ),
+                ));
+            }
+        }
+        Ok(page)
     }
 
     async fn conflicts_open(
@@ -7748,7 +7812,7 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        Ok(json!({
+        let mut answer = json!({
             "conflict": settled_conflict_json(&result.conflict),
             "write": result.write.as_ref().map(|write| json!({
                 "object": file_object_json(&write.object),
@@ -7769,7 +7833,30 @@ impl EngineService {
                 ),
                 "moment": moment_json(&delete.moment),
             })),
-        }))
+        });
+        // ONE frame carries the whole ANSWER, and this one reports a mutation
+        // that ALREADY COMMITTED: an over-frame answer loses the caller's
+        // acknowledgement for work the workspace kept. Each body is withheld
+        // past the in-band cap above; nothing bounds their sum beside a
+        // conflict whose own metadata may reach
+        // `CONFLICT_METADATA_BUDGET_BYTES`. Measure the encoded answer, and
+        // past the frame withhold every body it carries — each keeps its
+        // digest and `inbandLimitBytes`, so the caller hydrates through
+        // `versionedText.readBlob`.
+        //
+        // What remains is the settled conflict's non-withheld strings —
+        // bounded before persistence, and bounded there counting the conflict
+        // id twice where this answer serves it once — beside the write and
+        // delete blocks. Those blocks echo identifiers the request supplied,
+        // and no path in this engine bounds an identifier's length, so this is
+        // the smallest answer the daemon can build rather than a proof that
+        // every answer fits. Refusing is not the alternative: the resolution
+        // has committed, and a refusal would report a mutation that happened
+        // as one that did not.
+        if response_encoded_bytes(id, &answer) > RESPONSE_FRAME_BYTES {
+            withhold_all_resolve_answer_texts(&mut answer);
+        }
+        Ok(answer)
     }
 
     async fn search_query(
@@ -10471,6 +10558,43 @@ fn withhold_all_conflict_side_texts(value: &mut Value) {
     }
 }
 
+/// Withhold both payload bodies of one serialized moment, in place. The
+/// digests beside them stay, so the caller hydrates through
+/// `versionedText.readBlob` — the shape an over-cap moment already arrives in.
+fn withhold_moment_texts(moment: &mut Value) {
+    for (text, limit) in [
+        ("afterText", "afterInbandLimitBytes"),
+        ("beforeText", "beforeInbandLimitBytes"),
+    ] {
+        if moment.get(text).is_some_and(|body| !body.is_null()) {
+            moment[text] = Value::Null;
+            moment[limit] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        }
+    }
+}
+
+/// Withhold EVERY body one resolve answer carries: the conflict's three sides,
+/// the settled snapshot, and both moments' payloads. The removed head is
+/// described by its moment, so `delete.before` carries no body to withhold.
+fn withhold_all_resolve_answer_texts(answer: &mut Value) {
+    withhold_all_conflict_side_texts(&mut answer["conflict"]);
+    for block in ["write", "delete"] {
+        let Some(block) = answer.get_mut(block).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        if let Some(snapshot) = block.get_mut("snapshot")
+            && !snapshot.is_null()
+        {
+            withhold_text(snapshot);
+        }
+        if let Some(moment) = block.get_mut("moment")
+            && !moment.is_null()
+        {
+            withhold_moment_texts(moment);
+        }
+    }
+}
+
 fn file_object_json(object: &dohc_engine_domain::FileObjectRecord) -> Value {
     json!({
         "id": object.object_id,
@@ -12520,6 +12644,7 @@ mod tests {
             service
                 .conflicts_list(
                     &RequestContext::unbounded(),
+                    1,
                     Some(handle.clone()),
                     json!({}),
                 )

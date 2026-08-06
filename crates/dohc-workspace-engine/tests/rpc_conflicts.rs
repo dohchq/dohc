@@ -1007,6 +1007,26 @@ async fn open_conflict_against_seeded_head(
     request_id: u64,
     side_text: &str,
 ) -> String {
+    open_conflict_against_seeded_head_with(
+        transport,
+        handle,
+        workspace_id,
+        request_id,
+        side_text,
+        |_| {},
+    )
+    .await
+}
+
+/// The same seeded conflict, with `shape` applied to the open payload first.
+async fn open_conflict_against_seeded_head_with(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    workspace_id: &str,
+    request_id: u64,
+    side_text: &str,
+    shape: impl FnOnce(&mut Value),
+) -> String {
     let path = "conflict-000.md".to_owned();
     let current = transport
         .call(
@@ -1042,6 +1062,7 @@ async fn open_conflict_against_seeded_head(
         "latestMomentId": snapshot["latestMomentId"],
         "metadataOrigin": snapshot["metadataOrigin"],
     });
+    shape(&mut payload);
     transport
         .call(
             RequestContext::unbounded(),
@@ -1782,6 +1803,163 @@ async fn the_continuation_id_is_measured_at_both_copies_the_page_serves() {
         "a page serving its id twice is {} bytes",
         encoded.len()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_over_the_frame_beside_its_continuation_withholds_every_body() {
+    // The row cap bounds a ROW; the frame carries the PAGE. `conflicts.list`
+    // appends `nextAfterConflictId` after the rows are cut — a second copy of
+    // one row's id — and the pre-persistence budget counts that copy. A side
+    // BODY is exempt from that budget, though, so an in-band body can occupy
+    // the room the second copy needs: row and cursor are each admissible and
+    // their sum is not. The daemon's writer treats an over-frame answer as
+    // fatal rather than answering, which is #537's failure shape by a third
+    // route.
+    //
+    // MUTATION: drop the page measure from `conflicts_list` and this page no
+    // longer encodes into a control frame.
+    let (_scratch, transport, handle, workspace_id) = fixture("page-continuation").await;
+    // Inside the budget at the two copies it counts (7 MB of 8,257,536), and
+    // the row carrying one copy still fits the row cap beside its bodies.
+    let long_id = "c".repeat(3_500_000);
+    let body = "b".repeat(1_500_000);
+    let mut first = conflict_payload(&workspace_id, 0, &body);
+    first["conflict"]["id"] = json!(long_id);
+    assert_eq!(
+        transport
+            .call(
+                RequestContext::unbounded(),
+                request(10, "conflicts.open", Some(handle.clone()), first),
+            )
+            .await
+            .expect("the conflict is inside the metadata budget and opens")
+            .result["inserted"],
+        true
+    );
+    let second = conflict_payload(&workspace_id, 1, "small body");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(11, "conflicts.open", Some(handle.clone()), second),
+        )
+        .await
+        .expect("a second conflict, so the page must emit a continuation");
+
+    let listed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.list",
+                Some(handle),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("the page answers");
+    let page = listed.result.clone();
+    encode_control(&Envelope::Response(listed), &WireLimits::default())
+        .expect("the page fits the negotiated control frame");
+
+    // The cursor still advances — withholding shrinks a row, it never drops
+    // one — so the second conflict is still reachable.
+    assert_eq!(page["nextAfterConflictId"], json!(long_id));
+    assert_eq!(page["conflicts"].as_array().expect("rows").len(), 1);
+    for side in ["base", "current", "incoming"] {
+        let snapshot = &page["conflicts"][0][side]["snapshot"];
+        assert!(
+            snapshot["text"].is_null(),
+            "{side} body must be withheld once the PAGE crosses the frame"
+        );
+        assert!(snapshot["inbandLimitBytes"].is_number());
+        assert_eq!(snapshot["byteLength"], json!(body.len()));
+        assert!(snapshot["blobSha256"].is_string());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resolve_answer_over_the_frame_withholds_every_body_it_serves() {
+    // The resolve answer is bounded per BODY and not in aggregate: the
+    // conflict it settles may carry metadata up to
+    // `CONFLICT_METADATA_BUDGET_BYTES`, and every body under the 128 KiB
+    // in-band limit rides beside it — three sides, the settled snapshot, and
+    // the moment's after body. Each part is admissible, their sum is not, and
+    // this answer reports a mutation that ALREADY COMMITTED: an over-frame
+    // answer loses the acknowledgement for work the workspace kept.
+    //
+    // MUTATION: drop the aggregate measure from `conflicts_resolve` and this
+    // answer no longer encodes into a control frame.
+    let (_scratch, transport, handle, workspace_id) = fixture("resolve-aggregate").await;
+    let side = "s".repeat(128 * 1024);
+    let merged = "m".repeat(120 * 1024);
+    let summary = "u".repeat(8_150_000);
+    let path = open_conflict_against_seeded_head_with(
+        &transport,
+        &handle,
+        &workspace_id,
+        10,
+        &side,
+        |payload| {
+            payload["conflict"]["metadata"]["summary"] = json!(summary);
+        },
+    )
+    .await;
+
+    let resolved = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-merged",
+                    "mergedText": merged,
+                    "objectId": "aggregate-resolution-object",
+                    "writeMomentId": "aggregate-resolution-write",
+                    "deleteMomentId": "aggregate-resolution-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect("the conflict resolves");
+    let answer = resolved.result.clone();
+    encode_control(&Envelope::Response(resolved), &WireLimits::default())
+        .expect("the resolve answer fits the negotiated control frame");
+
+    for side_name in ["base", "incoming"] {
+        let snapshot = &answer["conflict"][side_name]["snapshot"];
+        assert_eq!(snapshot["text"], Value::Null, "{side_name} body withheld");
+        assert_eq!(snapshot["inbandLimitBytes"], json!(128 * 1024));
+        assert_eq!(snapshot["byteLength"], json!(side.len()));
+        assert!(snapshot["blobSha256"].is_string());
+    }
+    let settled = &answer["write"]["snapshot"];
+    assert_eq!(settled["text"], Value::Null, "settled body withheld");
+    assert_eq!(settled["inbandLimitBytes"], json!(128 * 1024));
+    assert_eq!(settled["byteLength"], json!(merged.len()));
+    let moment = &answer["write"]["moment"];
+    assert_eq!(moment["afterText"], Value::Null, "moment body withheld");
+    assert_eq!(moment["afterInbandLimitBytes"], json!(128 * 1024));
+    assert!(moment["afterBlobSha256"].is_string());
+
+    // The resolution committed, and the body it settled is whole in the store.
+    let head = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "versionedText.read",
+                Some(handle),
+                json!({ "versionId": "main", "path": path }),
+            ),
+        )
+        .await
+        .expect("read the settled head");
+    assert_eq!(head.result["text"], json!(merged));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
