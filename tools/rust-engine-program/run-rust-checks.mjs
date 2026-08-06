@@ -220,10 +220,15 @@ console.log(`\n--- scratch leak ---`);
 try {
   const scratch = await inspectScratchRun(scratchRunRoot);
   if (scratch.status === "FAIL") failed = true;
+  // Printed on every run, so the count and the bytes stay visible long before
+  // they trip a limit. It rides the row only on FAIL, because a passing
+  // verdict's evidence line is `name=STATUS` rows and nothing else — a
+  // free-form reason has no end a reader can find (require-ci-pass-verdict.mjs).
+  console.log(`  ${scratch.status} — ${scratch.reason}`);
   results.push({
     name: "scratch leak",
     status: scratch.status,
-    reason: scratch.reason,
+    reason: scratch.status === "FAIL" ? scratch.reason : undefined,
   });
 } catch (error) {
   failed = true;
