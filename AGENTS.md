@@ -124,6 +124,18 @@ That means every useful artifact should become part of the workspace: documents,
 
 A folder of well-structured text files plus a capable agent can approximate this. dohc makes it practical: it provides the structure, tools, permissions, views, sync, review gates, and agent affordances that make the text workspace reliable for real people and efficient for agents.
 
+### The engine and collaboration are core to dohc
+
+The dohc engine and collaboration are not pieces we build so the rest of the product can work. Together, they are one of the most powerful parts of dohc and core to what we are offering.
+
+The engine is what turns a folder of text into a living workspace. It gives the workspace memory and continuity. Work should not disappear into a chat, become trapped in an app, or start from zero every time a new agent arrives.
+
+Collaboration is what lets humans and agents share that workspace as participants in the same work. The goal is not just several people typing into the same document. The goal is for humans and agents to think, act, review, hand off, and build on each other's work without losing context, ownership, or trust.
+
+A single person working with agents is already collaborating. Over time, that person should be able to bring in new agents, continue old work, understand what happened, and remain in control. Teams multiply this, but they do not define it.
+
+The engine gives the workspace memory. Collaboration lets humans and agents carry that memory forward together. This is how dohc becomes more than files, tools, and AI features. It becomes a place where work can continue, compound, and still belong to the people doing it.
+
 ### Individual first
 
 We should focus on dohc being magical and obvious for one person before it is for a team. This might seem counter-intuitive as the benefit of dohc grows as more teammates adopt it, but without one person using it first and finding value in it on its own, then no one will use it and we won't even get to teams using it.
@@ -176,13 +188,7 @@ When external behavior is unclear, inspect source instead of guessing.
   commit.
 - Cite the remote URL and full commit SHA when source affects the result.
 
-## Repeated work should become skills
-
-When a user likes how an agent handled something, dohc should make it easy to turn that process into a reusable skill, workflow, or playbook.
-
-The best version of dohc does not just complete tasks. It helps users and teams compound how they work. Every repeated process is a candidate to become clearer, more inspectable, and easier for agents to run next time.
-
-### Where this repo's own skills live
+## Where this repo's own skills live
 
 Claude Code and Codex each scan their own directory and neither scans the
 other's, so a shared skill needs one body and two adapters:
