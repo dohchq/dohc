@@ -3716,10 +3716,10 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
     }
 }
 
-/// The domain's identifier door: non-empty and inside the engine-wide length
-/// bound. Every identifier the domain persists passes through here or through
-/// [`bounded_identifier`], so no route can store one an answer could not then
-/// carry (#654).
+/// Validates a required caller-minted write identifier: non-empty and inside
+/// the engine-wide length bound, so no route can store one an answer could not
+/// then carry (#654). The identifiers a caller may leave empty take
+/// [`bounded_identifier`] instead.
 pub(crate) fn validate_identifier(value: &str, field: &'static str) -> Result<(), DomainError> {
     if value.is_empty() {
         return Err(DomainError::InvalidInput {
@@ -3727,7 +3727,6 @@ pub(crate) fn validate_identifier(value: &str, field: &'static str) -> Result<()
                 "workspace_id" => "workspace_id must not be empty",
                 "moment_id" => "moment_id must not be empty",
                 "object_id" => "object_id must not be empty",
-                "conflict_id" => "conflict_id must not be empty",
                 _ => "version_id must not be empty",
             },
         });

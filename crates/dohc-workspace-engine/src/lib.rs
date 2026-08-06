@@ -11243,28 +11243,24 @@ fn map_runtime(error: RuntimeError) -> WireError {
     // The rejections whose message carries numbers. `wire` takes a static
     // string, so the generic tail below would replace them with a placeholder —
     // and a size refusal that drops its limit and usage is the one an agent
-    // cannot act on (AGENTS.md: show agents the limits they hit).
-    if let RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) = &error {
-        return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
-    }
-    if let RuntimeError::Domain(domain @ DomainError::PayloadTooLarge { .. }) = &error {
-        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
-    }
-    // Same reason: this refusal names a constraint, a limit, a unit and an
-    // observed size, and `wire` takes a static string.
-    if let RuntimeError::Domain(domain @ DomainError::ConflictMetadataTooLarge { .. }) = &error {
-        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
-    }
-    if let RuntimeError::Domain(domain @ DomainError::ConflictResolveAnswerTooLarge { .. }) = &error
-    {
-        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
-    }
-    // And again: an over-long identifier names the field, the constraint, the
-    // limit, the unit and the observed length (#654). Same `PayloadTooLarge`
-    // code as the other size refusals above — one code for "what you sent is
-    // past a size limit", whichever part of it was.
-    if let RuntimeError::Domain(domain @ DomainError::IdentifierTooLong { .. }) = &error {
-        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
+    // cannot act on (AGENTS.md: show agents the limits they hit). Each of these
+    // names a constraint, a limit, a unit and an observed size (the identifier
+    // one also names the field, #654). One code for all of them —
+    // `PayloadTooLarge` means "what you sent is past a size limit", whichever
+    // part of it was.
+    match &error {
+        RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) => {
+            return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
+        }
+        RuntimeError::Domain(
+            domain @ (DomainError::PayloadTooLarge { .. }
+            | DomainError::ConflictMetadataTooLarge { .. }
+            | DomainError::ConflictResolveAnswerTooLarge { .. }
+            | DomainError::IdentifierTooLong { .. }),
+        ) => {
+            return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
+        }
+        _ => {}
     }
     if let RuntimeError::Domain(domain) = &error {
         let message = match domain {

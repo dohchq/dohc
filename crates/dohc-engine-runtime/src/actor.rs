@@ -9012,8 +9012,7 @@ fn ydoc_record_update_on_store(
     // The origination decision is made inside the append transaction and read
     // after it commits, so a decline reported to the caller is one that
     // actually survived the commit.
-    let declined: std::cell::Cell<Option<SharingDeclined>> = std::cell::Cell::new(None);
-    let declined_sink = &declined;
+    let mut sharing_declined: Option<SharingDeclined> = None;
     // A replicated, base-claimed lineage journals the ydoc.update DELTA in
     // the SAME transaction as the append (blob-before-log holds; TS parity:
     // ydocEngineDriver journals inside the recordUpdate write). Local-only
@@ -9038,20 +9037,21 @@ fn ydoc_record_update_on_store(
         request_id.as_deref(),
         faults,
         now_ms,
-        move |tx, outcome| {
+        |tx, outcome| {
             // Origination is asked FIRST and owns the base-once decision: it
             // originates only a lineage that has no base yet. The base is a
             // full state, so it already carries this append and every row the
             // lineage held before it — a delta beside it would be redundant.
             // Everything else journals its delta.
-            let origination = ydoc_originate_base_in_tx(tx, &journal_key, now_ms)?;
-            if let BaseOrigination::Declined(reason) = &origination {
-                declined_sink.set(Some(reason.clone()));
-            }
-            if let BaseOrigination::Originated {
-                base_snapshot_sha: base_sha,
-            } = &origination
-            {
+            let base_sha = match ydoc_originate_base_in_tx(tx, &journal_key, now_ms)? {
+                BaseOrigination::Originated { base_snapshot_sha } => Some(base_snapshot_sha),
+                BaseOrigination::Declined(reason) => {
+                    sharing_declined = Some(reason);
+                    None
+                }
+                BaseOrigination::NothingToDo => None,
+            };
+            if let Some(base_sha) = base_sha {
                 dohc_engine_sync::journal_local_op_in_tx(
                     tx,
                     &journal_key.workspace_id,
@@ -9101,7 +9101,7 @@ fn ydoc_record_update_on_store(
     )? {
         TxnOutcome::Committed(outcome) => Ok(YdocAppend {
             outcome,
-            sharing_declined: declined.take(),
+            sharing_declined,
         }),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
