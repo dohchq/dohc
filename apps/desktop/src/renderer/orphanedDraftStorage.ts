@@ -95,20 +95,33 @@ function readRows(): ReadResult {
 // Returns whether the rows are now on disk. A refusal (the quota is full)
 // leaves the caller's draft in memory only, and the caller reports it as
 // unpersisted rather than claiming a durability it does not have.
+//
+// No rows means no key, not an empty array. One rule, and it is what keeps a
+// write that DROPS rows from ever asking for space: it either removes the key
+// or replaces it with a subset of what that key already holds.
 function writeRows(rows: readonly StoredOrphanedDraft[]): boolean {
   try {
-    localStorage.setItem(ORPHANED_DRAFT_STORAGE_KEY, JSON.stringify(rows));
+    if (rows.length === 0) {
+      localStorage.removeItem(ORPHANED_DRAFT_STORAGE_KEY);
+    } else {
+      localStorage.setItem(ORPHANED_DRAFT_STORAGE_KEY, JSON.stringify(rows));
+    }
     return true;
   } catch {
     return false;
   }
 }
 
-// Every recovery still worth restoring, oldest first. Expired rows go, and so
-// does any row this build's floor refuses — both are dropped here AND removed
-// from storage. localStorage is plaintext that an older build or another tool
-// can write, so a stored row is classified again on the way out instead of
-// being trusted because it is stored.
+// Every recovery still worth restoring, oldest first. Expired rows go, so does
+// any row this build's floor refuses, and so does anything the read could not
+// parse — dropped here AND written out of storage. localStorage is plaintext
+// an older build or another tool can write, so what comes out of it is
+// classified again rather than trusted, and the rewrite triggers on whatever
+// ANY stage threw away: a value that is not a list of drafts has no path to
+// classify, no capture time to expire, and no notice row to dismiss, so
+// nothing else would ever remove it. A key that was not there discarded
+// nothing and is left alone. Only this pass needs the check — it runs before
+// the root renders, and so before any capture, dismissal, or rename.
 //
 // The floor reads a PATH, not a file. A rename dohc PERFORMS re-keys the row
 // and drops it when the new path is secret (`remapStoredDraftPaths`). A rename
@@ -118,13 +131,12 @@ function writeRows(rows: readonly StoredOrphanedDraft[]): boolean {
 // listed in the notice center, where Dismiss deletes it, and expires with the
 // rest.
 //
-// The rewrite triggers on anything this pass threw away, including what the
-// READ threw away. A value that is not a list of drafts has no path to
-// classify, no capture time to expire, and no notice row to dismiss, so
-// comparing only the rows that survived would leave its bytes in plaintext
-// with nothing left that could ever remove them. This is the only pass that
-// needs the check: it runs once, before the root renders, and so before any
-// capture, dismissal, or rename can touch the key.
+// A store that refuses the rewrite keeps its bytes, and there is nothing
+// better to do about it. The rewrite removes the key or replaces it with a
+// subset of what that key holds, so a full quota cannot be what refused it;
+// what is left is a store taking no writes at all, which would refuse a
+// removal just as readily. The refused row is not restored either way, so
+// nothing lists or copies it, and this pass runs again on the next launch.
 export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] {
   const { rows, discarded } = readRows();
   const kept = rows.filter(
@@ -177,9 +189,5 @@ export function remapStoredDraftPaths(
 // Test seam, matching `resetOrphanedDrafts`: module state and storage are one
 // store, so a suite that resets one must reset both.
 export function clearStoredDrafts(): void {
-  try {
-    localStorage.removeItem(ORPHANED_DRAFT_STORAGE_KEY);
-  } catch {
-    // No storage to clear.
-  }
+  writeRows([]);
 }

@@ -311,6 +311,61 @@ describe("orphanedDrafts persistence (#600)", () => {
     const partial = await relaunch();
     expect(draftsFor(partial.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
     expect(storedText()).not.toContain("SHAPE_BODY");
+    // MUTATION (empty write): write `[]` instead of removing the key. A scrub
+    // that drops every row then has to ASK the store for space rather than
+    // hand space back, which is the one way it could be refused.
+    expect(localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY)).toBeNull();
+  });
+
+  // The scrub is not a promise the store can always keep, and the honest
+  // answer is not a fallback. Removing the key instead would take the valid
+  // row's durable copy with it — and the only refusal that can reach a write
+  // which frees space is a store taking no writes at all, which refuses a
+  // removal too. So the pass states what it really offers: it runs again.
+  it("retries the scrub on the next launch when the store refuses the rewrite", async () => {
+    const capturedAt = Date.now();
+    localStorage.setItem(
+      ORPHANED_DRAFT_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: 1,
+          workspaceId: "ws-1",
+          path: ".env",
+          text: "API_KEY=shh",
+          capturedAtMs: capturedAt,
+        },
+        {
+          id: 2,
+          workspaceId: "ws-1",
+          path: "b.md",
+          text: "kept",
+          capturedAtMs: capturedAt,
+        },
+      ]),
+    );
+    const refused = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new Error("QuotaExceededError");
+      });
+
+    const blocked = await relaunch();
+    // The floor still refuses to restore it, so no surface lists or copies it.
+    expect(draftsFor(blocked.useOrphanedDrafts, "ws-1", ".env")).toHaveLength(0);
+    // The store took no write, so it still holds the bytes. Nothing pretends
+    // otherwise.
+    expect(storedText()).toContain("shh");
+
+    // MUTATION (retry): scrub once per install behind a flag, or treat the
+    // refused write as handled because the row was left out of the restore.
+    // The relaunch below then leaves the plaintext exactly where it is.
+    refused.mockRestore();
+    const next = await relaunch();
+    expect(storedText()).not.toContain("shh");
+    // ...and the valid row it was sharing the key with came through both runs.
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "b.md").map((d) => d.text),
+    ).toEqual(["kept"]);
   });
 
   // The read drops a row that is not a draft BEFORE the load can compare what
