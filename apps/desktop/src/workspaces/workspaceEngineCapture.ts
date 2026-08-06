@@ -57,6 +57,7 @@ import {
 } from "./workspaceEnginePolicyFile";
 import {
   isEngineSessionReconnectError,
+  isEngineWorkspaceOpenRefusedError,
   TRANSPORT_REBIND_MAX_BACKOFF_MS,
   WORKSPACE_OPEN_DEADLINE_MS,
   type EngineWorkspaceSessions,
@@ -2912,13 +2913,30 @@ export function createWorkspaceEngineCapture(
           // the materialized-sha comparison in actor.rs). Before this change
           // the open admitted every absent-head bind unconditionally, so these
           // rules only ever narrow that surface.
-          if (disk === "content") {
-            const refusal = new YDocUncapturedArtifactError(input.path);
+          // Both rules below release the session and then describe the DISK.
+          // A release the BUDGET refused describes neither: nothing was
+          // released, the daemon still holds the restart-safe session, and a
+          // disk verdict is one main answers with a plain `available:false` —
+          // the writable plain editor, over a live session (#533/#567's
+          // double writer). The deadline keeps its own classification, which
+          // main answers with `openTimedOut` (#564, codex r13).
+          const releaseBeforeRefusal = async (): Promise<{
+            error: unknown;
+          } | null> => {
             try {
               await session.close({ settle: false, settleOnRefusal: false });
+              return null;
             } catch (releaseError) {
-              refusal.cause = releaseError;
+              if (isEngineWorkspaceOpenRefusedError(releaseError)) {
+                throw releaseError;
+              }
+              return { error: releaseError };
             }
+          };
+          if (disk === "content") {
+            const release = await releaseBeforeRefusal();
+            const refusal = new YDocUncapturedArtifactError(input.path);
+            if (release !== null) refusal.cause = release.error;
             throw refusal;
           }
           if (disk === "missing" && updatesSeen === 0) {
@@ -2930,15 +2948,8 @@ export function createWorkspaceEngineCapture(
             // which means exactly "content arrived after all", escalates to a
             // SETTLING close and materializes the path this code is about to
             // call missing.
-            let releaseError: unknown;
-            let released = true;
-            try {
-              await session.close({ settle: false, settleOnRefusal: false });
-            } catch (error) {
-              released = false;
-              releaseError = error;
-            }
-            if (released) {
+            const release = await releaseBeforeRefusal();
+            if (release === null) {
               // RECHECKED immediately before the claim. The release above
               // awaited a daemon round trip, and this chain serializes engine
               // work, not the filesystem — an agent or an external editor can
@@ -2967,7 +2978,7 @@ export function createWorkspaceEngineCapture(
             // Refuse, and do NOT claim the path is missing: something is
             // writing it. The caller falls back and a later open resolves.
             const raced = new YDocOpenRacedError(input.path);
-            raced.cause = releaseError;
+            raced.cause = release.error;
             throw raced;
           }
         }

@@ -9,7 +9,10 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
+  EngineWorkspaceRetryDeadlineError,
   EngineWorkspaceSessions,
+  EngineWorkspaceShuttingDownError,
+  isEngineWorkspaceOpenRefusedError,
   isEngineWorkspaceRetryDeadlineError,
   type EngineWorkspaceRunOptions,
 } from "@dohc/workspace-engine-client/daemon";
@@ -17,6 +20,8 @@ import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { nativeTmpdir } from "./testTemp";
 import {
   YDOC_OPEN_RETRY_DEADLINE_MS,
+  YDocOpenRacedError,
+  YDocUncapturedArtifactError,
   createWorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 
@@ -222,5 +227,103 @@ describe("the document open's capture-chain hold (#564)", () => {
         `over 8 opens; YDOC_OPEN_RETRY_DEADLINE_MS=${YDOC_OPEN_RETRY_DEADLINE_MS}ms`,
     );
     expect(maxMs).toBeLessThan(YDOC_OPEN_RETRY_DEADLINE_MS);
+  });
+
+  // #564, codex round 13. The absent-head branches REFUSE by releasing the
+  // session and then throwing a refusal that describes the DISK. That release
+  // runs inside the same budget the task opened, so a flaky transport can
+  // leave it spent — and then the close rejects with the deadline error, the
+  // daemon still holds the restart-safe session, and the refusal thrown in its
+  // place is one main answers with a plain `available:false`. The renderer
+  // hands the user a writable plain editor over a session the engine has not
+  // released: the double writer #533 and #567 exist to prevent.
+  describe("a release the budget refused is not a disk verdict", () => {
+    function captureRefusingRelease(
+      root: string,
+      sessions: EngineWorkspaceSessions,
+      closeError: unknown,
+    ) {
+      const doc = new Y.Doc();
+      return createWorkspaceEngineCapture({
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        rustEngineSessions: sessions,
+        // Absent head AND absent lineage: the bind the absent-head contract
+        // judges by what is on disk.
+        openRustYDocProviderSession: async () => ({
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext" as const,
+          path: "note.md",
+          head: "absent" as const,
+          lineage: "absent" as const,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () =>
+            ({ sha256: "a".repeat(64), markdown: "" }) as never,
+          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
+          close: async () => {
+            throw closeError;
+          },
+        }),
+      });
+    }
+
+    async function refusalFrom(
+      root: string,
+      closeError: unknown,
+    ): Promise<unknown> {
+      const { sessions } = recordingSessions();
+      const engine = captureRefusingRelease(root, sessions, closeError);
+      engine.start();
+      await engine.flush();
+      const refusal = await engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+      await engine.stop();
+      return refusal;
+    }
+
+    it("reports the timeout, not an uncaptured artifact, when the release times out", async () => {
+      const root = await tempRoot();
+      // Content on disk: the branch that refuses whatever else is true.
+      await write(root, "note.md", "uncaptured bytes\n");
+
+      const refusal = await refusalFrom(
+        root,
+        new EngineWorkspaceRetryDeadlineError(
+          WORKSPACE_ID,
+          "withRetryBudget budgetMs",
+          YDOC_OPEN_RETRY_DEADLINE_MS,
+          "since the first failure",
+          YDOC_OPEN_RETRY_DEADLINE_MS,
+          YDOC_OPEN_RETRY_DEADLINE_MS,
+          2,
+          new Error("transport-error"),
+        ),
+      );
+
+      // MUTATION: attach the release failure as `refusal.cause` and throw the
+      // artifact refusal anyway -> main answers a bare `available:false` and
+      // the renderer opens the writable plain editor over a session the
+      // daemon still holds.
+      expect(isEngineWorkspaceRetryDeadlineError(refusal)).toBe(true);
+      expect(refusal).not.toBeInstanceOf(YDocUncapturedArtifactError);
+    });
+
+    it("reports the shutdown, not a raced open, when quit refuses the release", async () => {
+      const root = await tempRoot();
+      // No file: the sibling branch, which would otherwise claim the open
+      // raced a writer and fall back the same silent way.
+
+      const refusal = await refusalFrom(
+        root,
+        new EngineWorkspaceShuttingDownError(),
+      );
+
+      // MUTATION: keep `released = false` as the only classification -> the
+      // raced refusal downgrades a quitting app to the plain editor.
+      expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+      expect(refusal).not.toBeInstanceOf(YDocOpenRacedError);
+    });
   });
 });
