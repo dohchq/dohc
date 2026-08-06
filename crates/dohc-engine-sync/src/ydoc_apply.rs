@@ -1499,23 +1499,17 @@ fn map_collab_hard_error(error: CollabError) -> SyncError {
 
 fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncError {
     match error {
-        DomainError::InvalidText { .. } | DomainError::InvalidPath { .. } => {
-            SyncError::InvalidInput { reason }
-        }
-        // A size refusal is a caller mistake with numbers attached, not
-        // corruption (#656). Without this arm it falls to the hard catch-all
-        // below and is reported as `StorageError::corrupt_public` — the exact
-        // shape #596 removed for the fold's own cap. Carry the measurements
-        // through instead of flattening them.
-        DomainError::PayloadTooLarge {
-            constraint,
-            limit_bytes,
-            observed_bytes,
-        } => SyncError::BlobTooLarge {
-            constraint,
-            limit_bytes,
-            observed_bytes,
-        },
+        // A size refusal is a caller mistake, not corruption (#656): with no
+        // arm here it reaches the hard catch-all below as
+        // `StorageError::corrupt_public`. It belongs in the SAME class as the
+        // other caller mistakes because only `InvalidInput` is ACKNOWLEDGED —
+        // the apply path answers it with `RefusedRetainingMutation` and
+        // `share_disposition` skips it. A measured variant aborts the
+        // transaction instead, so the relay redelivers the same coordinate
+        // forever with every later operation stuck behind it.
+        DomainError::InvalidText { .. }
+        | DomainError::InvalidPath { .. }
+        | DomainError::PayloadTooLarge { .. } => SyncError::InvalidInput { reason },
         hard @ DomainError::InvalidInput {
             reason: "object_id is already bound to another object",
         } => map_domain_hard_error(hard),

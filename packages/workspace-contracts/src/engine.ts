@@ -82,6 +82,9 @@ export type VersionedTextStoreErrorCode =
   | "invalid-timestamp"
   | "invalid-version-name"
   | "invalid-workspace"
+  // A write past a measured byte ceiling. Its message carries the constraint,
+  // the limit and the observed usage, so callers read the numbers there.
+  | "payload-too-large"
   | "persist-failed"
   | "state-corrupt"
   | "target-path-exists"
