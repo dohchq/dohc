@@ -1885,14 +1885,23 @@ function MarkdownView(props: {
                 workspaceId={props.workspaceId}
                 suggestedName={filenameStem(props.path)}
                 // The same rule the engine branch answers to: emit the
-                // document, or refuse. A timed-out open leaves this branch
-                // showing the DISK, while the engine may still hold a session
-                // whose Y.Doc took replicated updates the file has never seen
-                // (#564, codex r19) — the read-only editor beside this menu is
-                // the same statement. The refusal reads "Document not open",
-                // and the notice below it offers the retry that resolves this.
+                // document, or refuse. This branch shows the DISK, and until
+                // the engine open ANSWERS there is no telling whether the
+                // disk is the document — a session that binds a moment later
+                // may hold replicated updates the file has never seen (#564,
+                // codex r19/r21). Refuse for the whole unresolved window,
+                // which the editor beside this menu already spends read-only
+                // or opening. The refusal reads "Document not open", and the
+                // notice below offers the retry that resolves it.
+                //
+                // `opening` is the wait and `openTimedOut` is the wait giving
+                // up; both mean the same thing to an export. Once the open
+                // answers "not engine-backed", the file IS the document and
+                // this lifts.
                 getMarkdown={() =>
-                  engine.openTimedOut ? null : serializeDraftRef.current()
+                  engine.opening || engine.openTimedOut
+                    ? null
+                    : serializeDraftRef.current()
                 }
               />
             ) : null}

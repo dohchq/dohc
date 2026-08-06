@@ -2307,8 +2307,24 @@ export function createWorkspaceEngineCapture(
     // teardown may still hold the reservation with the on-disk state
     // indeterminate, and a dead generation still owns the path through its
     // canonical doc. Neither may have a partial write journaled under it.
-    const liveSessionStatus = liveYDocSessions.get(event.path)?.status;
-    if (liveSessionStatus !== undefined && liveSessionStatus !== "live") return;
+    //
+    // An ORPHAN is the exception, and it has to be, or the discharge above
+    // promises a recovery it cannot reach. That entry exists because a
+    // refused open could not release its session, and the retry that
+    // discharges it converges only once the file is captured — so deferring
+    // capture for the entry waiting on that capture is a deadlock, and the
+    // document stays read-only for the rest of the run (#564, codex r21).
+    // It is also the SAFE exception: the doc was never handed out and holds
+    // nothing the user typed, so there is no partial write to journal under
+    // it, and the file is the only truth this path has.
+    const liveSession = liveYDocSessions.get(event.path);
+    if (
+      liveSession !== undefined &&
+      liveSession.status !== "live" &&
+      !liveSession.orphaned
+    ) {
+      return;
+    }
     if (!policyTracksPath(event.path, policy)) return;
     // Deletes trust the watcher's confirmed-absent check; updates re-read the
     // CURRENT disk state so rapid successive writes coalesce to the final
@@ -2910,7 +2926,7 @@ export function createWorkspaceEngineCapture(
         const retained = liveYDocSessions.get(input.path);
         if (retained?.status === "failing-close" && retained.orphaned) {
           try {
-            await retained.close({ settle: false, settleOnRefusal: false });
+            await retained.close({ settle: false });
           } catch (dischargeError) {
             if (isEngineWorkspaceOpenRefusedError(dischargeError)) {
               throw dischargeError;
@@ -3546,8 +3562,25 @@ export function createWorkspaceEngineCapture(
         const closeEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
+          // THE ORPHAN'S POLICY, and it belongs to the ORPHAN rather than to
+          // each caller. An orphan is a session no caller ever received: its
+          // doc was seeded from neither a head nor a snapshot, so it holds
+          // nothing of the user's, and settling it writes what replication
+          // delivered OVER disk bytes the watcher has not captured yet.
+          //
+          // Two rounds fixed that at two call sites — the first release, then
+          // the discharge — and a third was still escalating: the lifecycle
+          // sweep a version switch, merge, rename or delete reaches. Three
+          // sites is a class, so the rule moved here. Every present and
+          // future caller inherits it, and a caller asking to settle an
+          // orphan is asking for the one write that is never correct
+          // (#564, codex r21).
+          const effective: WorkspaceEngineYDocCloseOptions | undefined =
+            liveEntry.orphaned
+              ? { ...opts, settle: false, settleOnRefusal: false }
+              : opts;
           try {
-            await session.close(opts);
+            await session.close(effective);
           } catch (error) {
             if (error instanceof YdocReleasedWithSettleFailureError) {
               // A locked settle under a SUCCEEDED release is the replicated
@@ -3708,16 +3741,19 @@ export function createWorkspaceEngineCapture(
           // double writer). The deadline keeps its own classification, which
           // main answers with `openTimedOut` (#564, codex r13).
           const releaseOrRefuse = async (): Promise<void> => {
+            // Marked BEFORE the release, not after: no caller receives this
+            // wrapper either way, and marking first is what puts this close
+            // under the orphan's own never-settle policy instead of spelling
+            // it out here (#564, codex r21).
+            liveEntry.orphaned = true;
             try {
-              await session.close({ settle: false, settleOnRefusal: false });
+              await liveEntry.close({ settle: false });
             } catch (releaseError) {
               // Whatever refused it, this session is still the daemon's, and
-              // the refusal below is the LAST reference to it — no caller
-              // receives this wrapper. Retain it as an ORPHAN, or the session
-              // keeps its lease and every later open of this path answers
-              // ydoc-session-busy with nothing left to close it (#564,
-              // codex r14).
-              liveEntry.orphaned = true;
+              // the refusal below is the LAST reference to it. Retain it, or
+              // the session keeps its lease and every later open of this path
+              // answers ydoc-session-busy with nothing left to close it
+              // (#564, codex r14).
               retainUnreleased();
               // The BUDGET's own refusals keep their identity — an agent
               // reading the message needs the limit that fired. Everything

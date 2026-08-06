@@ -167,6 +167,32 @@ describe("engine-mode export with no mounted serializer", () => {
     );
   });
 
+  // codex r21: the same rule for the WAIT, not just for the wait giving up.
+  // While the open is unresolved the disk may not be the document — a session
+  // that binds a moment later can hold replicated updates the file has never
+  // seen — and that window is long now that a refused release can hold it.
+  it("refuses the export while the engine open is still unresolved", async () => {
+    const user = userEvent.setup();
+    const bridge = engineBridge(DOC_MARKDOWN);
+    // The open never answers: the whole test sits inside the opening window.
+    const openEngineYDocSession = vi.fn(
+      async () => await new Promise<never>(() => {}),
+    );
+    vi.stubGlobal("dohcDesktop", { ...bridge, openEngineYDocSession });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    // The document is on screen through the local branch while it opens.
+    await screen.findByTestId("document-menu-trigger", {}, { timeout: 5_000 });
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+
+    // MUTATION: refuse only `openTimedOut` -> the disk body exports while the
+    // engine is still deciding what this document is.
+    expect(await screen.findByText("Document not open")).toBeTruthy();
+    expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
+  });
+
   it("exports the read body when the document is not engine-backed", async () => {
     const user = userEvent.setup();
     const bridge = engineBridge(DOC_MARKDOWN, { available: false });

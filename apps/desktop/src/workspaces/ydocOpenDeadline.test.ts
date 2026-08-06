@@ -488,6 +488,142 @@ describe("the document open's capture-chain hold (#564)", () => {
       await engine.stop();
     });
 
+    it("refuses to settle an orphan for a lifecycle close either", async () => {
+      // codex r21, and the third site of one mechanism — which is why the
+      // never-settle rule now lives on the ORPHAN instead of at each caller.
+      // A registered orphan is visible to the lifecycle sweep every version
+      // switch, merge, rename and delete runs, and that sweep closes with
+      // `{ settle: false }` alone: the provider escalates a refused close into
+      // a SETTLING one, over the uncaptured file.
+      const root = await tempRoot();
+      const uncaptured = "bytes the watcher has not ingested yet\n";
+      await write(root, "note.md", uncaptured);
+      const { sessions } = recordingSessions();
+      const doc = new Y.Doc();
+      const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> =
+        [];
+      const engine = createWorkspaceEngineCapture({
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        rustEngineSessions: sessions,
+        openRustYDocProviderSession: async () => ({
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext" as const,
+          path: "note.md",
+          head: "absent" as const,
+          lineage: "absent" as const,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () =>
+            ({ sha256: "a".repeat(64), markdown: "" }) as never,
+          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
+          close: async (closeOptions?: {
+            settle?: boolean;
+            settleOnRefusal?: boolean;
+          }) => {
+            closeCalls.push({ ...closeOptions });
+            throw new Error("unsettled-close");
+          },
+        }),
+      });
+      engine.start();
+      await engine.flush();
+
+      const refusal = await engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
+
+      // A version switch sweeps live sessions for the paths it is about to
+      // rewrite, and this orphan is one of them.
+      await engine
+        .settleAndCloseLiveSessionsForPath("note.md")
+        .catch(() => undefined);
+
+      // MUTATION: drop the entry-level policy -> the sweep's `{ settle: false }`
+      // arrives without `settleOnRefusal: false`, the provider escalates, and
+      // the doc lands on the user's uncaptured bytes.
+      for (const call of closeCalls) {
+        expect(call).toMatchObject({ settle: false, settleOnRefusal: false });
+      }
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(uncaptured);
+      await engine.stop();
+    });
+
+    it("captures the file an orphan is waiting on, so the retry converges", async () => {
+      // codex r21. Round 20 said the retry "converges once the watcher
+      // captures the file" — and a retained orphan is marked failing-close,
+      // which made captureOnePath DROP that path's events. The capture the
+      // discharge waits for could never run: permanently read-only, with a
+      // retry that could never succeed. The promise has to be reachable.
+      const root = await tempRoot();
+      await write(root, "note.md", "the user's bytes\n");
+      const { sessions } = recordingSessions();
+      const doc = new Y.Doc();
+      let captured = false;
+      let opens = 0;
+      const engine = createWorkspaceEngineCapture({
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        rustEngineSessions: sessions,
+        openRustYDocProviderSession: async () => {
+          opens += 1;
+          // Open 1 binds absent-head over content and its release refuses,
+          // which orphans the session. Once the file is CAPTURED the lineage
+          // is no longer dirty against it, so the discharge releases and the
+          // reopen has a head to bind.
+          const absent = !captured;
+          return {
+            doc,
+            initialUpdate: Y.encodeStateAsUpdate(doc),
+            contentKind: "plaintext" as const,
+            path: "note.md",
+            head: absent ? ("absent" as const) : ("present" as const),
+            lineage: absent ? ("absent" as const) : ("existing" as const),
+            applyLocalUpdate: async () => undefined,
+            settleNow: async () =>
+              ({ sha256: "a".repeat(64), markdown: "" }) as never,
+            applyExternalMarkdownEdit: async () =>
+              ({ kind: "merged" }) as never,
+            close: async () => {
+              if (!captured) throw new Error("unsettled-close");
+            },
+          };
+        },
+      });
+      engine.start();
+      await engine.flush();
+
+      const refusal = await engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
+
+      // THE STEP THAT COULD NOT HAPPEN: the watcher's event for the path the
+      // orphan is holding. Counted against a BEFORE, because the startup
+      // capture of this file already left a moment — an "any moments at all"
+      // assertion would pass whether or not this one ran.
+      const before = (await engine.listMoments({ limit: 200 })).moments.length;
+      await write(root, "note.md", "the user's bytes, edited outside dohc\n");
+      // MUTATION: defer capture for an orphan like any other failing-close
+      // entry -> this records nothing, and the retry below refuses forever.
+      engine.captureBatch([{ path: "note.md", operation: "update" }]);
+      await engine.flush();
+      const after = (await engine.listMoments({ limit: 200 })).moments.length;
+      expect(after).toBeGreaterThan(before);
+      captured = true;
+
+      // The retry discharges the orphan and binds.
+      const session = await engine.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+      });
+      expect(session.doc).toBe(doc);
+      expect(opens).toBe(2);
+      await session.close({ settle: false });
+      await engine.stop();
+    });
+
     it("reports the shutdown, not a raced open, when quit refuses the release", async () => {
       const root = await tempRoot();
       // No file: the sibling branch, which would otherwise claim the open
