@@ -1,5 +1,6 @@
 import {
   chmod,
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
@@ -2369,6 +2370,57 @@ describe("a symlink cannot alias a reserved area", () => {
         });
         expect(refusalReason(written)).toMatch(/no target|reserved/i);
         await expect(stat(join(ctx.root, ".dohc", "settings.local.json"))).rejects.toThrow();
+      });
+    });
+
+    // Refusing every path with a broken link on it takes away the one
+    // operation that FIXES a broken link. Delete and a move's source rename
+    // the entry, so the alias is the object here, not a route into `.dohc`.
+    it("deletes the broken link itself, and .dohc survives it", async () => {
+      await withDanglingAlias(async (ctx) => {
+        await expect(deleteWorkspacePath(ctx, { path: "meta" })).resolves.toMatchObject({
+          ok: true,
+          trashed: true,
+        });
+        // The link entry is gone. `.dohc` exists only because the delete's own
+        // ensureRecordable made it -- which is the check-then-create window the
+        // refusal guards, and renaming the entry closes it without following.
+        await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
+        expect((await stat(join(ctx.root, ".dohc"))).isDirectory()).toBe(true);
+      });
+    });
+
+    it("renames the broken link, and it is still a broken link", async () => {
+      await withDanglingAlias(async (ctx) => {
+        await expect(
+          moveWorkspacePath(ctx, { fromPath: "meta", toPath: "broken" }),
+        ).resolves.toMatchObject({ ok: true });
+        await expect(lstat(join(ctx.root, "meta"))).rejects.toThrow();
+        expect((await lstat(join(ctx.root, "broken"))).isSymbolicLink()).toBe(true);
+        expect((await stat(join(ctx.root, ".dohc"))).isDirectory()).toBe(true);
+      });
+    });
+
+    // The relaxation is the LAST component only. A broken link partway along a
+    // path is still a route, and where it leads is still unknown.
+    it("still refuses a delete THROUGH the broken link", async () => {
+      await withDanglingAlias(async (ctx) => {
+        const deleted = await deleteWorkspacePath(ctx, { path: "meta/settings.local.json" });
+        expect(refusalReason(deleted)).toMatch(/no target/i);
+      });
+    });
+
+    // Climbing past the link does not skip the reserved re-decision: the
+    // parent's REAL path plus this name is what the rule reads.
+    it("still refuses deleting a broken link that really sits inside .dohc", async () => {
+      await withWorkspace(async (ctx) => {
+        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+        await symlink(join(ctx.root, ".dohc", "absent"), join(ctx.root, ".dohc", "broken"), "dir");
+        await symlink(join(ctx.root, ".dohc"), join(ctx.root, "alias"), "dir");
+
+        const deleted = await deleteWorkspacePath(ctx, { path: "alias/broken" });
+        expect(refusalReason(deleted)).toMatch(/reserved/i);
+        expect((await lstat(join(ctx.root, ".dohc", "broken"))).isSymbolicLink()).toBe(true);
       });
     });
   });

@@ -133,7 +133,15 @@ type RealTarget =
 const ABSENT_CODES = new Set(["ENOENT", "ENOTDIR"]);
 const UNNAMED_ERROR = "unknown error";
 
-async function realRelativeInRoot(root: string, absolute: string): Promise<RealTarget> {
+// `noFollow` says the caller mutates the ENTRY at `absolute` rather than
+// reading or writing through it -- delete and a move's source, both of which
+// rename the entry itself. Only the final component changes meaning: a broken
+// link there is the thing being removed, not a step on the way somewhere.
+async function realRelativeInRoot(
+  root: string,
+  absolute: string,
+  noFollow = false,
+): Promise<RealTarget> {
   let realRoot: string;
   try {
     realRoot = await realpath(root);
@@ -166,11 +174,19 @@ async function realRelativeInRoot(root: string, absolute: string): Promise<RealT
       if (!climbable) return { ok: false, reason: "unreadable-path", code: realpathCode };
       try {
         await lstat(probe);
-        // The link is there and realpath will not follow it. ENOENT proves the
-        // target is missing; ELOOP proves a cycle. Only the first is dangling.
-        return ABSENT_CODES.has(realpathCode)
-          ? { ok: false, reason: "dangling-symlink" }
-          : { ok: false, reason: "unresolvable-symlink", code: realpathCode };
+        // Deleting or renaming a broken link IS the cleanup, so a no-follow
+        // mutation climbs past one at the END of the path the same way it
+        // climbs past a name that is not there. Nothing is relaxed: the parent
+        // chain must still resolve inside the root, and the reserved rule below
+        // still decides on the parent's real path plus this name.
+        if (!noFollow || probe !== absolute || !ABSENT_CODES.has(realpathCode)) {
+          // The link is there and realpath will not follow it. ENOENT proves
+          // the target is missing; ELOOP proves a cycle. Only the first is
+          // dangling.
+          return ABSENT_CODES.has(realpathCode)
+            ? { ok: false, reason: "dangling-symlink" }
+            : { ok: false, reason: "unresolvable-symlink", code: realpathCode };
+        }
       } catch (cause) {
         const code = errnoCode(cause) ?? UNNAMED_ERROR;
         if (!ABSENT_CODES.has(code)) {
@@ -209,7 +225,7 @@ async function isWithinRealRoot(root: string, absolute: string): Promise<boolean
 async function safeResolve(
   ctx: ToolContext,
   relativePath: string,
-  access: "read" | "write" = "write",
+  access: "read" | "write" | "entry" = "write",
 ): Promise<
   | { ok: true; absolute: string; normalized: string; realRelative: string }
   | { ok: false; reason: string }
@@ -217,6 +233,8 @@ async function safeResolve(
   // "write" (the default — fail closed) refuses the reserved shared-with-me
   // projection; "read" allows it (share mounts exist to be read by agents)
   // while keeping traversal/encoding/ignored-segment guards identical.
+  // "entry" is "write" for every rule, and additionally says the caller renames
+  // the entry itself rather than following it — see realRelativeInRoot.
   const validated =
     access === "read"
       ? validateUserReadPath(relativePath)
@@ -225,7 +243,7 @@ async function safeResolve(
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }
   const absolute = join(ctx.root, validated.normalized);
-  const target = await realRelativeInRoot(ctx.root, absolute);
+  const target = await realRelativeInRoot(ctx.root, absolute, access === "entry");
   if (!target.ok) {
     return { ok: false, reason: unresolvedPathRefusal(target, relativePath) };
   }
@@ -293,7 +311,7 @@ function unresolvedPathRefusal(
 // more specific rule wins.
 function resolvedAreaRefusal(
   realRelative: string,
-  access: "read" | "write",
+  access: "read" | "write" | "entry",
 ): { kind: "reserved" | "ignored"; article: "a" | "an"; explain: string } | null {
   if (isDohcMetadataPath(realRelative)) {
     return {
@@ -302,7 +320,7 @@ function resolvedAreaRefusal(
       explain: "dohc reserves .dohc for workspace state. Use a path in your own files.",
     };
   }
-  if (access === "write" && isSharedWithMePath(realRelative)) {
+  if (access !== "read" && isSharedWithMePath(realRelative)) {
     return {
       kind: "reserved",
       article: "a",
@@ -1181,7 +1199,9 @@ export async function moveWorkspacePath(
   ctx: ToolContext,
   args: { fromPath: string; toPath: string; overwrite?: boolean; summary?: string },
 ) {
-  const from = await safeResolve(ctx, args.fromPath);
+  // The source is renamed as an entry (a link moves as a link); the
+  // destination is created, so it keeps the following "write" rules.
+  const from = await safeResolve(ctx, args.fromPath, "entry");
   if (!from.ok) return { ok: false as const, reason: from.reason };
   const to = await safeResolve(ctx, args.toPath);
   if (!to.ok) return { ok: false as const, reason: to.reason };
@@ -1218,7 +1238,8 @@ export async function deleteWorkspacePath(
   ctx: ToolContext,
   args: { path: string; summary?: string },
 ) {
-  const resolved = await safeResolve(ctx, args.path);
+  // Renamed into the trash as an entry: a broken link is deleted, not followed.
+  const resolved = await safeResolve(ctx, args.path, "entry");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
