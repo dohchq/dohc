@@ -2698,16 +2698,39 @@ export function createWorkspaceEngineCapture(
         // An ORPHANED session — one a refused open could not release — still
         // belongs to the daemon, which answers ydoc-session-busy for as long
         // as it stands, so the user's "Try again" would refuse forever.
-        // Discharge it first. This close may settle where the refused one
-        // would not, and that is honest now: the refusal proved content
-        // exists, and this open is not about to call the path missing.
+        // Discharge it first, on the SAME terms the release that orphaned it
+        // used: `settleOnRefusal: false`.
+        //
+        // That flag is the whole point, and an earlier round of this PR had
+        // the reasoning wrong. It said the discharge could settle because "the
+        // refusal proved content exists" — conflating content existing in the
+        // DOC with the disk being captured. The danger was never calling the
+        // path missing. It is rule 1 above: this doc was seeded from neither a
+        // head nor a snapshot, so settling it writes whatever replication
+        // delivered OVER bytes the watcher has not ingested yet. Without the
+        // flag the provider escalates a repeated UnsettledClose to a SETTLING
+        // close (ydocProviderSession), and a quick retry on a dirty orphan
+        // materializes the Y.Doc over the user's uncaptured file (#564, codex
+        // r20).
+        //
+        // A discharge that refuses again leaves the orphan retained and
+        // refuses the open as unreleased — read-only, with a retry. It
+        // converges: once the watcher captures the file, the lineage is no
+        // longer dirty against it and the next discharge releases cleanly.
         //
         // Only an orphan. A failing-close session someone still HOLDS is
         // converged by its holder and by the version ops, and a second open
         // of it must keep refusing.
         const retained = liveYDocSessions.get(input.path);
         if (retained?.status === "failing-close" && retained.orphaned) {
-          await retained.close({ settle: false });
+          try {
+            await retained.close({ settle: false, settleOnRefusal: false });
+          } catch (dischargeError) {
+            if (isEngineWorkspaceOpenRefusedError(dischargeError)) {
+              throw dischargeError;
+            }
+            throw new YDocSessionUnreleasedError(input.path, dischargeError);
+          }
         }
         // Resolve the active version through this capture's store, then open the
         // provider through the same Rust workspace-session owner. Capture,

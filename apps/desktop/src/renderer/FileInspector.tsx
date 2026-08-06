@@ -2568,9 +2568,16 @@ function EngineOpenTimedOutNotice(props: {
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
       {/* "document", the noun the editing controls beside this already use
-          ("You can edit this document when it finishes opening."). */}
+          ("You can edit this document when it finishes opening.").
+
+          No "in time": this notice answers every refusal `main` maps to
+          `openTimedOut`, and only one of them is a timeout. A session the
+          daemon would not release refuses IMMEDIATELY, and naming a cause the
+          user did not hit sends them looking for a slow machine (#564, codex
+          r20). What is true of all of them is the sentence below, and the
+          retry is the same either way. */}
       <span>
-        dohc could not open this document for editing in time.
+        dohc could not open this document for editing.
         {props.contentShown ? " It is read-only for now." : ""}
       </span>
       <button

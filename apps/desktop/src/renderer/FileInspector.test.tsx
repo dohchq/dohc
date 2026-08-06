@@ -1333,7 +1333,7 @@ describe("engine markdown source view", () => {
       { timeout: 5_000 },
     );
     expect(notice.textContent).toContain(
-      "dohc could not open this document for editing in time.",
+      "dohc could not open this document for editing.",
     );
     expect(notice.textContent).toContain("It is read-only for now.");
     // The content still renders — read-only, not replaced.
@@ -1543,7 +1543,7 @@ describe("engine markdown source view", () => {
       { timeout: 5_000 },
     );
     expect(notice.textContent).toContain(
-      "dohc could not open this document for editing in time.",
+      "dohc could not open this document for editing.",
     );
     // The read failure stays stated beside it — and the notice must NOT
     // promise read access to content that is not on screen.

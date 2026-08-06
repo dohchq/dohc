@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
@@ -417,6 +417,75 @@ describe("the document open's capture-chain hold (#564)", () => {
       // The surface stays read-only because `main` answers this with
       // `openTimedOut` — the same door the deadline uses.
       expect(isYDocSessionUnreleasedError(refusal)).toBe(true);
+    });
+
+    it("discharges a dirty orphan without settling it over the file", async () => {
+      // codex r20, and the last data-loss door. The discharge released on
+      // easier terms than the release that orphaned the session: no
+      // `settleOnRefusal: false`, so a repeated UnsettledClose escalated to a
+      // SETTLING close inside the provider. The doc this session holds was
+      // seeded from neither a head nor a snapshot — settling it writes what
+      // replication delivered OVER bytes the watcher has not captured yet,
+      // which is exactly what rule 1 refuses the open to prevent.
+      const root = await tempRoot();
+      const uncaptured = "bytes the watcher has not ingested yet\n";
+      await write(root, "note.md", uncaptured);
+      const { sessions } = recordingSessions();
+      const doc = new Y.Doc();
+      const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> =
+        [];
+      const engine = createWorkspaceEngineCapture({
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        rustEngineSessions: sessions,
+        openRustYDocProviderSession: async () => ({
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext" as const,
+          path: "note.md",
+          head: "absent" as const,
+          lineage: "absent" as const,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () =>
+            ({ sha256: "a".repeat(64), markdown: "" }) as never,
+          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
+          close: async (closeOptions?: {
+            settle?: boolean;
+            settleOnRefusal?: boolean;
+          }) => {
+            closeCalls.push({ ...closeOptions });
+            // The daemon keeps refusing: the lineage is dirty and the file it
+            // would settle over is still uncaptured.
+            throw new Error("unsettled-close");
+          },
+        }),
+      });
+      engine.start();
+      await engine.flush();
+
+      const first = await engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(YDocSessionUnreleasedError);
+
+      // "Try again" on the retained orphan.
+      const retry = await engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+
+      // It refuses again rather than forcing the release, and stays read-only
+      // with a retry — which converges once the watcher captures the file.
+      expect(retry).toBeInstanceOf(YDocSessionUnreleasedError);
+      // MUTATION: discharge with `{ settle: false }` alone -> the provider
+      // escalates the repeated refusal to a SETTLING close, and the doc lands
+      // on top of the user's uncaptured bytes.
+      expect(closeCalls).toEqual([
+        { settle: false, settleOnRefusal: false },
+        { settle: false, settleOnRefusal: false },
+      ]);
+      // The bytes are still the user's.
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(uncaptured);
+      await engine.stop();
     });
 
     it("reports the shutdown, not a raced open, when quit refuses the release", async () => {
