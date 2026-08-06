@@ -698,6 +698,31 @@ export function createCaptureLiveStores(
     return { ...metadata, text };
   }
 
+  /**
+   * Restore the conflict sides the daemon withheld for being over-cap.
+   *
+   * A row past the conflict row frame cap (`conflicts_list`, lib.rs) arrives
+   * with each over-cap side's body nulled beside its digest, the same way a
+   * capped head read does. The three sides share the one reader, because a
+   * conflict whose base and current are identical names one digest twice.
+   */
+  async function hydratedConflict(conflict: ConflictRecord): Promise<ConflictRecord> {
+    const body = withheldBodies();
+    const side = async (state: ConflictFileState): Promise<ConflictFileState> => {
+      const snapshot = state.snapshot;
+      if (snapshot === null || snapshot.text !== null) return state;
+      const text = await body(snapshot.blobSha256, snapshot.path);
+      const { inbandLimitBytes: _inbandLimitBytes, ...metadata } = snapshot;
+      return { ...state, snapshot: { ...metadata, text } };
+    };
+    return {
+      ...conflict,
+      base: await side(conflict.base),
+      current: await side(conflict.current),
+      incoming: await side(conflict.incoming),
+    };
+  }
+
   // One open conflict by id, walking the daemon's `conflicts.list` pages until
   // the id appears. Null when no open conflict has the id.
   async function findOpenConflict(
@@ -711,11 +736,17 @@ export function createCaptureLiveStores(
           await adapter.listTextConflicts({
             workspaceId,
             status: "open",
+            // Ids only, like the merge's resume scan. The walk keeps ONE
+            // conflict, so hydrating each page would fetch up to three bodies
+            // per conflict passed over and discard every one of them (#655).
+            bodies: "withheld",
             ...(afterConflictId !== undefined ? { afterConflictId } : {}),
           }),
       );
       const match = page.conflicts.find((entry) => entry.id === conflictId);
-      if (match) return conflictFromWire(match);
+      // Callers read this conflict's bodies, so the match — and only the
+      // match — is hydrated.
+      if (match) return conflictFromWire(await hydratedConflict(match));
       afterConflictId = page.nextAfterConflictId ?? undefined;
     } while (afterConflictId !== undefined);
     return null;

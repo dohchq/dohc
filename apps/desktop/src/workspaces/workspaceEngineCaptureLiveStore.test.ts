@@ -72,20 +72,25 @@ type CompletedBlob = Parameters<
 >[0];
 
 /**
- * The daemon's answer to `versionedText.readBlob` for the one digest this
+ * The daemon's answer to `versionedText.readBlob` for the digests this
  * workspace references, and a refusal for every other one:
  * `read_text_blob_with_hydration` (store.rs) authorizes a digest against the
  * workspace's text references before it reads a byte. A fake that answered any
  * digest could not fail, and would pin nothing about the request sent.
  *
- * Delivery is out of band because the body is past the 48 KiB egress cap.
+ * Delivery is out of band because the bodies are past the 48 KiB egress cap.
  */
 function overCapBlobResult(
   request: Request,
   deliver: (blob: CompletedBlob) => void,
+  bodies: ReadonlyMap<string, Uint8Array> = new Map([
+    [OVER_CAP_SHA256, OVER_CAP_BYTES],
+  ]),
 ): Response["result"] {
   const params = request.params as { sha256?: unknown };
-  if (params.sha256 !== OVER_CAP_SHA256) {
+  const bytes =
+    typeof params.sha256 === "string" ? bodies.get(params.sha256) : undefined;
+  if (bytes === undefined) {
     throw {
       wireError: {
         code: "INVALID_PARAMS",
@@ -97,16 +102,45 @@ function overCapBlobResult(
   deliver({
     requestId: request.id,
     streamId: request.id,
-    totalBytes: OVER_CAP_BYTES.byteLength,
-    sha256: OVER_CAP_SHA256,
-    bytes: OVER_CAP_BYTES,
+    totalBytes: bytes.byteLength,
+    sha256: params.sha256 as string,
+    bytes,
   });
   return {
     bytesBase64: null,
-    byteLength: OVER_CAP_BYTES.byteLength,
+    byteLength: bytes.byteLength,
     inbandLimitBytes: 48 * 1024,
   };
 }
+
+/**
+ * An over-cap body whose bytes and digest are the label's alone. Three of
+ * these on one conflict make a side hydrated from ANOTHER side's digest read
+ * back the wrong text, rather than passing on the coincidence that all three
+ * sides named the same body.
+ */
+function overCapBody(label: string): {
+  text: string;
+  bytes: Uint8Array;
+  sha256: string;
+} {
+  const text = `\uFEFF# ${label}\n${"é".repeat(70 * 1024)}\n`;
+  const bytes = new Uint8Array(Buffer.from(text, "utf8"));
+  return {
+    text,
+    bytes,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+const OVER_CAP_BODY = {
+  text: OVER_CAP_TEXT,
+  bytes: OVER_CAP_BYTES,
+  sha256: OVER_CAP_SHA256,
+};
+const BASE_BODY = overCapBody("base");
+const CURRENT_BODY = overCapBody("current");
+const INCOMING_BODY = overCapBody("incoming");
 
 /**
  * A client that can deliver a completed blob out of band, which is the only
@@ -639,6 +673,170 @@ describe("createCaptureLiveStores", () => {
       conflict: { id: "created-conflict" },
     });
   });
+
+  it.each([
+    {
+      name: "one digest on all three sides",
+      // The daemon writes one digest per identical side, so this is the shape
+      // a real conflict usually has — and the shape that pins the reader's
+      // caching: three sides, one read.
+      sides: {
+        base: OVER_CAP_BODY,
+        current: OVER_CAP_BODY,
+        incoming: OVER_CAP_BODY,
+      },
+      blobDigests: [OVER_CAP_SHA256],
+    },
+    {
+      name: "a distinct digest per side",
+      // Three different bodies, so a side hydrated from ANOTHER side's digest
+      // reads back the wrong text instead of coinciding with the right one.
+      sides: {
+        base: BASE_BODY,
+        current: CURRENT_BODY,
+        incoming: INCOMING_BODY,
+      },
+      blobDigests: [BASE_BODY.sha256, CURRENT_BODY.sha256, INCOMING_BODY.sha256],
+    },
+  ])(
+    "mutation proof: scans open conflicts without bodies and hydrates only the match, $name (#655)",
+    async ({ sides, blobDigests }) => {
+      // The scanned-past conflict names a digest this workspace does not
+      // reference, so the blob fake refuses it the way the daemon refuses an
+      // unauthorized digest. A scan that asked for bodies would hydrate this
+      // row on its way to the match and FAIL here, not merely read too much.
+      const DECOY_SHA256 = "d".repeat(64);
+      const withheldSide = (body: { bytes: Uint8Array; sha256: string }) => ({
+        path: snapshot.path,
+        contentKind: "text" as const,
+        snapshot: {
+          ...snapshot,
+          text: null,
+          sha256: body.sha256,
+          blobSha256: body.sha256,
+          byteLength: body.bytes.byteLength,
+          inbandLimitBytes: 48 * 1024,
+        },
+        binarySha256: null,
+        binaryByteLength: null,
+        binaryObjectId: null,
+        binaryLatestMomentId: null,
+        metadataSummary: "side summary",
+        metadataCorrelationId: null,
+      });
+      const decoy = withheldSide({ bytes: OVER_CAP_BYTES, sha256: DECOY_SHA256 });
+      const pages = [
+        {
+          conflicts: [
+            {
+              ...conflict(),
+              id: "scanned-past",
+              base: decoy,
+              current: decoy,
+              incoming: decoy,
+            },
+          ],
+          nextAfterConflictId: "scanned-past",
+        },
+        {
+          conflicts: [
+            {
+              ...conflict(),
+              id: "created-conflict",
+              base: withheldSide(sides.base),
+              current: withheldSide(sides.current),
+              incoming: withheldSide(sides.incoming),
+            },
+          ],
+          nextAfterConflictId: null,
+        },
+      ] satisfies { conflicts: ConflictRecord[]; nextAfterConflictId: string | null }[];
+      // Only the match's digests are readable. The decoy's is not, and neither
+      // is any digest no side named.
+      const served = new Map(
+        [sides.base, sides.current, sides.incoming].map((body) => [
+          body.sha256,
+          body.bytes,
+        ]),
+      );
+      const requests: Request[] = [];
+      const client = blobClientFor(async (request, deliver) => {
+        requests.push(request);
+        if (request.method === VERSIONED_METHOD.textReadBlob) {
+          return {
+            id: request.id,
+            result: overCapBlobResult(request, deliver, served),
+          };
+        }
+        if (request.method === VERSIONED_METHOD.textRead) {
+          return { id: request.id, result: snapshot };
+        }
+        if (request.method === VERSIONED_METHOD.versionsMerge) {
+          return {
+            id: request.id,
+            result: {
+              status: "conflict",
+              conflictId: "created-conflict",
+              deduped: false,
+              comparison: {
+                workspaceId: WORKSPACE_ID,
+                path: "note.md",
+                targetVersionId: "main",
+                sourceVersionId: "draft",
+                base: snapshot,
+                current: snapshot,
+                incoming: { ...snapshot, versionId: "draft", text: "incoming" },
+                status: "diverged",
+              },
+              materializeEnqueued: false,
+              materialized: false,
+              materializeOutcome: "skipped",
+            },
+          };
+        }
+        expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
+        const params = request.params as { afterConflictId?: string };
+        if (params.afterConflictId === undefined) {
+          return { id: request.id, result: pages[0] };
+        }
+        // The walk continues from the page's own last row, so a cursor the
+        // daemon never issued must not be served page two.
+        expect(params.afterConflictId).toBe("scanned-past");
+        return { id: request.id, result: pages[1] };
+      });
+      const { store } = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+        sessionsFor(client),
+      );
+
+      const result = await store.mergeTextFileFromVersion({
+        workspaceId: WORKSPACE_ID,
+        targetVersionId: "main",
+        sourceVersionId: "draft",
+        path: "note.md",
+        metadata: { origin: "api" },
+      });
+
+      if (result.kind !== "conflict") throw new Error("expected a conflict");
+      // Every side of the match carries ITS OWN body: the callers of this walk
+      // read them.
+      for (const side of ["base", "current", "incoming"] as const) {
+        expect(
+          Buffer.from(
+            (result.conflict[side] as { text?: string }).text ?? "",
+            "utf8",
+          ),
+          `conflict.${side}`,
+        ).toEqual(Buffer.from(sides[side].bytes));
+      }
+      // One read per distinct digest, and never the decoy's.
+      expect(
+        requests
+          .filter((request) => request.method === VERSIONED_METHOD.textReadBlob)
+          .map((request) => (request.params as { sha256: string }).sha256),
+      ).toEqual(blobDigests);
+    },
+  );
 
   it("mutation proof: preserves a rename moment's source path", async () => {
     const client = clientFor(async (request) => ({
