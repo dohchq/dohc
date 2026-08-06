@@ -9,8 +9,8 @@
 pub const MAX_DOCUMENT_BODY_BYTES: usize = 256 * 1024;
 
 /// Maximum length of any identifier the engine persists, in UTF-8 bytes:
-/// workspace, version, object, moment, conflict and request ids on every
-/// layer's write path.
+/// workspace, version, object, moment and conflict ids on every layer's write
+/// path.
 ///
 /// MEASURED against the identifiers the product actually mints, not chosen.
 /// `dohc-engine-domain/tests/identifier_bounds.rs` measures them:

@@ -548,6 +548,27 @@ pub fn insert_text_conflict_if_absent(
             observed_bytes,
         });
     }
+    // And the same gate for identifiers (#654). The row budget bounds their
+    // SUM, which is not the same rule: a single 100 KiB conflict id passes the
+    // sum and then fails `resolve_text_conflict_with`, leaving a conflict a
+    // peer opened that nobody can ever resolve. Bounding each id here is what
+    // makes that unreachable rather than merely unlikely.
+    validate_identifier(&conflict.conflict_id, "conflict_id")?;
+    validate_identifier(&conflict.workspace_id, "workspace_id")?;
+    validate_identifier(&conflict.target_version_id, "version_id")?;
+    validate_identifier(&conflict.source_version_id, "version_id")?;
+    for side in [&conflict.base, &conflict.current, &conflict.incoming] {
+        if let Some(object_id) = &side.binary_object_id {
+            validate_identifier(object_id, "object_id")?;
+        }
+        if let Some(moment_id) = &side.binary_latest_moment_id {
+            validate_identifier(moment_id, "moment_id")?;
+        }
+        if let Some(snapshot) = &side.snapshot {
+            validate_identifier(&snapshot.object_id, "object_id")?;
+            validate_identifier(&snapshot.latest_moment_id, "moment_id")?;
+        }
+    }
     // Validate sides BEFORE the duplicate-id shortcut: an invalid or
     // unhydrated binary side must fail closed even when it reuses an existing
     // conflict id, or a replicated open would be acked without ever passing

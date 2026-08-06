@@ -327,11 +327,17 @@ the relay's `MAX_BLOB_BYTES` must stay at or above the result —
 `the_relay_transport_cap_covers_the_widest_engine_ingest_ceiling` fails if the
 two languages drift.
 
-**Still open.** A lineage that genuinely exceeds the bound declines to originate
-silently. The edit commits and markdown stays its artifact, but nothing tells
-the user the document is not shared. That needs a per-document sharing surface,
-which does not exist yet and cannot be exercised while #356 keeps replication
-unreachable — see #632.
+**Named.** A lineage that genuinely exceeds the bound declines to originate, and
+the decline says so. `ydoc_originate_base_in_tx` returns a typed
+`BaseOrigination` rather than the `Ok(None)` it shared with four benign cases —
+no marker, a base already claimed, a workspace that does not replicate, an
+unresolved dependency — and the too-large branch carries
+`SharingDeclined { constraint, limit_bytes, observed_bytes }` out to the caller.
+The four benign cases stay silent.
+
+**Still open.** The user cannot see it yet. The reason reaches the engine's
+stderr trail; it has no per-document sharing surface to sit on, and cannot get
+one while #356 keeps replication unreachable. #632 carries that remainder.
 
 ## The single-canonical reservation is process-global
 

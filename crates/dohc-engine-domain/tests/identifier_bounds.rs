@@ -11,7 +11,9 @@
 //! assumed, and the bound sits past it.
 
 use dohc_engine_domain::{
-    DomainError, NoFaults, VersionedTextStore, WriteText, derive_capture_object_id,
+    ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, DomainError, NoFaults,
+    TextConflict, VersionedTextStore, WriteText, derive_capture_object_id,
+    insert_text_conflict_if_absent,
 };
 use dohc_engine_storage::{EngineStore, MAX_IDENTIFIER_BYTES};
 use dohc_engine_testkit::ScratchDir;
@@ -95,7 +97,10 @@ fn every_identifier_the_product_mints_sits_far_inside_the_bound() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open(&scratch);
     VersionedTextStore::new(&mut store)
-        .write_text(&write(&widest.1, &format!("moment-{}", widest.1)), &NO_FAULTS)
+        .write_text(
+            &write(&widest.1, &format!("moment-{}", widest.1)),
+            &NO_FAULTS,
+        )
         .expect("the widest healthy identifier is accepted");
 }
 
@@ -143,6 +148,56 @@ fn an_over_long_identifier_is_refused_with_its_measurements() {
                 MAX_IDENTIFIER_BYTES + 1
             ),
         );
+    }
+}
+
+/// The conflict door too. `insert_text_conflict_if_absent` is where BOTH
+/// conflict opens land — the local RPC and a peer's replicated apply — so a
+/// conflict whose id no resolution could ever carry must not become a row.
+///
+/// The row budget it already enforces bounds the SUM of a conflict's strings,
+/// which is a different rule: a single 100 KiB id passes that sum and then
+/// fails every resolve, stranding the conflict forever.
+///
+/// MUTATION: drop the `validate_identifier` calls from
+/// `insert_text_conflict_if_absent` and the row is persisted instead.
+#[test]
+fn a_conflict_row_cannot_carry_an_identifier_no_resolution_could_serve() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open(&scratch);
+    let over_cap = "x".repeat(MAX_IDENTIFIER_BYTES + 1);
+    let conflict = TextConflict {
+        conflict_id: over_cap.clone(),
+        workspace_id: WS.to_owned(),
+        path: "notes/a.md".to_owned(),
+        target_version_id: "main".to_owned(),
+        source_version_id: "feature".to_owned(),
+        created_at_ms: 2_000,
+        updated_at_ms: 2_000,
+        status: ConflictStatus::Open,
+        chosen_from: ConflictChoice::Current,
+        resolution: None,
+        metadata: ConflictMetadata::origin("merge"),
+        base: ConflictFileState::text("notes/a.md", None),
+        current: ConflictFileState::text("notes/a.md", None),
+        incoming: ConflictFileState::text("notes/a.md", None),
+    };
+    let error = store
+        .write_with(&NoFaults, |tx| {
+            insert_text_conflict_if_absent(tx, &conflict)
+        })
+        .expect_err("a conflict id past the bound never becomes a row");
+    match error {
+        DomainError::IdentifierTooLong {
+            field,
+            limit_bytes,
+            observed_bytes,
+        } => {
+            assert_eq!(field, "conflict_id");
+            assert_eq!(limit_bytes, MAX_IDENTIFIER_BYTES);
+            assert_eq!(observed_bytes, MAX_IDENTIFIER_BYTES + 1);
+        }
+        other => panic!("the conflict door must name its bound, got {other:?}"),
     }
 }
 

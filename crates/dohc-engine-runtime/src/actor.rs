@@ -9048,7 +9048,10 @@ fn ydoc_record_update_on_store(
             if let BaseOrigination::Declined(reason) = &origination {
                 declined_sink.set(Some(reason.clone()));
             }
-            if let BaseOrigination::Originated { base_snapshot_sha: base_sha } = &origination {
+            if let BaseOrigination::Originated {
+                base_snapshot_sha: base_sha,
+            } = &origination
+            {
                 dohc_engine_sync::journal_local_op_in_tx(
                     tx,
                     &journal_key.workspace_id,
