@@ -3198,7 +3198,20 @@ export function createWorkspaceEngineCapture(
         const releaseRetainedSession = async (): Promise<void> => {
           const held = pendingRelease;
           if (held === null) return;
-          await held.close({ settle: false });
+          // `settle: false` is a preference, not a promise: the provider
+          // ESCALATES a refused release to a SETTLING close so pending edits
+          // survive a transient failure. That is right while this debt still
+          // owes a write. It is wrong the moment W is cancelled — the path is
+          // gone, or the engine refuses this write for good, and the
+          // escalation would materialize the canonical Y.Doc back onto the
+          // path the user just deleted. `settleOnRefusal: false` hands the
+          // refusal back instead, which is what keeps the lease retryable
+          // without ever writing.
+          await held.close(
+            writeCancelled
+              ? { settle: false, settleOnRefusal: false }
+              : { settle: false },
+          );
           pendingRelease = null;
         };
 
@@ -4922,7 +4935,10 @@ export function createWorkspaceEngineCapture(
           await debt.pay();
           if (detachedLockedDebts.has(endpoint)) {
             throw new Error(
-              `dohc could not rename ${fromPath}: another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program, then rename again.`,
+              // Explorer renders this verbatim, so it follows
+              // docs/brand/copy.md: what happened, why, then ONE instruction
+              // per sentence.
+              `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
             );
           }
         }

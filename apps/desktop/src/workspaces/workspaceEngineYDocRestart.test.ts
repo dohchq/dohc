@@ -2557,7 +2557,23 @@ async function lockedRebindCapture(prefix: string) {
         }
         // The RELEASE. Its failure is what reaches the caller, and it buries
         // the pre-close settle's failure exactly as the provider does.
-        if (state.closeFailure) throw state.closeFailure;
+        if (state.closeFailure) {
+          // `settle: false` is a PREFERENCE, not a promise. A daemon that
+          // refuses the release as unsettled makes the provider ESCALATE to a
+          // settling close so pending edits survive a transient failure — and
+          // that close MATERIALIZES the artifact on its way out.
+          // `settleOnRefusal: false` is the only thing that turns it off.
+          if (
+            closeOptions?.settle === false &&
+            closeOptions?.settleOnRefusal !== false
+          ) {
+            state.settleCalls.push(gen);
+            if (!state.locked && !state.unmaterialized) {
+              state.settledMarkdowns.push(doc.getText("plainText").toString());
+            }
+          }
+          throw state.closeFailure;
+        }
         if (preCloseError !== null) {
           // The release succeeded over a failed settle. Replicated lineages
           // compact and release cleanly, which is the shape that produces
@@ -3143,7 +3159,7 @@ it("a rename REFUSES while its debt payment is still locked", async () => {
   // The lock STILL holds when the rename runs: it must refuse, naming the
   // blocker and the way out, and nothing may be written.
   await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
-    /another program still has note\.md open/,
+    /Another program still has note\.md open/,
   );
   expect(state.settledMarkdowns).toEqual([]);
 
@@ -3274,7 +3290,7 @@ it("refused renames never stack more than one retry ladder", async () => {
   // Four refused renames while the lock holds: each pays, fails, and arms.
   for (let attempt = 0; attempt < 4; attempt += 1) {
     await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
-      /another program still has note\.md open/,
+      /Another program still has note\.md open/,
     );
   }
   const settlesAfterRenames = state.settleCalls.length;
@@ -3650,7 +3666,16 @@ it("a cancelled debt whose release is refused keeps retrying that release", asyn
   // And the cancelled write stays cancelled. The debt still looks unpaid —
   // that peer update never reached Markdown — so a debt that only knew how
   // to chase the write would reopen the DELETED path and settle the file
-  // back into existence. Long enough for two more rungs of the ladder.
+  // back into existence.
+  //
+  // The release itself is the subtler half (#595 round 16, codex P2).
+  // `settle: false` does not promise the file is left alone: the provider
+  // ESCALATES a refused release to a settling close to preserve pending
+  // edits, and that close materializes. A cancelled debt must therefore
+  // release with `settleOnRefusal: false`. This assertion is what catches
+  // it — but only since the fake models the escalation; before that it
+  // passed while the real provider recreated the file.
+  // Long enough for two more rungs of the ladder.
   await new Promise((resolve) => setTimeout(resolve, 12_000));
   expect(state.generation).toBe(generationBeforeCancel);
   expect(state.settledMarkdowns).toHaveLength(settlesBeforeCancel);
