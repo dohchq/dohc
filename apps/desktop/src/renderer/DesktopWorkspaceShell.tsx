@@ -3558,7 +3558,6 @@ export function DesktopWorkspaceShell(props: {
   // drafts, and navigation state.
   const chatsViewProps = {
     workspaceId,
-    readOnly: Boolean(shareView),
     initialNav: chatsNav.current ?? undefined,
     initialDrafts: chatsDrafts.current ?? undefined,
     onNavChange: onChatsNav,
@@ -3571,7 +3570,7 @@ export function DesktopWorkspaceShell(props: {
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
-    collaboration: shareView ? null : chatCollaboration,
+    collaboration: chatCollaboration,
     agentSetup,
     onSetupAgent: () => openSettings("agents"),
   } as const;
@@ -3580,7 +3579,6 @@ export function DesktopWorkspaceShell(props: {
   // transport so the navigator cannot create a duplicate presence lease.
   const chatsNavigatorProps = {
     workspaceId,
-    readOnly: Boolean(shareView),
     selectedNav: selectedChatsNav ?? undefined,
     readRevision: chatsReadRevision,
     onOpenInTab: openChatsNavInTab,
@@ -3590,8 +3588,7 @@ export function DesktopWorkspaceShell(props: {
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
-    collaboration:
-      shareView || isChatsTabPath(wb.activeTab) ? null : chatCollaboration,
+    collaboration: isChatsTabPath(wb.activeTab) ? null : chatCollaboration,
     agentSetup,
     onSetupAgent: () => openSettings("agents"),
   } as const;
@@ -4192,7 +4189,6 @@ export function DesktopWorkspaceShell(props: {
                   <LazyLinkedChatsPanel
                     workspaceId={workspaceId}
                     filePath={activeDocumentPath}
-                    readOnly={Boolean(shareView)}
                     initialThread={searchChatTarget?.thread ?? null}
                     initialFocusMessageId={searchChatTarget?.focusMessageId}
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
