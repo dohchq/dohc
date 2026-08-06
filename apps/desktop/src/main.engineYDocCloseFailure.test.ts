@@ -5,8 +5,9 @@ import { describe, expect, it } from "vitest";
 // main.engineYDocSaveState.test.ts: the engine Y.Doc IPC handlers live inside
 // main.ts's Electron bootstrap and have no unit harness. What the release DOES
 // is proved behaviorally in workspaces/engineYDocSessionRelease.test.ts. What
-// is only checkable here is that every teardown routes through it — the
-// swallow they replace (#657) is a one-token regression.
+// is only checkable here is that every NON-QUIT teardown routes through it —
+// the swallow they replace (#657) is a one-token regression. The quit sweep
+// closes directly and deliberately; see closeAllEngineYDocSessions.
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
 function handlerSource(channel: string): string {
@@ -51,8 +52,8 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     expect(handler.split("await release(").length - 1).toBe(2);
   });
 
-  it("answers openTimedOut — not a plain fallback — when a close fails", () => {
-    // openTimedOut is the contract for "the engine may still hold this
+  it("answers engineMayHoldDocument — not a plain fallback — when a close fails", () => {
+    // engineMayHoldDocument is the contract for "the engine may still hold this
     // document": the renderer stays read-only and offers a retry, and that
     // retry is also what discharges the session the failed close left behind.
     const handler = handlerSource("engineYDocOpen");
@@ -61,12 +62,12 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
       failedStaleClose,
       handler.indexOf("THIS OPEN IS THE RETRY"),
     );
-    expect(staleAnswer).toContain("openTimedOut: true");
+    expect(staleAnswer).toContain("engineMayHoldDocument: true");
     // The two post-open refusals answer it conditionally, on the release's
     // own verdict — a released session really is on disk and keeps the plain
     // editor.
     expect(
-      handler.split("...(released ? {} : { openTimedOut: true }),").length - 1,
+      handler.split("...(released ? {} : { engineMayHoldDocument: true }),").length - 1,
     ).toBe(2);
   });
 
@@ -89,7 +90,7 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     expect(retry).toContain("entry.closeFailed");
     expect(retry).toContain("entry.workspaceId !== workspace.workspaceId");
     expect(retry).toContain("entry.path !== input.path");
-    expect(retry).toContain("openTimedOut: true");
+    expect(retry).toContain("engineMayHoldDocument: true");
   });
 
   it("counts as a pending open from its FIRST await, not from the open", () => {
@@ -113,7 +114,7 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     ).toBeGreaterThan(tryAt);
     expect(handler.split("finishPendingOpen();").length - 1).toBe(1);
     expect(handler.indexOf("finishPendingOpen();")).toBeGreaterThan(
-      handler.lastIndexOf("openTimedOut: true"),
+      handler.lastIndexOf("engineMayHoldDocument: true"),
     );
   });
 

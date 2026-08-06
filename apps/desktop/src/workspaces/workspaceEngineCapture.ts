@@ -841,7 +841,7 @@ export class YDocOpenRacedError extends Error {
 // The open refused, and its session was NOT released. The daemon reinserts a
 // refused close's entry with its lease held (ydoc_close_inner), so it may
 // still own this document — which makes every refusal that describes the DISK
-// false, whatever the disk says. `main` answers this with `openTimedOut`: the
+// false, whatever the disk says. `main` answers this with `engineMayHoldDocument`: the
 // document stays read-only with a retry, and the next open discharges the
 // orphan this left behind (#564, codex r14/r17).
 export class YDocSessionUnreleasedError extends Error {
@@ -3739,7 +3739,7 @@ export function createWorkspaceEngineCapture(
           // disk verdict is one main answers with a plain `available:false` —
           // the writable plain editor, over a live session (#533/#567's
           // double writer). The deadline keeps its own classification, which
-          // main answers with `openTimedOut` (#564, codex r13).
+          // main answers with `engineMayHoldDocument` (#564, codex r13).
           const releaseOrRefuse = async (): Promise<void> => {
             // Marked BEFORE the release, not after: no caller receives this
             // wrapper either way, and marking first is what puts this close

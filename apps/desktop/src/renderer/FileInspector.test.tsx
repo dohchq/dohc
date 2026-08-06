@@ -1321,14 +1321,14 @@ describe("engine markdown source view", () => {
       ...bridgeMock,
       openEngineYDocSession: vi.fn(async () => {
         opens += 1;
-        return { available: false, openTimedOut: true };
+        return { available: false, engineMayHoldDocument: true };
       }),
     });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     const notice = await screen.findByTestId(
-      "engine-open-timeout-notice",
+      "engine-may-hold-document-notice",
       {},
       { timeout: 5_000 },
     );
@@ -1338,7 +1338,7 @@ describe("engine markdown source view", () => {
     expect(notice.textContent).toContain("It is read-only for now.");
     // The content still renders — read-only, not replaced.
     expect(screen.getByTestId("view-markdown")).toBeTruthy();
-    // MUTATION: drop openTimedOut from the readOnly computation -> the edit
+    // MUTATION: drop engineMayHoldDocument from the readOnly computation -> the edit
     // toggle is enabled over a session the engine may still bind.
     expect(
       (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
@@ -1377,7 +1377,7 @@ describe("engine markdown source view", () => {
           // Open 2 (a version switch): times out.
           // Open 3 ("Try again"): BINDS.
           if (opens === 1) return { available: false };
-          if (opens === 2) return { available: false, openTimedOut: true };
+          if (opens === 2) return { available: false, engineMayHoldDocument: true };
           return await bridgeMock.openEngineYDocSession(payload);
         }),
       });
@@ -1394,7 +1394,7 @@ describe("engine markdown source view", () => {
         <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
       );
       await screen.findByTestId(
-        "engine-open-timeout-notice",
+        "engine-may-hold-document-notice",
         {},
         { timeout: 5_000 },
       );
@@ -1431,7 +1431,7 @@ describe("engine markdown source view", () => {
 
   // #564, codex round 3 P2: the read had failed, so the inspector's
   // loading/error branch owned the surface. A SUCCESSFUL retry clears
-  // `openTimedOut` — and the user was left at "Couldn't read this file."
+  // `engineMayHoldDocument` — and the user was left at "Couldn't read this file."
   // with no document and no retry, while main held a live session.
   it("renders the document when the retry binds after a failed read", async () => {
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
@@ -1444,14 +1444,14 @@ describe("engine markdown source view", () => {
       openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
         opens += 1;
         return opens === 1
-          ? { available: false, openTimedOut: true }
+          ? { available: false, engineMayHoldDocument: true }
           : await bridgeMock.openEngineYDocSession(payload);
       }),
     });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId(
-      "engine-open-timeout-notice",
+      "engine-may-hold-document-notice",
       {},
       { timeout: 5_000 },
     );
@@ -1480,26 +1480,26 @@ describe("engine markdown source view", () => {
           // Open 1 times out; the retry (open 2) answers "not engine-backed",
           // so the plain editor is legitimately writable again.
           return opens === 1
-            ? { available: false, openTimedOut: true }
+            ? { available: false, engineMayHoldDocument: true }
             : { available: false };
         }),
       });
 
       render(<FileInspector workspaceId="ws-1" path="a.md" />);
       await screen.findByTestId(
-        "engine-open-timeout-notice",
+        "engine-may-hold-document-notice",
         {},
         { timeout: 5_000 },
       );
       await user.click(screen.getByText("Try again"));
       await waitFor(() => expect(opens).toBe(2));
       await waitFor(() =>
-        expect(screen.queryByTestId("engine-open-timeout-notice")).toBeNull(),
+        expect(screen.queryByTestId("engine-may-hold-document-notice")).toBeNull(),
       );
 
       // The answered retry left an ordinary writable document behind.
       // MUTATION: leave the refusal armed after the open answers (an "ever
-      // retried" flag, or `openTimedOut` kept sticky) -> the autosave is
+      // retried" flag, or `engineMayHoldDocument` kept sticky) -> the autosave is
       // refused and nothing reaches disk.
       //
       // fireEvent, not userEvent: a pointer click into the mounted WYSIWYG
@@ -1531,14 +1531,14 @@ describe("engine markdown source view", () => {
       }),
       openEngineYDocSession: vi.fn(async () => {
         opens += 1;
-        return { available: false, openTimedOut: true };
+        return { available: false, engineMayHoldDocument: true };
       }),
     });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     const notice = await screen.findByTestId(
-      "engine-open-timeout-notice",
+      "engine-may-hold-document-notice",
       {},
       { timeout: 5_000 },
     );
@@ -1597,7 +1597,7 @@ describe("engine markdown source view", () => {
   });
 
   // codex on the round-9 head: the SAME failed-read branch, but reached with a
-  // draft already pending. `openTimedOut` was carried only by the child's
+  // draft already pending. `engineMayHoldDocument` was carried only by the child's
   // `readOnly` — and this branch unmounts the child in the commit that would
   // have set it, so its unmount flush ran on the pre-refusal value and wrote
   // the draft to disk while the engine may still own the document. That is the
@@ -1625,7 +1625,7 @@ describe("engine markdown source view", () => {
           // Open 1: not engine-backed, so the plain editor is writable.
           // Open 2 (the refresh): times out, arriving with the failed read.
           if (opens === 1) return { available: false };
-          return { available: false, openTimedOut: true };
+          return { available: false, engineMayHoldDocument: true };
         }),
       });
 
@@ -1644,7 +1644,7 @@ describe("engine markdown source view", () => {
         />,
       );
       await screen.findByTestId(
-        "engine-open-timeout-notice",
+        "engine-may-hold-document-notice",
         {},
         { timeout: 5_000 },
       );

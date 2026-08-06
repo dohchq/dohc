@@ -153,7 +153,7 @@ describe("the document open's capture-chain hold (#564)", () => {
 
     // MUTATION: drop withRetryBudget from the task -> the version read runs
     // its full ladder and this is an EngineWorkspaceRebindError instead,
-    // which main maps to a plain fallback rather than openTimedOut.
+    // which main maps to a plain fallback rather than engineMayHoldDocument.
     expect(refusal).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
     expect((refusal as Error).message).toContain(
       `limit of ${YDOC_OPEN_RETRY_DEADLINE_MS}ms`,
@@ -415,7 +415,7 @@ describe("the document open's capture-chain hold (#564)", () => {
         message: "ydoc close refused: unsettled-close",
       });
       // The surface stays read-only because `main` answers this with
-      // `openTimedOut` — the same door the deadline uses.
+      // `engineMayHoldDocument` — the same door the deadline uses.
       expect(isYDocSessionUnreleasedError(refusal)).toBe(true);
     });
 

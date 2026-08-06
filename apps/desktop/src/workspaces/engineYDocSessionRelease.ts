@@ -1,25 +1,25 @@
-// Releasing an engine Y.Doc session main will not (or no longer will) hand to a
-// renderer: a stale session under a reused id, a session whose renderer died
-// mid-open, a lineage that came back the wrong content kind, the close IPC, and
-// the renderer-teardown sweep.
+// THE ONE STATEMENT OF WHAT A FAILED CLOSE MEANS. Every non-quit teardown of an
+// engine Y.Doc session runs through this: a stale session under a reused id, a
+// session whose renderer died mid-open, a lineage that came back the wrong
+// content kind, the close IPC, the renderer sweep, and the retry a later open
+// makes. Call sites say which branch they are; they do not restate this.
 //
-// A close that FAILS is not a clean teardown. The capture layer retains the
-// session as `failing-close` and rethrows exactly because the reservation may
-// still be held (workspaceEngineCapture.ts, `closeEntry`), and the daemon
-// reinserts a refused close's entry with its lease held. So the document may
-// still be the engine's, and a writable plain editor over it would be a second
-// writer.
+// A close that FAILS is not a teardown. The capture layer retains the session
+// as `failing-close` and rethrows exactly because the reservation may still be
+// held (workspaceEngineCapture.ts, `closeEntry`), and the daemon reinserts a
+// refused close's entry with its lease held. So the document may still be the
+// engine's, and a writable plain editor over it would be a second writer.
 //
-// Main therefore keeps the session in its registry on failure, MARKED — that is
-// what the close IPC, the renderer teardown, the next open of the same path,
-// and the quit sweep walk — and tells the caller the release did not happen.
+// The session therefore stays in the registry, MARKED, and the caller is told
+// the release did not happen — which is how a surface knows to stay read-only
+// and offer the retry that eventually discharges it.
 
-export interface ReleasableEngineYDocSession {
+interface ReleasableEngineYDocSession {
   close: () => Promise<void>;
 }
 
 /** What the registry must carry for a failed release to stay retriable. */
-export interface RetainableEngineYDocEntry {
+interface RetainableEngineYDocEntry {
   session: ReleasableEngineYDocSession;
   /** The document this session holds, workspace-relative. */
   path: string;
@@ -30,9 +30,7 @@ export interface RetainableEngineYDocEntry {
   closeFailed?: boolean;
 }
 
-export interface ReleaseEngineYDocSessionInput<
-  TEntry extends RetainableEngineYDocEntry,
-> {
+interface ReleaseEngineYDocSessionInput<TEntry extends RetainableEngineYDocEntry> {
   sessions: Map<string, TEntry>;
   sessionId: string;
   entry: TEntry;

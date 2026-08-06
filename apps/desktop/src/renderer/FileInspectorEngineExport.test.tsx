@@ -26,7 +26,7 @@ const DOC_MARKDOWN = "# Plan\n\nBody from the last read.\n";
 
 function engineBridge(
   markdown: string,
-  options?: { available?: boolean; openTimedOut?: boolean },
+  options?: { available?: boolean; engineMayHoldDocument?: boolean },
 ) {
   const serverDoc = markdownToYDoc(markdown);
   return {
@@ -42,8 +42,8 @@ function engineBridge(
       source: "default" as const,
     })),
     openEngineYDocSession: vi.fn(async () => {
-      if (options?.openTimedOut === true) {
-        return { available: false, openTimedOut: true };
+      if (options?.engineMayHoldDocument === true) {
+        return { available: false, engineMayHoldDocument: true };
       }
       return options?.available === false
         ? { available: false }
@@ -118,18 +118,18 @@ describe("engine-mode export with no mounted serializer", () => {
   // is not the document, which is what the engine branch already refuses to do.
   it("refuses the export while a timed-out open may still hold the document", async () => {
     const user = userEvent.setup();
-    const bridge = engineBridge(DOC_MARKDOWN, { openTimedOut: true });
+    const bridge = engineBridge(DOC_MARKDOWN, { engineMayHoldDocument: true });
     vi.stubGlobal("dohcDesktop", bridge);
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     // The timeout notice is up and the document is read-only beside it.
-    await screen.findByTestId("engine-open-timeout-notice", {}, { timeout: 5_000 });
+    await screen.findByTestId("engine-may-hold-document-notice", {}, { timeout: 5_000 });
 
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    // MUTATION: serialize the disk cache during `openTimedOut` -> a .md file
+    // MUTATION: serialize the disk cache during `engineMayHoldDocument` -> a .md file
     // that is missing whatever the held session already took.
     expect(await screen.findByText("Document not open")).toBeTruthy();
     expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
@@ -144,16 +144,16 @@ describe("engine-mode export with no mounted serializer", () => {
       // The retry answers "not engine-backed": the file IS the document again,
       // so the refusal must lift with it.
       return opens === 1
-        ? { available: false, openTimedOut: true }
+        ? { available: false, engineMayHoldDocument: true }
         : { available: false };
     });
     vi.stubGlobal("dohcDesktop", { ...bridge, openEngineYDocSession });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await screen.findByTestId("engine-open-timeout-notice", {}, { timeout: 5_000 });
+    await screen.findByTestId("engine-may-hold-document-notice", {}, { timeout: 5_000 });
     await user.click(screen.getByText("Try again"));
     await vi.waitFor(() =>
-      expect(screen.queryByTestId("engine-open-timeout-notice")).toBeNull(),
+      expect(screen.queryByTestId("engine-may-hold-document-notice")).toBeNull(),
     );
 
     await user.click(screen.getByTestId("document-menu-trigger"));
@@ -187,7 +187,7 @@ describe("engine-mode export with no mounted serializer", () => {
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    // MUTATION: refuse only `openTimedOut` -> the disk body exports while the
+    // MUTATION: refuse only `engineMayHoldDocument` -> the disk body exports while the
     // engine is still deciding what this document is.
     expect(await screen.findByText("Document not open")).toBeTruthy();
     expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
