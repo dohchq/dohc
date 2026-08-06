@@ -106,8 +106,34 @@ export function DocumentMenu(props: {
     }, FEEDBACK_MS);
   }
 
+  // NULL is the refusal this menu expects and handles. A THROW is not: the
+  // serializer reads a live editor, and reading it can fail. Called outside a
+  // boundary it rejected the action's promise into nothing — no feedback, no
+  // log, and the menu still open as though the click had missed (#564,
+  // codex r23). Both actions serialize through here, so both answer a throw
+  // the way they answer any other failure.
+  function serializeOrFail(
+    id: DocumentMenuItemId,
+    failureLabel: string,
+    what: string,
+  ): { markdown: string | null } | null {
+    try {
+      return { markdown: props.getMarkdown() };
+    } catch (error) {
+      console.error(`${what} failed`, error);
+      showFeedback(id, failureLabel);
+      return null;
+    }
+  }
+
   async function copyAsMarkdown() {
-    const markdown = props.getMarkdown();
+    const serialized = serializeOrFail(
+      "copy-markdown",
+      "Couldn't copy",
+      "Copy as Markdown",
+    );
+    if (!serialized) return;
+    const markdown = serialized.markdown;
     if (markdown === null) {
       showFeedback(
         "copy-markdown",
@@ -127,7 +153,13 @@ export function DocumentMenu(props: {
   }
 
   async function exportDocument(kind: "markdown" | "html" | "pdf") {
-    const documentMarkdown = props.getMarkdown();
+    const serialized = serializeOrFail(
+      `export-${kind}`,
+      "Couldn't export",
+      `Export as ${kind.toUpperCase()}`,
+    );
+    if (!serialized) return;
+    const documentMarkdown = serialized.markdown;
     if (documentMarkdown === null) {
       // BEFORE closing: the feedback replaces the item's label, so a refusal
       // shown into a closed menu is a refusal the user never sees — the

@@ -249,6 +249,55 @@ describe("DocumentMenu", () => {
     expect(exportDocumentFile).not.toHaveBeenCalled();
   });
 
+  // codex r23: NULL is the refusal this menu expects; a THROW is not. The
+  // serializer reads a live editor, and reading it can fail — and once the
+  // call moved outside the action's try boundary, that rejected the action's
+  // promise into nothing: no feedback, no log, and the menu still open as
+  // though the click had missed.
+  it("reports a serializer that throws instead of rejecting into nothing", async () => {
+    const user = userEvent.setup();
+    stubClipboard();
+    const failure = new Error("editor is gone");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      render(
+        <DocumentMenu
+          workspaceId="ws-1"
+          suggestedName="Plan"
+          getMarkdown={() => {
+            throw failure;
+          }}
+        />,
+      );
+
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await act(async () => {});
+
+      // MUTATION: call `getMarkdown()` outside the boundary -> an unhandled
+      // rejection, and the user sees the menu sit there.
+      expect(
+        screen.getByTestId("document-menu-item-copy-markdown").textContent,
+      ).toBe("Couldn't copy");
+      expect(logged).toHaveBeenCalledWith("Copy as Markdown failed", failure);
+      expect(writeText).not.toHaveBeenCalled();
+
+      // The export path answers the same way, in its own words.
+      await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+      await act(async () => {});
+      expect(
+        screen.getByTestId("document-menu-item-export-markdown").textContent,
+      ).toBe("Couldn't export");
+      expect(logged).toHaveBeenCalledWith("Export as MARKDOWN failed", failure);
+      expect(exportDocumentFile).not.toHaveBeenCalled();
+      // A failure the user can still see: the menu stays open for it, exactly
+      // as the refusal does.
+      expect(screen.queryByRole("menu")).not.toBeNull();
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   it("exports as PDF through the bridge with kind: pdf", async () => {
     const user = userEvent.setup();
     renderMenu();
