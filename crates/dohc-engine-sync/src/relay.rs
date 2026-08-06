@@ -256,13 +256,62 @@ pub(crate) const MAX_REFUSAL_DETAIL_UNITS: usize = 2048;
 /// being long; this is a share of the detail budget, and it exists because a
 /// path is the one part of a detail that no other limit bounds. Sized from
 /// that contract rather than from measured work: 200 units keeps at least six
-/// complete refusals inside `MAX_REFUSAL_DETAIL_UNITS`, and names a file by
-/// far more than its first folder.
+/// complete refusals inside `MAX_REFUSAL_DETAIL_UNITS`.
+///
+/// A healthy path OUTGROWS this, and by design. The relay admits a granted
+/// path of `MAX_SHARE_PATH_CHARS` (1,024, `services/sync-relay/src/shareFilter.ts`)
+/// and the files under it are longer still. Raising the budget to cover them
+/// would cost the six-refusal guarantee — one 1,024-unit path is half the
+/// whole detail. So eliding is the normal case, not the pathological one,
+/// which is why `elided_path` marks the cut instead of hiding it.
 const MAX_REFUSAL_PATH_UNITS: usize = 200;
 
 /// What an op kind becomes when the relay's is not one. The real cause is in
 /// `detail`, and the coordinate stays exactly as served.
 const INVALID_OP_KIND: &str = "invalid-op-kind";
+
+/// A path cut to `budget`, with the cut MARKED and BOTH ends kept.
+///
+/// A head-only cut was silent and lossy in the same stroke: two refused files
+/// that differ past the budget recorded identically, and the record is all the
+/// reader has once the cursor has committed past them. Since a healthy path
+/// outgrows this budget (see `MAX_REFUSAL_PATH_UNITS`), that was the ordinary
+/// case rather than a corner.
+///
+/// So the tail is taken first — the file name is the identifying part, and the
+/// stated recovery is to go ask the granter about a named file — and the
+/// marker carries how many units went, so two paths that share a head AND a
+/// tail still read apart.
+fn elided_path(path: &str, budget: usize) -> String {
+    let units = path.encode_utf16().count();
+    if units <= budget {
+        return path.to_owned();
+    }
+    let tail = trailing_units(path, budget / 2);
+    let tail_kept = tail.encode_utf16().count();
+    // `units` is an upper bound on the omitted count, so a marker measured
+    // from it is never narrower than the real one and the result cannot
+    // outgrow the budget.
+    let marker_budget = format!("…+{units}…").encode_utf16().count();
+    let head = bounded_units(path, budget.saturating_sub(tail_kept + marker_budget));
+    let omitted = units - head.encode_utf16().count() - tail_kept;
+    format!("{head}…+{omitted}…{tail}")
+}
+
+/// The LAST `limit` UTF-16 units of `value`, whole characters only.
+fn trailing_units(value: &str, limit: usize) -> String {
+    let mut reversed = String::new();
+    let mut units = 0;
+    for character in value.chars().rev() {
+        let width = character.len_utf16();
+        if units + width > limit {
+            break;
+        }
+        reversed.push(character);
+        units += width;
+    }
+    reversed.chars().rev().collect()
+}
 
 fn bounded_units(value: &str, limit: usize) -> String {
     if value.encode_utf16().count() <= limit {
@@ -1268,6 +1317,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut skipped = 0_usize;
         let mut refusals = Vec::new();
         let mut changed = BTreeMap::<String, ShareViewChangedPath>::new();
+        let mut blob_refusals = BTreeMap::<(String, &'static str), RelayError>::new();
         for (index, op) in ops.into_iter().enumerate() {
             // The coordinate BEFORE the envelope is built: a malformed op the
             // engine will not apply still commits the cursor past itself, and
@@ -1361,6 +1411,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 skipped: &mut skipped,
                 refusals: &mut refusals,
                 changed: &mut changed,
+                blob_refusals: &mut blob_refusals,
             };
             // Replay refusals are recorded INSIDE, one per refused blob, by
             // `refuse_replay_unit`. What reaches here is only what must abort.
@@ -2639,6 +2690,35 @@ struct ShareViewReplayContext<'a, T> {
     skipped: &'a mut usize,
     refusals: &'a mut Vec<ShareViewRefusal>,
     changed: &'a mut BTreeMap<String, ShareViewChangedPath>,
+    /// Blobs this pull has already refused permanently, by sha256 and the
+    /// content kind the op claimed for them. See `blob_refusal_key`.
+    blob_refusals: &'a mut BTreeMap<(String, &'static str), RelayError>,
+}
+
+/// What a permanent blob refusal is remembered under, and why the pull is the
+/// right lifetime for it.
+///
+/// `replay_share_write` is keyed by PATH — its request record is per path, and
+/// a refused write records nothing at all — so before this, every row naming
+/// the same blob downloaded and hashed the whole body again. A 256 KiB
+/// `version.create` holds thousands of snapshot rows and a blob runs to the
+/// kind ceiling, so one refresh could move gigabytes to reach the same
+/// refusal thousands of times.
+///
+/// The decision belongs to the BYTES and to the kind the op claims for them:
+/// the ceiling is per kind, and so is whether the bytes are text. Never to the
+/// path. So the key is the pair, and one row's answer serves every other row
+/// that names it.
+///
+/// The lifetime is the PULL rather than the op, because ops repeat a blob too
+/// — a granter who shared one oversized file into several versions sends one
+/// op per version. What makes that scope safe is what is stored: a decision,
+/// not a body. This map cannot grow with the size of the content it describes,
+/// which is exactly why caching the authenticated bytes instead would be the
+/// new failure — the payload budget admits thousands of distinct shas, and
+/// each body may run to the ceiling.
+fn blob_refusal_key(sha256: &str, content_kind: &'static str) -> (String, &'static str) {
+    (sha256.to_owned(), content_kind)
 }
 
 /// Record ONE refused replay unit, or abort the pull.
@@ -2756,7 +2836,7 @@ fn refusal_detail(refused: &[RefusedBlob]) -> String {
             format!(
                 "{} — {}",
                 blob.reason,
-                bounded_units(&blob.path, MAX_REFUSAL_PATH_UNITS)
+                elided_path(&blob.path, MAX_REFUSAL_PATH_UNITS)
             )
         })
         .collect();
@@ -2844,6 +2924,7 @@ fn replay_share_view_op<T: RelayTransport>(
                         context.faults,
                         &mut *context.applied,
                         &mut *context.changed,
+                        &mut *context.blob_refusals,
                     ) {
                         refuse_replay_unit(context, &mut refused, after, error)?;
                         // The rename's delete does NOT run. Removing the old
@@ -2885,6 +2966,7 @@ fn replay_share_view_op<T: RelayTransport>(
                         context.faults,
                         &mut *context.applied,
                         &mut *context.changed,
+                        &mut *context.blob_refusals,
                     ) {
                         refuse_replay_unit(context, &mut refused, after, error)?;
                     }
@@ -2918,6 +3000,7 @@ fn replay_share_view_op<T: RelayTransport>(
                     context.faults,
                     &mut *context.applied,
                     &mut *context.changed,
+                    &mut *context.blob_refusals,
                 ) {
                     refuse_replay_unit(context, &mut refused, path, error)?;
                 }
@@ -2942,6 +3025,7 @@ fn replay_share_write<T: RelayTransport>(
     faults: &dyn FaultInjector,
     applied: &mut usize,
     changed: &mut BTreeMap<String, ShareViewChangedPath>,
+    blob_refusals: &mut BTreeMap<(String, &'static str), RelayError>,
 ) -> Result<(), RelayError> {
     // The OP is wrong, not the relay's copy of the blob: this reference is not
     // a sha256, so there is no blob to ask for and no repair that produces one.
@@ -2973,6 +3057,24 @@ fn replay_share_write<T: RelayTransport>(
         );
         return Ok(());
     }
+    // AFTER the request record, because that one is about this path and this
+    // one is about the blob. A row whose write already landed is not refused
+    // by a later row's verdict on the same bytes.
+    let refusal_key = blob_refusal_key(sha256, content_kind);
+    if let Some(refused) = blob_refusals.get(&refusal_key) {
+        return Err(refused.clone());
+    }
+    // Remember a PERMANENT refusal, so the next row naming this blob is
+    // answered without fetching it again. Only permanent ones: a transport
+    // failure or a corrupt served body aborts the pull, and a retry after the
+    // repair must ask the relay rather than a stale verdict.
+    let remember = |refusals: &mut BTreeMap<(String, &'static str), RelayError>,
+                    error: RelayError| {
+        if error.share_replay_refusal_code().is_some() {
+            refusals.insert(blob_refusal_key(sha256, content_kind), error.clone());
+        }
+        error
+    };
     // The shared write lands in the store through `write_binary`/`write_text`,
     // which never pass a blob through ingest hydration. Without this the only
     // bound left is the generic 64 MiB blob store, so a share could persist a
@@ -3004,11 +3106,14 @@ fn replay_share_write<T: RelayTransport>(
         return Err(RelayError::BlobInvalid);
     }
     if bytes.len() > limit_bytes {
-        return Err(RelayError::ShareBlobOverCeiling {
-            constraint,
-            limit_bytes,
-            observed_bytes: bytes.len(),
-        });
+        return Err(remember(
+            blob_refusals,
+            RelayError::ShareBlobOverCeiling {
+                constraint,
+                limit_bytes,
+                observed_bytes: bytes.len(),
+            },
+        ));
     }
     let deduped = {
         let mut versioned = VersionedTextStore::new(store);
@@ -3037,8 +3142,13 @@ fn replay_share_write<T: RelayTransport>(
             // These bytes already matched the sha the op named, so they ARE
             // the content the granter shared. The op calling them text is the
             // defect, and no repair at the relay changes that.
-            let text = String::from_utf8(bytes).map_err(|_| RelayError::ShareOpInvalid {
-                reason: "share write claims text content the shared bytes cannot be",
+            let text = String::from_utf8(bytes).map_err(|_| {
+                remember(
+                    blob_refusals,
+                    RelayError::ShareOpInvalid {
+                        reason: "share write claims text content the shared bytes cannot be",
+                    },
+                )
             })?;
             versioned
                 .write_text(

@@ -16402,3 +16402,177 @@ fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
         );
     }
 }
+
+/// A refused blob is fetched ONCE, however many rows of an op name it.
+///
+/// Skipping per blob made the replay a loop, and `replay_share_write` is keyed
+/// by PATH: its request record is per path, and a refused write writes no
+/// record at all. So every row naming the same blob downloaded and hashed the
+/// whole body again. A 256 KiB `version.create` holds thousands of snapshot
+/// rows and a blob runs to the kind ceiling, so one refresh could move
+/// gigabytes to reach the same refusal thousands of times — and, because
+/// nothing is recorded, move them again on the next pull.
+///
+/// The decision is a property of the BYTES and the kind the op claims for
+/// them, not of the path, so it is remembered under that key for the pull.
+///
+/// MUTATION: drop the `blob_refusals` lookup in `replay_share_write` and the
+/// transport is asked for the same body once per row.
+#[test]
+fn one_refused_blob_is_fetched_once_however_many_rows_name_it() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    let rows = 5;
+    let over_cap = vec![3u8; limit_bytes + 1];
+    let over_cap_sha = dohc_engine_storage::hex_sha256(&over_cap);
+    let snapshots: Vec<serde_json::Value> = (0..rows)
+        .map(|index| {
+            json!({
+                "path": format!("docs/copy-{index}.bin"),
+                "blobSha256": over_cap_sha,
+                "contentKind": "binary",
+            })
+        })
+        .collect();
+    let op = ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({ "versionId": "shared-version", "forkSnapshots": snapshots }),
+        recorded_at_ms: 10,
+    };
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![op],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(over_cap_sha.clone(), over_cap)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "shared-version"),
+            &NoFaults,
+        )
+        .expect("the refused rows do not fail the page");
+    // Every row is still its own refusal: five files really are missing.
+    assert_eq!((outcome.applied, outcome.skipped), (0, rows));
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        [over_cap_sha],
+        "MUTATION: the same refused body is downloaded and hashed once per row"
+    );
+    // And the record still names each row, so the saving costs no detail.
+    let detail = &outcome.refusals[0].detail;
+    for index in 0..rows {
+        assert!(
+            detail.contains(&format!("docs/copy-{index}.bin")),
+            "the record must still name every file it lost: {detail}"
+        );
+    }
+}
+
+/// Two refused files that differ only past the path budget must still read
+/// apart.
+///
+/// A head-only cut made them identical in the record, and the record is all
+/// the reader has once the cursor commits. Eliding a healthy path is normal,
+/// not pathological: the relay admits a granted path of `MAX_SHARE_PATH_CHARS`
+/// (1,024) and the files under it are longer still, while one refusal's share
+/// of the detail is 200. So the cut is marked, the file name is kept, and the
+/// marker carries how much went — two paths sharing a head AND a tail still
+/// differ by that count.
+///
+/// MUTATION: cut the head only (`bounded_units`) and both refusals read as the
+/// same file.
+#[test]
+fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    // A shared prefix far longer than one refusal's path budget, so the two
+    // paths are identical until well past the cut.
+    let prefix = format!("docs/{}", "d".repeat(300));
+    let first_path = format!("{prefix}/quarterly-report.bin");
+    let second_path = format!("{prefix}/annual-report.bin");
+    let first = vec![1u8; limit_bytes + 1];
+    let second = vec![2u8; limit_bytes + 2];
+    let first_sha = dohc_engine_storage::hex_sha256(&first);
+    let second_sha = dohc_engine_storage::hex_sha256(&second);
+    let op = ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({
+            "versionId": "shared-version",
+            "forkSnapshots": [
+                { "path": first_path, "blobSha256": first_sha, "contentKind": "binary" },
+                { "path": second_path, "blobSha256": second_sha, "contentKind": "binary" },
+            ]
+        }),
+        recorded_at_ms: 10,
+    };
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![op],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(first_sha, first), (second_sha, second)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "shared-version"),
+            &NoFaults,
+        )
+        .expect("two refused snapshots do not fail the page");
+    assert_eq!(outcome.skipped, 2);
+    let detail = outcome.refusals[0].detail.clone();
+    let head = "2 files in this operation were not applied: ";
+    let entries: Vec<&str> = detail
+        .strip_prefix(head)
+        .unwrap_or_else(|| panic!("the count must lead: {detail}"))
+        .split("; ")
+        .collect();
+    assert_eq!(entries.len(), 2, "both refusals must be listed: {detail}");
+    assert_ne!(
+        entries[0], entries[1],
+        "MUTATION: two different missing files are recorded identically"
+    );
+    // The file name is what the reader needs to act, so it survives the cut.
+    assert!(
+        detail.contains("quarterly-report.bin") && detail.contains("annual-report.bin"),
+        "MUTATION: the cut kept the shared folders and dropped the file names: {detail}"
+    );
+    assert!(
+        detail.encode_utf16().count() <= crate::relay::MAX_REFUSAL_DETAIL_UNITS,
+        "the detail must stay inside what the recipient can persist"
+    );
+}
