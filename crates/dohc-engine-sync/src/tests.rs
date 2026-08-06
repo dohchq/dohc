@@ -15239,7 +15239,7 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
         [(
             "invalid-input",
             format!(
-                "docs/over-cap.bin — shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
+                "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes — docs/over-cap.bin",
                 limit_bytes + 1
             )
             .as_str()
@@ -15426,7 +15426,7 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
             "moment.append",
             "invalid-input",
             format!(
-                "docs/over-cap.bin — shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
+                "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes — docs/over-cap.bin",
                 limit_bytes + 1
             )
             .as_str()
@@ -15584,7 +15584,7 @@ fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
         [(
             0,
             "invalid-input",
-            "docs/unusable.md — share op is not replayable: share write names a blob reference that is not a sha256"
+            "share op is not replayable: share write names a blob reference that is not a sha256 — docs/unusable.md"
         )],
         "MUTATION: the skip is counted but the reason never reaches the recipient"
     );
@@ -15707,7 +15707,7 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
             "version.create",
             "invalid-input",
             format!(
-                "docs/over-cap.bin — shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes",
+                "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes — docs/over-cap.bin",
                 limit_bytes + 1
             )
             .as_str()
@@ -15924,16 +15924,18 @@ fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
         (refusal.origin_id.as_str(), refusal.origin_seq, refusal.code),
         ("peer", 0, "invalid-input")
     );
-    // The count leads, then every lost file by name with its own measurements.
-    // A reader must be able to see that TWO files are missing and which.
+    // The count leads, then every lost file's measurements with its name. A
+    // reader must be able to see that TWO files are missing and which. Each
+    // entry puts its reason before its path for the same reason the count
+    // leads: the detail is bounded, and truncation must cost a path tail.
     assert_eq!(
         refusal.detail,
         format!(
             "2 files in this operation were not applied: \
-             docs/first.bin — shared blob exceeds {constraint}: \
-             limit {limit_bytes} bytes, observed {} bytes; \
-             docs/second.bin — shared blob exceeds {constraint}: \
-             limit {limit_bytes} bytes, observed {} bytes",
+             shared blob exceeds {constraint}: \
+             limit {limit_bytes} bytes, observed {} bytes — docs/first.bin; \
+             shared blob exceeds {constraint}: \
+             limit {limit_bytes} bytes, observed {} bytes — docs/second.bin",
             limit_bytes + 1,
             limit_bytes + 2
         ),
@@ -16002,5 +16004,88 @@ fn a_transport_overflow_stops_the_pull_rather_than_skipping_the_op() {
     assert!(
         matches!(error, RelayError::BlobTooLarge { .. }),
         "unexpected refusal: {error:?}"
+    );
+}
+
+/// The measurements must outlive the bound, whatever the path costs.
+///
+/// A refusal detail is bounded at `MAX_REFUSAL_DETAIL_UNITS` because the
+/// recipient decodes it strictly, and the path inside it is the one part no
+/// limit anywhere covers: `classify_share_path` admits a tracked path of any
+/// length, so a served op chooses how much of the budget the path eats. With
+/// the path first it ate all of it, and the record that committed the cursor
+/// past this file named no constraint, no limit, no unit and no usage — the
+/// one thing AGENTS.md requires a rejection to carry.
+///
+/// So the reason goes first and the path goes last. Truncation then costs the
+/// tail of a path, which the coordinate and op kind still place, instead of
+/// the whole reason.
+///
+/// MUTATION: put the path first in `refuse_replay_unit` and the detail is
+/// 2048 units of path with every measurement cut off the end.
+#[test]
+fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    // A path the share boundary classifies `Tracked` and that alone overruns
+    // the whole detail budget: 40 segments of 60 units is 2,444.
+    let long_path = format!(
+        "docs/{}",
+        (0..40)
+            .map(|index| format!("{}{index:02}", "d".repeat(58)))
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    assert!(
+        long_path.encode_utf16().count() > crate::relay::MAX_REFUSAL_DETAIL_UNITS,
+        "the fixture only tests the bound if the path alone exceeds it"
+    );
+
+    let over_cap = vec![6u8; limit_bytes + 1];
+    let over_cap_sha = dohc_engine_storage::hex_sha256(&over_cap);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![share_view_binary_write_op(0, &long_path, &over_cap_sha)],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(over_cap_sha, over_cap)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("an over-cap blob is skipped, not fatal");
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (1, 0, 1)
+    );
+    let detail = outcome.refusals[0].detail.as_str();
+    // The bound still holds: the recipient rejects a longer one outright.
+    assert_eq!(
+        detail.encode_utf16().count(),
+        crate::relay::MAX_REFUSAL_DETAIL_UNITS,
+        "the detail must be bounded to what the recipient can persist"
+    );
+    // And it still opens with the reason, measurements intact.
+    assert!(
+        detail.starts_with(&format!(
+            "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes — docs/",
+            limit_bytes + 1
+        )),
+        "MUTATION: the path pushed the constraint, limit, unit and usage out of the record: {detail}"
     );
 }

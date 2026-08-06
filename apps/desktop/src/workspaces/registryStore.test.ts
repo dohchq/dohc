@@ -60,10 +60,10 @@ describe("share skip records", () => {
       code: "invalid-input",
       detail:
         "2 files in this operation were not applied: " +
-        "docs/first.bin — shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES: " +
-        "limit 5242880 bytes, observed 5242881 bytes; " +
-        "docs/second.bin — shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES: " +
-        "limit 5242880 bytes, observed 5242882 bytes",
+        "shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES: " +
+        "limit 5242880 bytes, observed 5242881 bytes — docs/first.bin; " +
+        "shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES: " +
+        "limit 5242880 bytes, observed 5242882 bytes — docs/second.bin",
       atMs: 1000,
     };
     const recorded = mergeShareSkippedOps(undefined, [twoRefusedSnapshots]);
@@ -95,7 +95,7 @@ describe("share skip records", () => {
       originSeq: 0,
       opKind: "version.create",
       code: "invalid-input",
-      detail: `${path} — shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES`,
+      detail: `shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES — ${path}`,
       atMs: 1000,
     });
 

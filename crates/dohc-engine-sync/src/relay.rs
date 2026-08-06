@@ -247,7 +247,7 @@ const BOOTSTRAP_OP_KIND: &str = "workspace.init";
 /// the refusal is built — a diagnostic must be well formed whatever it is
 /// diagnosing.
 const MAX_REFUSAL_OP_KIND_UNITS: usize = 128;
-const MAX_REFUSAL_DETAIL_UNITS: usize = 2048;
+pub(crate) const MAX_REFUSAL_DETAIL_UNITS: usize = 2048;
 
 /// What an op kind becomes when the relay's is not one. The real cause is in
 /// `detail`, and the coordinate stays exactly as served.
@@ -2654,7 +2654,15 @@ fn refuse_replay_unit<T>(
     *context.skipped += 1;
     refused.push(RefusedBlob {
         code,
-        reason: format!("{path} — {error}"),
+        // REASON FIRST, path last. `ShareViewRefusal::new` bounds the detail,
+        // and the path is the one part of it no limit anywhere covers —
+        // `classify_share_path` admits a tracked path of any length, so a
+        // served op decides how much of the budget the path eats. Path first,
+        // a long enough one spent all of it and the record that committed the
+        // cursor past this file named no constraint, limit, unit or usage.
+        // Truncation must cost the tail of a path, which the coordinate and
+        // op kind still place, never the measurements.
+        reason: format!("{error} — {path}"),
     });
     Ok(())
 }
