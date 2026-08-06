@@ -111,6 +111,46 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("| a |\n| --- |\n| b |\n\nAfter", 5)).toBe(1);
   });
 
+  it("opens a block at a fence that interrupts a paragraph", () => {
+    // 1 "Intro"  2 "~~~"  3 "matched"  4 "~~~"  5 "After" — three nodes.
+    const body = "Intro\n~~~\nmatched\n~~~\nAfter";
+    expect(blockIndexForLine(body, 1)).toBe(0);
+    expect(blockIndexForLine(body, 3)).toBe(1);
+    expect(blockIndexForLine(body, 5)).toBe(2);
+  });
+
+  it("ends a fenced block at its closing fence", () => {
+    // A quote is open, not a paragraph, and the fence still interrupts it.
+    const body = "> quote\n```\ncode\n```\nAfter";
+    expect(blockIndexForLine(body, 1)).toBe(0);
+    expect(blockIndexForLine(body, 3)).toBe(1);
+    expect(blockIndexForLine(body, 5)).toBe(2);
+  });
+
+  it("keeps an indented code block whole across its own blank lines", () => {
+    // 1 "    one"  2 ""  3 "    matched"  4 ""  5 "After" — two nodes.
+    const body = "    one\n\n    matched\n\nAfter";
+    expect(blockIndexForLine(body, 3)).toBe(0);
+    expect(blockIndexForLine(body, 5)).toBe(1);
+    // Consecutive blank lines do not break it either.
+    expect(blockIndexForLine("    one\n\n\n    matched", 4)).toBe(0);
+  });
+
+  it("ends an indented code block where the indentation stops", () => {
+    // No blank line: the code block ends at the first unindented line, which
+    // opens its own block.
+    expect(blockIndexForLine("    one\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("    one\n    two\nAfter\n\nEnd", 3)).toBe(1);
+    expect(blockIndexForLine("    one\n- item\n\nAfter", 2)).toBe(1);
+  });
+
+  it("does not read an indented line under a paragraph as code", () => {
+    // Three columns is not code, and four columns under an OPEN paragraph is
+    // that paragraph's own continuation.
+    expect(blockIndexForLine("Para\n\n   one\n\n   matched", 5)).toBe(2);
+    expect(blockIndexForLine("Para\n    more\n\nAfter", 4)).toBe(1);
+  });
+
   it("keeps content indented into a list item inside that list", () => {
     // 1 "- item"  2 ""  3 "  matched paragraph"  4 ""  5 "After"
     const body = "- item\n\n  matched paragraph\n\nAfter";
@@ -288,6 +328,94 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
       lands: [
         [3, "code line"],
         [5, "After"],
+      ],
+    },
+    {
+      name: "a fence interrupts a paragraph and ends at its closing fence",
+      body: "Intro\n~~~\nmatched\n~~~\nAfter",
+      lands: [
+        [1, "Intro"],
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a fence interrupts a quote too",
+      body: "> quote\n```\ncode\n```\n\nAfter",
+      lands: [
+        [1, "quote"],
+        [3, "code"],
+        [6, "After"],
+      ],
+    },
+    {
+      name: "a fence indented into a list item stays in that list",
+      body: "- item\n\n  ```\n  code\n  ```\n\nAfter",
+      lands: [
+        [4, "code"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "an unindented fence after a list ends the list",
+      body: "- item\n\n```\ncode\n```\n\nAfter",
+      lands: [
+        [1, "item"],
+        [4, "code"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "an indented code block runs through its own blank lines",
+      body: "    one\n\n    matched",
+      lands: [
+        [1, "one"],
+        [3, "matched"],
+      ],
+    },
+    {
+      name: "an indented code block ends where the indentation stops",
+      body: "Para\n\n    one\n\n    matched\n\nAfter",
+      lands: [
+        [1, "Para"],
+        [5, "matched"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "a list after an indented code block is its own node",
+      body: "    one\n\n    matched\n\n- item\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "item"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "an indented code block ends at the first unindented line",
+      body: "    one\n    two\nAfter\n\nEnd",
+      lands: [
+        [2, "two"],
+        [3, "After"],
+        [5, "End"],
+      ],
+    },
+    {
+      name: "a list straight under an indented code block is its own node",
+      body: "    one\n- item\n\nAfter",
+      lands: [
+        [1, "one"],
+        [2, "item"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "three columns is not an indented code block",
+      body: "Para\n\n   one\n\n   matched\n\nAfter",
+      lands: [
+        [3, "one"],
+        [5, "matched"],
+        [7, "After"],
       ],
     },
   ];

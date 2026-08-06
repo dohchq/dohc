@@ -4,14 +4,20 @@
 // against: which top-level block holds that line?
 //
 // The answer is APPROXIMATE by construction. Blocks are split on blank lines,
-// with three exceptions that cover how documents are actually written: fenced
-// code is inert, a heading always opens a block and ends at its own last line
-// (an ATX line, or a setext underline), and a blank line does not end a LIST
-// the next line continues — with a new item or with content indented into the
-// item above. That is the top-level shape of an ordinary document, not of
-// every document CommonMark can express — a jump can land a block off. It
-// still shows the reader the passage they searched for; the top of the
-// document shows them nothing.
+// with three exceptions that cover how documents are actually written:
+//
+//  - Some blocks END at their own last line, not at a blank one: a heading
+//    (an ATX line, or the setext underline under a paragraph), and a fenced
+//    code block at its closing fence. The line after opens its own block.
+//  - Some blocks RUN THROUGH a blank line, because the next line continues
+//    them: another item of the same list, content indented into that item,
+//    and the next chunk of an indented code block.
+//  - A fence's contents are inert. Blank lines and `#` inside one are code.
+//
+// That is the top-level shape of an ordinary document, not of every document
+// CommonMark can express — a jump can land a block off. It still shows the
+// reader the passage they searched for; the top of the document shows them
+// nothing.
 //
 // A quote is NOT in that exception. CommonMark ends a block quote at an
 // unquoted blank line, so `> one\n\n> two` is two nodes where
@@ -27,7 +33,7 @@
 //
 // DOM-free and duck-typed against plain text, same as outline.ts/findReplace.ts.
 
-type BlockKind = "bullet" | "ordered" | "quote" | "heading" | "other";
+type BlockKind = "bullet" | "ordered" | "quote" | "heading" | "code" | "other";
 
 const HEADING_RE = /^[ \t]{0,3}#{1,6}(?:[ \t]|$)/;
 const BULLET_RE = /^[ \t]{0,3}[-+*](?:[ \t]|$)/;
@@ -39,6 +45,9 @@ const SETEXT_RE = /^[ \t]{0,3}(?:=+|-+)[ \t]*$/;
 // Content indented into the list item above it. Two columns is where the
 // parser starts reading a line that way, tab or spaces.
 const CONTINUATION_RE = /^(?:\t| {2})/;
+// Four columns with nothing open above is an INDENTED code block, which runs
+// through its own blank lines and ends where the indentation stops.
+const INDENTED_CODE_RE = /^(?:\t| {4})/;
 
 type Fence = { marker: string; length: number };
 
@@ -47,6 +56,7 @@ function blockKind(text: string): BlockKind {
   if (BULLET_RE.test(text)) return "bullet";
   if (ORDERED_RE.test(text)) return "ordered";
   if (QUOTE_RE.test(text)) return "quote";
+  if (INDENTED_CODE_RE.test(text)) return "code";
   return "other";
 }
 
@@ -80,7 +90,12 @@ function blockStartLines(body: string): number[] {
   for (let index = 0; index < lines.length; index += 1) {
     const text = lines[index] ?? "";
     if (fence) {
-      if (closesFence(text, fence)) fence = null;
+      // A fenced block ends AT its closing fence, the way a heading ends at
+      // its own line: the next line opens its own block, blank line or not.
+      if (closesFence(text, fence)) {
+        fence = null;
+        open = false;
+      }
       continue;
     }
     if (text.trim() === "") {
@@ -96,19 +111,27 @@ function blockStartLines(body: string): number[] {
     }
     const kind = blockKind(text);
     const listOpen = openKind === "bullet" || openKind === "ordered";
-    // A blank line does not end a LIST the next line continues — either with
-    // another item of the same kind, or with content indented into the item.
-    const resumes = listOpen && (kind === openKind || CONTINUATION_RE.test(text));
-    if (kind === "heading" || (!open && !resumes)) {
+    const opener = fenceOpener(text);
+    // A blank line does not end a block the next line continues: another item
+    // of the same list, content indented into that item, or the next chunk of
+    // an indented code block. A fence indented into a list item is one of
+    // those continuations, which is why this is read before the starts below.
+    const resumes =
+      (listOpen && (kind === openKind || CONTINUATION_RE.test(text))) ||
+      (openKind === "code" && kind === "code");
+    // Indented code ends where the indentation stops, blank line or not — the
+    // same "ends at its own last line" shape a heading and a fence have. It
+    // cannot START under an open paragraph: there an indented line is that
+    // paragraph's lazy continuation, not code.
+    const leavesCode = openKind === "code" && kind !== "code";
+    if (kind === "heading" || ((opener || leavesCode || !open) && !resumes)) {
       starts.push(index + 1);
       openKind = kind;
     }
     // An ATX heading is one line. The next line opens its own block, blank
     // line or not — `# Plan\nBody` is two nodes, not one.
     open = kind !== "heading";
-    // An indented fence inside a list item must not split that item, so a
-    // fence is only tracked here — opening a block is the branch above.
-    fence = fenceOpener(text);
+    fence = opener;
   }
   return starts;
 }
