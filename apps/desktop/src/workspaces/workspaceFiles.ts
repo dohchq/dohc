@@ -409,15 +409,24 @@ async function missingEnd(
     (entry) => entry.isSymbolicLink(),
     () => false,
   );
-  return link ? "danglingLink" : "source";
+  if (!link) return "source";
+  // The link this lstat saw need not be the one the probe missed -- something
+  // can put a working link back at that path in between. So ask again, and
+  // claim a missing target only while there still is one.
+  const target = await probeEnd(source);
+  if (target === "there") return null;
+  return target === "absent" ? "danglingLink" : "unchecked";
 }
 
 // What the user gets to read when their pick was a link to nothing. A bare
 // ENOENT would name a path that is still right there, so it says which part is
 // missing and what to import instead.
+//
+// The name goes LAST and once. This renders in a single-line truncate span
+// (DesktopWorkspaceShell), and a basename can be 255 characters -- leading with
+// it pushed both the reason and the instruction off the end of the line.
 function danglingLinkRefusal(source: string): string {
-  const name = basename(source);
-  return `dohc did not import ${name}. ${name} is a symbolic link, and the file it points to is missing. Import that file instead.`;
+  return `dohc did not import a symbolic link. The file it points to is missing. Import that file instead. The link is ${basename(source)}.`;
 }
 
 // Why a trash ladder stopped before its next rung. Three outcomes, not two:

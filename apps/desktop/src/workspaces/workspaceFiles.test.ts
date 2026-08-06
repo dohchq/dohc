@@ -961,8 +961,13 @@ describe("import surfaces a vanished source instead of skipping it", () => {
       // The link itself is right there -- that is why lstat got it wrong.
       expect((await lstat(source)).isSymbolicLink()).toBe(true);
 
+      // The reason and the instruction come BEFORE the name: this renders in a
+      // one-line truncate span, and a 124-character basename in front of them
+      // truncates away everything the user needs.
       await expect(copyIntoWorkspace(root, [source])).rejects.toThrow(
-        /symbolic link/,
+        new RegExp(
+          `^dohc did not import a symbolic link\\. The file it points to is missing\\. Import that file instead\\. The link is ${name}\\.$`,
+        ),
       );
     } finally {
       await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
@@ -989,6 +994,13 @@ describe("import surfaces a vanished source instead of skipping it", () => {
       const outcome = await copyIntoWorkspace(root, [source]);
       expect(outcome.skipped).toBe(0);
       expect(outcome.imported).toHaveLength(1);
+      // What landed is the TARGET's bytes, under a collision variant, and the
+      // file that was already there is untouched. The outcome shape alone would
+      // still pass if the copy had overwritten it.
+      const landed = outcome.imported[0];
+      expect(landed).not.toBe(name);
+      expect(await readFile(join(root, landed), "utf8")).toBe("keep me");
+      expect(await readFile(join(root, name), "utf8")).toBe("already here");
     } finally {
       await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
         () => undefined,
