@@ -614,6 +614,25 @@ pub fn fold_resolution_into_ydoc_in_tx(
         // doc and the transaction are already in hand, so the check is one
         // projection, and it covers every construct the parser will ever
         // fail to model rather than the ones known today.
+        // SIZE FIRST (#660). The update exists by now, so its size is a
+        // length compare, while the verification below is a whole second
+        // projection. Running the projection first put the named refusal out
+        // of reach: since #643 an oversized doc trips the materialization cap
+        // inside `project`, which answers a bare `InvalidInput` naming no
+        // constraint, no limit and no usage — so the caller learned nothing it
+        // could act on, and the guard right below it never ran.
+        //
+        // The order also decides which refusal an update that is BOTH
+        // oversized and unrepresentable reports, and size is the right answer:
+        // it is the constraint the caller can do something about, and
+        // representability of an update we will never record is moot.
+        if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
+            return Err(SyncError::BlobTooLarge {
+                constraint: "MAX_YDOC_UPDATE_BYTES (conflict resolution fold)",
+                limit_bytes: dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
+                observed_bytes: update.len(),
+            });
+        }
         let refolded = doc
             .project(marker.content_kind)
             .map_err(|_| SyncError::InvalidInput {
@@ -622,13 +641,6 @@ pub fn fold_resolution_into_ydoc_in_tx(
         if refolded.markdown != chosen_text {
             return Err(SyncError::InvalidInput {
                 reason: "ydoc-resolution-not-representable",
-            });
-        }
-        if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
-            return Err(SyncError::BlobTooLarge {
-                constraint: "MAX_YDOC_UPDATE_BYTES (conflict resolution fold)",
-                limit_bytes: dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
-                observed_bytes: update.len(),
             });
         }
         let outcome = dohc_engine_collab::record_update_in_tx(tx, &key, &update, now_ms).map_err(
@@ -1490,6 +1502,20 @@ fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncErr
         DomainError::InvalidText { .. } | DomainError::InvalidPath { .. } => {
             SyncError::InvalidInput { reason }
         }
+        // A size refusal is a caller mistake with numbers attached, not
+        // corruption (#656). Without this arm it falls to the hard catch-all
+        // below and is reported as `StorageError::corrupt_public` — the exact
+        // shape #596 removed for the fold's own cap. Carry the measurements
+        // through instead of flattening them.
+        DomainError::PayloadTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        } => SyncError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        },
         hard @ DomainError::InvalidInput {
             reason: "object_id is already bound to another object",
         } => map_domain_hard_error(hard),

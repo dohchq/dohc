@@ -442,9 +442,20 @@ async fn an_open_base_conflict_freezes_the_open_too() {
 async fn an_oversized_resolution_fold_reports_its_measurements() {
     // Codex #596 round 4: the catch-all wrapped the fold's BlobTooLarge as
     // state-corrupt, discarding the numbers. The refusal now carries the
-    // constraint, the limit, and the observed usage end to end. MUTATION:
-    // route BlobTooLarge back through the corrupt catch-all in
-    // `map_fold_error` - the PayloadTooLarge match fails.
+    // constraint, the limit, and the observed usage end to end.
+    //
+    // #656: it names MAX_TEXT_BYTES, not the fold's cap. This test has never
+    // passed — a resolution large enough to reach the fold's 20 MiB update cap
+    // is over the store's 10 MiB text cap first, and every plaintext write
+    // runs `validate_text` (`normalized_write_input`), so the fold branch is
+    // unreachable from `conflict_resolve` by construction. Asserting the fold's
+    // cap here asserted a refusal this path cannot produce. The invariant the
+    // test owns is unchanged: the refusal names its constraint, limit and
+    // observed usage. It just names the one actually enforced — telling a
+    // caller refused at 10 MiB that the limit is 20 MiB would be false.
+    //
+    // MUTATION: return the old bare `InvalidText { reason: "text exceeds the
+    // size cap" }` from `validate_text` - the PayloadTooLarge match fails.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let (_key, _winner_base, _winner_doc, conflict_id) = {
@@ -486,11 +497,10 @@ async fn an_oversized_resolution_fold_reports_its_measurements() {
                 observed_bytes,
             },
         ) => {
-            assert!(constraint.contains("MAX_YDOC_UPDATE_BYTES"));
-            assert_eq!(
-                limit_bytes,
-                dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
-            );
+            // The cap this path actually reaches: the store's text cap, which
+            // every plaintext write is validated against before any fold runs.
+            assert_eq!(constraint, "MAX_TEXT_BYTES");
+            assert_eq!(limit_bytes, dohc_engine_domain::MAX_TEXT_BYTES);
             assert!(observed_bytes > limit_bytes);
         }
         other => panic!("the measurements must survive the mapping: {other:?}"),
