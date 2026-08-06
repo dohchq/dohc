@@ -1116,18 +1116,27 @@ describe("mergeVersionIntoMain", () => {
     const open = await engine.listOpenConflictsPage();
     expect(open.conflicts).toHaveLength(1);
     const conflict = open.conflicts[0]!;
-    // The under-cap sides ride in band even on a degraded row.
+    // Every side arrives whole, whichever way it crossed.
     expect(conflict.base.text).toBe("base line\n");
     expect(conflict.current.text).toBe("current line\n");
     // MUTATION: drop the adapter's hydration branch and this text is gone.
     expect(conflict.incoming.text).toBe(incomingBody);
-    // The body crossed as a blob, not in the listing row. MUTATION: stop
-    // degrading the row in `conflictListRowForWire` and the fixture serves
-    // what the daemon cannot, with no blob read to show for it.
+    // Each body crossed as a blob, not in the listing row — EVERY side, not
+    // only the over-cap one, because a row crosses the cap on the sum of its
+    // parts and the daemon withholds them all
+    // (`withhold_all_conflict_side_texts`). MUTATION: stop degrading the row
+    // in `conflictListRowForWire`, or withhold only its over-cap body there,
+    // and the fixture serves in band what the daemon serves as digests.
     const hydrationReads = requests
       .filter((request) => request.method === VERSIONED_METHOD.textReadBlob)
       .map((request) => String((request.params as JsonObject).sha256));
-    expect(hydrationReads).toContain(sha256Utf8(incomingBody));
+    expect(hydrationReads).toEqual(
+      expect.arrayContaining([
+        sha256Utf8("base line\n"),
+        sha256Utf8("current line\n"),
+        sha256Utf8(incomingBody),
+      ]),
+    );
     await engine.stop();
   });
 

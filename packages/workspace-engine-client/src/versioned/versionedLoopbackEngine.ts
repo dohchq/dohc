@@ -81,14 +81,34 @@ export function settledSnapshotForWire(snapshot: JsonObject): JsonObject {
 
 /**
  * The daemon's conflict-listing degrade (`conflicts_list`, lib.rs): a row
- * whose serialized size passes the conflict row frame cap ships as metadata —
- * every over-cap side body withheld — instead of refusing the page. A row
- * under the cap carries its bodies in band, exactly as served.
+ * whose serialized size passes the conflict row frame cap ships as metadata
+ * instead of refusing the page. A row under the cap carries its bodies in
+ * band, exactly as served.
+ *
+ * EVERY body goes, not only the ones over the in-band cap: a row crosses on
+ * the SUM of its parts, so the daemon withholds them all
+ * (`withhold_all_conflict_side_texts`). Withholding only the individually
+ * over-cap ones here would leave this fixture serving in-band bodies where the
+ * daemon serves digests, and every desktop test reading them would certify a
+ * hydration path production never takes.
  */
 export function conflictListRowForWire(conflict: JsonObject): JsonObject {
   return utf8Length(JSON.stringify(conflict)) > CONFLICT_ROW_HARD_CAP_BYTES
-    ? settledConflictForWire(conflict)
+    ? withheldConflictForWire(conflict)
     : conflict;
+}
+
+/**
+ * The daemon's `withhold_all_conflict_side_texts` (lib.rs): every side body
+ * withheld, whatever its own size, each leaving the digest and the limit the
+ * caller hydrates from.
+ */
+export function withheldConflictForWire(conflict: JsonObject): JsonObject {
+  return mapConflictSnapshots(conflict, (snapshot) =>
+    typeof snapshot.text === "string"
+      ? { ...snapshot, text: null, inbandLimitBytes: MAX_DESKTOP_CAPTURE_TEXT_BYTES }
+      : snapshot,
+  );
 }
 
 /**
@@ -97,20 +117,28 @@ export function conflictListRowForWire(conflict: JsonObject): JsonObject {
  * answer grows with a body.
  */
 export function settledConflictForWire(conflict: JsonObject): JsonObject {
-  const settled = { ...conflict };
+  return mapConflictSnapshots(conflict, settledSnapshotForWire);
+}
+
+/** Every side snapshot a conflict carries, rebuilt through `serve`. */
+function mapConflictSnapshots(
+  conflict: JsonObject,
+  serve: (snapshot: JsonObject) => JsonObject,
+): JsonObject {
+  const served = { ...conflict };
   for (const side of ["base", "current", "incoming"] as const) {
-    const state = settled[side];
+    const state = served[side];
     if (state === null || typeof state !== "object" || Array.isArray(state)) continue;
     const snapshot = (state as JsonObject).snapshot;
     if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
       continue;
     }
-    settled[side] = {
+    served[side] = {
       ...(state as JsonObject),
-      snapshot: settledSnapshotForWire(snapshot as JsonObject),
+      snapshot: serve(snapshot as JsonObject),
     };
   }
-  return settled;
+  return served;
 }
 
 const ACCEPTED_ORIGINS = new Set<string>([

@@ -123,6 +123,22 @@ pub enum DomainError {
         observed_bytes: usize,
     },
 
+    /// A resolution's ANSWER would not fit one control frame even with every
+    /// body withheld. Raised inside the resolve transaction, before anything
+    /// is written, because after the commit an unsendable answer costs the
+    /// caller the acknowledgement for work the workspace kept.
+    #[error(
+        "conflict-resolve-answer-exceeds-wire-limit: one control frame carries the whole \
+         resolve answer, so this conflict may occupy at most {limit_bytes} encoded bytes for \
+         everything it carries that withholding cannot shrink (ids, paths, digests, origins \
+         and metadata) beside this request's own answer fields, observed {observed_bytes} \
+         encoded bytes. Nothing was written."
+    )]
+    ConflictResolveAnswerTooLarge {
+        limit_bytes: usize,
+        observed_bytes: usize,
+    },
+
     /// A retry reused an idempotency key with a *different* payload than the
     /// originally recorded request. Fails closed rather than replaying a stale
     /// result (mirrors the storage core's exactly-once guard).
@@ -184,6 +200,9 @@ impl DomainError {
             DomainError::NotSecretPath => "not-secret-path",
             DomainError::InvalidInput { .. } => "invalid-input",
             DomainError::ConflictMetadataTooLarge { .. } => "conflict-metadata-too-large",
+            DomainError::ConflictResolveAnswerTooLarge { .. } => {
+                "conflict-resolve-answer-too-large"
+            }
             DomainError::IdempotencyKeyReuseMismatch => "idempotency-key-reuse-mismatch",
             DomainError::StateCorrupt { .. } => "state-corrupt",
             // Delegates to the crypto taxonomy: `decrypt-failed`, `key-corrupt`,

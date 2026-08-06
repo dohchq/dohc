@@ -220,6 +220,25 @@ fn response_encoded_bytes(id: u64, result: &Value) -> usize {
         .saturating_add(result_bytes)
 }
 
+/// What a resolve answer spends on everything the REQUEST supplies, each
+/// string counted at the number of places the answer serves it.
+///
+/// Read off the answer builder and rounded up: the object id rides
+/// `object.id`, `snapshot.objectId` and `moment.objectId` in both the write
+/// and the delete block; each moment id rides its own block's snapshot and
+/// moment; the metadata pair rides both snapshots and both moments; the author
+/// rides both moments, and its PARSED form is never longer than the string
+/// measured here.
+fn resolve_answer_beside_conflict_bytes(local: &LocalResolveDto) -> usize {
+    let optional = |value: &Option<String>| value.as_deref().map_or(0, json_string_encoded_len);
+    6 * json_string_encoded_len(&local.object_id)
+        + 3 * json_string_encoded_len(&local.write_moment_id)
+        + 3 * json_string_encoded_len(&local.delete_moment_id)
+        + 4 * optional(&local.metadata_summary)
+        + 4 * optional(&local.metadata_correlation_id)
+        + 2 * optional(&local.author_json)
+}
+
 fn encode_ydoc_state_base64(full_state: &[u8]) -> Result<String, WireError> {
     if full_state.len() > MAX_YDOC_STATE_WIRE_BYTES {
         return Err(wire(ErrorCode::Internal, "ydoc-state-exceeds-wire-limit"));
@@ -340,6 +359,23 @@ const RESOLVE_REQUEST_FRAME_BYTES: usize =
 /// answering it.
 const RESPONSE_FRAME_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
+/// What a fully withheld resolve answer spends on JSON keys, punctuation and
+/// every fixed-width field beside them — 64-hex digests, i64 counters, enum
+/// strings, the `inbandLimitBytes` numbers each withheld body leaves behind.
+/// `a_fully_withheld_resolve_answer_fits_its_scaffolding_allowance` measures
+/// the real figure against this, which is why it is public: a test carrying
+/// its own copy of the number would pass whatever this held.
+pub const RESOLVE_ANSWER_SCAFFOLDING_BYTES: usize = 64 * 1024;
+/// The one part of a resolve answer that no request supplies and no conflict
+/// row carries: the metadata pair on the head a resolution REMOVES. The write
+/// path that minted it bounded each field at `MAX_METADATA_FIELD_BYTES`
+/// decoded, and escaping costs at most six bytes per byte, so both fields
+/// together cannot pass this.
+const RESOLVE_ANSWER_REMOVED_HEAD_METADATA_BYTES: usize = 2 * (6 * MAX_METADATA_FIELD_BYTES + 2);
+/// Everything a resolve answer carries that is neither the conflict row nor
+/// this request's own fields.
+const RESOLVE_ANSWER_STRUCTURAL_BYTES: usize =
+    RESOLVE_ANSWER_SCAFFOLDING_BYTES + RESOLVE_ANSWER_REMOVED_HEAD_METADATA_BYTES;
 const SEARCH_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
 const CHAT_PAGE_LIMIT_DEFAULT: i64 = 200;
@@ -7760,6 +7796,42 @@ impl EngineService {
             local.metadata_correlation_id.as_deref(),
         )?;
         let metadata_origin = validated_origin(Some(&local.metadata_origin), None)?;
+        // THE ANSWER IS BUILT AFTER THE MUTATION COMMITS. Withholding (below)
+        // takes out every body, never the strings beside them, so an answer
+        // whose withheld form still passes the frame cannot be sent at all —
+        // and by then the resolution has happened, which turns a transport
+        // limit into a lost acknowledgement. So the answer is bounded BEFORE
+        // anything is written: reserve what this request's own fields will
+        // spend, and the resolve transaction refuses inside itself, without
+        // writing, if the conflict cannot fit in what remains.
+        //
+        // The reservation is an upper bound, not an estimate. Every string a
+        // withheld answer serves is one of three things:
+        //   1. the conflict row's own strings, measured against this budget in
+        //      the transaction that serves them (`non_withheld_encoded_bytes`);
+        //   2. this request's identifiers and metadata, counted here at every
+        //      place the answer repeats them;
+        //   3. scaffolding, fixed-width fields, and the removed head's
+        //      metadata pair — `RESOLVE_ANSWER_STRUCTURAL_BYTES`.
+        // Nothing else can appear. The write and delete blocks describe the
+        // LIVE head, and `live_state_matches_conflict_current` admits a
+        // resolution only when that head matches the recorded current side on
+        // path, object and latest moment — so those identifiers are the
+        // conflict row's, already counted in (1).
+        //
+        // Healthy work cannot reach it, MEASURED rather than assumed. Three
+        // UUID identifiers served twelve times cost under 600 bytes, and the
+        // sibling write paths cap a metadata field at
+        // `MAX_METADATA_FIELD_BYTES`. `a_worst_legitimate_resolve_is_admitted`
+        // runs the heaviest legitimate resolve there is — every free-form
+        // field at that cap, in its escaping-heaviest form, on the conflict
+        // and on the request — and its conflict measures 655,980 encoded
+        // bytes against a budget of about 8.13 MB, twelve times inside it.
+        // The only conflicts this can refuse carry metadata within a quarter
+        // megabyte of an entire control frame.
+        let conflict_answer_budget_bytes = RESPONSE_FRAME_BYTES
+            .saturating_sub(resolve_answer_beside_conflict_bytes(&local))
+            .saturating_sub(RESOLVE_ANSWER_STRUCTURAL_BYTES);
         let resolution = match local.resolution.as_str() {
             "keep-current" => ResolveConflictKind::KeepCurrent,
             "apply-incoming" => ResolveConflictKind::ApplyIncoming,
@@ -7805,6 +7877,7 @@ impl EngineService {
                     author_json: local.author_json,
                     now_ms: local.now_ms.unwrap_or(now_ms()?),
                     request_id,
+                    conflict_answer_budget_bytes,
                 },
                 open.root,
                 Arc::new(NoFaults),
@@ -7844,15 +7917,13 @@ impl EngineService {
         // digest and `inbandLimitBytes`, so the caller hydrates through
         // `versionedText.readBlob`.
         //
-        // What remains is the settled conflict's non-withheld strings —
-        // bounded before persistence, and bounded there counting the conflict
-        // id twice where this answer serves it once — beside the write and
-        // delete blocks. Those blocks echo identifiers the request supplied,
-        // and no path in this engine bounds an identifier's length, so this is
-        // the smallest answer the daemon can build rather than a proof that
-        // every answer fits. Refusing is not the alternative: the resolution
-        // has committed, and a refusal would report a mutation that happened
-        // as one that did not.
+        // This is the belt, not the guarantee. The guarantee is the budget
+        // reserved above and enforced inside the resolve transaction, which
+        // refuses — without writing — an answer whose withheld form cannot
+        // fit. What this pass adds is the shrinking that keeps a fitting
+        // answer inside the frame once the bodies are counted. Refusing HERE
+        // is not an option: the resolution has committed, and a refusal would
+        // report a mutation that happened as one that did not.
         if response_encoded_bytes(id, &answer) > RESPONSE_FRAME_BYTES {
             withhold_all_resolve_answer_texts(&mut answer);
         }
@@ -11147,6 +11218,10 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if let RuntimeError::Domain(domain @ DomainError::ConflictMetadataTooLarge { .. }) = &error {
         return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
     }
+    if let RuntimeError::Domain(domain @ DomainError::ConflictResolveAnswerTooLarge { .. }) = &error
+    {
+        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
+    }
     if let RuntimeError::Domain(domain) = &error {
         let message = match domain {
             DomainError::IdempotencyKeyReuseMismatch => Some("idempotency-key-reuse-mismatch"),
@@ -11296,7 +11371,8 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
         | DomainError::IdempotencyKeyReuseMismatch
         | DomainError::SecretMomentNotFound
         | DomainError::Chat { .. } => ErrorCode::InvalidParams,
-        DomainError::ConflictMetadataTooLarge { .. } => ErrorCode::PayloadTooLarge,
+        DomainError::ConflictMetadataTooLarge { .. }
+        | DomainError::ConflictResolveAnswerTooLarge { .. } => ErrorCode::PayloadTooLarge,
         _ => ErrorCode::Internal,
     }
 }

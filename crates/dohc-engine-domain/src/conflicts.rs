@@ -433,6 +433,14 @@ pub struct ResolveTextConflict {
     pub author_json: Option<String>,
     pub now_ms: i64,
     pub request_id: Option<String>,
+    /// How many encoded bytes this conflict's non-withheld strings may occupy
+    /// in the ANSWER the caller will send, measured before anything is
+    /// written. The caller owns the arithmetic — it is the one that knows the
+    /// answer's shape and the frame that has to carry it — and passes what is
+    /// left after reserving its own fields. `usize::MAX` for a caller whose
+    /// answer does not carry the conflict (a replicated apply reports an
+    /// outcome, not a row).
+    pub conflict_answer_budget_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -794,6 +802,23 @@ impl VersionedTextStore<'_> {
             let mut conflict =
                 load_text_conflict_in_tx(tx, &input.workspace_id, &input.conflict_id)?
                     .ok_or(DomainError::ConflictNotFound)?;
+            // BEFORE any write. The caller's answer carries this conflict, one
+            // control frame has to hold that answer, and withholding removes
+            // only BODIES — so a conflict whose remaining strings cannot fit
+            // beside the rest of the answer can only be refused here. Refusing
+            // after the commit would report a mutation that happened as one
+            // that did not, and sending an oversized answer would lose the
+            // acknowledgement for it. Measured with the same
+            // `non_withheld_encoded_bytes` the open path uses, which counts
+            // the conflict id twice where this answer serves it once — an
+            // over-count, the safe direction for a bound that refuses.
+            let answer_bytes = non_withheld_encoded_bytes(&conflict);
+            if answer_bytes > input.conflict_answer_budget_bytes {
+                return Err(DomainError::ConflictResolveAnswerTooLarge {
+                    limit_bytes: input.conflict_answer_budget_bytes,
+                    observed_bytes: answer_bytes,
+                });
+            }
             // Only the two LIVE sides decide what a resolution can do. The BASE
             // is history: bytes at the fork point neither block combining two
             // texts nor moving one, and treating them as if they did would

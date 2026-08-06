@@ -1892,7 +1892,10 @@ async fn a_resolve_answer_over_the_frame_withholds_every_body_it_serves() {
     let (_scratch, transport, handle, workspace_id) = fixture("resolve-aggregate").await;
     let side = "s".repeat(128 * 1024);
     let merged = "m".repeat(120 * 1024);
-    let summary = "u".repeat(8_150_000);
+    // Inside the budget the resolve reserves for a conflict (about 8.12 MB
+    // beside these short identifiers), so this answer is one the daemon
+    // admits and then has to shrink — the belt, not the bound.
+    let summary = "u".repeat(8_000_000);
     let path = open_conflict_against_seeded_head_with(
         &transport,
         &handle,
@@ -1960,6 +1963,242 @@ async fn a_resolve_answer_over_the_frame_withholds_every_body_it_serves() {
         .await
         .expect("read the settled head");
     assert_eq!(head.result["text"], json!(merged));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resolve_whose_withheld_answer_cannot_fit_is_refused_before_it_commits() {
+    // Withholding cannot save every answer, and the answer is built AFTER the
+    // resolution commits. The strings withholding cannot shrink — this
+    // conflict's 8.15 MB of metadata, and a 100 KB object id the answer
+    // repeats in `object.id`, `snapshot.objectId` and `moment.objectId` —
+    // carry the answer past the frame on their own. Sending it loses the
+    // caller's acknowledgement for a mutation the workspace kept; refusing
+    // after the commit reports work that happened as work that did not. So
+    // the answer is bounded BEFORE anything is written.
+    //
+    // MUTATION: drop the budget check from `resolve_text_conflict_with` and
+    // this resolution commits, and answers past the frame.
+    let (_scratch, transport, handle, workspace_id) = fixture("resolve-answer-budget").await;
+    let summary = "u".repeat(8_150_000);
+    let path = open_conflict_against_seeded_head_with(
+        &transport,
+        &handle,
+        &workspace_id,
+        10,
+        "incoming",
+        |payload| {
+            payload["conflict"]["metadata"]["summary"] = json!(summary);
+        },
+    )
+    .await;
+
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-merged",
+                    "mergedText": "combined",
+                    "objectId": "o".repeat(100_000),
+                    "writeMomentId": "budget-resolution-write",
+                    "deleteMomentId": "budget-resolution-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect_err("a resolve whose withheld answer cannot fit is refused before it commits");
+    assert_eq!(refused.code, ErrorCode::PayloadTooLarge);
+    // Constraint, limit, unit, observed — and what the caller most needs to
+    // know about a refusal on a mutating route.
+    assert!(
+        refused
+            .message
+            .contains("conflict-resolve-answer-exceeds-wire-limit"),
+        "the refusal must name the constraint: {}",
+        refused.message
+    );
+    assert!(
+        refused.message.contains("encoded bytes")
+            && refused.message.contains("Nothing was written."),
+        "the refusal must name the unit and say nothing was written: {}",
+        refused.message
+    );
+
+    // NOTHING WAS WRITTEN. The conflict is still open, and the head still
+    // holds what it held before the refusal.
+    let listed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "conflicts.list",
+                Some(handle.clone()),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("the listing still answers");
+    assert_eq!(listed.result["conflicts"][0]["id"], json!("conflict-000"));
+    assert_eq!(listed.result["conflicts"][0]["status"], json!("open"));
+    let head = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                14,
+                "versionedText.read",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": path }),
+            ),
+        )
+        .await
+        .expect("read the head the refusal must not have touched");
+    assert_eq!(head.result["text"], json!("recorded current"));
+    // The moment the refused resolution would have written does not exist.
+    let moments = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                15,
+                "moments.list",
+                Some(handle),
+                json!({ "versionId": "main" }),
+            ),
+        )
+        .await
+        .expect("list moments");
+    let written = moments.result["moments"]
+        .as_array()
+        .expect("moment rows")
+        .iter()
+        .any(|moment| moment["momentId"] == json!("budget-resolution-write"));
+    assert!(
+        !written,
+        "the refused resolution must have written no moment"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worst_legitimate_resolve_is_admitted() {
+    // The measured-limits obligation for the bound above: it must not reject
+    // work anyone can legitimately do. The worst legitimate resolve is every
+    // free-form field at the 16 KiB cap the sibling write paths enforce, in
+    // the escaping-heaviest form (each quote encodes to two bytes), on the
+    // conflict AND on the request, with UUID-length identifiers.
+    //
+    // MUTATION: reserve `RESPONSE_FRAME_BYTES` for the structural allowance
+    // and this resolve is refused.
+    let (_scratch, transport, handle, workspace_id) = fixture("worst-legitimate").await;
+    let field = "\"".repeat(16 * 1024 - 1);
+    let path = open_conflict_against_seeded_head_with(
+        &transport,
+        &handle,
+        &workspace_id,
+        10,
+        "incoming",
+        |payload| {
+            payload["conflict"]["metadata"]["summary"] = json!(field);
+            payload["conflict"]["metadata"]["correlationId"] = json!(field);
+            for side in ["base", "current", "incoming"] {
+                payload["conflict"][side]["metadataSummary"] = json!(field);
+                payload["conflict"][side]["metadataCorrelationId"] = json!(field);
+            }
+        },
+    )
+    .await;
+
+    let resolved = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-merged",
+                    "mergedText": "combined\n",
+                    // UUID-length, as every real caller mints them.
+                    "objectId": "object-0f9d4b1c-6f3a-4a1e-9c7b-2d5e8f0a1b2c",
+                    "writeMomentId": "moment-1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+                    "deleteMomentId": "moment-2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
+                    "metadataOrigin": "api",
+                    "metadataSummary": field,
+                    "metadataCorrelationId": field,
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect("the worst legitimate resolve is admitted");
+    assert_eq!(resolved.result["conflict"]["resolution"], "applied-merged");
+    encode_control(&Envelope::Response(resolved), &WireLimits::default())
+        .expect("and its answer crosses as one control frame");
+
+    let head = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "versionedText.read",
+                Some(handle),
+                json!({ "versionId": "main", "path": path }),
+            ),
+        )
+        .await
+        .expect("read the settled head");
+    assert_eq!(head.result["text"], json!("combined\n"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fully_withheld_resolve_answer_fits_its_scaffolding_allowance() {
+    // The reservation's third term, executable: the answer's own JSON keys,
+    // punctuation and fixed-width fields have to stay inside
+    // `RESOLVE_ANSWER_SCAFFOLDING_BYTES`. Measured on a real resolve answer
+    // stripped of every free-form string, which leaves exactly that.
+    //
+    // MUTATION: cut `RESOLVE_ANSWER_SCAFFOLDING_BYTES` to 128 bytes and this
+    // fails with the real figure. The allowance is READ, never copied — a
+    // local copy of the number would pass whatever the daemon reserved.
+    let (_scratch, transport, handle, workspace_id) = fixture("resolve-scaffolding").await;
+    open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
+    let resolved = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.resolve",
+                Some(handle),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-merged",
+                    "mergedText": "combined\n",
+                    "objectId": "scaffolding-object",
+                    "writeMomentId": "scaffolding-write",
+                    "deleteMomentId": "scaffolding-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect("a resolve to measure");
+    let mut skeleton = resolved.result.clone();
+    blank_every_string(&mut skeleton);
+    let scaffolding = serde_json::to_string(&skeleton)
+        .expect("serialize the answer skeleton")
+        .len();
+    assert!(
+        scaffolding < dohc_workspace_engine::RESOLVE_ANSWER_SCAFFOLDING_BYTES,
+        "a resolve answer's scaffolding is {scaffolding} bytes, which must stay inside the \
+         {} byte allowance the reservation makes for it",
+        dohc_workspace_engine::RESOLVE_ANSWER_SCAFFOLDING_BYTES
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
