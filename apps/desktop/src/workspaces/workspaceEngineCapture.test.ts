@@ -23,6 +23,7 @@ import {
   createWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
   YDocOpenRacedError,
+  YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
@@ -3098,8 +3099,15 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     // reaches the daemon. The daemon answers UnsettledClose — "content arrived
     // after all". The session cannot be handed back (its provider already
     // closed itself and dropped every subscription) and cannot be reopened (a
-    // refused close reinserts the daemon entry with its lease held), so the
-    // only safe answer is a refusal that does NOT claim the path is missing.
+    // refused close reinserts the daemon entry with its lease held).
+    //
+    // So the answer is the UNRELEASED refusal, not a verdict about the disk.
+    // It used to be `YDocOpenRacedError`, which is true — something IS writing
+    // the path — but `main` answers it with a bare `available: false` and the
+    // renderer opens the writable plain editor over the session the daemon
+    // just kept (#564, codex r17). What is true of every refused release is
+    // that the engine may still own the document, and that is what has to
+    // reach the surface: read-only, with a retry that discharges the orphan.
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
@@ -3153,7 +3161,14 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         (error: unknown) => error,
       );
 
-    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
+    // MUTATION: let an ordinary release refusal fall through to the disk
+    // verdict -> a raced/artifact refusal, a plain fallback, and two writers
+    // on one path.
+    expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
+    // The daemon's own words are kept as the cause, for whoever reads the log.
+    expect((refusal as Error).cause).toMatchObject({
+      message: "unsettled-close",
+    });
     // It must NOT claim the version does not have a path something is writing.
     expect(isYDocPathNotInVersionError(refusal)).toBe(false);
     // And the release never escalated, so nothing was materialized.

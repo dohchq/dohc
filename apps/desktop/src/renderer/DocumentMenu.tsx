@@ -26,6 +26,15 @@ const ITEMS: ReadonlyArray<{ id: DocumentMenuItemId; label: string }> = [
 // (editor/codeBlockChrome.tsx).
 const FEEDBACK_MS = 1200;
 
+// What every action says when the document has no serializer: the editor is
+// not showing this document, so there is nothing honest to copy or export.
+// It states the fact and NOT the cause, because this menu cannot tell an
+// editor that is still opening from one that failed to — and copy.md says to
+// give a reason only when we know it. "document" is the noun this surface
+// already uses (the menu is "Document actions"), and the per-action next step
+// rides in each item's tooltip.
+const REFUSAL_LABEL = "Document not open";
+
 export function DocumentMenu(props: {
   workspaceId: string;
   // Filename stem (no extension) — becomes the export dialog's suggested
@@ -33,12 +42,21 @@ export function DocumentMenu(props: {
   suggestedName: string;
   // Called fresh on every action: always the CURRENT document markdown
   // (frontmatter included), matching the code editor's own save path.
-  getMarkdown: () => string;
+  //
+  // NULL when the document cannot be serialized yet — an engine-backed
+  // document whose editor has not mounted (or failed to). Every action here
+  // REFUSES on null rather than falling back to a stale or empty body: a
+  // copy or an export that silently produces nothing is a file the user
+  // believes is their document (#564).
+  getMarkdown: () => string | null;
 }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState(0);
+  // A refusal owes the user a next step (docs/brand/copy.md), and an inline
+  // label that swaps for 1.2s has no room for one. The label states what is
+  // true; the tooltip carries the instruction.
   const [feedback, setFeedback] = useState<
-    Partial<Record<DocumentMenuItemId, string>>
+    Partial<Record<DocumentMenuItemId, { label: string; title?: string }>>
   >({});
   const containerRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -75,17 +93,56 @@ export function DocumentMenu(props: {
     [],
   );
 
-  function showFeedback(id: DocumentMenuItemId, text: string) {
-    setFeedback((current) => ({ ...current, [id]: text }));
+  // ONE timer, so one label. Merging into the previous feedback stranded it:
+  // the replacement timer only ever clears the newest item, so a second
+  // refusal inside the window left the first item showing its refusal with
+  // nothing left to retire it.
+  function showFeedback(id: DocumentMenuItemId, label: string, title?: string) {
+    setFeedback({ [id]: title === undefined ? { label } : { label, title } });
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     feedbackTimer.current = setTimeout(() => {
-      setFeedback((current) => ({ ...current, [id]: undefined }));
+      setFeedback({});
       setOpen(false);
     }, FEEDBACK_MS);
   }
 
+  // NULL is the refusal this menu expects and handles. A THROW is not: the
+  // serializer reads a live editor, and reading it can fail. Called outside a
+  // boundary it rejected the action's promise into nothing — no feedback, no
+  // log, and the menu still open as though the click had missed (#564,
+  // codex r23). Both actions serialize through here, so both answer a throw
+  // the way they answer any other failure.
+  function serializeOrFail(
+    id: DocumentMenuItemId,
+    failureLabel: string,
+    what: string,
+  ): { markdown: string | null } | null {
+    try {
+      return { markdown: props.getMarkdown() };
+    } catch (error) {
+      console.error(`${what} failed`, error);
+      showFeedback(id, failureLabel);
+      return null;
+    }
+  }
+
   async function copyAsMarkdown() {
-    const write = navigator.clipboard?.writeText(props.getMarkdown());
+    const serialized = serializeOrFail(
+      "copy-markdown",
+      "Couldn't copy",
+      "Copy as Markdown",
+    );
+    if (!serialized) return;
+    const markdown = serialized.markdown;
+    if (markdown === null) {
+      showFeedback(
+        "copy-markdown",
+        REFUSAL_LABEL,
+        "You can copy this document when it opens.",
+      );
+      return;
+    }
+    const write = navigator.clipboard?.writeText(markdown);
     if (!write) return;
     try {
       await write;
@@ -96,6 +153,24 @@ export function DocumentMenu(props: {
   }
 
   async function exportDocument(kind: "markdown" | "html" | "pdf") {
+    const serialized = serializeOrFail(
+      `export-${kind}`,
+      "Couldn't export",
+      `Export as ${kind.toUpperCase()}`,
+    );
+    if (!serialized) return;
+    const documentMarkdown = serialized.markdown;
+    if (documentMarkdown === null) {
+      // BEFORE closing: the feedback replaces the item's label, so a refusal
+      // shown into a closed menu is a refusal the user never sees — the
+      // export would just appear to do nothing.
+      showFeedback(
+        `export-${kind}`,
+        REFUSAL_LABEL,
+        "You can export this document when it opens.",
+      );
+      return;
+    }
     setOpen(false);
     try {
       let content: string;
@@ -103,8 +178,7 @@ export function DocumentMenu(props: {
         // The text-first export: the raw document source, written verbatim
         // to a .md file. A brand-new empty document still exports one
         // newline — the IPC contract requires non-empty content.
-        const markdown = props.getMarkdown();
-        content = markdown.length > 0 ? markdown : "\n";
+        content = documentMarkdown.length > 0 ? documentMarkdown : "\n";
       } else {
         // Imported on demand, not at module load: documentExport statically
         // pulls in the Tiptap MarkdownManager/schema stack and KaTeX, which
@@ -114,7 +188,7 @@ export function DocumentMenu(props: {
           "./editor/documentExport"
         );
         content = buildStandaloneDocumentHtml(
-          props.getMarkdown(),
+          documentMarkdown,
           props.suggestedName,
         );
       }
@@ -199,8 +273,9 @@ export function DocumentMenu(props: {
               className={`dohc-document-menu-item${index === selected ? " is-selected" : ""}`}
               onMouseEnter={() => setSelected(index)}
               onClick={() => runItem(item.id)}
+              title={feedback[item.id]?.title}
             >
-              {feedback[item.id] ?? item.label}
+              {feedback[item.id]?.label ?? item.label}
             </button>
           ))}
         </div>

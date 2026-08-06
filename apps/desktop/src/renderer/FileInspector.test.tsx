@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { configure } from "@testing-library/dom";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -1045,6 +1052,36 @@ describe("markdown editor unmount flush", () => {
 describe("engine markdown source view", () => {
   const DOC_MARKDOWN = "---\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.\n";
 
+  /**
+   * Put a draft in the document through the SOURCE editor — a textarea, and
+   * the surface these draft tests actually mean.
+   *
+   * Written to keep pointers out of the WYSIWYG surface, because
+   * ProseMirror's `mousedown` called `elementFromPoint` and jsdom did not
+   * implement it: the handler threw after the test had passed, failing the
+   * run with every assertion green. #619 has since stubbed hit testing in
+   * `vitest.setup.ts` (measured: the TypeError returns in 21 of 32 loaded
+   * runs without it), so that hazard is gone. This stays because driving the
+   * textarea is the honest way to say "the user typed a draft here" — not
+   * because the pointer is unsafe.
+   */
+  async function typeIntoSourceEditor(value: string): Promise<HTMLElement> {
+    // Read -> WYSIWYG -> source: the surface may start in any of the three,
+    // so step until the editor is the textarea.
+    for (let step = 0; step < 4; step += 1) {
+      const candidate = screen.queryByTestId("markdown-editor");
+      if (candidate?.tagName === "TEXTAREA") {
+        fireEvent.change(candidate, { target: { value } });
+        return candidate;
+      }
+      fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+    throw new Error("The source editor never appeared.");
+  }
+
   function makeEngineBridge(markdown: string) {
     const serverDoc = markdownToYDoc(markdown);
     const remoteListeners = new Set<
@@ -1271,6 +1308,423 @@ describe("engine markdown source view", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  // #564. The engine open hit its retry deadline. Like notInVersion, this
+  // must NOT downgrade to the writable plain editor — the engine may still
+  // bind the document, and a plain autosave meanwhile would take the disk
+  // path #533 closed. The document stays readable, read-only, with the
+  // reason stated and a retry that issues a fresh open.
+  it("keeps a timed-out open read-only with the reason, and retries on request", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    let opens = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      openEngineYDocSession: vi.fn(async () => {
+        opens += 1;
+        return { available: false, openTimedOut: true };
+      }),
+    });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const notice = await screen.findByTestId(
+      "engine-open-timeout-notice",
+      {},
+      { timeout: 5_000 },
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not open this document for editing.",
+    );
+    expect(notice.textContent).toContain("It is read-only for now.");
+    // The content still renders — read-only, not replaced.
+    expect(screen.getByTestId("view-markdown")).toBeTruthy();
+    // MUTATION: drop openTimedOut from the readOnly computation -> the edit
+    // toggle is enabled over a session the engine may still bind.
+    expect(
+      (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(opens).toBe(1);
+
+    // Try again is a FRESH open (a new request key), not a repaint.
+    await user.click(screen.getByText("Try again"));
+    await waitFor(() => expect(opens).toBe(2));
+  });
+
+  // A draft pending AT the retry needs no gate of its own, and that is why
+  // #564's retry-window guard and its draft disarm are gone. Both windows a
+  // "Try again" opens are `opening` windows, and #567 owns those: the retry
+  // changes the request key, so `opening` is true in the same render and the
+  // reopen's capture takes the draft out of the save pipeline before any
+  // seam can write it. This test drives the whole path — a draft typed
+  // before a timed-out reopen, the retry, then the bind — and asserts that
+  // the keystrokes reach the recovery surface and never the disk.
+  it("sets a draft aside across a timed-out reopen and its retry", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      let opens = 0;
+      const order: string[] = [];
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        writeWorkspaceText: vi.fn(async () => {
+          order.push("write");
+          return { path: "a.md", recorded: true };
+        }),
+        openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
+          opens += 1;
+          order.push(`open-${opens}`);
+          // Open 1: plain fallback (writable) — the draft is typed here.
+          // Open 2 (a version switch): times out.
+          // Open 3 ("Try again"): BINDS.
+          if (opens === 1) return { available: false };
+          if (opens === 2) return { available: false, openTimedOut: true };
+          return await bridgeMock.openEngineYDocSession(payload);
+        }),
+      });
+
+      const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+      // fireEvent + the SOURCE textarea, never a pointer into the WYSIWYG
+      // surface: prosemirror's mousedown calls elementFromPoint, which jsdom
+      // does not implement, and it throws AFTER the test — failing the run
+      // with every assertion green.
+      await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
+
+      view.rerender(
+        <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
+      );
+      await screen.findByTestId(
+        "engine-open-timeout-notice",
+        {},
+        { timeout: 5_000 },
+      );
+      // The keystrokes are recoverable, and the armed timer did not write
+      // them during the read-only window.
+      await screen.findByTestId("orphaned-draft-notice");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      expect(order).toEqual(["open-1", "open-2"]);
+
+      fireEvent.click(screen.getByText("Try again"));
+      await waitFor(() => expect(opens).toBe(3));
+      // The retry reopened and wrote NOTHING — not before the bind (a file
+      // write is not canonical here: the reopen seeds from the engine head,
+      // and only when no CRDT lineage exists) and not after it.
+      expect(order).toEqual(["open-1", "open-2", "open-3"]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(order).toEqual(["open-1", "open-2", "open-3"]);
+
+      // The unmount flush is the seam that outlives every other one: it runs
+      // once the bind has reopened the guards.
+      view.unmount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(order).toEqual(["open-1", "open-2", "open-3"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // #564, codex round 3 P2: the read had failed, so the inspector's
+  // loading/error branch owned the surface. A SUCCESSFUL retry clears
+  // `openTimedOut` — and the user was left at "Couldn't read this file."
+  // with no document and no retry, while main held a live session.
+  it("renders the document when the retry binds after a failed read", async () => {
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    let opens = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      readWorkspaceText: vi.fn(async () => {
+        throw new Error("read failed");
+      }),
+      openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
+        opens += 1;
+        return opens === 1
+          ? { available: false, openTimedOut: true }
+          : await bridgeMock.openEngineYDocSession(payload);
+      }),
+    });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId(
+      "engine-open-timeout-notice",
+      {},
+      { timeout: 5_000 },
+    );
+    fireEvent.click(screen.getByText("Try again"));
+
+    // MUTATION: let the read-error branch win over a bound engine doc ->
+    // this never appears and the user keeps "Couldn't read this file."
+    await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+    expect(screen.queryByText("Couldn't read this file.")).toBeNull();
+  });
+
+  // #564, review round 2 B2: the OTHER direction of the same guard. The
+  // refusal must LIFT when the retry answers. It is keyed on live engine
+  // state for that reason — an "ever retried" flag stayed true for the tab's
+  // life and cost the user every keystroke after one retry.
+  it("stops refusing writes once the retry has answered", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      let opens = 0;
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        openEngineYDocSession: vi.fn(async () => {
+          opens += 1;
+          // Open 1 times out; the retry (open 2) answers "not engine-backed",
+          // so the plain editor is legitimately writable again.
+          return opens === 1
+            ? { available: false, openTimedOut: true }
+            : { available: false };
+        }),
+      });
+
+      render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId(
+        "engine-open-timeout-notice",
+        {},
+        { timeout: 5_000 },
+      );
+      await user.click(screen.getByText("Try again"));
+      await waitFor(() => expect(opens).toBe(2));
+      await waitFor(() =>
+        expect(screen.queryByTestId("engine-open-timeout-notice")).toBeNull(),
+      );
+
+      // The answered retry left an ordinary writable document behind.
+      // MUTATION: leave the refusal armed after the open answers (an "ever
+      // retried" flag, or `openTimedOut` kept sticky) -> the autosave is
+      // refused and nothing reaches disk.
+      //
+      // fireEvent, not userEvent: a pointer click into the mounted WYSIWYG
+      // surface reaches prosemirror's mousedown, which needs layout jsdom
+      // does not have — and that throws AFTER the test, failing the run
+      // with every assertion green.
+      await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // #564, codex round 2 P2: when the content read itself failed, the
+  // inspector returns from its loading/error branch before MarkdownView
+  // mounts — the one path where the engine session is the only way back to
+  // the content is exactly where the timeout had no notice and no retry.
+  it("offers the timeout retry even when the content read failed", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    let opens = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      readWorkspaceText: vi.fn(async () => {
+        throw new Error("read failed");
+      }),
+      openEngineYDocSession: vi.fn(async () => {
+        opens += 1;
+        return { available: false, openTimedOut: true };
+      }),
+    });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const notice = await screen.findByTestId(
+      "engine-open-timeout-notice",
+      {},
+      { timeout: 5_000 },
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not open this document for editing.",
+    );
+    // The read failure stays stated beside it — and the notice must NOT
+    // promise read access to content that is not on screen.
+    expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
+    expect(notice.textContent).not.toContain("read-only for now");
+
+    await user.click(screen.getByText("Try again"));
+    await waitFor(() => expect(opens).toBe(2));
+  });
+
+  // codex r15. The Y.Doc-only bypass renders the document when the read
+  // failed — but the readiness signal that retires a pending search jump asks
+  // only about DISK text, which that path never has. The jump stayed pending
+  // in the shell and replayed on a later open of the path: the user clicks a
+  // search result, gets the document, and some unrelated later open jumps to
+  // that old line.
+  //
+  // What it does NOT do is APPLY the jump. No engine-backed document does:
+  // the line jump's only seam is the plain source textarea, which engine mode
+  // does not render (the comment on `pendingScrollLine` says the WYSIWYG
+  // editor takes that seam over when it owns the surface). This path behaves
+  // exactly like every other engine document — consumed, not applied — and
+  // making it the one place a jump lands would be a feature smuggled into a
+  // bugfix.
+  it("retires the search jump when the document comes back through the Y.Doc", async () => {
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    const onScrollConsumed = vi.fn();
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      readWorkspaceText: vi.fn(async () => {
+        throw new Error("read failed");
+      }),
+    });
+
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 3, nonce: 1 }}
+        onScrollConsumed={onScrollConsumed}
+      />,
+    );
+
+    // The document is on screen through the bound Y.Doc, with no disk text.
+    await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+    expect(screen.queryByText("Couldn't read this file.")).toBeNull();
+
+    // MUTATION: keep `textReady` on the disk read alone -> this never fires,
+    // the shell holds the jump, and it replays on a later open of this path.
+    await waitFor(() => expect(onScrollConsumed).toHaveBeenCalled());
+  });
+
+  // codex on the round-9 head: the SAME failed-read branch, but reached with a
+  // draft already pending. `openTimedOut` was carried only by the child's
+  // `readOnly` — and this branch unmounts the child in the commit that would
+  // have set it, so its unmount flush ran on the pre-refusal value and wrote
+  // the draft to disk while the engine may still own the document. That is the
+  // Y.Doc-canonical boundary being walked around, which is the invariant this
+  // PR exists to hold. An OUTCOME test like the one below, for the same
+  // reason: several guards refuse this write now.
+  it("refuses the unmount flush when the read fails and the open timed out", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      let reads = 0;
+      let opens = 0;
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        readWorkspaceText: vi.fn(async () => {
+          reads += 1;
+          // Read 1 succeeds, so the plain editor mounts and takes a draft.
+          // The refresh's read FAILS, which hands the surface to the
+          // loading/error branch and unmounts that editor.
+          if (reads === 1) return await bridgeMock.readWorkspaceText();
+          throw new Error("read failed");
+        }),
+        openEngineYDocSession: vi.fn(async () => {
+          opens += 1;
+          // Open 1: not engine-backed, so the plain editor is writable.
+          // Open 2 (the refresh): times out, arriving with the failed read.
+          if (opens === 1) return { available: false };
+          return { available: false, openTimedOut: true };
+        }),
+      });
+
+      const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+      await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
+
+      // Both keys, as a version switch bumps them: `refreshKey` re-reads the
+      // file (which fails) and `engineVersionKey` reopens (which times out).
+      view.rerender(
+        <FileInspector
+          workspaceId="ws-1"
+          path="a.md"
+          refreshKey={1}
+          engineVersionKey={1}
+        />,
+      );
+      await screen.findByTestId(
+        "engine-open-timeout-notice",
+        {},
+        { timeout: 5_000 },
+      );
+      expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
+
+      // The armed autosave must not land either.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      view.unmount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // codex on the round-12 head, and the same defect one state EARLIER: the
+  // reopen has not answered at all, so `opening` is true and every other
+  // refusal is false. On that head the unmount flush wrote the draft to disk
+  // while the engine was opening the document. An OUTCOME test, deliberately:
+  // three separate guards refuse that write now (the reopen's render-phase
+  // capture, the child's `openingRef`, the parent's carried `opening`), so no
+  // single mutation reds it. What it pins is the contract they exist for —
+  // the keystrokes reach the recovery surface, and never the file.
+  it("sets the draft aside when the read fails while the reopen is still pending", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+      let reads = 0;
+      let opens = 0;
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        readWorkspaceText: vi.fn(async () => {
+          reads += 1;
+          if (reads === 1) return await bridgeMock.readWorkspaceText();
+          throw new Error("read failed");
+        }),
+        openEngineYDocSession: vi.fn(async () => {
+          opens += 1;
+          // Open 1: not engine-backed, so the plain editor is writable.
+          // Open 2 (the refresh): NEVER answers — the read rejects first.
+          if (opens === 1) return { available: false };
+          return new Promise(() => {});
+        }),
+      });
+
+      const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+      await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
+
+      view.rerender(
+        <FileInspector
+          workspaceId="ws-1"
+          path="a.md"
+          refreshKey={1}
+          engineVersionKey={1}
+        />,
+      );
+      await screen.findByText("Couldn't read this file.", {}, { timeout: 5_000 });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      view.unmount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+      // Refused, never dropped: the text is on the recovery surface the
+      // failed-read branch renders.
+      render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId("orphaned-draft-notice", {}, { timeout: 5_000 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // THE P1 the review reproduced. Typing during the open wait arms an 800ms
   // autosave AND leaves a pending draft. When the refusal arrived, `readOnly`
   // flipped false->true; `readOnly` was a dependency of the unmount-flush
@@ -1481,11 +1935,10 @@ describe("engine markdown source view", () => {
         <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={0} />,
       );
       await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
-      await user.click(screen.getByTestId("markdown-edit-toggle"));
-      await user.type(
-        await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
-        "phantom",
-      );
+      // Same draft, no pointer: this test's typed click reached prosemirror's
+      // mousedown and threw AFTER it passed, which failed the whole run with
+      // every assertion green. See typeIntoSourceEditor.
+      await typeIntoSourceEditor(`${DOC_MARKDOWN}phantom`);
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
       // The version switch. Same mount, same pending draft, same armed timer.

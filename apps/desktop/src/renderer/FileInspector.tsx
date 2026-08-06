@@ -867,6 +867,10 @@ function MarkdownView(props: {
   // reread fail before the queued open answers — so an open owned here would be
   // cancelled by the very race its refusal exists to name (#534, codex P2).
   engine: UseEngineDoc;
+  // Reopen the engine session after `engine.openTimedOut` (#564). Owned by
+  // the inspector, like the open itself. REQUIRED: the timeout notice must
+  // never render without its retry, and the one caller always passes it.
+  onRetryEngineOpen: () => void;
   // Set by the inspector the instant the engine refuses this path. Read by
   // every write guard BESIDE `readOnlyRef`, because the refusal arrives in the
   // same commit that unmounts this component — there is no render of it here to
@@ -1050,9 +1054,18 @@ function MarkdownView(props: {
   // a stale title. Serialize the LIVE map instead. Reading it directly (rather
   // than yDocToMarkdown) keeps import-export's heavy schema/KaTeX stack out of
   // this eager chunk — the mounted WYSIWYG editor already owns the body.
-  const serializeEngineDraft = () => {
-    const body =
-      wysiwygRef.current?.getMarkdown() ?? markdownEditorBody(props.body);
+  const serializeEngineDraft = (): string | null => {
+    // The mounted editor is the ONLY serializer of the canonical Y.Doc, so
+    // without it there is no honest body to emit for an engine-backed
+    // document: `props.body` is the markdown CACHE beside that doc. It lags
+    // every edit the Y.Doc has taken since the read, and on the recovery path
+    // (a failed read whose retry bound the document, #564) it is empty. Both
+    // export a file that is not the user's document while reporting success,
+    // and emptiness was never the thing that made it wrong — the Y.Doc being
+    // canonical is. Refuse; the menu says the document is not ready.
+    const editorBody = wysiwygRef.current?.getMarkdown();
+    if (editorBody === undefined && engine.doc !== null) return null;
+    const body = editorBody ?? markdownEditorBody(props.body);
     const liveMeta = engine.doc
       ? (Object.fromEntries(
           engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
@@ -1133,6 +1146,10 @@ function MarkdownView(props: {
   const readOnly =
     !!props.forceReadOnly ||
     engine.notInVersion ||
+    // #564: the engine open hit its retry deadline. The plain editor stays
+    // read-only — its autosave would race the session the engine may still
+    // bind — and the notice below states the reason and offers the retry.
+    engine.openTimedOut ||
     (props.truncated && !engine.available);
   // Every write guard reads THIS, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
@@ -1536,14 +1553,13 @@ function MarkdownView(props: {
       // `opening` — and this cleanup is already willing to WRITE this exact
       // value, so keeping it can only be safer than losing it.
       //
-      // DECLARED UNPINNED. No test enters this branch, and that is a property
-      // of the design rather than a coverage gap: the render-phase capture
-      // clears `unsavedDraft` first on every path a test can construct, so
-      // reaching here needs the engine open and the file read to land in the
-      // same batch. A mutation aimed at it survives against the neighbouring
-      // "no write happens" tests, because turning the capture back into a
-      // `return` still writes nothing — those tests pin the write, not the
-      // rescue. Kept as a backstop, not as covered code.
+      // DECLARED UNPINNED, and it stays that way after #564. No test enters
+      // this branch with a draft the render-phase capture did not already
+      // take: reaching it needs the engine open and the file read to land in
+      // the same batch. Both conditions are conservative on purpose —
+      // `openingRef` holds the last RENDERED value and `writesBlocked` reads
+      // the parent's ref, so neither depends on this view living long enough
+      // to observe the refusal. Kept as a backstop, not as covered code.
       if (writesBlocked() || openingRef.current) {
         captureOrphanedDraft(workspaceId, path, text);
         return;
@@ -1868,13 +1884,39 @@ function MarkdownView(props: {
               <DocumentMenu
                 workspaceId={props.workspaceId}
                 suggestedName={filenameStem(props.path)}
-                getMarkdown={() => serializeDraftRef.current()}
+                // The same rule the engine branch answers to: emit the
+                // document, or refuse. This branch shows the DISK, and until
+                // the engine open ANSWERS there is no telling whether the
+                // disk is the document — a session that binds a moment later
+                // may hold replicated updates the file has never seen (#564,
+                // codex r19/r21). Refuse for the whole unresolved window,
+                // which the editor beside this menu already spends read-only
+                // or opening. The refusal reads "Document not open", and the
+                // notice below offers the retry that resolves it.
+                //
+                // `opening` is the wait and `openTimedOut` is the wait giving
+                // up; both mean the same thing to an export. Once the open
+                // answers "not engine-backed", the file IS the document and
+                // this lifts.
+                getMarkdown={() =>
+                  engine.opening || engine.openTimedOut
+                    ? null
+                    : serializeDraftRef.current()
+                }
               />
             ) : null}
           </>
         }
       />
       {props.truncatedNotice}
+      {/* "Try again" after a timed-out open (#564). It retries and nothing
+          else: the retry changes the request key, so `opening` flips true in
+          that same render and the capture above sets a draft typed before the
+          timeout aside — where the user can copy it — instead of letting it
+          reach disk over the artifact the engine is binding (#567). */}
+      {engine.openTimedOut ? (
+        <EngineOpenTimedOutNotice onRetry={props.onRetryEngineOpen} contentShown />
+      ) : null}
       {orphanedDraftNotice}
       {surfaceMode === "source" ? (
         <textarea
@@ -2546,6 +2588,45 @@ function Empty({ children }: { children: React.ReactNode }) {
   );
 }
 
+// #564: the engine open hit its retry deadline. The document stays read-only
+// — never the writable plain editor — with the reason stated and the retry
+// offered where the user is looking.
+function EngineOpenTimedOutNotice(props: {
+  onRetry: () => void;
+  // Is the document's content on screen? When the read failed too, it is
+  // not — and "It is read-only for now" would promise read access to
+  // content the user cannot see.
+  contentShown: boolean;
+}) {
+  return (
+    <div
+      data-testid="engine-open-timeout-notice"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      {/* "document", the noun the editing controls beside this already use
+          ("You can edit this document when it finishes opening.").
+
+          No "in time": this notice answers every refusal `main` maps to
+          `openTimedOut`, and only one of them is a timeout. A session the
+          daemon would not release refuses IMMEDIATELY, and naming a cause the
+          user did not hit sends them looking for a slow machine (#564, codex
+          r20). What is true of all of them is the sentence below, and the
+          retry is the same either way. */}
+      <span>
+        dohc could not open this document for editing.
+        {props.contentShown ? " It is read-only for now." : ""}
+      </span>
+      <button
+        type="button"
+        onClick={props.onRetry}
+        className="text-subtle hover:text-ink"
+      >
+        Try again
+      </button>
+    </div>
+  );
+}
+
 function TruncatedNotice(props: { workspaceId: string; path: string }) {
   return (
     <div
@@ -2666,12 +2747,20 @@ export function FileInspector(props: {
   // when that answer is a failure: a failed reread is exactly when the refusal
   // is on its way, and dropping `enabled` would cancel the open that carries it.
   const readAnswered = text !== null || error;
+  // "Try again" after an open that hit its retry deadline (#564): part of the
+  // hook's request key, so a retry is a fresh open under the same
+  // stale-response guard as any other request change.
+  const [engineRetryNonce, setEngineRetryNonce] = useState(0);
+  const retryEngineOpen = useCallback(() => {
+    setEngineRetryNonce((nonce) => nonce + 1);
+  }, []);
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
     enabled:
       kind === "markdown" && readAnswered && !truncated && !props.readOnly,
     reopenKey: props.engineVersionKey,
+    retryKey: engineRetryNonce,
   });
   // DERIVED, never stored. #565 keys the hook's outcome to the request that
   // asked for it, so a refusal for the version the user just LEFT cannot repaint
@@ -2697,13 +2786,19 @@ export function FileInspector(props: {
   if (switchReadPending.current && readSeq !== seenReadSeq.current) {
     switchReadPending.current = false;
   }
-  // The child never gets a render carrying this refusal: the branch below
-  // replaces it in the same commit that learns of it, so its own `readOnlyRef`
-  // still holds the pre-refusal value when its unmount flush runs. A REF the
-  // PARENT assigns during render is what crosses that gap — the object identity
-  // is stable, so even the child's first-render closures read the live value.
+  // Every engine state that is not a bound document, carried for a child that
+  // might never render it. This component has exactly two branches that
+  // replace the document — path-not-in-version (#534) and the failed read
+  // below — and each one replaces the child in the same commit that learns of
+  // the state, so the child's own refs still hold the pre-refusal value when
+  // its unmount flush runs. A guard that works because a child observes a
+  // state is defeated by unmounting that child, which is why these are
+  // carried here rather than derived there. A REF the PARENT assigns during
+  // render is what crosses that gap: the object identity is stable, so even
+  // the child's first-render closures read the live value.
   const writesRefusedRef = useRef(false);
-  writesRefusedRef.current = notInVersion;
+  writesRefusedRef.current =
+    notInVersion || engine.opening || engine.openTimedOut;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText
@@ -2713,11 +2808,24 @@ export function FileInspector(props: {
           undoText: props.pendingUndo.undoText,
         }
       : undefined;
+  // An engine document that BOUND does not need the file read: the canonical
+  // Y.Doc is the content, and main holds the live session. Without this, a
+  // read that failed before a successful retry left the user at "Couldn't
+  // read this file." with no document and no way back, while the session it
+  // describes was live (#564, codex round 3).
+  const engineDocBound = engine.available && engine.doc !== null;
   // Consume the jump AFTER the child view's own effects applied it (child
   // effects run before this parent effect). Text views wait for the loaded
   // text; every other kind has nowhere to land, so consume immediately.
+  //
+  // A bound Y.Doc counts as the text, because it IS the document: the branch
+  // below is bypassed and this commit shows the user everything it is ever
+  // going to show for this jump. Asking only about DISK text left the jump
+  // pending on the one path that has none, and the shell replayed it on a
+  // later open of that path (#564, codex r15).
   const { scrollTarget, onScrollConsumed } = props;
-  const textReady = !isText || (text !== null && loadedPath === props.path);
+  const textReady =
+    !isText || engineDocBound || (text !== null && loadedPath === props.path);
   useEffect(() => {
     if (scrollTarget && scrollTarget.path === props.path && textReady) {
       onScrollConsumed?.();
@@ -2768,7 +2876,7 @@ export function FileInspector(props: {
     );
   }
 
-  if (isText && (text === null || loadedPath !== props.path)) {
+  if (isText && !engineDocBound && (text === null || loadedPath !== props.path)) {
     // Keep the inspector frame mounted while loading/erroring so the surface
     // is stable (and testable) rather than flickering between containers.
     return (
@@ -2779,6 +2887,13 @@ export function FileInspector(props: {
           label="file"
           onShare={onShareCurrentPath}
         />
+        {engine.openTimedOut ? (
+          // #564, codex round 2: a failed read returns HERE, before
+          // MarkdownView mounts — without this the timeout had no notice and
+          // no retry on exactly the path where the engine session is the only
+          // way back to the content.
+          <EngineOpenTimedOutNotice onRetry={retryEngineOpen} contentShown={false} />
+        ) : null}
         {/* A failed read is exactly when the set-aside text matters most —
             the marker and the close warning must not point at actions this
             branch withholds (#579 review, r5). */}
@@ -2817,6 +2932,7 @@ export function FileInspector(props: {
             registerSourceToggle={props.registerSourceToggle}
             onPendingDraftChange={setPendingDraft}
             engine={engine}
+            onRetryEngineOpen={retryEngineOpen}
             writesRefusedRef={writesRefusedRef}
           />
         </div>

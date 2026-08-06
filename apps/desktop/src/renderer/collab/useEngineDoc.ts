@@ -74,6 +74,11 @@ export type UseEngineDoc = {
   // plain editor, whose autosave would write the file back into the version the
   // user just entered.
   notInVersion: boolean;
+  // The open hit its retry deadline while the engine was unreachable (#564).
+  // Same no-downgrade rule as notInVersion: the engine may still bind this
+  // document, so the caller stays read-only, states the reason, and offers a
+  // retry (bump retryKey).
+  openTimedOut: boolean;
 };
 
 // What ONE open answers: a workspace, a path, the gate, and the active-version
@@ -84,12 +89,14 @@ function engineDocRequestKey(input: {
   path: string;
   enabled: boolean;
   reopenKey?: number;
+  retryKey?: number;
 }): string {
   return JSON.stringify([
     input.enabled,
     input.workspaceId,
     input.path,
     input.reopenKey ?? null,
+    input.retryKey ?? null,
   ]);
 }
 
@@ -97,10 +104,12 @@ function engineDocRequestKey(input: {
 type EngineDocOpenOutcome =
   | { key: string; kind: "bound"; doc: Y.Doc }
   | { key: string; kind: "unavailable" }
-  // Its OWN kind, not a flag on "unavailable": every other unavailable answer
-  // means "fall back to the plain editor", and this one means the opposite
-  // (#534). Collapsing them would put the two behind one branch again.
-  | { key: string; kind: "not-in-version" };
+  // Their OWN kinds, not flags on "unavailable": every other unavailable
+  // answer means "fall back to the plain editor", and these two mean the
+  // opposite (#534, #564). Collapsing them would put the branches back
+  // behind one flag.
+  | { key: string; kind: "not-in-version" }
+  | { key: string; kind: "open-timed-out" };
 
 let engineDocSessionCounter = 0;
 function nextSessionId(): string {
@@ -129,6 +138,7 @@ function makeTransport(
         available: result.available,
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
+        ...(result.openTimedOut ? { openTimedOut: true } : {}),
       };
     },
     applyLocalUpdate(update) {
@@ -161,6 +171,9 @@ export function useEngineDoc(input: {
   // The caller gates: only a rich (markdown) file that is not truncated / read-
   // only opens an engine session. Everything else keeps the local editor.
   enabled: boolean;
+  // Bump to retry after `openTimedOut` (#564): part of the request key, so a
+  // retry is a fresh open with the same stale-response guard as any other.
+  retryKey?: number;
   // G2-C-3 version-switch re-bind: a monotonic token that changes whenever the
   // ACTIVE VERSION of this workspace changes while the SAME file stays open
   // (the shell's versionEpoch). The session keys on it so switching version
@@ -195,6 +208,7 @@ export function useEngineDoc(input: {
   // request-identity rule: a refusal for the version the user just LEFT never
   // repaints the document they just entered.
   const notInVersion = settled?.kind === "not-in-version";
+  const openTimedOut = settled?.kind === "open-timed-out";
 
   useEffect(() => {
     setSaveState("saved");
@@ -227,10 +241,16 @@ export function useEngineDoc(input: {
           // Resolved: NOT engine-backed. The caller may offer the plain local
           // editor again — that is what `opening` was holding back. EXCEPT
           // when the path is not in this version, where offering it would
-          // write the phantom the engine just refused (#534).
+          // write the phantom the engine just refused (#534), and when the
+          // open timed out, where a plain autosave would race the session the
+          // engine may still bind (#564).
           setOutcome({
             key,
-            kind: bound.notInVersion ? "not-in-version" : "unavailable",
+            kind: bound.notInVersion
+              ? "not-in-version"
+              : bound.openTimedOut
+                ? "open-timed-out"
+                : "unavailable",
           });
           return;
         }
@@ -312,7 +332,7 @@ export function useEngineDoc(input: {
     // the renderer's mirror session and the re-run opens a fresh one, guarded by
     // the per-open token so a stale response never repaints).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input.workspaceId, input.path, input.enabled, input.reopenKey]);
+  }, [input.workspaceId, input.path, input.enabled, input.reopenKey, input.retryKey]);
 
-  return { available, opening, doc, saveState, notInVersion };
+  return { available, opening, doc, saveState, notInVersion, openTimedOut };
 }

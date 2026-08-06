@@ -431,11 +431,15 @@ import type {
   WorkspaceEngineCapture,
   WorkspaceEngineYDocProviderSession,
 } from "./workspaces/workspaceEngineCapture";
-import { isYDocPathNotInVersionError } from "./workspaces/workspaceEngineCapture";
+import {
+  isYDocPathNotInVersionError,
+  isYDocSessionUnreleasedError,
+} from "./workspaces/workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
+  isEngineWorkspaceOpenRefusedError,
   type EngineDaemonLifecycle,
 } from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
@@ -2904,6 +2908,19 @@ app.on("will-quit", (event) => {
   if (quitting) return;
   quitting = true;
   event.preventDefault();
+  // FIRST, synchronously (#564): a document open mid transport-retry holds
+  // the capture chain, and captureStop below queues behind it. This resolves
+  // its armed backoff and makes the next failure final, so the chain frees in
+  // at most one attempt instead of spending the whole 3 s budget. Nothing is
+  // abandoned that a user could see: an opening document is read-only (#533),
+  // so no edit exists yet on the path being given up.
+  //
+  // That claim only holds because the sessions scope this to a BOUNDED region
+  // — the document open. An already-open document retrying a write the engine
+  // accepted keeps retrying, without backoff, for whatever the quit timer
+  // leaves it: its update exists only in the canonical in-memory Y.Doc, so
+  // abandoning that retry would discard the edit (codex P1).
+  rustEngineWorkspaceSessions?.beginShutdown();
   searchRegistry.killAll();
   // Here, not at before-quit: every window has closed, so every beforeunload
   // has had its chance to veto and this quit is now certain (#579 review,
@@ -7973,9 +7990,15 @@ function registerIpcHandlers(
         // gracefully — but never silently. A refusal here downgrades the doc to
         // the plain editor, and an unlogged permanent refusal is
         // indistinguishable from intended fallback (it hid a dead engine editor
-        // for weeks). Only path-not-in-version sets the flag below; an
-        // uncaptured artifact is really on disk, so claiming the version does
-        // not have it would be false.
+        // for weeks). Two flags below refuse that downgrade instead:
+        // path-not-in-version (#534, the plain editor would write the phantom
+        // back) and an open the engine refused while it may still hold this
+        // document (#564) — a spent retry budget, a region refused because the
+        // app is quitting, or an open whose session the daemon would not
+        // release. A writable plain editor for any of them would take the disk
+        // path #533 closed. An uncaptured artifact whose session WAS released
+        // is really on disk, so it keeps the plain editor: claiming the
+        // version does not have it would be false.
         console.error(
           `[desktop] engine Y.Doc open refused for ${input.path}:`,
           error,
@@ -7983,6 +8006,10 @@ function registerIpcHandlers(
         return OpenEngineYDocSessionResult.parse({
           available: false,
           ...(isYDocPathNotInVersionError(error) ? { notInVersion: true } : {}),
+          ...(isEngineWorkspaceOpenRefusedError(error) ||
+          isYDocSessionUnreleasedError(error)
+            ? { openTimedOut: true }
+            : {}),
         });
       }
       // The renderer can die or reload DURING the await above. Close the stale

@@ -59,6 +59,9 @@ import {
 } from "./workspaceEnginePolicyFile";
 import {
   isEngineSessionReconnectError,
+  isEngineWorkspaceOpenRefusedError,
+  TRANSPORT_REBIND_MAX_BACKOFF_MS,
+  WORKSPACE_OPEN_DEADLINE_MS,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -143,6 +146,26 @@ export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 //     failure.
 
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
+
+// #564: how long ONE document-open TASK may keep retrying transport errors
+// while it holds the capture chain. The task is more than the provider open —
+// it reads the active version first, and that read has its own six-attempt
+// ladder — so this is spent by the whole task through `withRetryBudget`,
+// never per call. Derived from the session constants it bounds: two full
+// open attempts plus two worst-case backoffs, so it always admits the
+// single-recovery path (daemon died, relaunched, second attempt bound:
+// ~2.1 s) and refuses the ladders that starved listMoments, readMoment, and
+// capture.stop(). A healthy open never consults it: the budget gates retries
+// only. Measured healthy opens on a busy chain are in ydocOpenDeadline.test.ts.
+//
+// What it does NOT bound: one in-flight `ydoc.open`. That request carries no
+// deadlineMs — unlike `workspace.open`, whose 2 s is in the derivation above —
+// so a daemon that accepts the open and then hangs holds the chain for as
+// long as it hangs. Bounding it needs a measured value for the opens it would
+// reject (a large document's lineage resurrection is the slow case #514
+// fought), which this issue did not measure. Tracked separately.
+export const YDOC_OPEN_RETRY_DEADLINE_MS =
+  2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
 export const MAX_ENGINE_CAPTURE_TEXT_BYTES = MAX_HISTORY_TEXT_SNAPSHOT_BYTES;
 export const MAX_ENGINE_CAPTURE_BINARY_BYTES = MAX_VERSIONED_BINARY_FILE_BYTES;
 
@@ -815,6 +838,32 @@ export class YDocOpenRacedError extends Error {
   }
 }
 
+// The open refused, and its session was NOT released. The daemon reinserts a
+// refused close's entry with its lease held (ydoc_close_inner), so it may
+// still own this document — which makes every refusal that describes the DISK
+// false, whatever the disk says. `main` answers this with `openTimedOut`: the
+// document stays read-only with a retry, and the next open discharges the
+// orphan this left behind (#564, codex r14/r17).
+export class YDocSessionUnreleasedError extends Error {
+  readonly code = "session-unreleased" as const;
+  constructor(
+    readonly workspacePath: string,
+    cause: unknown,
+  ) {
+    super(
+      `${workspacePath} could not be released after the engine refused to open it, so the engine may still hold the document. It is read-only until a retry releases it.`,
+      { cause },
+    );
+    this.name = "YDocSessionUnreleasedError";
+  }
+}
+
+export function isYDocSessionUnreleasedError(
+  error: unknown,
+): error is YDocSessionUnreleasedError {
+  return error instanceof YDocSessionUnreleasedError;
+}
+
 // A detached locked-write payment that was cancelled after it started. The
 // payment runs on the capture chain; the edges that cancel it do not, so a
 // delete or move finisher can land while the payment sits in an awaited RPC.
@@ -1250,6 +1299,12 @@ export function createWorkspaceEngineCapture(
     // still be held and the on-disk state is indeterminate. Only teardown
     // clears this — a recovering generation must never lift it.
     status: "live" | "dead-generation" | "failing-close";
+    // No caller ever received this session: it exists because a REFUSED open
+    // could not release it, so nothing else will ever close it and the next
+    // open of this path must discharge it before binding. A handed-out
+    // session is the opposite case — its holder and the version ops converge
+    // its teardown, and a second open must still refuse (ydoc-session-busy).
+    orphaned: boolean;
     // Flush + tear down, releasing the reservation, then drop the registry
     // entry — ONLY on success. On failure the entry is retained as
     // failing-close and the error propagates (never swallowed on this
@@ -1703,6 +1758,11 @@ export function createWorkspaceEngineCapture(
       }
     };
 
+    // The FIRST generation opens on the capture chain (#493). Its retry
+    // window is bounded by the TASK's budget (#564), which the open runs
+    // inside — no per-run deadline here, or the task would carry two.
+    // Rebinds after a daemon death run on the session's own operation chain,
+    // outside that budget, and keep the full ladder.
     current = await openGeneration(true);
     canonicalDoc = current.doc;
     const initialOpening = openingRemoteUpdates.get(current);
@@ -2247,8 +2307,24 @@ export function createWorkspaceEngineCapture(
     // teardown may still hold the reservation with the on-disk state
     // indeterminate, and a dead generation still owns the path through its
     // canonical doc. Neither may have a partial write journaled under it.
-    const liveSessionStatus = liveYDocSessions.get(event.path)?.status;
-    if (liveSessionStatus !== undefined && liveSessionStatus !== "live") return;
+    //
+    // An ORPHAN is the exception, and it has to be, or the discharge above
+    // promises a recovery it cannot reach. That entry exists because a
+    // refused open could not release its session, and the retry that
+    // discharges it converges only once the file is captured — so deferring
+    // capture for the entry waiting on that capture is a deadlock, and the
+    // document stays read-only for the rest of the run (#564, codex r21).
+    // It is also the SAFE exception: the doc was never handed out and holds
+    // nothing the user typed, so there is no partial write to journal under
+    // it, and the file is the only truth this path has.
+    const liveSession = liveYDocSessions.get(event.path);
+    if (
+      liveSession !== undefined &&
+      liveSession.status !== "live" &&
+      !liveSession.orphaned
+    ) {
+      return;
+    }
     if (!policyTracksPath(event.path, policy)) return;
     // Deletes trust the watcher's confirmed-absent check; updates re-read the
     // CURRENT disk state so rapid successive writes coalesce to the final
@@ -2807,7 +2883,57 @@ export function createWorkspaceEngineCapture(
       // projection over the folder the switch had just written. Running the
       // open as a chain task makes "which version is active" and "this path
       // has a live session" one indivisible step against every version op.
-      return enqueueResult("open ydoc session", async () => {
+      // ONE budget for the whole task (#564). Bounding only the provider open
+      // left the task unbounded: the version read below runs first, through
+      // the store's own six-attempt transport ladder, so a daemon-down open
+      // failed THERE — holding the chain for that ladder and rejecting with a
+      // rebind error the surface reads as an ordinary fallback, which is the
+      // writable plain editor this bound exists to prevent.
+      return enqueueResult("open ydoc session", () =>
+        options.rustEngineSessions.withRetryBudget(
+          YDOC_OPEN_RETRY_DEADLINE_MS,
+          openYDocSessionTask,
+        ),
+      );
+
+      async function openYDocSessionTask(): Promise<WorkspaceEngineYDocProviderSession> {
+        // An ORPHANED session — one a refused open could not release — still
+        // belongs to the daemon, which answers ydoc-session-busy for as long
+        // as it stands, so the user's "Try again" would refuse forever.
+        // Discharge it first, on the SAME terms the release that orphaned it
+        // used: `settleOnRefusal: false`.
+        //
+        // That flag is the whole point, and an earlier round of this PR had
+        // the reasoning wrong. It said the discharge could settle because "the
+        // refusal proved content exists" — conflating content existing in the
+        // DOC with the disk being captured. The danger was never calling the
+        // path missing. It is rule 1 above: this doc was seeded from neither a
+        // head nor a snapshot, so settling it writes whatever replication
+        // delivered OVER bytes the watcher has not ingested yet. Without the
+        // flag the provider escalates a repeated UnsettledClose to a SETTLING
+        // close (ydocProviderSession), and a quick retry on a dirty orphan
+        // materializes the Y.Doc over the user's uncaptured file (#564, codex
+        // r20).
+        //
+        // A discharge that refuses again leaves the orphan retained and
+        // refuses the open as unreleased — read-only, with a retry. It
+        // converges: once the watcher captures the file, the lineage is no
+        // longer dirty against it and the next discharge releases cleanly.
+        //
+        // Only an orphan. A failing-close session someone still HOLDS is
+        // converged by its holder and by the version ops, and a second open
+        // of it must keep refusing.
+        const retained = liveYDocSessions.get(input.path);
+        if (retained?.status === "failing-close" && retained.orphaned) {
+          try {
+            await retained.close({ settle: false });
+          } catch (dischargeError) {
+            if (isEngineWorkspaceOpenRefusedError(dischargeError)) {
+              throw dischargeError;
+            }
+            throw new YDocSessionUnreleasedError(input.path, dischargeError);
+          }
+        }
         // Resolve the active version through this capture's store, then open the
         // provider through the same Rust workspace-session owner. Capture,
         // version work, and Y.Doc work therefore share one daemon workspace lease.
@@ -3025,100 +3151,6 @@ export function createWorkspaceEngineCapture(
           onSettleStart,
           onSettleError,
         });
-        // ABSENT-HEAD CONTRACT (stated on WorkspaceEngineCapture.openYDocSession).
-        // Both absent means the daemon bound an EMPTY doc over nothing. A
-        // lineage without a head is the crash-orphaned draft the daemon
-        // resurrects: it holds the user's only copy of those edits, and a
-        // settle:false close of that dirty lineage would be refused and strand
-        // the lease. Read here, on the capture chain, so no version op can land
-        // between the version binding above and this check.
-        if (head === "absent" && lineage === "absent") {
-          const disk = await absentHeadDiskState(rootPath, input.path);
-          // THREE RULES, IN THIS ORDER. They used to be tangled into one
-          // condition, and the order is the whole correctness argument:
-          //
-          //  1. Content on disk refuses, whatever else is true. This bind was
-          //     seeded from neither a head nor a snapshot, so its doc holds
-          //     only what replication delivered — settling it would write that
-          //     OVER uncaptured bytes the watcher has not ingested yet, while
-          //     this very chain is what is holding the watcher off. A peer
-          //     writing the same path does not make that safe, so this rule
-          //     wins over rule 2.
-          //  2. An update that reached the session means the document exists
-          //     here: a peer is replicating it into this version, so refusing
-          //     "not in this version" would be false. Bind it.
-          //  3. Nothing on disk, nothing replicated: the path is not in this
-          //     version. Refuse — and release without ever settling.
-          //
-          // The ADMIT paths (1's inverse, and 2) deliberately do not recheck
-          // the artifact. Nothing awaits between this read and the admission —
-          // the registration below is straight-line — so there is no window to
-          // narrow. A writer that fills the file AFTER admission is the
-          // open-ended case no open-time check can bound, and it is bounded
-          // instead where it has to be: the settle refuses to materialize over
-          // a file that drifted from what it settled (digestSettledFile here,
-          // the materialized-sha comparison in actor.rs). Before this change
-          // the open admitted every absent-head bind unconditionally, so these
-          // rules only ever narrow that surface.
-          if (disk === "content") {
-            const refusal = new YDocUncapturedArtifactError(input.path);
-            try {
-              await session.close({ settle: false, settleOnRefusal: false });
-            } catch (releaseError) {
-              refusal.cause = releaseError;
-            }
-            throw refusal;
-          }
-          if (disk === "missing" && updatesSeen === 0) {
-            // The count cannot be read atomically with the release: the close
-            // defers through the operation chain, so its provider has not
-            // unsubscribed at this line and an update can still arrive before
-            // the close reaches the daemon. `settleOnRefusal: false` is what
-            // makes that survivable — without it the daemon's UnsettledClose,
-            // which means exactly "content arrived after all", escalates to a
-            // SETTLING close and materializes the path this code is about to
-            // call missing.
-            let releaseError: unknown;
-            let released = true;
-            try {
-              await session.close({ settle: false, settleOnRefusal: false });
-            } catch (error) {
-              released = false;
-              releaseError = error;
-            }
-            if (released) {
-              // RECHECKED immediately before the claim. The release above
-              // awaited a daemon round trip, and this chain serializes engine
-              // work, not the filesystem — an agent or an external editor can
-              // create the path inside that window, and the queued watcher
-              // then captures a file we just told the user does not exist.
-              //
-              // This NARROWS, it does not close: a writer can always land one
-              // tick after any recheck. It is here because this is the one
-              // terminal decision that makes a user-facing STATEMENT, and a
-              // false one is worth a second syscall. The admit paths take no
-              // recheck deliberately — see the note below.
-              if (
-                (await absentHeadDiskState(rootPath, input.path)) === "missing"
-              ) {
-                throw new YDocPathNotInVersionError(input.path, versionId);
-              }
-              throw new YDocOpenRacedError(input.path);
-            }
-            // An update won the gap. This session CANNOT be handed back: the
-            // provider already marked itself closed and dropped every
-            // remote-update subscription before the daemon refused, so it would
-            // forward nothing and its initialUpdate predates the update that
-            // caused all this. Nor can it be reopened — a refused close
-            // REINSERTS the daemon entry with its lease held
-            // (ydoc_close_inner), so a fresh open answers ydoc-session-busy.
-            // Refuse, and do NOT claim the path is missing: something is
-            // writing it. The caller falls back and a later open resolves.
-            const raced = new YDocOpenRacedError(input.path);
-            raced.cause = releaseError;
-            throw raced;
-          }
-        }
         // Register the live session only after the open succeeds (a secret/
         // already-live/path-not-in-version rejection propagates to the caller
         // and never guards a path that has no session). The close below drops the entry
@@ -3530,8 +3562,25 @@ export function createWorkspaceEngineCapture(
         const closeEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
+          // THE ORPHAN'S POLICY, and it belongs to the ORPHAN rather than to
+          // each caller. An orphan is a session no caller ever received: its
+          // doc was seeded from neither a head nor a snapshot, so it holds
+          // nothing of the user's, and settling it writes what replication
+          // delivered OVER disk bytes the watcher has not captured yet.
+          //
+          // Two rounds fixed that at two call sites — the first release, then
+          // the discharge — and a third was still escalating: the lifecycle
+          // sweep a version switch, merge, rename or delete reaches. Three
+          // sites is a class, so the rule moved here. Every present and
+          // future caller inherits it, and a caller asking to settle an
+          // orphan is asking for the one write that is never correct
+          // (#564, codex r21).
+          const effective: WorkspaceEngineYDocCloseOptions | undefined =
+            liveEntry.orphaned
+              ? { ...opts, settle: false, settleOnRefusal: false }
+              : opts;
           try {
-            await session.close(opts);
+            await session.close(effective);
           } catch (error) {
             if (error instanceof YdocReleasedWithSettleFailureError) {
               // A locked settle under a SUCCEEDED release is the replicated
@@ -3544,7 +3593,7 @@ export function createWorkspaceEngineCapture(
               // The daemon session and its lease ARE gone — only the settle
               // failed. Lift the guard like a clean teardown (capture of the
               // path must resume; nothing holds the reservation).
-              if (liveYDocSessions.get(input.path) === entry) {
+              if (liveYDocSessions.get(input.path) === liveEntry) {
                 liveYDocSessions.delete(input.path);
               }
               // #496: the settle met a head the daemon's capture had already
@@ -3607,8 +3656,8 @@ export function createWorkspaceEngineCapture(
             // indeterminate — retain a failing-close guard so a retry/force-close
             // can complete the teardown, and DO NOT swallow (data-integrity
             // teardown). captureOnePath keeps deferring this path meanwhile.
-            if (liveYDocSessions.get(input.path) === entry) {
-              entry.status = "failing-close";
+            if (liveYDocSessions.get(input.path) === liveEntry) {
+              liveEntry.status = "failing-close";
               scheduleLockedCloseRetry(error, opts);
             }
             throw error;
@@ -3616,18 +3665,148 @@ export function createWorkspaceEngineCapture(
           // Lift the guard exactly when the session tears down (releasing the
           // single-canonical reservation), so ordinary capture of this path
           // resumes for the next opener / external editor.
-          if (liveYDocSessions.get(input.path) === entry) {
+          if (liveYDocSessions.get(input.path) === liveEntry) {
             liveYDocSessions.delete(input.path);
           }
         };
-        entry = {
+        const liveEntry: LiveYDocSession = {
           path: input.path,
           versionId,
           session,
           status: "live",
+          orphaned: false,
           close: closeEntry,
         };
-        liveYDocSessions.set(input.path, entry);
+        entry = liveEntry;
+        // A session whose release FAILED is still the daemon's: a refused
+        // close reinserts its entry with the lease held (ydoc_close_inner).
+        // Retaining it here is what makes it reachable — by a version op,
+        // by the path-scoped settle-and-close, and by the next open of this
+        // path, which discharges it before binding.
+        const retainUnreleased = (): void => {
+          const registered = liveYDocSessions.get(input.path);
+          if (registered === liveEntry) {
+            liveEntry.status = "failing-close";
+            return;
+          }
+          // Registered under nothing: this entry was never handed out, so it
+          // exists only to keep the unreleased session reachable. A path some
+          // LATER open owns is left alone — its entry is what teardown must
+          // find — and a released session is not resurrected.
+          if (registered === undefined && liveEntry.orphaned) {
+            liveEntry.status = "failing-close";
+            liveYDocSessions.set(input.path, liveEntry);
+          }
+        };
+        // ABSENT-HEAD CONTRACT (stated on WorkspaceEngineCapture.openYDocSession).
+        // Both absent means the daemon bound an EMPTY doc over nothing. A
+        // lineage without a head is the crash-orphaned draft the daemon
+        // resurrects: it holds the user's only copy of those edits, and a
+        // settle:false close of that dirty lineage would be refused and strand
+        // the lease. Read here, on the capture chain, so no version op can land
+        // between the version binding above and this check.
+        if (head === "absent" && lineage === "absent") {
+          const disk = await absentHeadDiskState(rootPath, input.path);
+          // THREE RULES, IN THIS ORDER. They used to be tangled into one
+          // condition, and the order is the whole correctness argument:
+          //
+          //  1. Content on disk refuses, whatever else is true. This bind was
+          //     seeded from neither a head nor a snapshot, so its doc holds
+          //     only what replication delivered — settling it would write that
+          //     OVER uncaptured bytes the watcher has not ingested yet, while
+          //     this very chain is what is holding the watcher off. A peer
+          //     writing the same path does not make that safe, so this rule
+          //     wins over rule 2.
+          //  2. An update that reached the session means the document exists
+          //     here: a peer is replicating it into this version, so refusing
+          //     "not in this version" would be false. Bind it.
+          //  3. Nothing on disk, nothing replicated: the path is not in this
+          //     version. Refuse — and release without ever settling.
+          //
+          // The ADMIT paths (1's inverse, and 2) deliberately do not recheck
+          // the artifact. Nothing awaits between this read and the admission —
+          // the registration below is straight-line — so there is no window to
+          // narrow. A writer that fills the file AFTER admission is the
+          // open-ended case no open-time check can bound, and it is bounded
+          // instead where it has to be: the settle refuses to materialize over
+          // a file that drifted from what it settled (digestSettledFile here,
+          // the materialized-sha comparison in actor.rs). Before this change
+          // the open admitted every absent-head bind unconditionally, so these
+          // rules only ever narrow that surface.
+          // Both rules below release the session and then describe the DISK.
+          // A release the BUDGET refused describes neither: nothing was
+          // released, the daemon still holds the restart-safe session, and a
+          // disk verdict is one main answers with a plain `available:false` —
+          // the writable plain editor, over a live session (#533/#567's
+          // double writer). The deadline keeps its own classification, which
+          // main answers with `openTimedOut` (#564, codex r13).
+          const releaseOrRefuse = async (): Promise<void> => {
+            // Marked BEFORE the release, not after: no caller receives this
+            // wrapper either way, and marking first is what puts this close
+            // under the orphan's own never-settle policy instead of spelling
+            // it out here (#564, codex r21).
+            liveEntry.orphaned = true;
+            try {
+              await liveEntry.close({ settle: false });
+            } catch (releaseError) {
+              // Whatever refused it, this session is still the daemon's, and
+              // the refusal below is the LAST reference to it. Retain it, or
+              // the session keeps its lease and every later open of this path
+              // answers ydoc-session-busy with nothing left to close it
+              // (#564, codex r14).
+              retainUnreleased();
+              // The BUDGET's own refusals keep their identity — an agent
+              // reading the message needs the limit that fired. Everything
+              // else becomes the one refusal that is true of all of them:
+              // this session is still the daemon's.
+              if (isEngineWorkspaceOpenRefusedError(releaseError)) {
+                throw releaseError;
+              }
+              throw new YDocSessionUnreleasedError(input.path, releaseError);
+            }
+          };
+          if (disk === "content") {
+            await releaseOrRefuse();
+            throw new YDocUncapturedArtifactError(input.path);
+          }
+          if (disk === "missing" && updatesSeen === 0) {
+            // The count cannot be read atomically with the release: the close
+            // defers through the operation chain, so its provider has not
+            // unsubscribed at this line and an update can still arrive before
+            // the close reaches the daemon. `settleOnRefusal: false` is what
+            // makes that survivable — without it the daemon's UnsettledClose,
+            // which means exactly "content arrived after all", escalates to a
+            // SETTLING close and materializes the path this code is about to
+            // call missing.
+            // A refused release means an update won the gap — the daemon is
+            // saying the lineage is dirty — and `releaseOrRefuse` has already
+            // turned that into the unreleased refusal, which is the honest
+            // one: nothing here may claim the path is missing while something
+            // is writing it.
+            await releaseOrRefuse();
+            // RECHECKED immediately before the claim. The release above
+            // awaited a daemon round trip, and this chain serializes engine
+            // work, not the filesystem — an agent or an external editor can
+            // create the path inside that window, and the queued watcher then
+            // captures a file we just told the user does not exist.
+            //
+            // This NARROWS, it does not close: a writer can always land one
+            // tick after any recheck. It is here because this is the one
+            // terminal decision that makes a user-facing STATEMENT, and a
+            // false one is worth a second syscall. The admit paths take no
+            // recheck deliberately — see the note below.
+            if ((await absentHeadDiskState(rootPath, input.path)) === "missing") {
+              throw new YDocPathNotInVersionError(input.path, versionId);
+            }
+            throw new YDocOpenRacedError(input.path);
+          }
+        }
+        // Registered only after the open succeeds: a secret, already-live or
+        // path-not-in-version rejection propagates to the caller and never
+        // guards a path that has no session. The absent-head refusals above
+        // register it themselves when their release FAILS, because the daemon
+        // keeps that session and something must still be able to close it.
+        liveYDocSessions.set(input.path, liveEntry);
         return {
           doc: session.doc,
           initialUpdate: session.initialUpdate,
@@ -3652,7 +3831,7 @@ export function createWorkspaceEngineCapture(
           },
           close: closeEntry,
         };
-      });
+      }
     },
 
     settleAndCloseLiveSessionsForPath(pathOrPrefix) {
