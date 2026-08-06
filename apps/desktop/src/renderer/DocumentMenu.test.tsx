@@ -366,39 +366,6 @@ describe("DocumentMenu", () => {
     });
   });
 
-  // A later action supersedes a standing refusal: its instruction describes an
-  // attempt that is over, and leaving it under a fresh result states something
-  // that is no longer what happened.
-  it("retires the instruction when another action answers", async () => {
-    const user = userEvent.setup();
-    stubClipboard();
-    let markdown: string | null = null;
-    render(
-      <DocumentMenu
-        workspaceId="ws-1"
-        suggestedName="Plan"
-        getMarkdown={() => markdown}
-      />,
-    );
-
-    await user.click(screen.getByTestId("document-menu-trigger"));
-    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
-    await act(async () => {});
-    expect(screen.getByTestId("document-menu-status").textContent).toBe(
-      "You can copy this document when it opens.",
-    );
-
-    // The document opened. The same action now succeeds, and the menu stops
-    // saying the document is not open.
-    markdown = MARKDOWN;
-    const written = nextClipboardWrite();
-    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
-    expect(await written).toBe(MARKDOWN);
-    await act(async () => {});
-    expect(screen.getByText("Copied")).toBeTruthy();
-    expect(screen.getByTestId("document-menu-status").textContent).toBe("");
-  });
-
   // codex r2 on #684: a clipboard write settles after the click that started
   // it, and a refusal now stands until the user closes the menu — so the late
   // "Copied" landed on top of an instruction the user was still reading, and
@@ -484,11 +451,12 @@ describe("DocumentMenu", () => {
     expect(screen.queryByRole("menu")).not.toBeNull();
   });
 
-  // codex r3 on #684: the token above decides who may speak NEXT, and that is
-  // only half of it. Until the new attempt answers — and a clipboard write can
-  // sit behind an OS permission prompt — the menu still showed the last
-  // answer: an instruction to wait for a document the user is already
-  // retrying.
+  // A later action supersedes a standing refusal — its instruction describes
+  // an attempt that is over. WHEN it does is codex r3 on #684: the token
+  // decides who may speak next, and that is only half of it. Until the new
+  // attempt answers, and a clipboard write can sit behind an OS permission
+  // prompt, the menu still showed the last answer: an instruction to wait for
+  // a document the user is already retrying.
   it("retires a standing refusal when the retry starts, not when it answers", async () => {
     const user = userEvent.setup();
     stubClipboard();
@@ -523,12 +491,14 @@ describe("DocumentMenu", () => {
       screen.getByTestId("document-menu-item-copy-markdown").textContent,
     ).toBe("Copy as Markdown");
 
-    // And the retry still gets to speak when it lands.
+    // And the retry still gets to speak when it lands. A confirmation owes no
+    // next step, so nothing of the refusal survives under it.
     await act(async () => {
       retry.resolve();
       await retry.promise;
     });
     expect(screen.getByText("Copied")).toBeTruthy();
+    expect(screen.getByTestId("document-menu-status").textContent).toBe("");
   });
 
   // The other consequence of leaving the last answer standing: its timer runs

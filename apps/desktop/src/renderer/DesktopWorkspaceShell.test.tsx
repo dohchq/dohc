@@ -6431,6 +6431,10 @@ describe("shared view chats surface", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
+  // The other half of BOTH gates: a healthy engine workspace gets the real
+  // panel. Without this, hiding Chats from every workspace — or replacing the
+  // panel with the failed-capture placeholder on every one — keeps the share
+  // pins above and the #628 pins below green.
   it("keeps Chats for a workspace that is not a shared view", async () => {
     const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
@@ -6438,6 +6442,7 @@ describe("shared view chats surface", () => {
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
     await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
+    expect(screen.queryByTestId("chats-panel-off")).toBeNull();
   });
 
   // The graph's chat-mentions toggle, on its own. The test above proves the
@@ -6697,17 +6702,6 @@ describe("chats surface after a failed capture build", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The other half of the branch: a healthy engine workspace must still get
-  // the real panel. Without this, replacing ChatsView with the placeholder
-  // for EVERY workspace keeps the tests above green.
-  it("keeps the real Chats panel when main's status reports a live recorder", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
-    renderShell(bridge);
-
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
-    await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
-    expect(screen.queryByTestId("chats-panel-off")).toBeNull();
-  });
 });
 
 // #621: virtual tabs survive restore, so a moment-diff tab outlives the

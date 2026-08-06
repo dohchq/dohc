@@ -70,26 +70,30 @@ export function DocumentMenu(props: {
   // Every attempt gets a number, and only the newest one may speak. A
   // clipboard write settles after the click that started it, so its outcome
   // can land on a menu that has moved on — over a refusal the user is still
-  // reading, and with a timer that then closes the menu under them.
+  // reading, on a menu that closed, or on the next one they open.
   const attempts = useRef(0);
 
   useEffect(() => {
     if (!open) return;
     setSelected(0);
-    // A freshly opened menu says nothing about the last one, and that
-    // includes an attempt still in flight from it. The timer goes too: left
-    // running, a confirmation's pending auto-close would shut this menu
-    // instead of the one it belonged to.
+    // A freshly opened menu says nothing about the last one.
     setFeedback({});
     setInstruction("");
-    attempts.current += 1;
-    if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     menuRef.current?.focus();
-    // On every close path (Escape, outside pointer-down, post-feedback
-    // auto-close) the menu div unmounts and focus would fall to document.body,
-    // breaking the WAI-ARIA menu-button contract. Return focus to the trigger
-    // when the menu closes — mirrors PageIdentity's emoji picker (phase 2).
+    // Closing ends every attempt this menu started. The token moves past
+    // them, so a clipboard write settling afterwards cannot speak into a menu
+    // that is gone or one the user has since reopened, and the timer it would
+    // arm never exists. Nothing can arm one while the menu is closed either,
+    // which is why this is the only cleanup the timer needs — including at
+    // unmount, where this cleanup also runs.
+    //
+    // Focus goes back to the trigger on every close path (Escape, outside
+    // pointer-down, post-feedback auto-close): the menu div unmounts and
+    // focus would fall to document.body, breaking the WAI-ARIA menu-button
+    // contract. Mirrors PageIdentity's emoji picker (phase 2).
     return () => {
+      attempts.current += 1;
+      if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
       triggerRef.current?.focus();
     };
   }, [open]);
@@ -103,13 +107,6 @@ export function DocumentMenu(props: {
     window.addEventListener("mousedown", onPointerDown, true);
     return () => window.removeEventListener("mousedown", onPointerDown, true);
   }, [open]);
-
-  useEffect(
-    () => () => {
-      if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
-    },
-    [],
-  );
 
   // ONE timer, so one label. Merging into the previous feedback stranded it:
   // the replacement timer only ever clears the newest item, so a second
