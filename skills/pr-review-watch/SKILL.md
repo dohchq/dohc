@@ -38,8 +38,12 @@ API call is now a deliberate act of the judge.
 
 **What you give up, stated plainly.** Activity is noticed only as fast as the
 wake interval; nothing reaches you between wakes. And a wake with nothing to
-judge costs either a `review_status` run or a check you skip. Decide at each
-wake which PRs are worth a query.
+judge costs either a `review_status` run or a check you skip.
+
+**A wake is not an instruction to query.** Most wakes should cost zero API
+calls. Run `review_status` when you expect an answer to exist: you requested a
+round, you pushed a head, or you are about to merge. A beat with no PR in that
+state needs no action at all.
 
 ## Facts that break naive implementations
 
@@ -171,7 +175,7 @@ fi
 beat=0
 while true; do
   beat=$((beat + 1))
-  echo "HEARTBEAT $beat @$(date -u +%H:%M:%SZ) — for each ready PR at a decision point, run: review_status <PR>"
+  echo "HEARTBEAT $beat @$(date -u +%H:%M:%SZ) — judge only a PR at a decision point (new push, a round you requested, pre-merge): run review_status <PR>; if none, do nothing until the next beat"
   sleep "$INTERVAL_SECONDS"
 done
 ```
@@ -216,9 +220,9 @@ fi
 counts `bash` blocks, so making this one of them would renumber the very block it is
 trying to fetch. Block 1 is the heartbeat, block 2 is `review_status`.)
 
-Run it before merging, and at each heartbeat for every PR you are waiting on.
-The optional second argument selects `codex` or `coderabbit`; the default is
-`both`.
+Run it before merging, and at any heartbeat where you expect a round to have
+landed. The optional second argument selects `codex` or `coderabbit`; the
+default is `both`.
 
 ```bash
 review_status() {
