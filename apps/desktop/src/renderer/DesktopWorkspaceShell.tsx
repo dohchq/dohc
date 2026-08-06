@@ -212,17 +212,57 @@ export function chatsNavigationChangesDestination(
   );
 }
 
-// One lane of the snapshot group. It accepts an answer only if that answer is
-// newer than whatever last wrote the lane — a response, or a local action by
-// the user, which counts as newer than every request already issued.
-function commitSnapshotLane(
-  lane: { current: number },
+// One lane of the snapshot group. Two facts, because the two questions a lane
+// is asked are different ones:
+//
+// - `committed` — what this lane last WROTE. A response, or a local action by
+//   the user, which counts as newer than every request already issued.
+// - `issued` — the newest request this lane has ASKED. Not the same fact: a
+//   request in flight has written nothing, and "is anything newer coming"
+//   cannot be answered from what was last written.
+type SnapshotLane = { committed: number; issued: number };
+
+// The only thing that writes a lane from an answer. It takes the whole read,
+// so BOTH ways a read can settle face the same rule, and it registers the
+// request itself, so no caller can issue a read the lane does not know about.
+//
+// A value writes the lane when it is newer than what the lane last wrote.
+//
+// A failure is an answer too, and asking it separately is how the rule leaks.
+// It may report, because a lane with no failure surface of its own has only
+// the banner to say a shown value is now old. It may report only when it is
+// still the newest thing this lane asked — which covers BOTH orderings of a
+// stale failure against a fresher request. The newer answer may already have
+// committed (then `committed` outranks it), or it may still be in flight (then
+// `issued` does). Both are the same fact: a failure whose question someone has
+// already asked again has nothing to say, and a banner it raised would claim
+// the value on screen could not be read.
+//
+// A failure never advances either mark. A read that failed proves nothing, and
+// an older read that still succeeds is the only answer anyone has (#507).
+//
+// The history page is not a lane here. It carries its own admission rules —
+// version staleness, a pagination that may hold it — and the refresh returns
+// it, so it is judged where those rules live.
+function settleSnapshotLane<T>(
+  lane: { current: SnapshotLane },
   token: number,
-  apply: () => void,
+  read: Promise<T>,
+  apply: (value: T) => void,
+  report: (error: unknown) => void,
 ): void {
-  if (token <= lane.current) return;
-  lane.current = token;
-  apply();
+  if (token > lane.current.issued) lane.current.issued = token;
+  void read.then(
+    (value) => {
+      if (token <= lane.current.committed) return;
+      lane.current.committed = token;
+      apply(value);
+    },
+    (error: unknown) => {
+      if (token <= lane.current.committed || token < lane.current.issued) return;
+      report(error);
+    },
+  );
 }
 
 // What the history-off placeholder may claim (#542). The placeholder renders
@@ -1223,7 +1263,15 @@ export function DesktopWorkspaceShell(props: {
     versionName?: string;
   } | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
-  const [shellError, setShellError] = useState<string | null>(null);
+  // The banner carries its own way out. An error that names a value the user
+  // can see and gives no way to ask again leaves them with a stale reading and
+  // nothing to do about it — the reverse path every reversible state change
+  // owes (AGENTS.md). Errors that are already over when they are shown carry
+  // no retry.
+  const [shellError, setShellError] = useState<{
+    message: string;
+    retry: (() => void) | null;
+  } | null>(null);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
     kind: "file" | "folder";
@@ -1709,8 +1757,30 @@ export function DesktopWorkspaceShell(props: {
   ]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
-    setShellError(error instanceof Error ? error.message : fallback);
+    setShellError({
+      message: error instanceof Error ? error.message : fallback,
+      retry: null,
+    });
   }, []);
+  // What a failed snapshot lane owes the user, and `reportShellError` supplies
+  // one third of it. It shows the cause and DROPS the fallback, so three lanes
+  // that share one banner arrive as one backend sentence naming none of them —
+  // and the user cannot tell whether sync status, agent runs or the try run
+  // went stale. The lane says WHICH, the cause says why, and the control asks
+  // again: the three parts an error owes (copy.md), in that order, so the lane
+  // survives truncation.
+  //
+  // The retry matters most on the first load. A sibling that fails while the
+  // page succeeds renders the timeline, which hides History's own Try again —
+  // so without this the lane had no way back at all, and its value could sit
+  // stale until unrelated workspace activity happened to refresh it.
+  const reportLaneFailure = useCallback(
+    (lane: string, error: unknown, retry: () => void) => {
+      const cause = error instanceof Error ? error.message : null;
+      setShellError({ message: cause ? `${lane} ${cause}` : lane, retry });
+    },
+    [],
+  );
 
   // Quiet, self-dismissing status line for import/share-mount summaries
   // ("Imported 3 files into notes.") — informational, never the error banner.
@@ -1800,9 +1870,9 @@ export function DesktopWorkspaceShell(props: {
   // write only ever knows about the lane it wrote — dismissing a review says
   // nothing about sync state, and rejecting all three would strand a status
   // bar that has no other source (the dismiss emits no activity event).
-  const committedSyncStatusToken = useRef(0);
-  const committedAgentActiveToken = useRef(0);
-  const committedTryStateToken = useRef(0);
+  const syncStatusLane = useRef<SnapshotLane>({ committed: 0, issued: 0 });
+  const agentActiveLane = useRef<SnapshotLane>({ committed: 0, issued: 0 });
+  const tryStateLane = useRef<SnapshotLane>({ committed: 0, issued: 0 });
   // The version the DISPLAYED timeline describes, so a pagination can prove
   // its page extends the same timeline it is appending to.
   const committedEngineVersionId = useRef<string | null>(null);
@@ -1863,8 +1933,10 @@ export function DesktopWorkspaceShell(props: {
   // answers lose by construction whenever they land. Dismissing a review is
   // the case that bites: it emits no replacement activity, so a restored card
   // would sit there until something unrelated refreshed.
-  const supersedeSnapshotLane = useCallback((lane: { current: number }) => {
-    lane.current = engineHistoryToken.current;
+  // It writes `committed` and not `issued`: the user asked nothing. A failure
+  // from the request they superseded is judged by `committed`, and stays quiet.
+  const supersedeSnapshotLane = useCallback((lane: { current: SnapshotLane }) => {
+    lane.current.committed = engineHistoryToken.current;
   }, []);
   useEffect(
     () => () => {
@@ -1876,9 +1948,9 @@ export function DesktopWorkspaceShell(props: {
       engineHistoryToken.current += 1;
       committedEngineHistoryToken.current = engineHistoryToken.current;
       newestEngineHistoryRefresh.current = engineHistoryToken.current;
-      committedSyncStatusToken.current = engineHistoryToken.current;
-      committedAgentActiveToken.current = engineHistoryToken.current;
-      committedTryStateToken.current = engineHistoryToken.current;
+      syncStatusLane.current.committed = engineHistoryToken.current;
+      agentActiveLane.current.committed = engineHistoryToken.current;
+      tryStateLane.current.committed = engineHistoryToken.current;
       blockedEngineHistoryRefresh.current = null;
     },
     [],
@@ -1898,7 +1970,7 @@ export function DesktopWorkspaceShell(props: {
   // here, and that IS the user acting: it supersedes whatever a request issued
   // earlier will eventually say.
   const onTryReviewDismissed = useCallback(() => {
-    supersedeSnapshotLane(committedTryStateToken);
+    supersedeSnapshotLane(tryStateLane);
     setTryState(null);
   }, [supersedeSnapshotLane]);
   // Settings reports the agent lane two different ways, and only one of them
@@ -1908,12 +1980,37 @@ export function DesktopWorkspaceShell(props: {
   // have been issued BEFORE a refresh the shell is still waiting on — and
   // superseding on it would throw away the newer answer. A run observed alive
   // just before it ended would then leave the indicator running forever.
+  //
+  // So an observation is not written at all. It carries no request token, and
+  // arrival order is not ordering: once each lane commits when its OWN read
+  // lands, a refresh answer can commit BEFORE the observation arrives, and an
+  // untimed write would then paint over an answer that is newer than it. The
+  // observation asks this lane's own reader instead — one tokened read, judged
+  // by the same rule as every other answer, and issued after the observation,
+  // so it is the freshest thing available.
+  const refreshAgentLane = useCallback(() => {
+    const token = ++engineHistoryToken.current;
+    settleSnapshotLane(
+      agentActiveLane,
+      token,
+      bridge().getAgentRunStatus({ workspaceId }),
+      (agent) => setAgentActive(agent.activeRun !== null),
+      (error) =>
+        reportLaneFailure("dohc could not refresh agent runs.", error, () =>
+          refreshAgentLane(),
+        ),
+    );
+  }, [reportLaneFailure, workspaceId]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
-      if (mutated) supersedeSnapshotLane(committedAgentActiveToken);
+      if (!mutated) {
+        refreshAgentLane();
+        return;
+      }
+      supersedeSnapshotLane(agentActiveLane);
       setAgentActive(active);
     },
-    [supersedeSnapshotLane],
+    [refreshAgentLane, supersedeSnapshotLane],
   );
 
   const refreshHistory = useCallback(async () => {
@@ -1931,15 +2028,61 @@ export function DesktopWorkspaceShell(props: {
       // different thing from knowing the last read failed. Saying so here is
       // also what makes the retry control show that it is working.
       setEngineHistoryReadFailed(false);
-      const reads = Promise.all([
-        bridge().listEngineMoments({ workspaceId, limit: 200 }),
+      // Four reads ride one refresh, and they answer four different
+      // questions. One batch made every answer hostage to the worst of them:
+      // a try-state failure discarded a history page the engine had already
+      // served, and the timeline then said it could not load (#610). An
+      // aggregate await is hostage to the SLOWEST of them the same way — a
+      // sibling that never settles would hold a failed history read in
+      // "Loading history..." forever, with no failure and no Try again.
+      // So the reads are issued together and handled apart: each lane
+      // commits its own answer when that answer arrives.
+      //
+      // The snapshots need no ordering against the page: nothing can block
+      // them, and holding them for a later commit would republish a world the
+      // user has already acted on — a dismissed review card, most visibly.
+      // Each is handed whole to the lane rule, which judges both ways it can
+      // settle.
+      const pageRead = bridge().listEngineMoments({ workspaceId, limit: 200 });
+      // Asking again IS this refresh: it re-reads all four, so the lane that
+      // failed is read again. Same control the History surface offers for its
+      // own read, and the same one the caller runs on any activity.
+      const askAgain = () => {
+        void refreshHistory().catch((error) =>
+          reportShellError("Could not refresh history.", error),
+        );
+      };
+      settleSnapshotLane(
+        syncStatusLane,
+        token,
         bridge().getSyncStatus({ workspaceId }),
+        (status) => setSyncStatus(status),
+        (error) =>
+          reportLaneFailure("dohc could not refresh sync status.", error, askAgain),
+      );
+      settleSnapshotLane(
+        agentActiveLane,
+        token,
         bridge().getAgentRunStatus({ workspaceId }),
+        (agent) => setAgentActive(agent.activeRun !== null),
+        (error) =>
+          reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
+      );
+      settleSnapshotLane(
+        tryStateLane,
+        token,
         bridge().getTryInVersionState({ workspaceId }),
-      ]);
-      let answers: Awaited<typeof reads>;
+        (trySession) => setTryState(trySession.state),
+        (error) =>
+          reportLaneFailure(
+            "dohc could not refresh this workspace's try run.",
+            error,
+            askAgain,
+          ),
+      );
+      let page: Awaited<typeof pageRead>;
       try {
-        answers = await reads;
+        page = await pageRead;
       } catch (error) {
         // A failure is an answer too — about why the surface is blank, not
         // about what the timeline holds. Only the newest read may give it:
@@ -1950,17 +2093,6 @@ export function DesktopWorkspaceShell(props: {
         }
         throw error;
       }
-      const [page, status, agent, trySession] = answers;
-      // The snapshots settle here and now, lane by lane: nothing can block
-      // them, and holding them for a later commit would republish a world the
-      // user has already acted on — a dismissed review card, most visibly.
-      commitSnapshotLane(committedSyncStatusToken, token, () => setSyncStatus(status));
-      commitSnapshotLane(committedAgentActiveToken, token, () =>
-        setAgentActive(agent.activeRun !== null),
-      );
-      commitSnapshotLane(committedTryStateToken, token, () =>
-        setTryState(trySession.state),
-      );
       if (token <= committedEngineHistoryToken.current) return;
       // An answer describing the version the user left is not late — it is
       // about somewhere else.
@@ -2003,7 +2135,7 @@ export function DesktopWorkspaceShell(props: {
     ]);
     setSyncStatus(status);
     setAgentActive(agent.activeRun !== null);
-  }, [engineEnabled, isShareView, workspaceId]);
+  }, [engineEnabled, isShareView, reportLaneFailure, reportShellError, workspaceId]);
 
   const loadMoreEngineHistory = useCallback(async () => {
     const cursor = engineHistory?.nextBeforeMomentOrder;
@@ -3435,7 +3567,7 @@ export function DesktopWorkspaceShell(props: {
     onThreadRead: onChatsThreadRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: setShellError,
+    onError: (message: string) => setShellError({ message, retry: null }),
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
@@ -3454,7 +3586,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: setShellError,
+    onError: (message: string) => setShellError({ message, retry: null }),
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
@@ -3500,7 +3632,24 @@ export function DesktopWorkspaceShell(props: {
           data-testid="workspace-shell-error"
           className="flex min-h-8 items-center gap-2 border-b border-line bg-danger/10 px-3 text-[12px] text-danger"
         >
-          <span className="min-w-0 flex-1 truncate">{shellError}</span>
+          <span className="min-w-0 flex-1 truncate">{shellError.message}</span>
+          {shellError.retry ? (
+            <button
+              type="button"
+              data-testid="workspace-shell-error-retry"
+              onClick={() => {
+                const retry = shellError.retry;
+                // Clearing first is what shows the control took: the read is
+                // on its way, and a failure that is being retried is no longer
+                // the newest thing this surface knows.
+                setShellError(null);
+                retry?.();
+              }}
+              className="h-6 shrink-0 cursor-pointer rounded border border-danger/40 px-2 text-[11px] hover:bg-danger/10"
+            >
+              Try again
+            </button>
+          ) : null}
           <button
             type="button"
             aria-label="Dismiss workspace error"
@@ -3724,7 +3873,7 @@ export function DesktopWorkspaceShell(props: {
                   flushActiveDraft={flushActiveDraft}
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-                  onError={(message) => setShellError(message)}
+                  onError={(message) => setShellError({ message, retry: null })}
                   {...(shareView
                     ? {}
                     : {
@@ -4049,7 +4198,7 @@ export function DesktopWorkspaceShell(props: {
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
                     onOpenPath={openPathWithHeading}
                     onThreadRead={onChatsThreadRead}
-                    onError={(message) => setShellError(message)}
+                    onError={(message) => setShellError({ message, retry: null })}
                   />
                 </Suspense>
               ) : (
