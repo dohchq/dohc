@@ -14,6 +14,8 @@ export default defineConfig({
     // Fills jsdom's missing hit-testing APIs. See the file for why an absent
     // document.elementFromPoint failed whole runs rather than single tests.
     // `testSetup.ts` registers the scratch-directory cleanup every suite needs.
+    // Dropping `./vitest.setup.ts` fails `src/vitestSetup.test.ts` by name,
+    // so the suite can no longer go red without naming a test (#635).
     setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
     maxWorkers: WORKER_CAP,
     minWorkers: 1,
