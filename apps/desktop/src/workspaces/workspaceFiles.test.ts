@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import {
+  lstat,
   mkdtemp,
   mkdir,
   rm,
@@ -14,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  classifyEndProbe,
   classifyLadderProbe,
   collectZipEntries,
   couldBeLengthRefusal,
@@ -880,6 +882,29 @@ describe("copy length-refusal classification", () => {
   });
 });
 
+// Before the copy loop may call a link dangling, something has to establish
+// that the target is ABSENT. A probe that failed establishes nothing --
+// separated from the I/O because an EACCES or an EIO stat is not arrangeable
+// here, and it is the case that carries the defect: a link to an unreachable
+// network path would be reported to the user as a link to a missing file.
+describe("copy end-probe classification", () => {
+  it("reads a stat that answered as the end being there", () => {
+    expect(classifyEndProbe({ looked: true })).toBe("there");
+  });
+
+  it("takes only ENOENT and ENOTDIR as absence", () => {
+    expect(classifyEndProbe({ looked: false, code: "ENOENT" })).toBe("absent");
+    expect(classifyEndProbe({ looked: false, code: "ENOTDIR" })).toBe("absent");
+  });
+
+  // The finding. The same distinction the trash ladder draws above.
+  it("says it could not check when the probe itself failed", () => {
+    for (const code of ["EACCES", "EIO", "EPERM", "ELOOP", "ETIMEDOUT", undefined]) {
+      expect(classifyEndProbe({ looked: false, code }), code).toBe("unknown");
+    }
+  });
+});
+
 // Arithmetic says an over-budget name COULD be refused for length; it cannot
 // say it WAS. On a long-path-aware host the budget is not the real limit -- a
 // 300-character path works -- so an ENOENT there means something vanished.
@@ -903,6 +928,71 @@ describe("import surfaces a vanished source instead of skipping it", () => {
       await expect(copyIntoWorkspace(root, [missing])).rejects.toMatchObject({
         code: "ENOENT",
       });
+    } finally {
+      await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
+        () => undefined,
+      );
+    }
+  });
+
+  // The narrowest instance of the same defect: the check and the copy
+  // disagreed about what "exists" means. `copyFile` FOLLOWS the source link and
+  // answered ENOENT for a link whose target is gone; the guard asked `lstat`,
+  // which answers about the LINK, said the source was still there, and let the
+  // ladder shorten the name until the source counted as skipped.
+  //
+  // Mutation: ask `lstat` for the source again and this test fails with a bare
+  // ENOENT that names a path the user can plainly see. No deep folder is
+  // needed for it: every ENOENT is probed BEFORE the length arithmetic, so the
+  // over-budget case is the length ladder's own test, not this one.
+  it("names a dangling symbolic link instead of skipping it", async () => {
+    const base = await mkdtemp(join(tmpdir(), "dohc-dangling-"));
+    try {
+      const root = join(base, "ws");
+      await mkdir(root, { recursive: true });
+      const source = join(base, "link.md");
+      await symlink(join(base, "never-existed.md"), source, "file");
+      // The link itself is right there -- that is why lstat got it wrong.
+      expect((await lstat(source)).isSymbolicLink()).toBe(true);
+
+      // The reason and the instruction come BEFORE the name: this renders in a
+      // one-line truncate span, and a basename runs to 255 characters, so
+      // leading with it truncates away everything the user needs.
+      await expect(copyIntoWorkspace(root, [source])).rejects.toThrow(
+        "dohc did not import a symbolic link. The file it points to is missing. Restore that file. Then import it instead. The link is link.md.",
+      );
+    } finally {
+      await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
+        () => undefined,
+      );
+    }
+  });
+
+  // A link whose target IS there is an ordinary source: the dialog path
+  // deliberately follows it, so it still imports and still gets shortened.
+  it("still imports through a symbolic link whose target exists", async () => {
+    const base = await mkdtemp(join(tmpdir(), "dohc-livelink-"));
+    try {
+      const root = join(base, "ws");
+      await mkdir(root, { recursive: true });
+      const name = `${"n".repeat(120)}.md`;
+      const target = join(base, "target.md");
+      await writeFile(target, "keep me");
+      const source = join(base, name);
+      await symlink(target, source, "file");
+      // A collision forces the variant path, where the ladder lives.
+      await writeFile(join(root, name), "already here");
+
+      const outcome = await copyIntoWorkspace(root, [source]);
+      expect(outcome.skipped).toBe(0);
+      expect(outcome.imported).toHaveLength(1);
+      // What landed is the TARGET's bytes, under a collision variant, and the
+      // file that was already there is untouched. The outcome shape alone would
+      // still pass if the copy had overwritten it.
+      const landed = outcome.imported[0];
+      expect(landed).not.toBe(name);
+      expect(await readFile(join(root, landed), "utf8")).toBe("keep me");
+      expect(await readFile(join(root, name), "utf8")).toBe("already here");
     } finally {
       await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
         () => undefined,

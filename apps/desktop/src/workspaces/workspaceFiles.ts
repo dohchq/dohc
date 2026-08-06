@@ -323,7 +323,9 @@ function collisionVariants(
  * read as a length refusal, walked the shorter rungs, and was counted as
  * SKIPPED instead of aborting the batch. Two copies of one fact, disagreeing.
  *
- * "Could" is as far as arithmetic gets for ENOENT. See `bothStillThere`.
+ * "Could" is as far as arithmetic gets for ENOENT, so the copy loop asks the
+ * filesystem first and only reaches here when both ends are there. See
+ * `classifyCopyEnoent`.
  */
 export function couldBeLengthRefusal(
   code: string | undefined,
@@ -347,20 +349,87 @@ export function couldBeLengthRefusal(
 // budget silently counted that as `skipped`, and a user does not notice a
 // skipped line.
 //
-// So ask, exactly as the ladder does for the rename. Only on the ambiguous
-// branch: ENAMETOOLONG never reaches here, and neither does any other errno.
-async function bothStillThere(source: string, absDir: string): Promise<boolean> {
-  const [sourceThere, dirThere] = await Promise.all([
-    lstat(source).then(
-      () => true,
-      () => false,
+// So ask, exactly as `copyFile` asks: `stat`, which FOLLOWS the source link,
+// because that is what the copy did. An earlier revision asked `lstat`, which
+// answers about the LINK -- so a source that was a symlink to a missing target
+// read as "still there", its ENOENT was charged to length, and the broken link
+// was skipped.
+//
+// `null` means both ends are there, so the ENOENT is about the composed path
+// and the ladder may try a shorter name. "danglingLink" is the one thing dohc
+// can say better than the copy's own error. "unexplained" is every other
+// answer -- a source that is plainly gone, a destination folder that went away,
+// a probe that could not look -- where the original ENOENT already names a
+// path and dohc has nothing to add, so the batch aborts on that error.
+type CopyEnoent = "danglingLink" | "unexplained";
+
+/**
+ * What one probe established about one end. Exported for unit testing, as
+ * `classifyLadderProbe` below is: an EACCES or EIO on the probe is not
+ * arrangeable in that suite, and it is the case that carries the defect.
+ *
+ * "unknown" is not "absent". Only ENOENT and ENOTDIR say a path is not there.
+ * EACCES, EIO and the rest say dohc could not look -- and "the file it points
+ * to is missing", written on that evidence, names a file that is fine.
+ */
+export function classifyEndProbe(
+  probe: { looked: true } | { looked: false; code: string | undefined },
+): "there" | "absent" | "unknown" {
+  if (probe.looked) return "there";
+  return probe.code === "ENOENT" || probe.code === "ENOTDIR"
+    ? "absent"
+    : "unknown";
+}
+
+async function probeEnd(path: string) {
+  return classifyEndProbe(
+    await stat(path).then(
+      () => ({ looked: true as const }),
+      (error: unknown) => ({
+        looked: false as const,
+        code: (error as NodeJS.ErrnoException).code,
+      }),
     ),
-    lstat(absDir).then(
-      () => true,
-      () => false,
-    ),
+  );
+}
+
+async function classifyCopyEnoent(
+  source: string,
+  absDir: string,
+): Promise<CopyEnoent | null> {
+  const [sourceProbe, dirProbe] = await Promise.all([
+    probeEnd(source),
+    probeEnd(absDir),
   ]);
-  return sourceThere && dirThere;
+  if (dirProbe !== "there") return "unexplained";
+  if (sourceProbe === "there") return null;
+  if (sourceProbe === "unknown") return "unexplained";
+  // Say WHICH nothing the source resolved to. A dangling link is still at the
+  // path the user picked, so "no such file" alone sends them to look at
+  // something they can plainly see.
+  const link = await lstat(source).then(
+    (entry) => entry.isSymbolicLink(),
+    () => false,
+  );
+  if (!link) return "unexplained";
+  // The link this lstat saw need not be the one the probe missed -- something
+  // can put a working link back at that path in between. So ask again, and
+  // claim a missing target only while there still is one.
+  const target = await probeEnd(source);
+  if (target === "there") return null;
+  return target === "absent" ? "danglingLink" : "unexplained";
+}
+
+// What the user gets to read when their pick was a link to nothing. A bare
+// ENOENT would name a path that is still right there, so it says which part is
+// missing and gives the two steps in the order they work: the target has to
+// come back before the user can import it.
+//
+// The name goes LAST and once. This renders in a single-line truncate span
+// (DesktopWorkspaceShell), and a basename can be 255 characters -- leading with
+// it pushed both the reason and the instruction off the end of the line.
+function danglingLinkRefusal(source: string): string {
+  return `dohc did not import a symbolic link. The file it points to is missing. Restore that file. Then import it instead. The link is ${basename(source)}.`;
 }
 
 // Why a trash ladder stopped before its next rung. Three outcomes, not two:
@@ -446,11 +515,18 @@ async function copyWithoutOverwrite(
         // EEXIST is the collision itself: take the next attempt NUMBER, not a
         // shorter spelling of this one.
         if (code === "EEXIST") break;
+        // ENOENT is the one code that also means something vanished, so ask
+        // before any arithmetic reads it as length. A missing source or
+        // destination folder is a real failure and must surface, not be
+        // shortened into a skip.
+        if (code === "ENOENT") {
+          const enoent = await classifyCopyEnoent(source, absDir);
+          if (enoent === "danglingLink") {
+            throw new Error(danglingLinkRefusal(source), { cause: error });
+          }
+          if (enoent) throw error;
+        }
         if (!couldBeLengthRefusal(code, candidate, maxEntryChars)) throw error;
-        // "Could" is not enough for an ENOENT: it is the one code that also
-        // means something vanished. A missing source or destination folder is
-        // a real failure and must surface, not be shortened into a skip.
-        if (code === "ENOENT" && !(await bothStillThere(source, absDir))) throw error;
         // No shorter rung left: a name this filesystem cannot hold skips the
         // source instead of aborting the batch.
         if (rung === candidates.length - 1) return null;
