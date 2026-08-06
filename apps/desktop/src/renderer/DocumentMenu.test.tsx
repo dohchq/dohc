@@ -223,11 +223,14 @@ describe("DocumentMenu", () => {
     // holds nothing.
     const copyItem = screen.getByTestId("document-menu-item-copy-markdown");
     expect(copyItem.textContent).toBe("Document not open");
-    // The label states the fact; the next step rides in the tooltip, because
-    // an inline label that swaps for 1.2s has no room for it.
-    expect(copyItem.getAttribute("title")).toBe(
-      "You can copy this document when it opens.",
-    );
+    // The label states the fact; the next step is stated in the menu's status
+    // line, because an inline label that swaps for 1.2s has no room for it.
+    // It was a tooltip, and a keyboard user never saw it: focus stays on the
+    // role="menu" container, so the item's title never presents (#666).
+    const status = screen.getByTestId("document-menu-status");
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.textContent).toBe("You can copy this document when it opens.");
+    expect(copyItem.getAttribute("title")).toBeNull();
     expect(writeText).not.toHaveBeenCalled();
 
     // The refusal leaves the menu open, so the export item is right there.
@@ -240,13 +243,47 @@ describe("DocumentMenu", () => {
     expect(screen.getAllByText("Document not open")).toHaveLength(1);
     const exportItem = screen.getByTestId("document-menu-item-export-markdown");
     expect(exportItem.textContent).toBe("Document not open");
-    // Each action names its OWN next step.
-    expect(exportItem.getAttribute("title")).toBe(
+    // Each action names its OWN next step, and one status line carries the
+    // one feedback the menu holds.
+    expect(screen.getByTestId("document-menu-status").textContent).toBe(
       "You can export this document when it opens.",
     );
     // MUTATION: the same fallback -> a .md file containing one newline,
     // written as if it were the user's document.
     expect(exportDocumentFile).not.toHaveBeenCalled();
+  });
+
+  // #666: the instruction was a tooltip, so a keyboard user never got it —
+  // focus stays on the role="menu" container and the item's title never
+  // presents. A live region only announces reliably when it was already in
+  // the accessibility tree before its text arrived, so the region mounts with
+  // the menu and starts empty.
+  it("watches an empty status region from the moment the menu opens", async () => {
+    const user = userEvent.setup();
+    stubClipboard();
+    render(
+      <DocumentMenu
+        workspaceId="ws-1"
+        suggestedName="Plan"
+        getMarkdown={() => null}
+      />,
+    );
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    const status = screen.getByTestId("document-menu-status");
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.textContent).toBe("");
+
+    // Keyboard only, which is the path the tooltip could not serve: the menu
+    // takes focus on open, so Enter runs the selected item.
+    await user.keyboard("{Enter}");
+    await act(async () => {});
+    expect(screen.getByTestId("document-menu-status").textContent).toBe(
+      "You can copy this document when it opens.",
+    );
+    // Same element throughout — a region replaced along with its text is a
+    // region a screen reader was not watching.
+    expect(screen.getByTestId("document-menu-status")).toBe(status);
   });
 
   // codex r23: NULL is the refusal this menu expects; a THROW is not. The

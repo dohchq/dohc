@@ -32,7 +32,7 @@ const FEEDBACK_MS = 1200;
 // editor that is still opening from one that failed to — and copy.md says to
 // give a reason only when we know it. "document" is the noun this surface
 // already uses (the menu is "Document actions"), and the per-action next step
-// rides in each item's tooltip.
+// is stated below the items.
 const REFUSAL_LABEL = "Document not open";
 
 export function DocumentMenu(props: {
@@ -54,9 +54,11 @@ export function DocumentMenu(props: {
   const [selected, setSelected] = useState(0);
   // A refusal owes the user a next step (docs/brand/copy.md), and an inline
   // label that swaps for 1.2s has no room for one. The label states what is
-  // true; the tooltip carries the instruction.
+  // true; the instruction is stated in the menu's status line, which every
+  // user reaches — a tooltip is not one, because focus stays on the menu
+  // container and never presents it (#666).
   const [feedback, setFeedback] = useState<
-    Partial<Record<DocumentMenuItemId, { label: string; title?: string }>>
+    Partial<Record<DocumentMenuItemId, { label: string; instruction?: string }>>
   >({});
   const containerRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -97,8 +99,14 @@ export function DocumentMenu(props: {
   // the replacement timer only ever clears the newest item, so a second
   // refusal inside the window left the first item showing its refusal with
   // nothing left to retire it.
-  function showFeedback(id: DocumentMenuItemId, label: string, title?: string) {
-    setFeedback({ [id]: title === undefined ? { label } : { label, title } });
+  function showFeedback(
+    id: DocumentMenuItemId,
+    label: string,
+    instruction?: string,
+  ) {
+    setFeedback({
+      [id]: instruction === undefined ? { label } : { label, instruction },
+    });
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     feedbackTimer.current = setTimeout(() => {
       setFeedback({});
@@ -219,6 +227,12 @@ export function DocumentMenu(props: {
   const move = (delta: number) =>
     setSelected((current) => (current + delta + ITEMS.length) % ITEMS.length);
 
+  // One instruction at a time, because one feedback is held at a time.
+  const instruction =
+    ITEMS.map((item) => feedback[item.id]?.instruction).find(
+      (text): text is string => text !== undefined,
+    ) ?? "";
+
   return (
     <div className="dohc-document-menu" ref={containerRef}>
       <IconButton
@@ -273,11 +287,22 @@ export function DocumentMenu(props: {
               className={`dohc-document-menu-item${index === selected ? " is-selected" : ""}`}
               onMouseEnter={() => setSelected(index)}
               onClick={() => runItem(item.id)}
-              title={feedback[item.id]?.title}
             >
               {feedback[item.id]?.label ?? item.label}
             </button>
           ))}
+          {/* The refusal's next step, stated where every user reads it. It
+              mounts with the menu and stays empty until there is something to
+              say, so a screen reader is already watching the region when the
+              instruction arrives — a region that appears with its text is
+              announced unreliably. Empty, it paints nothing. */}
+          <div
+            data-testid="document-menu-status"
+            className="dohc-document-menu-status"
+            role="status"
+          >
+            {instruction}
+          </div>
         </div>
       ) : null}
     </div>

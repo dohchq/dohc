@@ -3365,6 +3365,19 @@ mark.dohc-highlight,
   background: var(--dohc-line);
 }
 
+/* The menu's status line: a refusal's next step, wrapped rather than
+ * truncated, and taking no room while there is nothing to say. */
+.dohc-document-menu-status {
+  padding: 4px 8px 2px;
+  color: var(--dohc-muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.dohc-document-menu-status:empty {
+  display: none;
+}
+
 /* TeX math (KaTeX). The `.katex` typesetting itself comes from the bundled
  * katex.min.css; these rules only theme the dohc wrappers, the source-edit
  * field, and the empty/error states so math reads correctly in both themes.
