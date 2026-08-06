@@ -2415,6 +2415,11 @@ async function lockedRebindCapture(prefix: string) {
     // after a settle resolves.
     settleFailure: null as Error | null,
     emitUpdateAfterSettle: false,
+    // #595 round 14: a peer update that lands while a session is RETAINED —
+    // after its close unsubscribed and before the daemon accepted the
+    // release. It reaches the durable lineage; the deaf session never hears
+    // it. This is the window a stale write proof survives into.
+    peerEditWhileRetained: false,
     // #595 round 12: the engine COMMITS the settle and declines to write the
     // target (a symlinked path or ancestor), so the call resolves clean while
     // the artifact stays stale.
@@ -2439,6 +2444,22 @@ async function lockedRebindCapture(prefix: string) {
     const doc = new Y.Doc();
     for (const update of state.journal) Y.applyUpdate(doc, update);
     let tokens = 0;
+    // The real provider unsubscribes from remote updates at the TOP of
+    // close(), before it asks the daemon to release
+    // (ydocProviderSession.ts). A fake that keeps forwarding after a refused
+    // close models a session that can still hear peers, which no retained
+    // session can — and that difference is exactly what hid #595 round 14.
+    let listening = true;
+    const deliverPeerEdit = (text: string) => {
+      // The daemon's lineage advances whether or not this client hears it:
+      // the update is journaled, so the NEXT generation opens holding it.
+      const peer = new Y.Doc();
+      peer.getText("plainText").insert(0, text);
+      const update = Y.encodeStateAsUpdate(peer);
+      Y.applyUpdate(doc, update);
+      state.journal.push(update);
+      if (listening) options.onRemoteUpdate(update);
+    };
     return {
       doc,
       initialUpdate: Y.encodeStateAsUpdate(doc),
@@ -2500,6 +2521,13 @@ async function lockedRebindCapture(prefix: string) {
       },
       async close(closeOptions) {
         state.closeCalls.push(gen);
+        // Ordering copied from the real provider: the subscriptions go first,
+        // before the release is even attempted, and they never come back.
+        listening = false;
+        if (state.peerEditWhileRetained) {
+          state.peerEditWhileRetained = false;
+          deliverPeerEdit("peer edit while retained");
+        }
         if (state.closeFailure) throw state.closeFailure;
         if (closeOptions?.settle === false) {
           state.closesWithSettleFalse += 1;
@@ -2925,6 +2953,70 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
   expect(state.settledMarkdowns).toEqual([]);
   await capture.stop();
 }, 15_000);
+
+it("a delete cancels a debt that registered while the disk delete was in flight", async () => {
+  // #595 round 14 (codex P2). The suspension snapshots the registry, but the
+  // filesystem delete runs OFF the capture chain — so an open of the same
+  // path can land on the chain while the delete is still running, meet the
+  // lock, and register a debt the finisher never saw. Cancelling only the
+  // snapshot left that debt armed, and its ladder recreates the file the user
+  // just deleted. The finisher rescans instead.
+  //
+  // MUTATION: cancel `suspended` alone -> the second debt survives, its
+  // ladder opens a third generation, and the deleted path is settled back
+  // onto disk.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-delete-race-");
+  const first = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, first.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "first edit");
+  await first.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(first.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The delete starts: live sessions are vacated and the debt is suspended.
+  // The disk work has NOT finished, so the finisher has not been called.
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+
+  // Another window opens the same document inside that window and meets the
+  // same lock. This registers a SECOND debt, invisible to the snapshot above.
+  const second = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const secondDoc = new Y.Doc();
+  Y.applyUpdate(secondDoc, second.initialUpdate);
+  const secondBefore = Y.encodeStateVector(secondDoc);
+  secondDoc.getText("plainText").insert(0, "raced edit");
+  await second.applyLocalUpdate(Y.encodeStateAsUpdate(secondDoc, secondBefore));
+  await expect(second.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  const generationAtDelete = state.generation;
+
+  // The delete succeeded. BOTH debts are cancelled: the path is provably gone.
+  finishDelete(true);
+  state.locked = false;
+
+  // THE FACT, asserted first: the deleted path is not reopened and nothing is
+  // settled back onto it. A trace count would only prove the finisher ran.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(generationAtDelete);
+  expect(state.settledMarkdowns).toEqual([]);
+  // And both debts said so out loud.
+  expect(
+    state.errors.filter((context) => context.includes("close retry")),
+  ).toHaveLength(2);
+  await capture.stop();
+}, 20_000);
 
 it("a moved-away directory cancels detached locked debts under its prefix", async () => {
   // Same rule, prefix shape: moving or deleting `dir` must not let a debt
@@ -3372,6 +3464,60 @@ it("a close that raced a newer update is not proof the write landed", async () =
     .toBeGreaterThan(settlesAfterRace);
   await capture.stop();
 }, 30_000);
+
+it("a retained session's settle is never proof, because it stopped hearing the document", async () => {
+  // #595 round 14 (codex P2). Round 11 replaced a stored `settled: true` with
+  // a live comparison so a later update would withdraw the proof by itself.
+  // On the RETAINED path that comparison cannot move: `close()` unsubscribes
+  // from remote updates before it asks the daemon to release, so a session
+  // whose release was refused is deaf from that moment on. `updateSeq` freezes
+  // at whatever the settle covered, the comparison keeps answering yes, and
+  // the next successful release deletes the debt over an update the artifact
+  // never received — the stored yes, wearing a comparison's clothes.
+  //
+  // The old test could not see this: it emitted the peer update DURING the
+  // settle, while the session was still listening. This one puts the update
+  // in the window that actually matters, and the fake now models the
+  // unsubscribe the same way the provider does.
+  //
+  // MUTATION: drop `settleCovers = -1` at retention -> the retained release
+  // discharges the debt, no further session opens, and the peer edit never
+  // reaches settledMarkdowns.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-deaf-proof-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "deaf proof");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The retry settles cleanly. Its release is refused, and the peer update
+  // lands inside that refused close — after the unsubscribe, so this session
+  // never hears it, while the durable lineage does.
+  state.locked = false;
+  state.closeFailure = new Error("ydoc-unsettled-close");
+  state.peerEditWhileRetained = true;
+  await expect
+    .poll(() => state.settledMarkdowns.length, { timeout: 15_000 })
+    .toBeGreaterThan(0);
+
+  // The release now succeeds, discharging the lease. The write is NOT
+  // discharged with it: a fresh session must settle the peer edit.
+  state.closeFailure = null;
+  await expect
+    .poll(() => state.settledMarkdowns.join("\n"), { timeout: 25_000 })
+    .toContain("peer edit while retained");
+  await capture.stop();
+}, 45_000);
 
 it("a settle held through a refused release stops being proof when an update lands", async () => {
   // #595 round 11, invariant W: the write is discharged only against proof

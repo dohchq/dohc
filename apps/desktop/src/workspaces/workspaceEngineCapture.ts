@@ -3303,13 +3303,15 @@ export function createWorkspaceEngineCapture(
             // finish its own release — retry its close before anything else.
             if (pendingRelease !== null) {
               await releaseRetainedSession();
-              // L is discharged. W is asked, not remembered: a settle that
-              // landed before the refused release stops being proof the
-              // moment a newer update arrives on the retained session.
-              if (writeIsProven()) {
-                detachedLockedDebts.delete(input.path);
-                return;
-              }
+              // L is discharged. W is NOT, and asking `writeIsProven()` here
+              // would be the round-11 mistake wearing a comparison's clothes
+              // (#595 round 14): `close()` unsubscribes from remote updates
+              // BEFORE it asks the daemon to release, so a retained session
+              // has been deaf since its first close. Its `updateSeq` is
+              // frozen, so the comparison keeps answering yes over updates
+              // the artifact never received. A retained settle is never
+              // proof — re-arm, and let a fresh session settle what the
+              // document holds now. One extra settle; never a lost update.
               armDetachedLockedRetry();
               return;
             }
@@ -3637,7 +3639,15 @@ export function createWorkspaceEngineCapture(
         const suspended = suspendDetachedDebts(match);
         return (removed: boolean) => {
           if (removed) {
-            cancelSuspendedDebts(suspended, `a delete of ${pathOrPrefix}`);
+            // RESCAN — the snapshot is not the whole set. The disk delete
+            // runs OFF the capture chain, so an open of this path can land on
+            // the chain while it is in flight, meet the lock, and register a
+            // NEW debt. Cancelling only what was suspended leaves that one
+            // armed, and its ladder reopens the path the user just deleted.
+            cancelSuspendedDebts(
+              [...suspended, ...suspendDetachedDebts(match)],
+              `a delete of ${pathOrPrefix}`,
+            );
           } else {
             restoreSuspendedDebts(suspended);
           }

@@ -11205,13 +11205,16 @@ fn map_runtime(error: RuntimeError) -> WireError {
             dohc_engine_files::MaterializeError::FileLocked => {
                 wire(ErrorCode::Overloaded, "file-locked")
             }
-            // Retryable like any contention, but honestly named: the engine
-            // database was busy, not the user's file.
-            dohc_engine_files::MaterializeError::Storage(
-                dohc_engine_storage::StorageError::FileLocked,
-            ) => wire(ErrorCode::Overloaded, "engine-store-busy"),
             // Every other materialization failure keeps the prior mapping
-            // (the tail match below routed them to Internal).
+            // (the tail match below routed them to Internal). That INCLUDES
+            // a busy engine database (#595 round 14): matching the VARIANT is
+            // what stops it being reported as the user's file being locked,
+            // and no second wire message is needed to do that. An earlier
+            // `engine-store-busy` / Overloaded arm promised a retry after
+            // backoff that nothing performs — the desktop retries only
+            // `file-locked` — and a contract that advertises an unperformed
+            // retry is worse than an honest terminal answer. The real retry
+            // is tracked separately.
             _ => wire(ErrorCode::Internal, "workspace operation failed"),
         };
     }
@@ -11547,6 +11550,12 @@ mod tests {
     /// matching on the code alone reported a busy SQLite handle as an
     /// artifact lock. Matching the variant is what keeps them apart.
     ///
+    /// Round 14 narrowed the answer: the busy store keeps the prior terminal
+    /// mapping. Only `file-locked` may be `Overloaded`, because only
+    /// `file-locked` has a retry behind it — the desktop's ladder accepts
+    /// nothing else, so any other `afterBackoff` message advertises a retry
+    /// nobody performs.
+    ///
     /// MUTATION: match on `materialize.code() == "file-locked"` again -> the
     /// storage case below reports "file-locked".
     #[test]
@@ -11562,11 +11571,10 @@ mod tests {
                 dohc_engine_storage::StorageError::FileLocked,
             ),
         ));
-        // Retryable, because a busy database is contention — but never under
-        // the artifact-lock message the desktop explains to the user.
-        assert_eq!(store.code, ErrorCode::Overloaded);
         assert_ne!(store.message, "file-locked");
-        assert_eq!(store.message, "engine-store-busy");
+        // Terminal, not a retry the caller cannot collect on.
+        assert_eq!(store.code, ErrorCode::Internal);
+        assert_eq!(store.message, "workspace operation failed");
     }
 
     #[test]

@@ -1086,9 +1086,14 @@ fn read_current_file(
     file: std::fs::File,
     display_path: &Path,
 ) -> Result<CurrentTarget, MaterializeError> {
+    // The OPEN is not the only place a lock speaks (#595 round 14). A
+    // byte-range lock (`LockFileEx`) leaves the handle openable and fails the
+    // READ with ERROR_LOCK_VIOLATION, so classifying only the open sent that
+    // file down the terminal io path — no retry, for a lock that releases.
+    // Same narrow rule as the open: 32/33 only, ACL denials stay terminal.
     let metadata = file
         .metadata()
-        .map_err(|err| MaterializeError::io(display_path, &err))?;
+        .map_err(|err| terminal_lock_classification(err, display_path))?;
     if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
         return Err(MaterializeError::SymlinkTarget);
     }
@@ -1099,7 +1104,7 @@ fn read_current_file(
     let mut buf = Vec::new();
     limited
         .read_to_end(&mut buf)
-        .map_err(|err| MaterializeError::io(display_path, &err))?;
+        .map_err(|err| terminal_lock_classification(err, display_path))?;
     if buf.len() > MAX_MATERIALIZE_BYTES {
         return Ok(CurrentTarget::Oversized);
     }
@@ -1987,7 +1992,11 @@ fn sync_parent_dir(
 /// produces. The loops still RETRY on the broad predicate within their cap;
 /// the error that outlives the cap must say what the cause really is (#595).
 fn terminal_lock_classification(err: std::io::Error, target: &Path) -> MaterializeError {
-    if matches!(err.raw_os_error(), Some(32) | Some(33)) {
+    // Windows-only by construction: 32 and 33 are Win32 codes, and the same
+    // raw numbers are EPIPE and EDOM on Unix. This helper now serves the
+    // platform-shared read below, so the guard is load-bearing rather than
+    // decorative.
+    if cfg!(windows) && matches!(err.raw_os_error(), Some(32) | Some(33)) {
         MaterializeError::FileLocked
     } else {
         MaterializeError::io(target, &err)
@@ -2209,6 +2218,22 @@ mod tests {
             ));
             assert!(is_transient_lock(&std::io::Error::from_raw_os_error(5)));
         }
+        #[cfg(not(windows))]
+        {
+            // 32 and 33 are EPIPE and EDOM here, not lock codes. The helper
+            // serves the platform-shared read path, so the Windows guard has
+            // to hold on Unix too — a retryable FileLocked for a broken pipe
+            // would poll forever under a false cause. NOTE: the canonical
+            // Windows gate cannot run this block; it is covered on Linux.
+            assert!(matches!(
+                classify(std::io::Error::from_raw_os_error(32)),
+                MaterializeError::Io { .. }
+            ));
+            assert!(matches!(
+                classify(std::io::Error::from_raw_os_error(33)),
+                MaterializeError::Io { .. }
+            ));
+        }
         // A bare PermissionDenied (the POSIX EACCES shape): absorbed within
         // the bounded cap, terminal Io at every boundary.
         let acl = std::io::Error::from(ErrorKind::PermissionDenied);
@@ -2311,6 +2336,36 @@ mod tests {
             verdict.is_ok(),
             "a landed reattempt resolves the exhaustion"
         );
+    }
+
+    /// #595 round 14 (codex P2): the OPEN is not the only boundary a lock
+    /// speaks at. A byte-range lock (`LockFileEx`, which `File::lock` takes on
+    /// Windows) leaves the target openable and fails the READ with
+    /// ERROR_LOCK_VIOLATION. Classifying only the open sent that file down the
+    /// terminal io path, so the pending job never retried a lock that does
+    /// release.
+    ///
+    /// MUTATION: map the `read_to_end` failure with `MaterializeError::io`
+    /// again -> this returns `Io` and the assertion fails.
+    #[cfg(windows)]
+    #[test]
+    fn a_byte_range_lock_on_the_read_keeps_the_retryable_lock_contract() {
+        let scratch = Scratch::new("read-byte-range-lock");
+        let target = scratch.root.join("locked.md");
+        std::fs::write(&target, b"held bytes").expect("write target");
+        let holder = std::fs::File::open(&target).expect("open holder");
+        holder.lock().expect("take the byte-range lock");
+
+        let verdict = read_current_no_follow(&target);
+
+        // The open succeeded — this is the read failing, which is the whole
+        // point. An `Io` here is the bug: it is terminal, so the durably
+        // pending write would never be retried against a lock that lifts.
+        assert!(
+            matches!(verdict, Err(MaterializeError::FileLocked)),
+            "a byte-range-locked read must keep the FileLocked contract"
+        );
+        drop(holder);
     }
 
     /// The inverse: a real sharing violation that survives every attempt
