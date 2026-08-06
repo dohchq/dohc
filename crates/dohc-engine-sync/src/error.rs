@@ -178,6 +178,125 @@ impl SyncError {
     }
 }
 
+/// The refusal code for a shared blob over this recipient's content-kind
+/// ceiling.
+///
+/// Deliberately not the generic code. This is the one replay refusal a person
+/// can act on: the bytes are authentically the granter's file, so no repair at
+/// the relay helps, but the granter making the file smaller and sharing it
+/// again arrives as a NEW op at a later cursor. The recipient's notice reads
+/// this code to say so (`apps/desktop/src/renderer/shareSkipNotice.ts`). Under
+/// the generic code it told the reader nothing could be done, which is the one
+/// thing that is not true here — and the cursor had already committed past the
+/// file.
+pub(crate) const SHARE_BLOB_OVER_CEILING_CODE: &str = "share-blob-over-ceiling";
+
+/// What a replay refusal reports when nobody can act on it: the op describes
+/// its own content wrongly, and no repair anywhere makes it replayable.
+pub(crate) const GENERIC_REPLAY_REFUSAL_CODE: &str = "invalid-input";
+
+impl RelayError {
+    /// The machine code a share-view pull records when it SKIPS a served op
+    /// because of this failure, or `None` when the pull must abort instead.
+    ///
+    /// `SyncError::share_disposition` answers this question for the boundary,
+    /// which refuses an op before replay. This answers it for the REPLAY,
+    /// where the failures come back from the transport.
+    ///
+    /// ONE question decides it: **can this op ever succeed?**
+    ///
+    /// - PERMANENT — no. The op will be refused identically forever, so the
+    ///   cursor must move past it or the share freezes on it. Skipping loses
+    ///   nothing that was ever going to arrive.
+    /// - REPAIRABLE — yes, once someone fixes the thing that is wrong. The
+    ///   cursor must NOT move past it: advancing would drop content that was
+    ///   still coming, and nothing would bring it back.
+    /// - PENDING — yes, once the sender finishes. `BlobMissing`. Same
+    ///   disposition as repairable, named apart because the fix is a normal
+    ///   step rather than a failure.
+    ///
+    /// Only the permanent class is skipped. That is what keeps this change
+    /// from trading a frozen share for silently dropped data: an op the
+    /// recipient could still receive is never advanced past.
+    ///
+    /// The code travels with the decision instead of coming from a total
+    /// `RelayError::code`. `map_relay_code` in the runtime crate already owns
+    /// the wire code for every relay failure, and a second total mapping here
+    /// would be a second naming authority for the same thing.
+    ///
+    /// No wildcard arm, for the reason the boundary's twin has none: a new
+    /// variant must answer the question rather than inherit an answer.
+    pub(crate) const fn share_replay_refusal_code(&self) -> Option<&'static str> {
+        match self {
+            // PERMANENT. These bytes hashed to the sha the op named, so they
+            // ARE the granter's file, and it is over a ceiling this recipient
+            // enforces on every ingest. Asking again returns the same file and
+            // the same refusal, forever.
+            //
+            // Advancing is not merely safe here, it is REQUIRED for the only
+            // repair there is. A granter who re-shares the file under the
+            // ceiling produces a NEW op at a LATER cursor. Holding the cursor
+            // on the oversized op would keep that replacement from ever
+            // arriving — the repair would be unreachable by construction.
+            //
+            // It is also the one permanent class with a person who can act, so
+            // it carries its own code rather than the generic one.
+            RelayError::ShareBlobOverCeiling { .. } => Some(SHARE_BLOB_OVER_CEILING_CODE),
+            // PERMANENT. The op describes its own content wrongly. No blob the
+            // relay could serve makes it replayable, and nobody can repair it,
+            // so it keeps the generic code.
+            RelayError::ShareOpInvalid { .. } => Some(GENERIC_REPLAY_REFUSAL_CODE),
+            // REPAIRABLE. The relay served a body that is not the one this op
+            // named. The op is fine; the relay's copy is wrong. Fix the blob
+            // and this same op applies — so the cursor must not pass it. This
+            // is `BlobMissing`'s claim in a different tense.
+            RelayError::BlobInvalid
+            // REPAIRABLE for the same reason, and easy to mistake for the
+            // permanent class above. This is raised on bytes NOBODY has
+            // authenticated: a transport that stopped at its own read bound
+            // (`blob_body_overflow`, which cannot even report an exact size),
+            // or an oversized body served for the wrong blob. The op may name
+            // a perfectly small file, so skipping past it would drop content
+            // the relay can still serve correctly.
+            | RelayError::BlobTooLarge { .. }
+            // PENDING, and the reason to keep reading: the relay does not have
+            // the blob YET and the sender can still upload it.
+            | RelayError::BlobMissing
+            | RelayError::BlobReferenceMissing
+            | RelayError::Unauthorized
+            | RelayError::BadRequest
+            | RelayError::Conflict
+            | RelayError::OriginDiverged
+            | RelayError::NoProgress
+            | RelayError::WorkspaceUnavailable
+            | RelayError::KeyEnvelopeMissing
+            | RelayError::ShareUnavailable
+            | RelayError::EpochSuperseded
+            | RelayError::IdentityNotRecognized
+            | RelayError::IdentityRequired
+            | RelayError::StreamIdentityMismatch
+            | RelayError::AuthorshipMismatch
+            | RelayError::UnknownChatOperation
+            | RelayError::ShareReadOnly
+            | RelayError::ShareOperationRejected
+            | RelayError::PayloadTooLarge
+            | RelayError::PresenceCapacity
+            | RelayError::QuotaExceeded
+            | RelayError::SelfShare
+            | RelayError::AmbiguousSelector
+            | RelayError::InvalidChannel
+            | RelayError::MethodNotAllowed
+            | RelayError::Forbidden
+            | RelayError::ServerInternal
+            | RelayError::UnknownServerCode(_)
+            | RelayError::HttpStatus(_)
+            | RelayError::Partitioned
+            | RelayError::InvalidResponse
+            | RelayError::Local(_) => None,
+        }
+    }
+}
+
 pub(crate) fn local_corruption(reason: &'static str) -> SyncError {
     SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(reason)))
 }
@@ -204,6 +323,34 @@ pub enum RelayError {
     BlobReferenceMissing,
     #[error("relay blob content failed integrity validation")]
     BlobInvalid,
+    /// The granter's file, AUTHENTICATED against the sha256 its op named, is
+    /// larger than the ceiling this recipient enforces for that content kind.
+    ///
+    /// Deliberately not `BlobTooLarge`. That one is raised on bytes nobody has
+    /// checked — a transport that stopped at its own read bound, or a body the
+    /// relay served for the wrong blob — so it says nothing about the file the
+    /// op actually names, and the op may well succeed once the relay serves
+    /// the right body. This one is measured on bytes already proven to be the
+    /// granter's, so no repair anywhere makes them fit.
+    #[error(
+        "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {observed_bytes} bytes"
+    )]
+    ShareBlobOverCeiling {
+        constraint: &'static str,
+        limit_bytes: usize,
+        observed_bytes: usize,
+    },
+    /// A served share op that describes its own content wrongly: a blob
+    /// reference that is not a sha256, or a body that is authentically the
+    /// one the op named and still not the kind the op claimed.
+    ///
+    /// Deliberately NOT `BlobInvalid`. That one means the relay served a body
+    /// which is not the one the op asked for — repairable at the relay, and
+    /// the same op succeeds once it is. This one means the op itself is
+    /// unusable, so no repair anywhere makes it replayable. The two classes
+    /// were one variant, and one variant cannot hold two dispositions.
+    #[error("share op is not replayable: {reason}")]
+    ShareOpInvalid { reason: &'static str },
     #[error("relay blob exceeds {constraint}: limit {limit_bytes} bytes, observed {observed}")]
     BlobTooLarge {
         constraint: &'static str,

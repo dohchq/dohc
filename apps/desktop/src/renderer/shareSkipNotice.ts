@@ -7,11 +7,22 @@
 // grant excluded the op, and wrong on both counts when the relay sent an
 // envelope the engine could not read. There the selector may well cover the
 // update, nothing about the share is at fault, and the granter can change
-// nothing. So each class says only what is true of it, and neither invents a
-// next step it does not have.
+// nothing. So each class says only what is true of it, and none invents a
+// next step it does not have — or withholds one it does.
 
 /** Refusals the boundary made: the op fell outside what the share granted. */
 const BOUNDARY_CODE = "share-boundary-violation";
+
+/**
+ * The file is authentically the granter's and over the ceiling dohc stores.
+ *
+ * The only replay refusal a person can act on. No repair at the relay helps,
+ * but the granter making the file smaller and sharing it again arrives as a
+ * new update. `RelayError::ShareBlobOverCeiling`
+ * (`crates/dohc-engine-sync/src/error.rs`) mints this code so the notice can
+ * say so instead of reporting it as unappliable.
+ */
+const OVER_CEILING_CODE = "share-blob-over-ceiling";
 
 /**
  * Whether a share has skipped ops the user has not seen.
@@ -41,7 +52,7 @@ export interface ShareSkipNoticeInput {
 export interface ShareSkipNoticeLine {
   // `unknown` is the overflow: ops the record counted but could not keep, so
   // their cause is not knowable from the record.
-  kind: "boundary" | "malformed" | "unknown";
+  kind: "boundary" | "oversized" | "malformed" | "unknown";
   text: string;
   /** The engine's own message, for the element's title. */
   detail: string | undefined;
@@ -68,7 +79,10 @@ export function shareSkipNoticeLines(
   granterEmail: string | null,
 ): ShareSkipNoticeLine[] {
   const boundary = skipped.ops.filter((op) => op.code === BOUNDARY_CODE);
-  const malformed = skipped.ops.filter((op) => op.code !== BOUNDARY_CODE);
+  const oversized = skipped.ops.filter((op) => op.code === OVER_CEILING_CODE);
+  const malformed = skipped.ops.filter(
+    (op) => op.code !== BOUNDARY_CODE && op.code !== OVER_CEILING_CODE,
+  );
   const lines: ShareSkipNoticeLine[] = [];
   if (boundary.length > 0) {
     lines.push({
@@ -77,6 +91,18 @@ export function shareSkipNoticeLines(
         granterEmail ?? "the person who shared it"
       }.`,
       detail: boundary[0]?.detail,
+    });
+  }
+  if (oversized.length > 0) {
+    lines.push({
+      kind: "oversized",
+      // The one class with a Next, because the granter really can act: the
+      // cursor has committed past these files, and a smaller copy shared
+      // again arrives as a new update.
+      text: `dohc skipped ${updates(oversized.length)} with files over the size limit. Ask ${
+        granterEmail ?? "the person who shared it"
+      } to make them smaller and share them again.`,
+      detail: oversized[0]?.detail,
     });
   }
   if (malformed.length > 0) {

@@ -45,6 +45,76 @@ describe("share skip records", () => {
   // or a later page fails and the pull is retried. The same skipped op must
   // not stack up in the record, or the count the banner shows drifts away
   // from what actually happened.
+  // The engine aggregates every blob ONE op refused into a single record,
+  // because this store's only duplicate test is the origin coordinate and every
+  // blob in an op shares it (`record_refused_blobs`, `relay.rs`). One refusal
+  // per blob would arrive here as several records with the same coordinate, and
+  // this merge would keep the first and drop the rest UNCOUNTED — a shared
+  // version losing two files while the notice reported one, with the cursor
+  // already committed past both.
+  it("keeps every file a single op refused, across the refetch that follows a restart", () => {
+    const twoRefusedSnapshots = {
+      originId: "origin-granter",
+      originSeq: 0,
+      opKind: "version.create",
+      code: "share-blob-over-ceiling",
+      detail:
+        "2 files in this operation were not applied: " +
+        "shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES: " +
+        "limit 5242880 bytes, observed 5242881 bytes — docs/first.bin; " +
+        "shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES: " +
+        "limit 5242880 bytes, observed 5242882 bytes — docs/second.bin",
+      atMs: 1000,
+    };
+    const recorded = mergeShareSkippedOps(undefined, [twoRefusedSnapshots]);
+    // The restart: the page is re-fetched and the identical record arrives again.
+    const afterRestart = mergeShareSkippedOps(recorded, [twoRefusedSnapshots]);
+
+    expect(afterRestart.ops).toHaveLength(1);
+    expect(afterRestart.more).toBe(0);
+    expect(
+      afterRestart.ops[0]?.detail,
+      "MUTATION: the record loses a refused file, or its count, or its measurements",
+    ).toContain("2 files in this operation were not applied");
+    for (const path of ["docs/first.bin", "docs/second.bin"]) {
+      expect(
+        afterRestart.ops[0]?.detail,
+        `MUTATION: ${path} vanished from the durable record`,
+      ).toContain(path);
+    }
+  });
+
+  // Why the engine has to aggregate, stated as a fact about THIS function
+  // rather than a claim in a comment. Two records sharing one coordinate are
+  // not two records here: the second is dropped and never counted, so `more`
+  // does not rise to cover it either. Nothing downstream can recover what this
+  // merge discards, which is what makes the engine the only place to fix it.
+  it("cannot hold two refusals that share an origin coordinate", () => {
+    const perBlob = (path: string) => ({
+      originId: "origin-granter",
+      originSeq: 0,
+      opKind: "version.create",
+      code: "share-blob-over-ceiling",
+      detail: `shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES — ${path}`,
+      atMs: 1000,
+    });
+
+    const collapsed = mergeShareSkippedOps(undefined, [
+      perBlob("docs/first.bin"),
+      perBlob("docs/second.bin"),
+    ]);
+
+    expect(collapsed.ops).toHaveLength(1);
+    expect(
+      collapsed.ops[0]?.detail,
+      "the FIRST refusal is the one kept, so a per-blob engine loses the rest",
+    ).toContain("docs/first.bin");
+    expect(
+      collapsed.more,
+      "and the dropped refusal is not even counted as overflow",
+    ).toBe(0);
+  });
+
   it("merges the same skipped op once, however often its page is refetched", () => {
     const first = mergeShareSkippedOps(undefined, [op(4), op(9)]);
     const again = mergeShareSkippedOps(first, [op(4), op(9), op(11)]);

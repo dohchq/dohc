@@ -1955,6 +1955,10 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
             }),
         ));
 
+    // A body that does not hash to the sha its op named is REPAIRABLE at the
+    // relay, so the pull stops rather than committing past content that is
+    // still coming. The retry below is the recovery, and it works because the
+    // cursor never moved.
     let rename = transport
         .call(
             RequestContext::unbounded(),

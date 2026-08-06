@@ -11025,7 +11025,12 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::IdentityNotRecognized => ErrorCode::IdentityNotRecognized,
         RelayError::ShareReadOnly => ErrorCode::ShareReadOnly,
         RelayError::ShareOperationRejected => ErrorCode::ShareOperationRejected,
-        RelayError::PayloadTooLarge | RelayError::BlobTooLarge { .. } => ErrorCode::PayloadTooLarge,
+        RelayError::PayloadTooLarge
+        | RelayError::BlobTooLarge { .. }
+        // The same class as the two above — content past a size limit — and it
+        // reaches this mapping only through a caller that chooses to surface
+        // it, because the share-view pull records it as a skipped op instead.
+        | RelayError::ShareBlobOverCeiling { .. } => ErrorCode::PayloadTooLarge,
         RelayError::QuotaExceeded => ErrorCode::QuotaExceeded,
         RelayError::NoProgress => ErrorCode::RelayNoProgress,
         RelayError::BlobMissing => ErrorCode::BlobMissing,
@@ -11040,7 +11045,14 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::AmbiguousSelector => ErrorCode::AmbiguousSelector,
         RelayError::InvalidChannel => ErrorCode::InvalidChannel,
         RelayError::MethodNotAllowed => ErrorCode::RelayMethodNotAllowed,
-        RelayError::InvalidResponse => ErrorCode::RelayInvalidResponse,
+        // A served share op the engine cannot replay is the relay's response
+        // failing validation, which is the code that already says so. The
+        // share-view pull never returns this — it records it as a skipped op
+        // and keeps reading — so this arm exists for exhaustiveness and for
+        // any later caller that chooses to surface it instead.
+        RelayError::ShareOpInvalid { .. } | RelayError::InvalidResponse => {
+            ErrorCode::RelayInvalidResponse
+        }
         RelayError::WorkspaceUnavailable | RelayError::Partitioned => {
             ErrorCode::WorkspaceUnavailable
         }
