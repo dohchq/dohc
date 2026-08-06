@@ -21,14 +21,6 @@ const ITEMS: ReadonlyArray<{ id: DocumentMenuItemId; label: string }> = [
   { id: "export-pdf", label: "Export as PDF…" },
 ];
 
-function exportItemId(kind: "markdown" | "html" | "pdf"): DocumentMenuItemId {
-  return kind === "markdown"
-    ? "export-markdown"
-    : kind === "html"
-      ? "export-html"
-      : "export-pdf";
-}
-
 // How long a quiet inline confirmation ("Copied") replaces an item's label —
 // mirrors the code-block copy button's "copy" → "copied" swap
 // (editor/codeBlockChrome.tsx).
@@ -141,7 +133,7 @@ export function DocumentMenu(props: {
       // shown into a closed menu is a refusal the user never sees — the
       // export would just appear to do nothing.
       showFeedback(
-        exportItemId(kind),
+        `export-${kind}`,
         REFUSAL_LABEL,
         "You can export this document when it opens.",
       );

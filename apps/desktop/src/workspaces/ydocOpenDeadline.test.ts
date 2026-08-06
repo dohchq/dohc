@@ -13,7 +13,6 @@ import {
   EngineWorkspaceSessions,
   EngineWorkspaceShuttingDownError,
   isEngineWorkspaceOpenRefusedError,
-  isEngineWorkspaceRetryDeadlineError,
   type EngineWorkspaceRunOptions,
 } from "@dohc/workspace-engine-client/daemon";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
@@ -153,7 +152,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     // MUTATION: drop withRetryBudget from the task -> the version read runs
     // its full ladder and this is an EngineWorkspaceRebindError instead,
     // which main maps to a plain fallback rather than openTimedOut.
-    expect(isEngineWorkspaceRetryDeadlineError(refusal)).toBe(true);
+    expect(refusal).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
     expect((refusal as Error).message).toContain(
       `limit of ${YDOC_OPEN_RETRY_DEADLINE_MS}ms`,
     );
@@ -163,7 +162,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     await engine.stop();
   });
 
-  it("passes no per-run deadline: the task budget is the only one", async () => {
+  it("spends one budget across the several runs the task makes", async () => {
     const root = await tempRoot();
     await write(root, "note.md", "hello\n");
     const { sessions, runOptions } = recordingSessions();
@@ -178,11 +177,9 @@ describe("the document open's capture-chain hold (#564)", () => {
     await session.close({ settle: false });
     await engine.stop();
 
-    // One budget for the task, not one per call: a per-run deadline here
-    // would mean the task carries two clocks that disagree.
-    expect(
-      runOptions.filter((options) => options?.retryDeadlineMs !== undefined),
-    ).toHaveLength(0);
+    // WHY the budget is a region rather than a per-call limit: the task
+    // makes several daemon calls, and a limit on each would let their waits
+    // add up to something no caller ever set.
     expect(runOptions.length).toBeGreaterThan(1);
   });
 
@@ -306,7 +303,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       // artifact refusal anyway -> main answers a bare `available:false` and
       // the renderer opens the writable plain editor over a session the
       // daemon still holds.
-      expect(isEngineWorkspaceRetryDeadlineError(refusal)).toBe(true);
+      expect(refusal).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(refusal).not.toBeInstanceOf(YDocUncapturedArtifactError);
     });
 
@@ -373,7 +370,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       const refusal = await engine
         .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
         .catch((error: unknown) => error);
-      expect(isEngineWorkspaceRetryDeadlineError(refusal)).toBe(true);
+      expect(refusal).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
 
       // "Try again". MUTATION: drop the retention (or the discharge) -> the
       // unreleased session is unreachable, and in production every open from

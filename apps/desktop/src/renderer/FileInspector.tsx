@@ -824,8 +824,9 @@ function MarkdownView(props: {
   // cancelled by the very race its refusal exists to name (#534, codex P2).
   engine: UseEngineDoc;
   // Reopen the engine session after `engine.openTimedOut` (#564). Owned by
-  // the inspector, like the open itself.
-  onRetryEngineOpen?: () => void;
+  // the inspector, like the open itself. REQUIRED: the timeout notice must
+  // never render without its retry, and the one caller always passes it.
+  onRetryEngineOpen: () => void;
   // Set by the inspector the instant the engine refuses this path. Read by
   // every write guard BESIDE `readOnlyRef`, because the refusal arrives in the
   // same commit that unmounts this component — there is no render of it here to
@@ -1868,7 +1869,7 @@ function MarkdownView(props: {
           that same render and the capture above sets a draft typed before the
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding (#567). */}
-      {engine.openTimedOut && props.onRetryEngineOpen ? (
+      {engine.openTimedOut ? (
         <EngineOpenTimedOutNotice onRetry={props.onRetryEngineOpen} contentShown />
       ) : null}
       {orphanedDraftNotice}

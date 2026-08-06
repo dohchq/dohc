@@ -2655,17 +2655,16 @@ export function createWorkspaceEngineCapture(
       // projection over the folder the switch had just written. Running the
       // open as a chain task makes "which version is active" and "this path
       // has a live session" one indivisible step against every version op.
-      return enqueueResult("open ydoc session", async () =>
-        // ONE budget for the whole task (#564). Bounding only the provider
-        // open left the task unbounded: the version read below runs first,
-        // through the store's own six-attempt transport ladder, so a
-        // daemon-down open failed THERE — holding the chain for that ladder
-        // and rejecting with a rebind error the surface reads as an ordinary
-        // fallback, which is the writable plain editor this bound exists to
-        // prevent.
-        await options.rustEngineSessions.withRetryBudget(
+      // ONE budget for the whole task (#564). Bounding only the provider open
+      // left the task unbounded: the version read below runs first, through
+      // the store's own six-attempt transport ladder, so a daemon-down open
+      // failed THERE — holding the chain for that ladder and rejecting with a
+      // rebind error the surface reads as an ordinary fallback, which is the
+      // writable plain editor this bound exists to prevent.
+      return enqueueResult("open ydoc session", () =>
+        options.rustEngineSessions.withRetryBudget(
           YDOC_OPEN_RETRY_DEADLINE_MS,
-          async () => await openYDocSessionTask(),
+          openYDocSessionTask,
         ),
       );
 

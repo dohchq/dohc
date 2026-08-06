@@ -10,7 +10,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DaemonRefusalError } from "../live/daemonLiveAdapter";
+import {
+  DaemonRefusalError,
+  type DaemonErrorCode,
+} from "../live/daemonLiveAdapter";
 import type { Request } from "../ydoc/generated/Request";
 import type { Response } from "../ydoc/generated/Response";
 import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
@@ -92,6 +95,17 @@ describe("EngineWorkspaceRunOptions", () => {
     expect(source).toContain("verify a possibly committed");
   });
 });
+
+// The daemon's retryable refusals, which seven ladder tests below raise. The
+// disposition is the part under test in every one of them, so it stays at the
+// call site while the envelope shape does not.
+function daemonRefusal(
+  code: DaemonErrorCode,
+  message: string,
+  retry: "afterReconnect" | "afterBackoff" | "immediate",
+): DaemonRefusalError {
+  return new DaemonRefusalError({ code, message, retry }, undefined);
+}
 
 describe("EngineWorkspaceSessions", () => {
   it("prepares an ordinary workspace before opening it in the daemon", async () => {
@@ -727,10 +741,11 @@ describe("EngineWorkspaceSessions", () => {
       });
 
       await expect(
-        sessions.run(workspace, async (binding) => binding.workspace, {
-          retryTransportErrors: true,
-          retryDeadlineMs: 1,
-        }),
+        sessions.withRetryBudget(1, async () =>
+          await sessions.run(workspace, async (binding) => binding.workspace, {
+            retryTransportErrors: true,
+          }),
+        ),
       ).resolves.toBe("handle-healthy");
     });
 
@@ -738,8 +753,9 @@ describe("EngineWorkspaceSessions", () => {
       const workspace = await tempWorkspace("workspace-deadline");
       const client = new MockClient("handle-deadline");
       // Injected clock: each failed attempt costs 2,500 ms (the shape of a
-      // real workspace-open deadline plus overhead). Attempts 1 and 2 are
-      // inside the 6,000 ms budget; the check after attempt 3 is not.
+      // real workspace-open deadline plus overhead). The budget's clock
+      // starts at the FIRST failure (t=2,500), so attempts 2 and 3 are inside
+      // the 6,000 ms window and the check after attempt 4 is not.
       let nowMs = 0;
       let attempts = 0;
       const sessions = new EngineWorkspaceSessions(
@@ -748,31 +764,32 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .run(
-          workspace,
-          async () => {
-            attempts += 1;
-            nowMs += 2_500;
-            throw { code: "transport-error" };
-          },
-          { retryTransportErrors: true, retryDeadlineMs: 6_000 },
+        .withRetryBudget(6_000, async () =>
+          await sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              nowMs += 2_500;
+              throw { code: "transport-error" };
+            },
+            { retryTransportErrors: true },
+          ),
         )
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       // MUTATION: drop the deadline check -> all six attempts run and the
       // rejection is EngineWorkspaceRebindError instead.
-      expect(attempts).toBe(3);
+      expect(attempts).toBe(4);
       const message = (outcome as Error).message;
       // The rejection names the constraint, the configured limit with its
       // unit, and the observed wait (AGENTS.md: show agents the limits they
       // hit).
-      expect(message).toContain("retryDeadlineMs limit of 6000ms");
-      // A per-run deadline IS timed from the start of the run, so both
-      // durations are the same interval — and both are still stated, so the
-      // message has one shape whichever limit fired.
-      expect(message).toContain("7500ms since the run started");
-      expect(message).toContain("waited 7500ms in total, across 3 attempts");
+      expect(message).toContain("withRetryBudget budgetMs limit of 6000ms");
+      // The two durations differ by the first attempt, which the budget
+      // deliberately does not charge.
+      expect(message).toContain("7500ms since the first failure");
+      expect(message).toContain("waited 10000ms in total, across 4 attempts");
       expect((outcome as Error).cause).toMatchObject({
         code: "transport-error",
       });
@@ -794,14 +811,17 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .run(workspace, async () => "unreachable", {
-          retryTransportErrors: true,
-          retryDeadlineMs: 6_000,
-        })
+        .withRetryBudget(6_000, async () =>
+          await sessions.run(workspace, async () => "unreachable", {
+            retryTransportErrors: true,
+          }),
+        )
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      expect(clientReads).toBe(3);
+      // Four, not six: the first failure starts the clock and the fourth
+      // open finds it spent.
+      expect(clientReads).toBe(4);
     });
 
     it("does not start attempt N+1 on a budget the backoff spent", async () => {
@@ -817,28 +837,35 @@ describe("EngineWorkspaceSessions", () => {
         { currentClient: () => client },
         {
           now: () => nowMs,
-          sleep: async () => {
-            nowMs += 300;
+          // The wait costs what it says it costs, so a backoff can carry the
+          // budget over the line — which is the whole case here.
+          sleep: async (delayMs) => {
+            nowMs += delayMs;
           },
         },
       );
 
+      // Tuned so the BACKOFF is what spends it: attempt 2 ends at 2,550 ms of
+      // recovery (inside 2,600) and the 200 ms backoff after it ends at
+      // 2,750 ms (outside).
       const outcome = await sessions
-        .run(
-          workspace,
-          async () => {
-            attempts += 1;
-            nowMs += 4_900;
-            throw { code: "transport-error" };
-          },
-          { retryTransportErrors: true, retryDeadlineMs: 5_000 },
+        .withRetryBudget(2_600, async () =>
+          await sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              nowMs += 2_450;
+              throw { code: "transport-error" };
+            },
+            { retryTransportErrors: true },
+          ),
         )
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      // MUTATION: drop the post-backoff re-check -> a second attempt starts
-      // (4,900 ms was inside the budget when the backoff was armed).
-      expect(attempts).toBe(1);
+      // MUTATION: drop the post-backoff re-check -> a third attempt starts on
+      // a budget the backoff had already spent.
+      expect(attempts).toBe(2);
     });
 
     it("bounds the client-churn open ladder the same way", async () => {
@@ -861,15 +888,16 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .run(workspace, async () => "unreachable", {
-          retryDeadlineMs: 6_000,
-        })
+        .withRetryBudget(6_000, async () =>
+          await sessions.run(workspace, async () => "unreachable"),
+        )
         .catch((error: unknown) => error);
 
       // MUTATION: drop the deadline from the churn ladder -> the full
-      // six-open churn runs and rejects with EngineWorkspaceRebindError.
+      // six-open churn runs (12 reads) and rejects with
+      // EngineWorkspaceRebindError.
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      expect(reads).toBeLessThanOrEqual(4);
+      expect(reads).toBe(6);
     });
 
     it("bounds an afterReconnect storm, which takes no backoff at all", async () => {
@@ -890,28 +918,23 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .run(
-          workspace,
-          async () => {
-            attempts += 1;
-            nowMs += 2_000;
-            throw new DaemonRefusalError(
-              {
-                code: "CONFLICT",
-                message: "workspace moved",
-                retry: "afterReconnect",
-              },
-              undefined,
-            );
-          },
-          { retryTransportErrors: true, retryDeadlineMs: 5_000 },
+        .withRetryBudget(5_000, async () =>
+          await sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              nowMs += 2_000;
+              throw daemonRefusal("CONFLICT", "workspace moved", "afterReconnect");
+            },
+            { retryTransportErrors: true },
+          ),
         )
         .catch((error: unknown) => error);
 
       // MUTATION: gate only the transport branch -> six attempts and a
       // DaemonRefusalError instead.
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      expect(attempts).toBe(3);
+      expect(attempts).toBe(4);
       // MUTATION: make `settleAttempt` back off unconditionally -> an
       // afterReconnect retry waits, which this test's name says it never does.
       expect(sleep).not.toHaveBeenCalled();
@@ -930,14 +953,7 @@ describe("EngineWorkspaceSessions", () => {
         async sendRequest() {
           opens += 1;
           nowMs += 2_000;
-          throw new DaemonRefusalError(
-            {
-              code: "CONFLICT",
-              message: "workspace handle is stale",
-              retry: "afterReconnect",
-            },
-            undefined,
-          );
+          throw daemonRefusal("CONFLICT", "workspace handle is stale", "afterReconnect");
         },
       };
       const sessions = new EngineWorkspaceSessions(
@@ -946,16 +962,17 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .run(workspace, async () => "unreachable", {
-          retryTransportErrors: true,
-          retryDeadlineMs: 5_000,
-        })
+        .withRetryBudget(5_000, async () =>
+          await sessions.run(workspace, async () => "unreachable", {
+            retryTransportErrors: true,
+          }),
+        )
         .catch((error: unknown) => error);
 
       // MUTATION: drop requiresReconnect from daemonMayBeRelaunching -> the
       // ladder runs every attempt and rejects with the refusal instead.
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      expect(opens).toBe(3);
+      expect(opens).toBe(4);
     });
 
     it("calls an exhausted ladder past its budget a DEADLINE, not a transport failure", async () => {
@@ -974,15 +991,18 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .run(
-          workspace,
-          async () => {
-            // Each attempt STARTS inside the 5 s budget; the last one ends
-            // outside it, and it is also the last the ladder allows.
-            nowMs += 3_000;
-            throw { code: "transport-error" };
-          },
-          { retryTransportErrors: true, retryDeadlineMs: 5_000 },
+        .withRetryBudget(3_000, async () =>
+          await sessions.run(
+            workspace,
+            async () => {
+              // The last allowed attempt STARTS inside the budget (0 ms of
+              // recovery spent) and ends outside it, which is the case this
+              // pins.
+              nowMs += 3_000;
+              throw { code: "transport-error" };
+            },
+            { retryTransportErrors: true },
+          ),
         )
         .catch((error: unknown) => error);
 
@@ -1009,14 +1029,7 @@ describe("EngineWorkspaceSessions", () => {
         async sendRequest() {
           opens += 1;
           nowMs += 2_000;
-          throw new DaemonRefusalError(
-            {
-              code: "DEADLINE_EXCEEDED",
-              message: "workspace open exceeded its deadline",
-              retry: "afterBackoff",
-            },
-            undefined,
-          );
+          throw daemonRefusal("DEADLINE_EXCEEDED", "workspace open exceeded its deadline", "afterBackoff");
         },
       };
       const sessions = new EngineWorkspaceSessions(
@@ -1030,10 +1043,11 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .run(workspace, async () => "unreachable", {
-          retryTransportErrors: true,
-          retryDeadlineMs: 5_000,
-        })
+        .withRetryBudget(4_000, async () =>
+          await sessions.run(workspace, async () => "unreachable", {
+            retryTransportErrors: true,
+          }),
+        )
         .catch((error: unknown) => error);
 
       // MUTATION: restore the bare `continue` for errors outside
@@ -1077,15 +1091,16 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .run(workspace, async () => "unreachable", {
-          retryTransportErrors: true,
-          retryDeadlineMs: 5_000,
-        })
+        .withRetryBudget(4_000, async () =>
+          await sessions.run(workspace, async () => "unreachable", {
+            retryTransportErrors: true,
+          }),
+        )
         .catch((error: unknown) => error);
 
       // MUTATION: restore the bare `continue` for errors outside
-      // daemonMayBeRelaunching -> six opens over 12,000 ms on a 5,000 ms
-      // deadline, rejecting with the plain Error.
+      // daemonMayBeRelaunching -> six opens over 12,000 ms on a 4,000 ms
+      // budget, rejecting with the plain Error.
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(opens).toBe(3);
       // Gated, but still immediate: the error class decides only whether to
@@ -1106,14 +1121,7 @@ describe("EngineWorkspaceSessions", () => {
         async sendRequest() {
           opens += 1;
           nowMs += 2_000;
-          throw new DaemonRefusalError(
-            {
-              code: "CONFLICT",
-              message: "workspace is busy",
-              retry: "immediate",
-            },
-            undefined,
-          );
+          throw daemonRefusal("CONFLICT", "workspace is busy", "immediate");
         },
       };
       const sessions = new EngineWorkspaceSessions(
@@ -1127,10 +1135,11 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .run(workspace, async () => "unreachable", {
-          retryTransportErrors: true,
-          retryDeadlineMs: 5_000,
-        })
+        .withRetryBudget(4_000, async () =>
+          await sessions.run(workspace, async () => "unreachable", {
+            retryTransportErrors: true,
+          }),
+        )
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
@@ -1153,15 +1162,17 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .run(
-          workspace,
-          async () => {
-            nowMs += 3_000;
-            // Quit arrives while the LAST allowed attempt is in flight.
-            if (nowMs >= 6_000) sessions.beginShutdown();
-            throw { code: "transport-error" };
-          },
-          { retryTransportErrors: true, retryDeadlineMs: 5_000 },
+        .withRetryBudget(3_000, async () =>
+          await sessions.run(
+            workspace,
+            async () => {
+              nowMs += 3_000;
+              // Quit arrives while the LAST allowed attempt is in flight.
+              if (nowMs >= 6_000) sessions.beginShutdown();
+              throw { code: "transport-error" };
+            },
+            { retryTransportErrors: true },
+          ),
         )
         .catch((error: unknown) => error);
 
@@ -1457,17 +1468,14 @@ describe("EngineWorkspaceSessions", () => {
       expect(outcome).toBe("second");
     });
 
-    it("rejects an invalid deadline instead of quietly voiding it", async () => {
-      const workspace = await tempWorkspace("workspace-bad-deadline");
-      const client = new MockClient("handle-bad-deadline");
+    it("rejects an invalid budget instead of quietly voiding it", async () => {
+      const client = new MockClient("handle-bad-budget");
       const sessions = new EngineWorkspaceSessions({
         currentClient: () => client,
       });
 
       await expect(
-        sessions.run(workspace, async () => "unreachable", {
-          retryDeadlineMs: 0,
-        }),
+        sessions.withRetryBudget(0, async () => "unreachable"),
       ).rejects.toThrow(TypeError);
     });
   });
@@ -1571,14 +1579,7 @@ describe("EngineWorkspaceSessions", () => {
           opens += 1;
           // Quit lands while the first open is in flight.
           if (opens === 1) sessions.beginShutdown();
-          throw new DaemonRefusalError(
-            {
-              code: "CONFLICT",
-              message: "workspace handle is stale",
-              retry: "afterReconnect",
-            },
-            undefined,
-          );
+          throw daemonRefusal("CONFLICT", "workspace handle is stale", "afterReconnect");
         },
       };
       const sessions = new EngineWorkspaceSessions(
@@ -1614,14 +1615,7 @@ describe("EngineWorkspaceSessions", () => {
           opens += 1;
           // Quit lands while the first open is in flight.
           if (opens === 1) sessions.beginShutdown();
-          throw new DaemonRefusalError(
-            {
-              code: "OVERLOADED",
-              message: "engine queue is full",
-              retry: "afterBackoff",
-            },
-            undefined,
-          );
+          throw daemonRefusal("OVERLOADED", "engine queue is full", "afterBackoff");
         },
       };
       const sessions = new EngineWorkspaceSessions(
@@ -1663,14 +1657,7 @@ describe("EngineWorkspaceSessions", () => {
               attempts += 1;
               // Quit lands while the first attempt is in flight.
               if (attempts === 1) sessions.beginShutdown();
-              throw new DaemonRefusalError(
-                {
-                  code: "CONFLICT",
-                  message: "workspace moved",
-                  retry: "afterReconnect",
-                },
-                undefined,
-              );
+              throw daemonRefusal("CONFLICT", "workspace moved", "afterReconnect");
             }, { retryTransportErrors: true }),
         ),
       ).rejects.toBeInstanceOf(DaemonRefusalError);

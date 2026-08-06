@@ -61,16 +61,6 @@ export interface EngineWorkspaceRunOptions {
    * first attempt before applying another write.
    */
   retryTransportErrors?: boolean;
-  /**
-   * Stop retrying transport errors once this many milliseconds have passed
-   * since the run started (#564). The deadline gates RETRIES only: a healthy
-   * first attempt is never rejected, and an attempt already in flight always
-   * finishes. Expiry throws EngineWorkspaceRetryDeadlineError with the last
-   * transport error as its cause. Callers that hold a shared resource while
-   * they wait — the capture chain's document open — pass this so one open
-   * cannot spend the full six-attempt ladder holding everyone else off.
-   */
-  retryDeadlineMs?: number;
 }
 
 export interface EngineWorkspaceSessionsOptions {
@@ -99,7 +89,7 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 const TRANSPORT_REBIND_ATTEMPTS = 6;
 const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
-// Exported so a caller deriving a retryDeadlineMs can budget whole recovery
+// Exported so a caller deriving a retry budget can size whole recovery
 // windows (open deadline + worst-case backoff) instead of restating numbers.
 export const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
 const SHADOW_CLONE_TOKEN = /^[0-9a-f]{64}$/;
@@ -134,10 +124,9 @@ export class EngineWorkspaceSessionsClosedError extends Error {
 // A retry limit was reached: the run stopped STARTING retries. The last
 // failure rides as the cause.
 //
-// `constraint` is the name of the option the CALLER actually set, because two
-// different limits reach here and an agent has to be able to find the one that
-// fired. Naming `retryDeadlineMs` for a region budget pointed readers at an
-// option with no production caller (#564, codex).
+// `constraint` names the option the CALLER actually set, so an agent reading
+// the message can find the limit that fired instead of an option it never
+// passed (#564, codex).
 // TWO durations, because they are two different facts and one number cannot
 // carry both (#564, codex). `measuredMs` is the interval the LIMIT is measured
 // over — for a region budget that starts at the first failure, so a slow but
@@ -181,12 +170,6 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
     this.totalWaitedMs = totalWaitedMs;
     this.attempts = attempts;
   }
-}
-
-export function isEngineWorkspaceRetryDeadlineError(
-  error: unknown,
-): error is EngineWorkspaceRetryDeadlineError {
-  return error instanceof EngineWorkspaceRetryDeadlineError;
 }
 
 // A bounded region was asked to START after `beginShutdown`. It is refused
@@ -285,9 +268,9 @@ export class EngineWorkspaceSessions {
   private shuttingDown = false;
   private readonly sleepCancels = new Set<() => void>();
   // The ambient budget a caller put over a REGION of daemon work
-  // (`withRetryBudget`). A per-run `retryDeadlineMs` bounds one run; this
-  // bounds every run the region makes, together — which is what a caller
-  // holding a shared resource across several daemon calls actually needs.
+  // (`withRetryBudget`). It bounds every run the region makes, together —
+  // which is what a caller holding a shared resource across several daemon
+  // calls actually needs, and it is the only retry limit this class has.
   private readonly retryBudgets = new AsyncLocalStorage<{
     budgetMs: number;
     // The clock starts at the FIRST FAILURE, not at region entry, because the
@@ -354,21 +337,7 @@ export class EngineWorkspaceSessions {
     operation: (binding: EngineWorkspaceBinding) => Promise<T>,
     options: EngineWorkspaceRunOptions = {},
   ): Promise<T> {
-    // Same discipline as workspaceOpenDeadlineMs above: reject an invalid
-    // value rather than quietly voiding the bound it exists to preserve.
-    const retryDeadlineMs = options.retryDeadlineMs;
-    if (
-      retryDeadlineMs !== undefined &&
-      (!Number.isInteger(retryDeadlineMs) ||
-        retryDeadlineMs <= 0 ||
-        retryDeadlineMs > MAX_TIMER_DELAY_MS)
-    ) {
-      throw new TypeError(
-        `retryDeadlineMs must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}, received ${String(retryDeadlineMs)}.`,
-      );
-    }
-    const startedAtMs = this.now();
-    this.refuseSpentRegion(workspace.workspaceId, startedAtMs);
+    this.refuseSpentRegion(workspace.workspaceId);
     const entry = await this.acquire(workspace.workspaceId);
     try {
       const maxAttempts = options.retryTransportErrors
@@ -382,7 +351,6 @@ export class EngineWorkspaceSessions {
           entry,
           options,
           rebindStarted,
-          startedAtMs,
         );
         try {
           return await operation(binding);
@@ -405,8 +373,6 @@ export class EngineWorkspaceSessions {
           lastError = error;
           const next = await this.settleAttempt({
             workspaceId: workspace.workspaceId,
-            retryDeadlineMs,
-            startedAtMs,
             attempt,
             lastAttempt: attempt >= maxAttempts,
             backoff: retryAfterTransport,
@@ -502,71 +468,38 @@ export class EngineWorkspaceSessions {
    * retrying at quit on purpose, because an accepted write must not be
    * dropped.
    */
-  private refuseSpentRegion(workspaceId: string, startedAtMs: number): void {
+  private refuseSpentRegion(workspaceId: string): void {
     const budget = this.retryBudgets.getStore();
     if (budget === undefined) return;
     if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();
     // A healthy attempt costs the budget nothing, however long it took, so a
     // region that has not failed yet is never refused for time alone.
-    if (budget.failedAtMs === null) return;
-    this.throwPastRetryDeadline(
-      workspaceId,
-      undefined,
-      startedAtMs,
-      budget.attempts,
-      budget.lastError,
-    );
+    this.throwPastRetryDeadline(workspaceId, budget.lastError);
   }
 
   // The one deadline gate every retry ladder consults, on both sides of its
-  // backoff: once a deadline is spent, no new attempt starts — in any
-  // ladder, on any path. Two can apply: the ambient region budget, and this
-  // run's own. Whichever is spent first stops the ladder.
-  private throwPastRetryDeadline(
-    workspaceId: string,
-    retryDeadlineMs: number | undefined,
-    startedAtMs: number,
-    attempt: number,
-    cause: unknown,
-  ): void {
-    const now = this.now();
+  // backoff: once the ambient budget is spent, no new attempt starts — in any
+  // ladder, on any path. A run outside a region is not bounded here, and that
+  // is deliberate: only work a caller marked abandonable may be abandoned.
+  private throwPastRetryDeadline(workspaceId: string, cause: unknown): void {
     const budget = this.retryBudgets.getStore();
-    if (budget !== undefined && budget.failedAtMs !== null) {
-      const spentMs = now - budget.failedAtMs;
-      if (spentMs >= budget.budgetMs) {
-        throw new EngineWorkspaceRetryDeadlineError(
-          workspaceId,
-          // The option the caller actually set, not the per-run one it did
-          // not pass.
-          "withRetryBudget budgetMs",
-          budget.budgetMs,
-          "since the first failure",
-          spentMs,
-          // The whole hold, first attempt included. `spentMs` deliberately
-          // excludes it — that is what stops a slow healthy open being
-          // charged — so it cannot also answer "how long was the chain held".
-          now - budget.startedAtMs,
-          // The REGION's count, not this ladder's: the budget spans several
-          // runs, each of which restarts `attempt` at 1.
-          budget.attempts,
-          cause,
-        );
-      }
-    }
-    if (retryDeadlineMs === undefined) return;
-    const waitedMs = now - startedAtMs;
-    if (waitedMs < retryDeadlineMs) return;
+    if (budget === undefined || budget.failedAtMs === null) return;
+    const now = this.now();
+    const spentMs = now - budget.failedAtMs;
+    if (spentMs < budget.budgetMs) return;
     throw new EngineWorkspaceRetryDeadlineError(
       workspaceId,
-      "retryDeadlineMs",
-      retryDeadlineMs,
-      // This limit IS timed from the start of the run, so the two durations
-      // are the same interval here. Both are still reported, so the message
-      // has one shape and a reader never has to guess which one is missing.
-      "since the run started",
-      waitedMs,
-      waitedMs,
-      attempt,
+      "withRetryBudget budgetMs",
+      budget.budgetMs,
+      "since the first failure",
+      spentMs,
+      // The whole hold, first attempt included. `spentMs` deliberately
+      // excludes it — that is what stops a slow healthy open being charged —
+      // so it cannot also answer "how long was the chain held".
+      now - budget.startedAtMs,
+      // The REGION's count, not one ladder's: the budget spans several runs,
+      // each of which restarts `attempt` at 1.
+      budget.attempts,
       cause,
     );
   }
@@ -594,8 +527,6 @@ export class EngineWorkspaceSessions {
    */
   private async settleAttempt(gate: {
     workspaceId: string;
-    retryDeadlineMs: number | undefined;
-    startedAtMs: number;
     attempt: number;
     lastAttempt: boolean;
     // Transport retries wait; an `afterReconnect` retry takes no backoff at
@@ -604,13 +535,7 @@ export class EngineWorkspaceSessions {
     cause: unknown;
   }): Promise<"retry" | "stop"> {
     const checkDeadline = (): void => {
-      this.throwPastRetryDeadline(
-        gate.workspaceId,
-        gate.retryDeadlineMs,
-        gate.startedAtMs,
-        gate.attempt,
-        gate.cause,
-      );
+      this.throwPastRetryDeadline(gate.workspaceId, gate.cause);
     };
     if (gate.lastAttempt) {
       checkDeadline();
@@ -772,7 +697,6 @@ export class EngineWorkspaceSessions {
     entry: SessionEntry,
     options: EngineWorkspaceRunOptions,
     rebindStarted: boolean,
-    startedAtMs: number,
   ): Promise<EngineWorkspaceBinding> {
     const maxAttempts = options.retryTransportErrors
       ? this.transportRebindAttempts
@@ -780,7 +704,7 @@ export class EngineWorkspaceSessions {
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        return await this.open(workspace, entry, options, startedAtMs);
+        return await this.open(workspace, entry, options);
       } catch (error) {
         if (error instanceof EngineWorkspaceRebindError) throw error;
         if (error instanceof EngineWorkspaceRetryDeadlineError) throw error;
@@ -796,8 +720,6 @@ export class EngineWorkspaceSessions {
         // chain, which is what #564 is about.
         const next = await this.settleAttempt({
           workspaceId: workspace.workspaceId,
-          retryDeadlineMs: options.retryDeadlineMs,
-          startedAtMs,
           attempt,
           lastAttempt: attempt >= maxAttempts,
           // Wait only when the error asks for it: the daemon may be
@@ -819,7 +741,6 @@ export class EngineWorkspaceSessions {
     workspace: EngineWorkspace,
     entry: SessionEntry,
     options: EngineWorkspaceRunOptions,
-    startedAtMs: number,
   ): Promise<EngineWorkspaceBinding> {
     for (let attempt = 1; ; attempt += 1) {
       const client = this.source.currentClient();
@@ -849,8 +770,6 @@ export class EngineWorkspaceSessions {
         );
         const next = await this.settleAttempt({
           workspaceId: workspace.workspaceId,
-          retryDeadlineMs: options.retryDeadlineMs,
-          startedAtMs,
           attempt,
           lastAttempt,
           backoff: true,
