@@ -16,6 +16,13 @@ import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-pa
 // never opened. Nothing goes inside the workspace tree — the text is exactly
 // what the capture refused to write there.
 //
+// App-scoped means this desktop profile, and that is the boundary every local
+// store here keeps. The workspace registry in userData lists every workspace
+// whatever cloud account is signed in, and a workspace is a folder the OS user
+// owns. A cloud account is not a local access boundary, so a recovery row does
+// not carry one: scoping these rows to an account would claim a guarantee the
+// registry, the files, and the rest of this profile do not keep.
+//
 // It is PLAINTEXT, which is why the secret floor below decides what may enter
 // it at all.
 
