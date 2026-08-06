@@ -15237,7 +15237,7 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
             .map(|refusal| (refusal.code, refusal.detail.as_str()))
             .collect::<Vec<_>>(),
         [(
-            "invalid-input",
+            "share-blob-over-ceiling",
             format!(
                 "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes — docs/over-cap.bin",
                 limit_bytes + 1
@@ -15424,7 +15424,7 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
             "peer",
             0,
             "moment.append",
-            "invalid-input",
+            "share-blob-over-ceiling",
             format!(
                 "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes — docs/over-cap.bin",
                 limit_bytes + 1
@@ -15705,7 +15705,7 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
             .collect::<Vec<_>>(),
         [(
             "version.create",
-            "invalid-input",
+            "share-blob-over-ceiling",
             format!(
                 "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes — docs/over-cap.bin",
                 limit_bytes + 1
@@ -15922,7 +15922,7 @@ fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
     let refusal = &outcome.refusals[0];
     assert_eq!(
         (refusal.origin_id.as_str(), refusal.origin_seq, refusal.code),
-        ("peer", 0, "invalid-input")
+        ("peer", 0, "share-blob-over-ceiling")
     );
     // The count leads, then every lost file's measurements with its name. A
     // reader must be able to see that TWO files are missing and which. Each
@@ -16075,10 +16075,17 @@ fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
     );
     let detail = outcome.refusals[0].detail.as_str();
     // The bound still holds: the recipient rejects a longer one outright.
-    assert_eq!(
-        detail.encode_utf16().count(),
-        crate::relay::MAX_REFUSAL_DETAIL_UNITS,
+    assert!(
+        detail.encode_utf16().count() <= crate::relay::MAX_REFUSAL_DETAIL_UNITS,
         "the detail must be bounded to what the recipient can persist"
+    );
+    // The path is cut to its OWN budget, not to whatever is left of the
+    // detail's. Cut to the detail's, one refusal fills the record and the next
+    // one in the same op gets nothing —
+    // `a_long_path_does_not_cost_the_next_refusals_measurements` is that case.
+    assert!(
+        detail.encode_utf16().count() < crate::relay::MAX_REFUSAL_DETAIL_UNITS,
+        "MUTATION: the path is unbounded and spends the whole detail budget"
     );
     // And it still opens with the reason, measurements intact.
     assert!(
@@ -16088,4 +16095,310 @@ fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
         )),
         "MUTATION: the path pushed the constraint, limit, unit and usage out of the record: {detail}"
     );
+}
+
+/// Reason-before-path saved one entry's measurements. It did not save the
+/// next entry's.
+///
+/// A `version.create` refusing several snapshots writes ONE record, and the
+/// entries were concatenated whole: `reason — path; reason — path`. An
+/// unbounded path in entry one therefore spent the budget entry two's
+/// measurements needed, and the aggregate truncation put the same rejection
+/// back that the per-entry order had just removed — one level up.
+///
+/// So a path gets a budget of its own, and the list stops at the last entry
+/// that fits and says how many it did not list. Every entry the record shows
+/// is complete. None is ever half-written.
+///
+/// MUTATION: drop the path bound in `record_refused_blobs`, or concatenate
+/// every entry and let `ShareViewRefusal::new` cut the tail, and the second
+/// snapshot's constraint, limit, unit and usage vanish.
+#[test]
+fn a_long_path_does_not_cost_the_next_refusals_measurements() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    // First snapshot's path alone overruns the whole detail budget.
+    let long_path = format!(
+        "docs/{}.bin",
+        (0..40)
+            .map(|index| format!("{}{index:02}", "d".repeat(58)))
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    assert!(
+        long_path.encode_utf16().count() > crate::relay::MAX_REFUSAL_DETAIL_UNITS,
+        "the fixture only tests the aggregate bound if entry one can exhaust it"
+    );
+
+    let first_over = vec![1u8; limit_bytes + 1];
+    let second_over = vec![2u8; limit_bytes + 2];
+    let first_sha = dohc_engine_storage::hex_sha256(&first_over);
+    let second_sha = dohc_engine_storage::hex_sha256(&second_over);
+    let op = ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({
+            "versionId": "shared-version",
+            "forkSnapshots": [
+                { "path": long_path, "blobSha256": first_sha, "contentKind": "binary" },
+                { "path": "docs/second.bin", "blobSha256": second_sha, "contentKind": "binary" },
+            ]
+        }),
+        recorded_at_ms: 10,
+    };
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![op],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(first_sha, first_over), (second_sha, second_over)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "shared-version"),
+            &NoFaults,
+        )
+        .expect("two refused snapshots do not fail the page");
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (1, 0, 2)
+    );
+    let detail = outcome.refusals[0].detail.as_str();
+    assert!(
+        detail.encode_utf16().count() <= crate::relay::MAX_REFUSAL_DETAIL_UNITS,
+        "the detail must stay inside what the recipient can persist"
+    );
+    // The count still leads.
+    assert!(
+        detail.starts_with("2 files in this operation were not applied: "),
+        "the record must still say how many files it is short: {detail}"
+    );
+    // And the SECOND file's measurements survived the first file's path.
+    assert!(
+        detail.contains(&format!(
+            "shared blob exceeds {constraint}: limit {limit_bytes} bytes, observed {} bytes — docs/second.bin",
+            limit_bytes + 2
+        )),
+        "MUTATION: entry one's path pushed entry two's constraint, limit, unit and usage out of the record: {detail}"
+    );
+}
+
+/// One record per coordinate means ONE code for however many blobs an op
+/// refused, so a mixed op has to choose — and it must not choose the one that
+/// carries an instruction.
+///
+/// `share-blob-over-ceiling` sends the reader to the granter for a smaller
+/// file. That is right for the oversized snapshot and a false instruction for
+/// the one refused because its blob reference is not a sha256, which no
+/// smaller file repairs. So a mixed op reports the generic code, which claims
+/// nothing it cannot keep, and the detail still names both.
+///
+/// MUTATION: take the first blob's code in `refusal_code` and this op tells
+/// the reader to go ask for a smaller file about a malformed reference.
+#[test]
+fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    let over_cap = vec![7u8; limit_bytes + 1];
+    let over_cap_sha = dohc_engine_storage::hex_sha256(&over_cap);
+    let op = ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({
+            "versionId": "shared-version",
+            "forkSnapshots": [
+                // Oversized: the granter can act.
+                { "path": "docs/over-cap.bin", "blobSha256": over_cap_sha, "contentKind": "binary" },
+                // Unusable reference: nobody can.
+                { "path": "docs/unusable.md", "blobSha256": "not-a-sha256", "contentKind": "text" },
+            ]
+        }),
+        recorded_at_ms: 10,
+    };
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![op],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(over_cap_sha, over_cap)]),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "shared-version"),
+            &NoFaults,
+        )
+        .expect("two refused snapshots do not fail the page");
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (1, 0, 2)
+    );
+    let refusal = &outcome.refusals[0];
+    assert_eq!(
+        refusal.code, "invalid-input",
+        "MUTATION: a mixed op reports an instruction that is false for one of its blobs"
+    );
+    // Both are still named, so nothing is hidden by the cautious code.
+    for path in ["docs/over-cap.bin", "docs/unusable.md"] {
+        assert!(
+            refusal.detail.contains(path),
+            "the record must still name every file it lost: {}",
+            refusal.detail
+        );
+    }
+}
+
+/// Bounding each path is not enough on its own: enough refusals still overrun
+/// the record. What must never happen is a HALF-written entry.
+///
+/// An op can refuse more blobs than the detail can name — a `version.create`
+/// carries a snapshot per file. Concatenating them all and letting
+/// `ShareViewRefusal::new` cut the tail leaves the last entry sliced through
+/// its measurements or its path, and says nothing about the ones past it. So
+/// entries are added only while the WHOLE detail still fits, and the record
+/// says how many it did not list.
+///
+/// The invariant: every entry the record shows is complete, and the ones it
+/// cannot show are counted. Never a fragment.
+///
+/// MUTATION: concatenate every entry and let the record's own bound cut it,
+/// and the last entry is a fragment with no count behind it.
+#[test]
+fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
+
+    // Ten refused snapshots whose paths sit just under the per-path budget,
+    // so the detail cannot hold them all and each is worth naming in full.
+    let refused_count = 10;
+    let bodies: Vec<Vec<u8>> = (0..refused_count)
+        .map(|index| vec![u8::try_from(index).expect("small"); limit_bytes + 1 + index])
+        .collect();
+    let paths: Vec<String> = (0..refused_count)
+        .map(|index| format!("docs/{}{index:02}/file.bin", "d".repeat(178)))
+        .collect();
+    for path in &paths {
+        assert!(
+            path.encode_utf16().count() <= 200,
+            "each path must fit its budget whole, or this tests truncation instead"
+        );
+    }
+    let snapshots: Vec<serde_json::Value> = paths
+        .iter()
+        .zip(&bodies)
+        .map(|(path, body)| {
+            json!({
+                "path": path,
+                "blobSha256": dohc_engine_storage::hex_sha256(body),
+                "contentKind": "binary",
+            })
+        })
+        .collect();
+    let op = ShareReplicationEnvelope {
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "version.create".to_owned(),
+        payload: json!({ "versionId": "shared-version", "forkSnapshots": snapshots }),
+        recorded_at_ms: 10,
+    };
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![op],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs(
+            bodies
+                .iter()
+                .map(|body| (dohc_engine_storage::hex_sha256(body), body.clone())),
+        ),
+    );
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "shared-version"),
+            &NoFaults,
+        )
+        .expect("ten refused snapshots do not fail the page");
+    assert_eq!(outcome.skipped, refused_count);
+    let detail = outcome.refusals[0].detail.clone();
+    assert!(
+        detail.encode_utf16().count() <= crate::relay::MAX_REFUSAL_DETAIL_UNITS,
+        "the detail must stay inside what the recipient can persist"
+    );
+
+    let head = format!("{refused_count} files in this operation were not applied: ");
+    let body = detail
+        .strip_prefix(&head)
+        .unwrap_or_else(|| panic!("the count must lead: {detail}"));
+    let parts: Vec<&str> = body.split("; ").collect();
+    // The fixture is only about overflow if the record could not hold them all.
+    assert!(
+        parts.len() < refused_count,
+        "the detail held every refusal, so this proves nothing about overflow"
+    );
+    let (entries, tail) = parts.split_at(parts.len() - 1);
+    let unlisted: usize = tail[0]
+        .strip_prefix("and ")
+        .and_then(|rest| rest.strip_suffix(" more"))
+        .unwrap_or_else(|| {
+            panic!("MUTATION: the record stops mid-entry and counts nothing: {detail}")
+        })
+        .parse()
+        .expect("the unlisted count is a number");
+    assert_eq!(
+        entries.len() + unlisted,
+        refused_count,
+        "MUTATION: the record's own count does not add up to the files it lost"
+    );
+    // Every entry it DID show is whole: its measurements and its full path.
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            *entry,
+            format!(
+                "shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES: limit {limit_bytes} bytes, \
+                 observed {} bytes — {}",
+                limit_bytes + 1 + index,
+                paths[index]
+            ),
+            "MUTATION: entry {index} is a fragment rather than a whole refusal"
+        );
+    }
 }

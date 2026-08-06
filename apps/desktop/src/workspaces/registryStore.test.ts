@@ -57,7 +57,7 @@ describe("share skip records", () => {
       originId: "origin-granter",
       originSeq: 0,
       opKind: "version.create",
-      code: "invalid-input",
+      code: "share-blob-over-ceiling",
       detail:
         "2 files in this operation were not applied: " +
         "shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES: " +
@@ -94,7 +94,7 @@ describe("share skip records", () => {
       originId: "origin-granter",
       originSeq: 0,
       opKind: "version.create",
-      code: "invalid-input",
+      code: "share-blob-over-ceiling",
       detail: `shared blob exceeds MAX_CAPTURE_BINARY_FILE_BYTES — ${path}`,
       atMs: 1000,
     });

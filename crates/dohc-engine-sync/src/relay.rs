@@ -9,6 +9,7 @@ use crate::apply::apply_chat_lww_projection_tx;
 use crate::cursor::{
     RelayCursor, commit_relay_cursor, read_pushed_seq, rewind_pushed_seq, write_pushed_seq,
 };
+use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::{
     ApplyOutcome, BlobContent, BlobHydration, BlobKind, ObservedBytes, RelayError,
@@ -248,6 +249,16 @@ const BOOTSTRAP_OP_KIND: &str = "workspace.init";
 /// diagnosing.
 const MAX_REFUSAL_OP_KIND_UNITS: usize = 128;
 pub(crate) const MAX_REFUSAL_DETAIL_UNITS: usize = 2048;
+
+/// The path budget inside ONE refusal listed in a detail, in UTF-16 units.
+///
+/// This rejects no work. The path is stored whole and nothing is refused for
+/// being long; this is a share of the detail budget, and it exists because a
+/// path is the one part of a detail that no other limit bounds. Sized from
+/// that contract rather than from measured work: 200 units keeps at least six
+/// complete refusals inside `MAX_REFUSAL_DETAIL_UNITS`, and names a file by
+/// far more than its first folder.
+const MAX_REFUSAL_PATH_UNITS: usize = 200;
 
 /// What an op kind becomes when the relay's is not one. The real cause is in
 /// `detail`, and the coordinate stays exactly as served.
@@ -2654,15 +2665,8 @@ fn refuse_replay_unit<T>(
     *context.skipped += 1;
     refused.push(RefusedBlob {
         code,
-        // REASON FIRST, path last. `ShareViewRefusal::new` bounds the detail,
-        // and the path is the one part of it no limit anywhere covers —
-        // `classify_share_path` admits a tracked path of any length, so a
-        // served op decides how much of the budget the path eats. Path first,
-        // a long enough one spent all of it and the record that committed the
-        // cursor past this file named no constraint, limit, unit or usage.
-        // Truncation must cost the tail of a path, which the coordinate and
-        // op kind still place, never the measurements.
-        reason: format!("{error} — {path}"),
+        reason: error.to_string(),
+        path: path.to_owned(),
     });
     Ok(())
 }
@@ -2670,9 +2674,16 @@ fn refuse_replay_unit<T>(
 /// One blob an op named that this recipient will never apply, and why. The
 /// path is carried because the reason alone cannot say WHICH file went
 /// missing, and an op can lose several.
+///
+/// Reason and path are kept APART because they are bounded differently. A
+/// reason is bounded by construction: a constraint name, a limit, a unit and
+/// an observed count. A path is bounded by nothing — `classify_share_path`
+/// admits a tracked path of any length — so a served op would otherwise
+/// decide how much of the record every OTHER refusal in the op gets.
 struct RefusedBlob {
     code: &'static str,
     reason: String,
+    path: String,
 }
 
 /// Turn an op's refused blobs into ONE durable record.
@@ -2685,40 +2696,97 @@ struct RefusedBlob {
 /// rest, uncounted. Two files would go missing and the notice would say one.
 ///
 /// So the op is the record and the blobs are its contents. The count leads,
-/// because `ShareViewRefusal::new` bounds the detail and a truncated list must
-/// still say how many files it is short.
+/// because `ShareViewRefusal::new` bounds the detail and a list that stops
+/// short must still say how many files it is short.
 fn record_refused_blobs<T>(
     context: &mut ShareViewReplayContext<'_, T>,
     envelope: &ReplicationEnvelope,
     refused: &[RefusedBlob],
 ) {
-    let Some(first) = refused.first() else {
+    if refused.is_empty() {
         return;
-    };
-    let detail = if refused.len() == 1 {
-        first.reason.clone()
-    } else {
-        format!(
-            "{} files in this operation were not applied: {}",
-            refused.len(),
-            refused
-                .iter()
-                .map(|blob| blob.reason.as_str())
-                .collect::<Vec<_>>()
-                .join("; ")
-        )
-    };
-    // The first blob's code speaks for the record. Every class
-    // `share_replay_refusal_code` skips reports `invalid-input`, and that
-    // function is exhaustive, so a future class that needs its own code has to
-    // pass through it and will surface here.
+    }
     context.refusals.push(ShareViewRefusal::new(
         envelope.origin_id.clone(),
         envelope.origin_seq,
         &envelope.op_kind,
-        first.code,
-        detail,
+        refusal_code(refused),
+        refusal_detail(refused),
     ));
+}
+
+/// The ONE code that speaks for however many blobs an op refused.
+///
+/// The recipient keeps one record per origin coordinate, so a mixed op has to
+/// choose, and it reports a class only when every refused blob is in that
+/// class. The codes are not interchangeable: `share-blob-over-ceiling` sends
+/// the reader to the granter for a smaller file, which is a false instruction
+/// for a blob refused because the op described its own content wrongly. So a
+/// mixed op falls back to the generic code, which claims nothing it cannot
+/// keep.
+fn refusal_code(refused: &[RefusedBlob]) -> &'static str {
+    refused
+        .iter()
+        .map(|blob| blob.code)
+        .reduce(|left, right| {
+            if left == right {
+                left
+            } else {
+                GENERIC_REPLAY_REFUSAL_CODE
+            }
+        })
+        .unwrap_or(GENERIC_REPLAY_REFUSAL_CODE)
+}
+
+/// Every refusal the record can hold in full, and an honest count of the rest.
+///
+/// One entry is `reason — path`: the reason first, so truncation costs a path
+/// tail rather than a measurement. That order alone was not enough. The
+/// entries were concatenated whole, so entry one's unbounded path spent the
+/// budget entry two's measurements needed, and the aggregate put back exactly
+/// the rejection the per-entry order had removed.
+///
+/// Two rules close it. A path gets a budget of its own, and entries are added
+/// only while the WHOLE detail still fits — so the record never holds a
+/// half-written entry, and it says how many entries it left out.
+fn refusal_detail(refused: &[RefusedBlob]) -> String {
+    let entries: Vec<String> = refused
+        .iter()
+        .map(|blob| {
+            format!(
+                "{} — {}",
+                blob.reason,
+                bounded_units(&blob.path, MAX_REFUSAL_PATH_UNITS)
+            )
+        })
+        .collect();
+    // One refused blob needs no count: the record already names one file.
+    if let [only] = entries.as_slice() {
+        return only.clone();
+    }
+    let mut listed = 0;
+    while listed < entries.len()
+        && refusal_list(entries.len(), &entries[..=listed])
+            .encode_utf16()
+            .count()
+            <= MAX_REFUSAL_DETAIL_UNITS
+    {
+        listed += 1;
+    }
+    refusal_list(entries.len(), &entries[..listed])
+}
+
+/// The count leads, then the entries that fit, then what was left out.
+fn refusal_list(total: usize, listed: &[String]) -> String {
+    let unlisted = format!("and {} more", total - listed.len());
+    let mut parts: Vec<&str> = listed.iter().map(String::as_str).collect();
+    if listed.len() < total {
+        parts.push(&unlisted);
+    }
+    format!(
+        "{total} files in this operation were not applied: {}",
+        parts.join("; ")
+    )
 }
 
 fn replay_share_view_op<T: RelayTransport>(

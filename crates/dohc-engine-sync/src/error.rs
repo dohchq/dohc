@@ -178,6 +178,23 @@ impl SyncError {
     }
 }
 
+/// The refusal code for a shared blob over this recipient's content-kind
+/// ceiling.
+///
+/// Deliberately not the generic code. This is the one replay refusal a person
+/// can act on: the bytes are authentically the granter's file, so no repair at
+/// the relay helps, but the granter making the file smaller and sharing it
+/// again arrives as a NEW op at a later cursor. The recipient's notice reads
+/// this code to say so (`apps/desktop/src/renderer/shareSkipNotice.ts`). Under
+/// the generic code it told the reader nothing could be done, which is the one
+/// thing that is not true here — and the cursor had already committed past the
+/// file.
+pub(crate) const SHARE_BLOB_OVER_CEILING_CODE: &str = "share-blob-over-ceiling";
+
+/// What a replay refusal reports when nobody can act on it: the op describes
+/// its own content wrongly, and no repair anywhere makes it replayable.
+pub(crate) const GENERIC_REPLAY_REFUSAL_CODE: &str = "invalid-input";
+
 impl RelayError {
     /// The machine code a share-view pull records when it SKIPS a served op
     /// because of this failure, or `None` when the pull must abort instead.
@@ -221,10 +238,14 @@ impl RelayError {
             // ceiling produces a NEW op at a LATER cursor. Holding the cursor
             // on the oversized op would keep that replacement from ever
             // arriving — the repair would be unreachable by construction.
-            RelayError::ShareBlobOverCeiling { .. }
+            //
+            // It is also the one permanent class with a person who can act, so
+            // it carries its own code rather than the generic one.
+            RelayError::ShareBlobOverCeiling { .. } => Some(SHARE_BLOB_OVER_CEILING_CODE),
             // PERMANENT. The op describes its own content wrongly. No blob the
-            // relay could serve makes it replayable.
-            | RelayError::ShareOpInvalid { .. } => Some("invalid-input"),
+            // relay could serve makes it replayable, and nobody can repair it,
+            // so it keeps the generic code.
+            RelayError::ShareOpInvalid { .. } => Some(GENERIC_REPLAY_REFUSAL_CODE),
             // REPAIRABLE. The relay served a body that is not the one this op
             // named. The op is fine; the relay's copy is wrong. Fix the blob
             // and this same op applies — so the cursor must not pass it. This
