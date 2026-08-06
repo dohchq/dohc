@@ -250,6 +250,7 @@ import {
   noteSettleStart,
   type EngineYDocSaveSeqState,
 } from "./workspaces/engineYDocSaveSeq";
+import { releaseEngineYDocSession } from "./workspaces/engineYDocSessionRelease";
 // The relay presence transport is a dependency-free module (no DOM/React): main
 // reuses it so the presence wire contract (routes, publish/leave/poll) lives in
 // ONE place. Main is the ONLY holder of the relay bearer token — the renderer's
@@ -7924,11 +7925,27 @@ function registerIpcHandlers(
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
     // A stale session under this id (e.g. a renderer that reused an id after a
-    // crash) is closed before opening a new one.
+    // crash) is closed before opening a new one. A close that FAILS does not
+    // clear the way: the daemon may still hold the document, and the next open
+    // of a path whose failing-close session someone still holds keeps refusing
+    // (workspaceEngineCapture.ts, openYDocSessionTask). Answer read-only with a
+    // retry instead of downgrading to a writable plain editor over it.
     const existing = engineYDocSessions.get(input.sessionId);
-    if (existing) {
-      engineYDocSessions.delete(input.sessionId);
-      await existing.session.close().catch(() => undefined);
+    if (
+      existing &&
+      !(await releaseEngineYDocSession({
+        sessions: engineYDocSessions,
+        sessionId: input.sessionId,
+        entry: existing,
+        path: input.path,
+        reason: "stale session replaced",
+        onCloseFailed: (message, error) => console.error(message, error),
+      }))
+    ) {
+      return OpenEngineYDocSessionResult.parse({
+        available: false,
+        openTimedOut: true,
+      });
     }
     const finishPendingOpen = beginPendingEngineYDocOpen(sender.id);
     try {
@@ -8012,6 +8029,27 @@ function registerIpcHandlers(
             : {}),
         });
       }
+      const entry: EngineYDocSessionEntry = {
+        session,
+        senderId: sender.id,
+        workspaceId: workspace.workspaceId,
+        sender,
+        generation,
+        saveSeq: createEngineYDocSaveSeqState(),
+      };
+      // Every path below that refuses this session hands it to
+      // `releaseEngineYDocSession`: a failed close registers it (so main's own
+      // teardowns can retry) and answers read-only, because the plain editor
+      // this would otherwise fall back to is writable.
+      const release = (reason: string): Promise<boolean> =>
+        releaseEngineYDocSession({
+          sessions: engineYDocSessions,
+          sessionId: input.sessionId,
+          entry,
+          path: input.path,
+          reason,
+          onCloseFailed: (message, error) => console.error(message, error),
+        });
       // The renderer can die or reload DURING the await above. Close the stale
       // session before crash cleanup completes so its reservation cannot block
       // the replacement renderer's open.
@@ -8019,36 +8057,38 @@ function registerIpcHandlers(
         sender.isDestroyed() ||
         rendererGeneration(sender.id) !== generation
       ) {
-        await session.close().catch(() => undefined);
-        return OpenEngineYDocSessionResult.parse({ available: false });
+        const released = await release("renderer gone before hand-over");
+        return OpenEngineYDocSessionResult.parse({
+          available: false,
+          ...(released ? {} : { openTimedOut: true }),
+        });
       }
-      // The daemon honors the requested kind only for state-free markers; a
-      // lineage with durable state keeps its own. Binding the rich editor's
-      // body fragment onto a plaintext session is silent data loss (empty doc
-      // over a non-empty file, typed edits pruned at close) — refuse and fall
-      // back to the plain editor, loudly.
-      if (session.contentKind !== "richdoc") {
-        console.error(
-          `[desktop] engine Y.Doc open for ${input.path} came back ${session.contentKind}; ` +
-            "falling back to the plain editor (kind-mismatched lineage).",
-        );
-        await session.close().catch(() => undefined);
-        return OpenEngineYDocSessionResult.parse({ available: false });
-      }
+      // Hooked here, not after the kind check: the sender is known alive from
+      // this line on, and a kind-mismatched session whose close FAILS stays
+      // registered — the hook is what lets a renderer teardown retry it.
       if (!engineYDocCleanupHooked.has(sender)) {
         engineYDocCleanupHooked.add(sender);
         sender.once("destroyed", () => {
           void closeEngineYDocSessionsForSender(sender.id);
         });
       }
-      engineYDocSessions.set(input.sessionId, {
-        session,
-        senderId: sender.id,
-        workspaceId: workspace.workspaceId,
-        sender,
-        generation,
-        saveSeq: createEngineYDocSaveSeqState(),
-      });
+      // The daemon honors the requested kind only for state-free markers; a
+      // lineage with durable state keeps its own. Binding the rich editor's
+      // body fragment onto a plaintext session is silent data loss (empty doc
+      // over a non-empty file, typed edits pruned at close) — refuse loudly,
+      // and fall back to the plain editor only once the session is released.
+      if (session.contentKind !== "richdoc") {
+        console.error(
+          `[desktop] engine Y.Doc open for ${input.path} came back ${session.contentKind}; ` +
+            "refusing the rich editor (kind-mismatched lineage).",
+        );
+        const released = await release("kind-mismatched lineage");
+        return OpenEngineYDocSessionResult.parse({
+          available: false,
+          ...(released ? {} : { openTimedOut: true }),
+        });
+      }
+      engineYDocSessions.set(input.sessionId, entry);
       return OpenEngineYDocSessionResult.parse({
         available: true,
         initialUpdate: session.initialUpdate,
