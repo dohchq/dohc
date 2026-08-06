@@ -119,14 +119,17 @@ const SEARCH_PREVIEW_CHARS = 200;
 //
 // Returns the real path RELATIVE to the canonical root, with the still-absent
 // tail appended — the answer callers need to judge where the operation lands,
-// not just whether it is inside. Null means outside the root, and any error
-// fails closed to null.
-async function realRelativeInRoot(root: string, absolute: string): Promise<string | null> {
+// not just whether it is inside. Every failure refuses.
+type RealTarget =
+  | { ok: true; relative: string }
+  | { ok: false; reason: "escapes-workspace" | "dangling-symlink" };
+
+async function realRelativeInRoot(root: string, absolute: string): Promise<RealTarget> {
   let realRoot: string;
   try {
     realRoot = await realpath(root);
   } catch {
-    return null;
+    return { ok: false, reason: "escapes-workspace" };
   }
   const absentTail: string[] = [];
   let probe = absolute;
@@ -135,20 +138,35 @@ async function realRelativeInRoot(root: string, absolute: string): Promise<strin
     try {
       real = await realpath(probe);
     } catch {
+      // A component realpath cannot resolve is only safe to call "not there
+      // yet" when NOTHING is there. A dangling symlink is present, and
+      // whatever creates its target later decides where this path lands.
+      // That is not hypothetical here: a mutator calls ensureRecordable
+      // immediately after this check, which CREATES `.dohc` — so a dangling
+      // `meta -> .dohc` would go live between the check and the operation.
+      // lstat separates the two cases; realpath cannot.
+      if (await lstat(probe).then(() => true, () => false)) {
+        return { ok: false, reason: "dangling-symlink" };
+      }
       const parent = dirname(probe);
-      if (parent === probe) return null; // reached fs root without resolving
+      if (parent === probe) return { ok: false, reason: "escapes-workspace" };
       absentTail.unshift(basename(probe));
       probe = parent;
       continue;
     }
-    if (real !== realRoot && !real.startsWith(realRoot + sep)) return null;
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+      return { ok: false, reason: "escapes-workspace" };
+    }
     const resolved = real === realRoot ? "" : real.slice(realRoot.length + 1);
-    return [...resolved.split(sep), ...absentTail].filter(Boolean).join("/");
+    return {
+      ok: true,
+      relative: [...resolved.split(sep), ...absentTail].filter(Boolean).join("/"),
+    };
   }
 }
 
 async function isWithinRealRoot(root: string, absolute: string): Promise<boolean> {
-  return (await realRelativeInRoot(root, absolute)) !== null;
+  return (await realRelativeInRoot(root, absolute)).ok;
 }
 
 // A tool's path arg, resolved to an absolute path INSIDE the root, or a reason
@@ -178,33 +196,70 @@ async function safeResolve(
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }
   const absolute = join(ctx.root, validated.normalized);
-  const realRelative = await realRelativeInRoot(ctx.root, absolute);
-  if (realRelative === null) {
-    return { ok: false, reason: `path rejected (symlink escapes workspace): ${relativePath}` };
+  const target = await realRelativeInRoot(ctx.root, absolute);
+  if (!target.ok) {
+    return {
+      ok: false,
+      reason:
+        target.reason === "escapes-workspace"
+          ? `path rejected (symlink escapes workspace): ${relativePath}`
+          : `path rejected (a symlink on this path has no target): ${relativePath}. ` +
+            `dohc cannot tell where the path leads. Create the target first, or use ` +
+            `a path with no symlink.`,
+    };
   }
+  const realRelative = target.relative;
   // The check above judged the path as SPELLED. An in-workspace symlink can
   // spell a reserved area under any other name (#638), so the SAME reservation
   // is decided again on where the path really lands. Enumerating spellings is
   // the losing side of this; the resolved path ends the game.
-  if (isReservedAfterResolve(realRelative, access)) {
+  const refused = resolvedAreaRefusal(realRelative, access);
+  if (refused) {
     return {
       ok: false,
       reason:
-        `path rejected (symlink resolves into a reserved area): ${relativePath} resolves to ` +
-        `${realRelative}. dohc reserves ${access === "read" ? ".dohc" : ".dohc and shared-with-me"}. ` +
-        `Use a path in your own files.`,
+        `path rejected (symlink resolves into ${refused.article} ${refused.kind} area): ` +
+        `${relativePath} resolves to ${realRelative}. ${refused.explain}`,
     };
   }
   return { ok: true, absolute, normalized: validated.normalized, realRelative };
 }
 
-// The reservation, re-decided on a resolved path. Same predicates the lexical
-// validators use, in the same read/write split: `.dohc` is refused both ways,
-// shared-with-me is a write reservation only, and ignored segments (.git,
-// node_modules) stay refused because safeResolve never allows them either.
-function isReservedAfterResolve(realRelative: string, access: "read" | "write"): boolean {
-  if (isDohcMetadataPath(realRelative) || hasIgnoredSegment(realRelative)) return true;
-  return access === "write" && isSharedWithMePath(realRelative);
+// WHICH rule refuses this resolved path, or null when none does. It names the
+// matched rule rather than answering yes/no, because a refusal has to state the
+// constraint it actually hit: an alias landing in `.git` is not refused by the
+// `.dohc` reservation, and saying so would send an agent to the wrong rule.
+// Same predicates the lexical validators use, in the same read/write split.
+// `.dohc` is checked before the ignored segments it also belongs to, so the
+// more specific rule wins.
+function resolvedAreaRefusal(
+  realRelative: string,
+  access: "read" | "write",
+): { kind: "reserved" | "ignored"; article: "a" | "an"; explain: string } | null {
+  if (isDohcMetadataPath(realRelative)) {
+    return {
+      kind: "reserved",
+      article: "a",
+      explain: "dohc reserves .dohc for workspace state. Use a path in your own files.",
+    };
+  }
+  if (access === "write" && isSharedWithMePath(realRelative)) {
+    return {
+      kind: "reserved",
+      article: "a",
+      explain:
+        "dohc reserves shared-with-me for share mounts. Copy the file into your own files first.",
+    };
+  }
+  const ignored = realRelative.split("/").find((segment) => hasIgnoredSegment(segment));
+  if (ignored) {
+    return {
+      kind: "ignored",
+      article: "an",
+      explain: `dohc does not manage ${ignored}. Use a path in your own files.`,
+    };
+  }
+  return null;
 }
 
 async function safeResolveForMutation(

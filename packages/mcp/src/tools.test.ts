@@ -2321,6 +2321,73 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 
+  // A DANGLING alias is the ordering trap. With no `.dohc` on disk yet,
+  // realpath fails for the alias itself, so a walk that treats every
+  // unresolvable component as "not there yet" reports an ordinary path. Then
+  // the mutator calls ensureRecordable, which CREATES `.dohc` -- the alias
+  // goes live between the check and the operation, and the operation follows
+  // it in. A component that exists cannot be absent, so lstat decides this,
+  // not realpath.
+  describe("through an alias that is still dangling", () => {
+    async function withDanglingAlias<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
+      return withWorkspace(async (ctx) => {
+        // Deliberately NOT created: the alias points at a `.dohc` that does
+        // not exist until a mutator makes it.
+        await symlink(join(ctx.root, ".dohc"), join(ctx.root, "meta"), "dir");
+        await expect(stat(join(ctx.root, ".dohc"))).rejects.toThrow();
+        return fn(ctx);
+      });
+    }
+
+    it("refuses the directory, and nothing appears inside .dohc", async () => {
+      await withDanglingAlias(async (ctx) => {
+        const made = await createWorkspaceDirectory(ctx, { path: "meta/sneaky" });
+        expect(made.ok).toBe(false);
+        await expect(stat(join(ctx.root, ".dohc", "sneaky"))).rejects.toThrow();
+      });
+    });
+
+    it("refuses the move, and nothing lands inside .dohc", async () => {
+      await withDanglingAlias(async (ctx) => {
+        await writeFile(join(ctx.root, "note.md"), "visible");
+
+        const moved = await moveWorkspacePath(ctx, {
+          fromPath: "note.md",
+          toPath: "meta/note.md",
+        });
+        expect(moved.ok).toBe(false);
+        await expect(stat(join(ctx.root, ".dohc", "note.md"))).rejects.toThrow();
+        expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("visible");
+      });
+    });
+
+    it("refuses the write, and no file appears inside .dohc", async () => {
+      await withDanglingAlias(async (ctx) => {
+        const written = await writeWorkspaceFile(ctx, {
+          path: "meta/settings.local.json",
+          content: OPTED_OUT,
+        });
+        expect(written.ok).toBe(false);
+        await expect(stat(join(ctx.root, ".dohc", "settings.local.json"))).rejects.toThrow();
+      });
+    });
+  });
+
+  // The refusal must name the rule that ACTUALLY rejected the path. An alias
+  // into .git is refused by the ignored-area rule, and a message claiming
+  // dohc reserves ".dohc and shared-with-me" would send an agent looking for
+  // a reservation that had nothing to do with it.
+  it("names the ignored area it hit, not the .dohc reservation", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, ".git", "refs"), { recursive: true });
+      await symlink(join(ctx.root, ".git"), join(ctx.root, "history"), "dir");
+
+      const reason = refusalReason(await safeResolve(ctx, "history/config"));
+      expect(reason).toContain(".git");
+      expect(reason).not.toContain("shared-with-me");
+    });
+  });
+
   // The guard is about WHERE a path lands, not about symlinks being suspect.
   // An in-workspace symlink to an ordinary folder must keep working, or the
   // fix has traded one wrong answer for another.
