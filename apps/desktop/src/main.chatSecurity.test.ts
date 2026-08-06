@@ -329,4 +329,32 @@ describe("main-process chat authorization", () => {
     expect(autoRefusalAt).toBeGreaterThan(-1);
     expect(autoRefusalAt).toBeLessThan(autoJoin.indexOf("claimDmHome("));
   });
+
+  // #627 deleted the read-only chat plumbing because these five handlers sit
+  // behind requireEngineCapture, which throws for share views. That gate is
+  // now the only barrier between a share view and their full read/write
+  // paths, so its position is pinned: capture first, stores and sync after.
+  it("acquires the Chats engine capture before any store or sync seam", () => {
+    const gated = [
+      "listChatChannels",
+      "listChatFollows",
+      "listPersonalChatFeed",
+      "markPersonalChatFeedSeen",
+      "syncDms",
+    ];
+
+    for (const channel of gated) {
+      const handler = handlerSource(channel);
+      const captureAt = handler.indexOf("await requireEngineCapture(");
+      expect(captureAt, channel).toBeGreaterThan(-1);
+      const captureCall = handler.slice(captureAt, handler.indexOf(");", captureAt));
+      expect(captureCall, channel).toContain('"Chats"');
+
+      const seamAts = ["linkedChatStoreFor(", "syncWorkspaceSharedChannels("]
+        .map((seam) => handler.indexOf(seam))
+        .filter((at) => at >= 0);
+      expect(seamAts.length, channel).toBeGreaterThan(0);
+      expect(Math.min(...seamAts), channel).toBeGreaterThan(captureAt);
+    }
+  });
 });
