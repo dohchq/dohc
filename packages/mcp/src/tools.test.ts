@@ -2151,3 +2151,197 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
     });
   });
 });
+
+// #638. The reserved rule used to read the path as SPELLED, and containment
+// was proved only INTO the root -- never OUT of .dohc. So an in-workspace
+// symlink named anything but `.dohc` carried every mutating tool straight into
+// the workspace's control plane: the probe on the issue wrote
+// `experimental.workspaceEngineAlpha: false` through one, and a delete through
+// the same alias moved the settings file to trash, silently dropping the
+// workspace's engine opt-out.
+//
+// Every case below is decided on the RESOLVED path, which is what makes the
+// spelling irrelevant. Revert safeResolve to the lexical check alone and each
+// one fails.
+describe("a symlink cannot alias a reserved area", () => {
+  const settingsPath = (root: string) => join(root, ".dohc", "settings.local.json");
+  const OPTED_OUT = JSON.stringify({
+    ...DEFAULT_WORKSPACE_SETTINGS,
+    experimental: { workspaceEngineAlpha: false },
+  });
+
+  // A workspace holding a real `.dohc` with an engine opt-out in it, plus
+  // `meta -> .dohc`: an ordinary-looking folder whose real path is reserved.
+  async function withDohcAlias<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
+    return withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+      await writeFile(settingsPath(ctx.root), OPTED_OUT);
+      await symlink(join(ctx.root, ".dohc"), join(ctx.root, "meta"), "dir");
+      return fn(ctx);
+    });
+  }
+
+  // The refusal has to name the constraint an agent hit, and the resolved
+  // WORKSPACE-RELATIVE path is what names it -- an absolute host path would
+  // say where the workspace lives, which no agent asked for.
+  function expectsReservedRefusal(reason: string) {
+    expect(reason).toMatch(/reserved/i);
+    expect(reason).toContain(".dohc");
+    expect(reason).not.toContain(tmpdir());
+  }
+
+  it("refuses safeResolve for a path whose real target is inside .dohc", async () => {
+    await withDohcAlias(async (ctx) => {
+      for (const path of ["meta", "meta/settings.local.json", "meta/trash/x.md"]) {
+        const resolved = await safeResolve(ctx, path);
+        expect(resolved.ok, path).toBe(false);
+        expectsReservedRefusal(refusalReason(resolved));
+      }
+    });
+  });
+
+  it("refuses the write, and the engine opt-out still reads off", async () => {
+    await withDohcAlias(async (ctx) => {
+      const written = await writeWorkspaceFile(ctx, {
+        path: "meta/settings.local.json",
+        content: JSON.stringify({
+          ...DEFAULT_WORKSPACE_SETTINGS,
+          experimental: { workspaceEngineAlpha: true },
+        }),
+      });
+      expect(written.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(written));
+
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+    });
+  });
+
+  it("refuses the delete, and the settings file is still where it was", async () => {
+    await withDohcAlias(async (ctx) => {
+      const deleted = await deleteWorkspacePath(ctx, { path: "meta/settings.local.json" });
+      expect(deleted.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(deleted));
+
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      await expect(isWorkspaceEngineFlagged(ctx)).resolves.toBe(false);
+    });
+  });
+
+  it("refuses a move whose source or destination resolves into .dohc", async () => {
+    await withDohcAlias(async (ctx) => {
+      await writeFile(join(ctx.root, "note.md"), "visible");
+
+      const out = await moveWorkspacePath(ctx, {
+        fromPath: "meta/settings.local.json",
+        toPath: "stolen.json",
+      });
+      expect(out.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(out));
+
+      const into = await moveWorkspacePath(ctx, {
+        fromPath: "note.md",
+        toPath: "meta/note.md",
+      });
+      expect(into.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(into));
+
+      expect(await readFile(settingsPath(ctx.root), "utf8")).toBe(OPTED_OUT);
+      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("visible");
+      await expect(stat(join(ctx.root, "stolen.json"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses the directory, and no directory appears inside .dohc", async () => {
+    await withDohcAlias(async (ctx) => {
+      const made = await createWorkspaceDirectory(ctx, { path: "meta/sneaky" });
+      expect(made.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(made));
+      await expect(stat(join(ctx.root, ".dohc", "sneaky"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses the read, so .dohc stays unreadable under any spelling", async () => {
+    await withDohcAlias(async (ctx) => {
+      const read = await readWorkspaceFile(ctx, { path: "meta/settings.local.json" });
+      expect(read.ok).toBe(false);
+      expectsReservedRefusal(refusalReason(read));
+    });
+  });
+
+  // shared-with-me is a WRITE reservation: mount refresh owns it, agents read
+  // it. An alias must inherit exactly that split, not more and not less.
+  it("refuses a write through an alias of shared-with-me but still reads it", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "shared-with-me", "acme"), { recursive: true });
+      await writeFile(join(ctx.root, "shared-with-me", "acme", "plan.md"), "theirs");
+      await symlink(join(ctx.root, "shared-with-me"), join(ctx.root, "inbox"), "dir");
+
+      const written = await writeWorkspaceFile(ctx, {
+        path: "inbox/acme/plan.md",
+        content: "mine",
+      });
+      expect(written.ok).toBe(false);
+      expect(refusalReason(written)).toMatch(/reserved/i);
+      expect(await readFile(join(ctx.root, "shared-with-me", "acme", "plan.md"), "utf8")).toBe(
+        "theirs",
+      );
+
+      await expect(
+        readWorkspaceFile(ctx, { path: "inbox/acme/plan.md" }),
+      ).resolves.toMatchObject({ ok: true, content: "theirs" });
+    });
+  });
+
+  // Site tools EXECUTE the site. shared-with-me is readable, so safeResolve
+  // lets an alias of it through on purpose — which means the "do not run
+  // someone else's shared code" gate is the one that has to read the resolved
+  // path. Judged on the spelling, `mine -> shared-with-me/alex` runs it.
+  it("refuses to run a site whose real root is a mounted share", async () => {
+    await withWorkspace(async (ctx) => {
+      const shared = join(ctx.root, "shared-with-me", "alex", "landing");
+      await mkdir(shared, { recursive: true });
+      await writeFile(join(shared, "index.html"), "<h1>theirs</h1>");
+      await writeFile(
+        join(shared, "package.json"),
+        JSON.stringify({ name: "landing", scripts: { build: "echo pwned" } }),
+      );
+      await symlink(join(ctx.root, "shared-with-me", "alex"), join(ctx.root, "mine"), "dir");
+
+      // These tools return wide unions, so the refusal is read positionally:
+      // a result without `reason` did not refuse, which is the failure.
+      for (const result of [
+        await buildSite(ctx, { siteRoot: "mine/landing" }),
+        await testSite(ctx, { siteRoot: "mine/landing" }),
+        await addSiteSdk(ctx, { siteRoot: "mine/landing" }),
+      ]) {
+        expect(result.ok).toBe(false);
+        expect("reason" in result ? result.reason : "no refusal").toMatch(/mounted share/i);
+      }
+    });
+  });
+
+  // The guard is about WHERE a path lands, not about symlinks being suspect.
+  // An in-workspace symlink to an ordinary folder must keep working, or the
+  // fix has traded one wrong answer for another.
+  it("still writes, reads and deletes through a symlink to an ordinary folder", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "notes"), { recursive: true });
+      await symlink(join(ctx.root, "notes"), join(ctx.root, "shortcut"), "dir");
+
+      await expect(
+        writeWorkspaceFile(ctx, { path: "shortcut/day.md", content: "hello\n" }),
+      ).resolves.toMatchObject({ ok: true });
+      expect(await readFile(join(ctx.root, "notes", "day.md"), "utf8")).toBe("hello\n");
+
+      await expect(
+        readWorkspaceFile(ctx, { path: "shortcut/day.md" }),
+      ).resolves.toMatchObject({ ok: true, content: "hello\n" });
+
+      await expect(
+        deleteWorkspacePath(ctx, { path: "shortcut/day.md" }),
+      ).resolves.toMatchObject({ ok: true });
+      await expect(stat(join(ctx.root, "notes", "day.md"))).rejects.toThrow();
+    });
+  });
+});

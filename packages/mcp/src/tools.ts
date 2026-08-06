@@ -16,6 +16,7 @@ import {
   frameworkConfigName,
   hasIgnoredSegment,
   hasWebDependency,
+  isDohcMetadataPath,
   mediaTypeForPath,
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
@@ -108,42 +109,64 @@ const HARD_SEARCH_MAX_RESULTS = 1000;
 const DEFAULT_SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const SEARCH_PREVIEW_CHARS = 200;
 
-// Is `absolute` REALLY inside `root` after resolving symlinks? Lexical
+// WHERE does `absolute` really land inside `root`, after symlinks? Lexical
 // containment (the path validators) stops ../ and friends, but a symlink that
-// already exists inside the workspace can still point outside it; every later
-// fs call would follow it. We realpath the deepest EXISTING ancestor (the file
-// itself for reads, its parent chain for not-yet-created targets) and require
-// it to stay under the canonical root. The root itself may legitimately be a
-// symlink, so we compare against realpath(root). Fails closed on any error.
-async function isWithinRealRoot(root: string, absolute: string): Promise<boolean> {
+// already exists inside the workspace can point anywhere; every later fs call
+// would follow it. We realpath the deepest EXISTING ancestor (the file itself
+// for reads, its parent chain for not-yet-created targets) and require it to
+// stay under the canonical root. The root itself may legitimately be a symlink,
+// so we compare against realpath(root).
+//
+// Returns the real path RELATIVE to the canonical root, with the still-absent
+// tail appended — the answer callers need to judge where the operation lands,
+// not just whether it is inside. Null means outside the root, and any error
+// fails closed to null.
+async function realRelativeInRoot(root: string, absolute: string): Promise<string | null> {
   let realRoot: string;
   try {
     realRoot = await realpath(root);
   } catch {
-    return false;
+    return null;
   }
+  const absentTail: string[] = [];
   let probe = absolute;
   for (;;) {
+    let real: string;
     try {
-      const real = await realpath(probe);
-      return real === realRoot || real.startsWith(realRoot + sep);
+      real = await realpath(probe);
     } catch {
       const parent = dirname(probe);
-      if (parent === probe) return false; // reached fs root without resolving
+      if (parent === probe) return null; // reached fs root without resolving
+      absentTail.unshift(basename(probe));
       probe = parent;
+      continue;
     }
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) return null;
+    const resolved = real === realRoot ? "" : real.slice(realRoot.length + 1);
+    return [...resolved.split(sep), ...absentTail].filter(Boolean).join("/");
   }
+}
+
+async function isWithinRealRoot(root: string, absolute: string): Promise<boolean> {
+  return (await realRelativeInRoot(root, absolute)) !== null;
 }
 
 // A tool's path arg, resolved to an absolute path INSIDE the root, or a reason
 // it was refused. Centralizes BOTH guards so no tool can forget them: lexical
 // validation (traversal/encoding/reserved) then realpath containment (symlink
 // escape). Async because the symlink check touches the filesystem.
+// `normalized` is the path as SPELLED (what the agent asked for, what tool
+// results and change records report). `realRelative` is where it actually
+// lands, root-relative, after symlinks — the only safe input to a guard that
+// decides authority from a path.
 async function safeResolve(
   ctx: ToolContext,
   relativePath: string,
   access: "read" | "write" = "write",
-): Promise<{ ok: true; absolute: string; normalized: string } | { ok: false; reason: string }> {
+): Promise<
+  | { ok: true; absolute: string; normalized: string; realRelative: string }
+  | { ok: false; reason: string }
+> {
   // "write" (the default — fail closed) refuses the reserved shared-with-me
   // projection; "read" allows it (share mounts exist to be read by agents)
   // while keeping traversal/encoding/ignored-segment guards identical.
@@ -155,10 +178,33 @@ async function safeResolve(
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }
   const absolute = join(ctx.root, validated.normalized);
-  if (!(await isWithinRealRoot(ctx.root, absolute))) {
+  const realRelative = await realRelativeInRoot(ctx.root, absolute);
+  if (realRelative === null) {
     return { ok: false, reason: `path rejected (symlink escapes workspace): ${relativePath}` };
   }
-  return { ok: true, absolute, normalized: validated.normalized };
+  // The check above judged the path as SPELLED. An in-workspace symlink can
+  // spell a reserved area under any other name (#638), so the SAME reservation
+  // is decided again on where the path really lands. Enumerating spellings is
+  // the losing side of this; the resolved path ends the game.
+  if (isReservedAfterResolve(realRelative, access)) {
+    return {
+      ok: false,
+      reason:
+        `path rejected (symlink resolves into a reserved area): ${relativePath} resolves to ` +
+        `${realRelative}. dohc reserves ${access === "read" ? ".dohc" : ".dohc and shared-with-me"}. ` +
+        `Use a path in your own files.`,
+    };
+  }
+  return { ok: true, absolute, normalized: validated.normalized, realRelative };
+}
+
+// The reservation, re-decided on a resolved path. Same predicates the lexical
+// validators use, in the same read/write split: `.dohc` is refused both ways,
+// shared-with-me is a write reservation only, and ignored segments (.git,
+// node_modules) stay refused because safeResolve never allows them either.
+function isReservedAfterResolve(realRelative: string, access: "read" | "write"): boolean {
+  if (isDohcMetadataPath(realRelative) || hasIgnoredSegment(realRelative)) return true;
+  return access === "write" && isSharedWithMePath(realRelative);
 }
 
 async function safeResolveForMutation(
@@ -1997,14 +2043,17 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
   // the site into the user's own files makes it runnable. The check is the
   // shared case-insensitive/alias-normalizing predicate, NOT a literal
   // compare: normalized paths preserve casing, and "Shared-With-Me/…" names
-  // the same directory on case-insensitive filesystems (CodeRabbit).
-  if (isSharedWithMePath(root.normalized)) {
+  // the same directory on case-insensitive filesystems (CodeRabbit). Both
+  // gates read the RESOLVED path (#638): reads may enter shared-with-me, so
+  // safeResolve lets an alias of it through, and judging the spelling would
+  // let `mine -> shared-with-me/alex` run someone else's shared code.
+  if (isSharedWithMePath(root.realRelative)) {
     return {
       ok: false as const,
       reason: `site root is a mounted share (read-only): ${siteRoot} — copy it into your own files to run it`,
     };
   }
-  const allowed = sitePathAllowed(root.normalized);
+  const allowed = sitePathAllowed(root.realRelative);
   if (!allowed.ok) return allowed;
   const info = await lstat(root.absolute).catch(() => null);
   if (!info) return { ok: false as const, reason: `site root not found: ${siteRoot}` };

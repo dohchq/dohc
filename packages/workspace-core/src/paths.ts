@@ -55,7 +55,11 @@ const SHARED_WITH_ME_SHORT_NAME_STEM = "SHARED"; // 8.3 base of `shared-with-me`
 // at ANY depth — a nested `notes/.dohc/x` is just as internal as a top-level
 // one (the watcher/tree suppress `.dohc` everywhere via hasIgnoredSegment), so
 // a user/agent write into one must be refused, not just the first segment.
-function isDohcMetadataPath(relativePath: string): boolean {
+//
+// Exported because this is the READ-side reservation: callers that re-decide
+// the reservation on a RESOLVED path (a symlink can spell `.dohc` under any
+// name — #638) need the same predicate validateUserReadPath uses, not a copy.
+export function isDohcMetadataPath(relativePath: string): boolean {
   return relativePath
     .replaceAll("\\", "/")
     .toLowerCase()
