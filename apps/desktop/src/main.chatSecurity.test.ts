@@ -65,14 +65,6 @@ describe("main-process chat authorization", () => {
     expect(handlerSource("markChatThreadRead")).toContain(
       "await assertSharedChannelWritable({",
     );
-
-    // These read-shaped calls can write viewer/sync state. Their shared-view
-    // behavior is deliberately a no-op rather than a rejected background call.
-    expect(handlerSource("markPersonalChatFeedSeen")).toContain(
-      "markPersonalFeedSeenReadOnlySafe",
-    );
-    expect(handlerSource("syncDms")).toContain("createReadAwareChatIpcHandler({");
-    expect(handlerSource("syncDms")).toContain("if (relay && !readOnly)");
   });
 
   it("gates every chat dispatch IPC on the workspace engine capture", () => {

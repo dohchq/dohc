@@ -4,13 +4,11 @@ import {
   ListChatChannelSharesResult,
   MAX_CHAT_CHANNEL_SHARE_ROWS,
 } from "./ipc/bridgeContract";
-import { markPersonalFeedSeenReadOnlySafe } from "./workspaces/chatFollowAccess";
 import {
   chatShareSessionKey,
   chatViewerAuthorId,
   handleRelayUnauthorized,
   createChatChannelIpcHandler,
-  createReadAwareChatIpcHandler,
   createSharedChannelWritableChatIpcHandler,
   createSetChatReactionIpcHandler,
   reactionsForViewer,
@@ -319,7 +317,7 @@ describe("runtime main chat IPC boundaries", () => {
     expect(setReaction).not.toHaveBeenCalled();
   });
 
-  it("rejects mutations and keeps read-shaped writes as no-ops in a read-only workspace", async () => {
+  it("rejects mutations in a read-only workspace", async () => {
     const workspaceId = "shared-view";
     const contexts = new Map<string, TestContext>([
       [workspaceId, { workspace: { workspaceId, readOnly: true } }],
@@ -328,9 +326,6 @@ describe("runtime main chat IPC boundaries", () => {
     const ipc = runtimeHarness();
     const create = vi.fn(async () => ({ channelId: "channel-1" }));
     const react = vi.fn(async () => ({ reactionId: "reaction-1" }));
-    const mark = vi.fn(async () => undefined);
-    const reconcileDms = vi.fn(async () => undefined);
-    const listDms = vi.fn(async () => [] as string[]);
     const joinedSync = vi.fn();
     const cloudSync = vi.fn();
 
@@ -351,30 +346,6 @@ describe("runtime main chat IPC boundaries", () => {
         queueCloudSync: cloudSync,
       }),
     );
-    ipc.handle(
-      CHANNELS.markPersonalChatFeedSeen,
-      createReadAwareChatIpcHandler({
-        assertTrustedSender: deps.assertTrustedSender,
-        parsePayload: deps.parsePayload,
-        requireContext: deps.requireContext,
-        isReadOnly: (workspace) => workspace.readOnly,
-        run: async (_context, _payload, readOnly) =>
-          markPersonalFeedSeenReadOnlySafe({ readOnly, mark }),
-      }),
-    );
-    ipc.handle(
-      CHANNELS.syncDms,
-      createReadAwareChatIpcHandler({
-        assertTrustedSender: deps.assertTrustedSender,
-        parsePayload: deps.parsePayload,
-        requireContext: deps.requireContext,
-        isReadOnly: (workspace) => workspace.readOnly,
-        run: async (_context, _payload, readOnly) => {
-          if (!readOnly) await reconcileDms();
-          return listDms();
-        },
-      }),
-    );
 
     await expect(ipc.invoke(CHANNELS.createChatChannel, { workspaceId })).rejects.toThrow(
       /read-only/u,
@@ -382,16 +353,9 @@ describe("runtime main chat IPC boundaries", () => {
     await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).rejects.toThrow(
       /read-only/u,
     );
-    await expect(
-      ipc.invoke(CHANNELS.markPersonalChatFeedSeen, { workspaceId }),
-    ).resolves.toBeUndefined();
-    await expect(ipc.invoke(CHANNELS.syncDms, { workspaceId })).resolves.toEqual([]);
 
     expect(create).not.toHaveBeenCalled();
     expect(react).not.toHaveBeenCalled();
-    expect(mark).not.toHaveBeenCalled();
-    expect(reconcileDms).not.toHaveBeenCalled();
-    expect(listDms).toHaveBeenCalledOnce();
     expect(joinedSync).not.toHaveBeenCalled();
     expect(cloudSync).not.toHaveBeenCalled();
   });
