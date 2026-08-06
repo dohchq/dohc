@@ -61,17 +61,35 @@ function isStoredDraft(value: unknown): value is StoredOrphanedDraft {
   );
 }
 
-// Unreadable storage and unreadable content answer the same way: no stored
-// recoveries. There is nothing else to do with either, and a throw here would
-// take down the render that is trying to set a draft aside.
-function readRows(): StoredOrphanedDraft[] {
+// Unreadable storage and unreadable content both answer "no stored
+// recoveries" — a throw here would take down the render that is trying to set
+// a draft aside. They differ in the one way that matters to the caller:
+// unreadable CONTENT still occupies the key, so the read reports that it threw
+// bytes away and the load path writes over them. Missing storage discards
+// nothing and must not provoke a write, or every launch would create this key
+// for a user who never set an edit aside.
+type ReadResult = {
+  rows: StoredOrphanedDraft[];
+  discarded: boolean;
+};
+
+function readRows(): ReadResult {
+  let raw: string | null;
   try {
-    const raw = localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY);
-    const parsed: unknown = raw === null ? null : JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter(isStoredDraft) : [];
+    raw = localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY);
   } catch {
-    return [];
+    return { rows: [], discarded: false };
   }
+  if (raw === null) return { rows: [], discarded: false };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { rows: [], discarded: true };
+  }
+  if (!Array.isArray(parsed)) return { rows: [], discarded: true };
+  const rows = parsed.filter(isStoredDraft);
+  return { rows, discarded: rows.length !== parsed.length };
 }
 
 // Returns whether the rows are now on disk. A refusal (the quota is full)
@@ -99,24 +117,32 @@ function writeRows(rows: readonly StoredOrphanedDraft[]): boolean {
 // that rename from a delete, and a delete must keep its draft. The row stays
 // listed in the notice center, where Dismiss deletes it, and expires with the
 // rest.
+//
+// The rewrite triggers on anything this pass threw away, including what the
+// READ threw away. A value that is not a list of drafts has no path to
+// classify, no capture time to expire, and no notice row to dismiss, so
+// comparing only the rows that survived would leave its bytes in plaintext
+// with nothing left that could ever remove them. This is the only pass that
+// needs the check: it runs once, before the root renders, and so before any
+// capture, dismissal, or rename can touch the key.
 export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] {
-  const rows = readRows();
+  const { rows, discarded } = readRows();
   const kept = rows.filter(
     (row) =>
       isPersistableDraftPath(row.path) &&
       nowMs - row.capturedAtMs < ORPHANED_DRAFT_RETENTION_MS,
   );
-  if (kept.length !== rows.length) writeRows(kept);
+  if (discarded || kept.length !== rows.length) writeRows(kept);
   return kept;
 }
 
 export function storeDraft(draft: StoredOrphanedDraft): boolean {
   if (!isPersistableDraftPath(draft.path)) return false;
-  return writeRows([...readRows(), draft]);
+  return writeRows([...readRows().rows, draft]);
 }
 
 export function forgetStoredDraft(id: number): void {
-  const rows = readRows();
+  const rows = readRows().rows;
   const kept = rows.filter((row) => row.id !== id);
   if (kept.length !== rows.length) writeRows(kept);
 }
@@ -129,7 +155,7 @@ export function remapStoredDraftPaths(
   workspaceId: string,
   project: (path: string) => string | null,
 ): ReadonlySet<number> {
-  const rows = readRows();
+  const rows = readRows().rows;
   const dropped = new Set<number>();
   const next: StoredOrphanedDraft[] = [];
   let changed = false;

@@ -281,21 +281,93 @@ describe("orphanedDrafts persistence (#600)", () => {
     ).toEqual(["Nowhere to put it"]);
   });
 
-  it("restores nothing from storage that is not a list of drafts", async () => {
-    localStorage.setItem(ORPHANED_DRAFT_STORAGE_KEY, "{not json");
+  it("restores nothing from storage that is not a list of drafts, and clears it", async () => {
+    // A half-written value still holds whatever draft text reached it.
+    localStorage.setItem(
+      ORPHANED_DRAFT_STORAGE_KEY,
+      '[{"text":"UNPARSEABLE_BODY',
+    );
     const broken = await relaunch();
     expect(draftsFor(broken.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
+    // MUTATION (blob scrub): report no discard when the value does not parse.
+    // The bytes stay in plaintext with no row to expire and no notice to
+    // dismiss, so nothing can ever remove them.
+    expect(storedText()).not.toContain("UNPARSEABLE_BODY");
 
     localStorage.setItem(
       ORPHANED_DRAFT_STORAGE_KEY,
       JSON.stringify([
-        { id: "1", workspaceId: "ws-1", path: "a.md", text: "x", capturedAtMs: 0 },
+        {
+          id: "1",
+          workspaceId: "ws-1",
+          path: "a.md",
+          text: "SHAPE_BODY",
+          capturedAtMs: 0,
+        },
         null,
         7,
       ]),
     );
     const partial = await relaunch();
     expect(draftsFor(partial.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
+    expect(storedText()).not.toContain("SHAPE_BODY");
+  });
+
+  // The read drops a row that is not a draft BEFORE the load can compare what
+  // survived against what it started with. With a valid row beside it the two
+  // counts match, so the old check saw a clean store and rewrote nothing.
+  it("scrubs a row that is not a draft, and keeps the one beside it", async () => {
+    const capturedAt = Date.now();
+    localStorage.setItem(
+      ORPHANED_DRAFT_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: "not a number",
+          workspaceId: "ws-1",
+          path: "a.md",
+          text: "MALFORMED_BODY",
+          capturedAtMs: capturedAt,
+        },
+        {
+          id: 2,
+          workspaceId: "ws-1",
+          path: "b.md",
+          text: "kept",
+          capturedAtMs: capturedAt,
+        },
+      ]),
+    );
+    // MUTATION (discard trigger): compare only kept.length with rows.length.
+    // The counts agree, no rewrite runs, and MALFORMED_BODY stays in plaintext
+    // for the life of the install.
+    const next = await relaunch();
+    expect(storedText()).not.toContain("MALFORMED_BODY");
+    // ...and the row beside it restores and stays durable.
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "b.md").map((d) => d.text),
+    ).toEqual(["kept"]);
+    expect(next.atRiskOrphanedDraftIds()).toEqual([]);
+    expect(storedText()).toContain("kept");
+  });
+
+  // The other half of the trigger: a clean store must not be rewritten, and an
+  // empty one must not gain a key it never had.
+  it("leaves an untouched store alone", async () => {
+    captureOrphanedDraft("ws-1", "a.md", "clean");
+    const written = storedText();
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const next = await relaunch();
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(1);
+    // MUTATION (always rewrite): drop the discard condition and write on every
+    // load. Restoring becomes a write, and the launch after an empty store
+    // creates the key for a user who never set an edit aside.
+    expect(setItem).not.toHaveBeenCalled();
+    expect(storedText()).toBe(written);
+
+    localStorage.removeItem(ORPHANED_DRAFT_STORAGE_KEY);
+    await relaunch();
+    expect(setItem).not.toHaveBeenCalled();
+    expect(localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY)).toBeNull();
   });
 
   it("keeps this run's ids clear of the ones it restored", async () => {
