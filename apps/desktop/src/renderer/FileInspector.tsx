@@ -867,8 +867,8 @@ function MarkdownView(props: {
   // reread fail before the queued open answers — so an open owned here would be
   // cancelled by the very race its refusal exists to name (#534, codex P2).
   engine: UseEngineDoc;
-  // Reopen the engine session after `engine.openTimedOut` (#564). Owned by
-  // the inspector, like the open itself. REQUIRED: the timeout notice must
+  // Reopen the engine session after `engine.engineMayHoldDocument` (#564).
+  // Owned by the inspector, like the open itself. REQUIRED: the notice must
   // never render without its retry, and the one caller always passes it.
   onRetryEngineOpen: () => void;
   // Set by the inspector the instant the engine refuses this path. Read by
@@ -1149,7 +1149,7 @@ function MarkdownView(props: {
     // #564: the engine open hit its retry deadline. The plain editor stays
     // read-only — its autosave would race the session the engine may still
     // bind — and the notice below states the reason and offers the retry.
-    engine.openTimedOut ||
+    engine.engineMayHoldDocument ||
     (props.truncated && !engine.available);
   // Every write guard reads THIS, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
@@ -1894,12 +1894,12 @@ function MarkdownView(props: {
                 // or opening. The refusal reads "Document not open", and the
                 // notice below offers the retry that resolves it.
                 //
-                // `opening` is the wait and `openTimedOut` is the wait giving
-                // up; both mean the same thing to an export. Once the open
-                // answers "not engine-backed", the file IS the document and
-                // this lifts.
+                // `opening` is the wait and `engineMayHoldDocument` is the
+                // wait giving up; both mean the same thing to an export. Once
+                // the open answers "not engine-backed", the file IS the
+                // document and this lifts.
                 getMarkdown={() =>
-                  engine.opening || engine.openTimedOut
+                  engine.opening || engine.engineMayHoldDocument
                     ? null
                     : serializeDraftRef.current()
                 }
@@ -1914,8 +1914,8 @@ function MarkdownView(props: {
           that same render and the capture above sets a draft typed before the
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding (#567). */}
-      {engine.openTimedOut ? (
-        <EngineOpenTimedOutNotice onRetry={props.onRetryEngineOpen} contentShown />
+      {engine.engineMayHoldDocument ? (
+        <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown />
       ) : null}
       {orphanedDraftNotice}
       {surfaceMode === "source" ? (
@@ -2591,7 +2591,7 @@ function Empty({ children }: { children: React.ReactNode }) {
 // #564: the engine open hit its retry deadline. The document stays read-only
 // — never the writable plain editor — with the reason stated and the retry
 // offered where the user is looking.
-function EngineOpenTimedOutNotice(props: {
+function EngineMayHoldDocumentNotice(props: {
   onRetry: () => void;
   // Is the document's content on screen? When the read failed too, it is
   // not — and "It is read-only for now" would promise read access to
@@ -2600,18 +2600,18 @@ function EngineOpenTimedOutNotice(props: {
 }) {
   return (
     <div
-      data-testid="engine-open-timeout-notice"
+      data-testid="engine-may-hold-document-notice"
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
       {/* "document", the noun the editing controls beside this already use
           ("You can edit this document when it finishes opening.").
 
           No "in time": this notice answers every refusal `main` maps to
-          `openTimedOut`, and only one of them is a timeout. A session the
-          daemon would not release refuses IMMEDIATELY, and naming a cause the
-          user did not hit sends them looking for a slow machine (#564, codex
-          r20). What is true of all of them is the sentence below, and the
-          retry is the same either way. */}
+          `engineMayHoldDocument`, and only one of them is a timeout. A session
+          the daemon would not release refuses IMMEDIATELY, and naming a cause
+          the user did not hit sends them looking for a slow machine (#564,
+          codex r20). What is true of all of them is the sentence below, and
+          the retry is the same either way. */}
       <span>
         dohc could not open this document for editing.
         {props.contentShown ? " It is read-only for now." : ""}
@@ -2798,7 +2798,7 @@ export function FileInspector(props: {
   // the child's first-render closures read the live value.
   const writesRefusedRef = useRef(false);
   writesRefusedRef.current =
-    notInVersion || engine.opening || engine.openTimedOut;
+    notInVersion || engine.opening || engine.engineMayHoldDocument;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText
@@ -2887,12 +2887,12 @@ export function FileInspector(props: {
           label="file"
           onShare={onShareCurrentPath}
         />
-        {engine.openTimedOut ? (
+        {engine.engineMayHoldDocument ? (
           // #564, codex round 2: a failed read returns HERE, before
           // MarkdownView mounts — without this the timeout had no notice and
           // no retry on exactly the path where the engine session is the only
           // way back to the content.
-          <EngineOpenTimedOutNotice onRetry={retryEngineOpen} contentShown={false} />
+          <EngineMayHoldDocumentNotice onRetry={retryEngineOpen} contentShown={false} />
         ) : null}
         {/* A failed read is exactly when the set-aside text matters most —
             the marker and the close warning must not point at actions this

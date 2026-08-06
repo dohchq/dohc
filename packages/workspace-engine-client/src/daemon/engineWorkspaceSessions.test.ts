@@ -978,7 +978,7 @@ describe("EngineWorkspaceSessions", () => {
     it("calls an exhausted ladder past its budget a DEADLINE, not a transport failure", async () => {
       // codex round 5: the LAST allowed attempt can start inside the budget
       // and finish outside it. That branch threw the transport error, and
-      // main maps only EngineWorkspaceRetryDeadlineError to `openTimedOut` —
+      // main maps only EngineWorkspaceRetryDeadlineError to `engineMayHoldDocument` —
       // so an exhausted ladder downgraded an engine-owned document to the
       // writable plain editor. Same failure as the unbounded-task blocker,
       // through a different door.
@@ -1018,7 +1018,7 @@ describe("EngineWorkspaceSessions", () => {
       // recognised only transport, daemon-unavailable and afterReconnect, so
       // the refusal took a bare `continue`: six immediate opens over ~12 s
       // against a 5 s deadline, rejecting with the refusal (which main does
-      // NOT map to openTimedOut) and applying no backoff at all to an
+      // NOT map to engineMayHoldDocument) and applying no backoff at all to an
       // overload the daemon had just declared.
       const workspace = await tempWorkspace("workspace-open-backoff");
       let nowMs = 0;
@@ -1152,7 +1152,7 @@ describe("EngineWorkspaceSessions", () => {
       // `shuttingDown`, and the ordering was unpinned — swapping the two
       // passed every test. At quit, on the last allowed attempt with a spent
       // budget, the swap returns the ladder's own transport error, which main
-      // does not map to openTimedOut: the plain-editor downgrade, at quit.
+      // does not map to engineMayHoldDocument: the plain-editor downgrade, at quit.
       const workspace = await tempWorkspace("workspace-quit-vs-deadline");
       const client = new MockClient("handle-quit-deadline");
       let nowMs = 0;
@@ -1185,7 +1185,7 @@ describe("EngineWorkspaceSessions", () => {
       // codex round 7: the churn ladder ordered its terminal throw AHEAD of
       // the deadline check, so a last open that started inside the budget and
       // finished outside it rejected with EngineWorkspaceRebindError. Main
-      // maps only EngineWorkspaceRetryDeadlineError to `openTimedOut`, so
+      // maps only EngineWorkspaceRetryDeadlineError to `engineMayHoldDocument`, so
       // that downgraded an engine-owned document to the writable plain
       // editor — the disk/Y.Doc race this budget exists to prevent.
       const workspace = await tempWorkspace("workspace-churn-exhausted");
@@ -2039,7 +2039,7 @@ describe("EngineWorkspaceSessions", () => {
       expect(ran).toBe(0);
       // It must keep the document READ-ONLY, never downgrade it to the
       // writable plain editor: main answers both open refusals with
-      // `openTimedOut`. MUTATION: drop it from the predicate -> the surface
+      // `engineMayHoldDocument`. MUTATION: drop it from the predicate -> the surface
       // takes the disk path #533 closed.
       expect(isEngineWorkspaceOpenRefusedError(outcome)).toBe(true);
     });
