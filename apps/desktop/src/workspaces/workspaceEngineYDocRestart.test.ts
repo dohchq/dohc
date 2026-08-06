@@ -1,6 +1,6 @@
 import * as Y from "yjs";
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import {
@@ -2381,8 +2381,10 @@ it("announces a recovered edit exactly once when both arm points run", async () 
 // arms a settle on the replacement, and the pending locked write would sit
 // stale until an unrelated edit.
 async function lockedRebindCapture(prefix: string) {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), prefix));
-  roots.push(rootPath);
+  // #630's scratch, like every other harness in this file: the run root is
+  // swept even when a test fails, and an unremovable tree fails the suite
+  // instead of being left behind under a green run.
+  const rootPath = await createTestScratch(prefix);
   const workspaceId = prefix.replace(/-+$/, "");
   const loopback = new VersionedLoopbackEngine();
   const client: EngineDaemonClient & EngineTransport = {
@@ -2618,12 +2620,13 @@ async function lockedRebindCapture(prefix: string) {
 async function openWithOneEdit(
   capture: WorkspaceEngineCapture,
   text: string,
+  path = "note.md",
 ): Promise<{
   session: Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>;
   mirror: Y.Doc;
 }> {
   const session = await capture.openYDocSession({
-    path: "note.md",
+    path,
     onRemoteUpdate: () => undefined,
   });
   const mirror = new Y.Doc();
@@ -3199,6 +3202,85 @@ it("a directory move drains a detached debt under its prefix", async () => {
   // The descendant's debt was paid BEFORE the move proceeded.
   expect(state.settledMarkdowns).toEqual(["moved edit"]);
   await finish(true).catch(() => undefined);
+  await capture.stop();
+}, 20_000);
+
+it("a move cancels a debt that registered while the disk move was in flight", async () => {
+  // The move seam's half of the delete fence. `beginFileRename` drains the
+  // debts it can SEE, then hands back a finisher and releases the capture
+  // chain — and main awaits the filesystem move off that chain. Another window
+  // can open the source in that window, meet the lock, and register a debt the
+  // drain never saw. Left armed, its ladder reopens the moved-from path and
+  // recreates the file the user just moved away.
+  //
+  // MUTATION: drop the rescan from the finisher's `ok` branch -> the ladder
+  // opens a third generation over the source path.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-move-race-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
+
+  // The move starts with a clean registry, so it prepares instead of refusing.
+  const finishMove = await capture.beginFileRename("note.md", "moved.md");
+
+  // Another window opens the source inside the move window and meets the lock.
+  const { session } = await openWithOneEdit(capture, "raced during the move");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  const generationAtMove = state.generation;
+
+  // The move landed. The late debt is cancelled with it.
+  await finishMove(true);
+  state.locked = false;
+
+  // THE FACT: the moved-from path is never reopened and nothing is settled
+  // back onto it.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(generationAtMove);
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 20_000);
+
+it("a folder move fences late debts too, on the no-op finisher path", async () => {
+  // `beginFileRename` returns a NO-OP finisher for everything the engine
+  // rename declines — folders, binary, untracked paths — but the disk move
+  // still happens, so a late debt recreates the moved-from tree just the same.
+  // The test above covers the engine-rename finisher; without this one, the
+  // no-op path carries the fix untested (verified: mutating only the no-op
+  // finisher leaves the test above green).
+  //
+  // MUTATION: return a bare `async () => {}` no-op again -> the descendant's
+  // ladder opens a second generation over `dir/note.md`.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-foldermove-race-",
+  );
+  await mkdir(join(rootPath, "dir"), { recursive: true });
+  await writeFile(join(rootPath, "dir", "note.md"), "stale artifact\n", "utf8");
+
+  // A directory is not engine-renamable text, so this hands back the no-op.
+  const finishMove = await capture.beginFileRename("dir", "moved");
+
+  const { session } = await openWithOneEdit(
+    capture,
+    "raced during the folder move",
+    "dir/note.md",
+  );
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  const generationAtMove = state.generation;
+
+  await finishMove(true);
+  state.locked = false;
+
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(generationAtMove);
+  expect(state.settledMarkdowns).toEqual([]);
   await capture.stop();
 }, 20_000);
 

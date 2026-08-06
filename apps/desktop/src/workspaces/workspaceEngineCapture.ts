@@ -4942,8 +4942,38 @@ export function createWorkspaceEngineCapture(
           (p) => p === fromPath || p === toPath,
           "Saved latest edits before renaming",
         );
+        // The drain above sees only the debts that exist NOW. The filesystem
+        // move runs off this chain, after the finisher is handed back, so an
+        // open of the source can land on the chain inside that window, meet
+        // the lock, and register a debt the drain never saw. Left armed, its
+        // ladder reopens the moved-from path and recreates the file the user
+        // just moved away — the same hole the delete seam had.
+        //
+        // CANCEL, not retarget. Retargeting is tempting: the write belongs to
+        // the object, and the object now lives at `toPath`. But it is only
+        // sound when the ENGINE rename ran, and this seam also serves folder
+        // moves, binary files and untracked paths, where the destination is
+        // not this debt's object at all — writing this lineage's text there
+        // would be the clobber inverted. Cancelling is safe in every case and
+        // loses nothing durable: the edits stay in the object's lineage, which
+        // is where a moved document's text lives anyway.
+        //
+        // The residual, stated rather than hidden: the artifact at the
+        // destination can stay stale until the document is reopened. Making
+        // the pending write follow the file is a retarget feature, not this
+        // fence.
+        const cancelDebtsRegisteredDuringTheMove = (): void => {
+          cancelSuspendedDebts(
+            suspendDetachedDebts(endpointMatch),
+            `a move of ${fromPath}`,
+          );
+        };
         const policy = await readPolicyForTask();
-        const noop: WorkspaceEngineRenameFinisher = async () => {};
+        // Every path out of this method must fence the move, not just the
+        // engine-rename one: the disk move happens either way.
+        const noop: WorkspaceEngineRenameFinisher = async (ok: boolean) => {
+          if (ok) cancelDebtsRegisteredDuringTheMove();
+        };
         // Only a clean single-file rename between two engine-owned text paths
         // goes through the engine rename (preserving the stable object id);
         // everything else falls back to the watcher's delete+write capture.
@@ -4988,7 +5018,10 @@ export function createWorkspaceEngineCapture(
           { path: toPath, operation: "write", sha256: disk.sha256 },
         ]);
         return async (ok: boolean) => {
-          if (ok) return;
+          if (ok) {
+            cancelDebtsRegisteredDuringTheMove();
+            return;
+          }
           cancel();
           // The disk move failed after the engine recorded the rename: rename
           // back so engine state keeps mirroring the folder. Forward history —
