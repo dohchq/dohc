@@ -484,6 +484,97 @@ describe("DocumentMenu", () => {
     expect(screen.queryByRole("menu")).not.toBeNull();
   });
 
+  // codex r3 on #684: the token above decides who may speak NEXT, and that is
+  // only half of it. Until the new attempt answers — and a clipboard write can
+  // sit behind an OS permission prompt — the menu still showed the last
+  // answer: an instruction to wait for a document the user is already
+  // retrying.
+  it("retires a standing refusal when the retry starts, not when it answers", async () => {
+    const user = userEvent.setup();
+    stubClipboard();
+    let markdown: string | null = null;
+    render(
+      <DocumentMenu
+        workspaceId="ws-1"
+        suggestedName="Plan"
+        getMarkdown={() => markdown}
+      />,
+    );
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    await act(async () => {});
+    expect(screen.getByTestId("document-menu-status").textContent).toBe(
+      "You can copy this document when it opens.",
+    );
+
+    // The document opened and the user retries. This write does not settle.
+    markdown = MARKDOWN;
+    const retry = deferredWrite();
+    writeText.mockImplementationOnce(() => retry.promise);
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    await act(async () => {});
+
+    // MUTATION: clear only when the retry ANSWERS -> the menu tells the user
+    // to wait for a document that is open, while the copy of it runs.
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("document-menu-status").textContent).toBe("");
+    expect(
+      screen.getByTestId("document-menu-item-copy-markdown").textContent,
+    ).toBe("Copy as Markdown");
+
+    // And the retry still gets to speak when it lands.
+    await act(async () => {
+      retry.resolve();
+      await retry.promise;
+    });
+    expect(screen.getByText("Copied")).toBeTruthy();
+  });
+
+  // The other consequence of leaving the last answer standing: its timer runs
+  // too, and that timer CLOSES the menu after a confirmation. A retry started
+  // inside the window had the menu shut under it while it was still pending.
+  it("cannot be closed by a previous result's timer once a new attempt starts", async () => {
+    const user = userEvent.setup();
+    renderMenu();
+    stubClipboard();
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    const written = nextClipboardWrite();
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    expect(await written).toBe(MARKDOWN);
+    await act(async () => {});
+    expect(screen.getByText("Copied")).toBeTruthy();
+
+    // A second copy, inside that confirmation's window. It does not settle.
+    const retry = deferredWrite();
+    writeText.mockImplementationOnce(() => retry.promise);
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    await act(async () => {});
+
+    // The one wall-clock wait in this file, and it is safe in the direction
+    // that matters: the timer under test was armed BEFORE this wait started,
+    // so a slow machine gives it more chances to fire, never fewer. With it
+    // cancelled there is no timer left to wait for at all.
+    //
+    // MUTATION: leave the previous timer running -> it closes the menu on
+    // behalf of an attempt that is over, while this one is still waiting on
+    // the clipboard.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, FEEDBACK_MS * 2));
+    });
+    expect(screen.queryByRole("menu")).not.toBeNull();
+    expect(
+      screen.getByTestId("document-menu-item-copy-markdown").textContent,
+    ).toBe("Copy as Markdown");
+
+    await act(async () => {
+      retry.resolve();
+      await retry.promise;
+    });
+    expect(screen.getByText("Copied")).toBeTruthy();
+  });
+
   // codex r23: NULL is the refusal this menu expects; a THROW is not. The
   // serializer reads a live editor, and reading it can fail — and once the
   // call moved outside the action's try boundary, that rejected the action's

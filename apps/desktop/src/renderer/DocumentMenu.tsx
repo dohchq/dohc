@@ -241,6 +241,15 @@ export function DocumentMenu(props: {
 
   function runItem(id: DocumentMenuItemId) {
     const attempt = ++attempts.current;
+    // The token says who may speak next. This says the last one has stopped —
+    // a new action retires its predecessor's answer when it STARTS, not when
+    // it finishes. Its own result can be a while away (a clipboard write can
+    // sit behind an OS permission prompt), and until then the menu would
+    // state a refusal the user is already retrying, under a timer that closes
+    // the menu on behalf of an attempt that is over.
+    setFeedback({});
+    setInstruction("");
+    if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     if (id === "copy-markdown") {
       void copyAsMarkdown(attempt);
       return;
