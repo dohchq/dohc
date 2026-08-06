@@ -7306,6 +7306,17 @@ impl EngineService {
                     }
                 })?
         };
+        // A lineage that could have started sharing and did not is the one
+        // origination outcome a person can act on, so it does not pass in
+        // silence (#632). The wire result reports the append; stderr keeps the
+        // server-side trail, the same split the post-commit materialize path
+        // uses. The per-document sharing surface that will show this to the
+        // user arrives with #356 — until a workspace can replicate at all,
+        // there is nothing for it to sit beside.
+        if let Some(declined) = &outcome.sharing_declined {
+            eprintln!("engine: {declined}");
+        }
+        let outcome = outcome.outcome;
         serde_json::to_value(YdocRecordUpdateResult {
             seq: outcome.seq,
             deduped: outcome.deduped,
@@ -11246,6 +11257,13 @@ fn map_runtime(error: RuntimeError) -> WireError {
     }
     if let RuntimeError::Domain(domain @ DomainError::ConflictResolveAnswerTooLarge { .. }) = &error
     {
+        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
+    }
+    // And again: an over-long identifier names the field, the constraint, the
+    // limit, the unit and the observed length (#654). Same `PayloadTooLarge`
+    // code as the other size refusals above — one code for "what you sent is
+    // past a size limit", whichever part of it was.
+    if let RuntimeError::Domain(domain @ DomainError::IdentifierTooLong { .. }) = &error {
         return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
     }
     if let RuntimeError::Domain(domain) = &error {

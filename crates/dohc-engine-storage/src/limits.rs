@@ -8,9 +8,25 @@
 /// is simpler than the TS `Buffer.byteLength` detour).
 pub const MAX_DOCUMENT_BODY_BYTES: usize = 256 * 1024;
 
-/// Maximum length of an identifier accepted on the write path (`doc_id`,
-/// `request_id`, `op_kind`), in UTF-8 bytes. A generous cap that still refuses
-/// unbounded input.
+/// Maximum length of any identifier the engine persists, in UTF-8 bytes:
+/// workspace, version, object, moment, conflict and request ids on every
+/// layer's write path.
+///
+/// MEASURED against the identifiers the product actually mints, not chosen.
+/// `dohc-engine-domain/tests/identifier_bounds.rs` measures them:
+/// a bare UUID is 36 bytes, the prefixed forms the desktop mints
+/// (`object-<uuid>`, `moment-<uuid>`) are 43, and the widest the engine
+/// generates for itself — `derive_capture_object_id`, a `object-` prefix over
+/// a hex SHA-256 — is 71. This bound sits about seven times past that widest
+/// healthy identifier.
+///
+/// It exists because identifiers are ECHOED. One resolve answer serves an
+/// object id six times and each moment id three (#654), so an unbounded id
+/// turns a request that fits its 8 MiB control frame into a response that
+/// cannot — after the mutation has committed. `dohc-engine-collab`
+/// (`DocKey::new`) and `dohc-engine-sync` (`model::unbounded_clause`) have
+/// enforced this number since they were written; the domain's write path was
+/// the outlier.
 pub const MAX_IDENTIFIER_BYTES: usize = 512;
 
 /// The schema fingerprint this build owns. Persisted in `PRAGMA user_version`

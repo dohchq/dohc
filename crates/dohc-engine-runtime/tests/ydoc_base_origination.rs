@@ -340,7 +340,7 @@ async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &s
     let doc = Ydoc::wire();
     for (index, (text, now)) in [("alpha", 200), (" beta", 300)].into_iter().enumerate() {
         let update = doc.plaintext_insert(u32::try_from(index * 5).expect("offset"), text);
-        handle
+        let append = handle
             .ydoc_record_update(
                 key.clone(),
                 path.to_owned(),
@@ -356,6 +356,10 @@ async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &s
             )
             .await
             .expect("local-only update");
+        // #632: the benign reasons a lineage does not originate stay silent. A
+        // private workspace has no peer to share with — that is not a decline
+        // the user has to hear about.
+        assert_eq!(append.sharing_declined, None);
     }
     supervisor.close(&db).expect("close actor");
 
@@ -471,7 +475,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
     assert_eq!(resumed.plaintext_string(), "alpha");
 
     let beta = resumed.plaintext_insert(5, " beta");
-    handle
+    let promoted = handle
         .ydoc_record_update(
             key.clone(),
             PATH.to_owned(),
@@ -487,6 +491,10 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
         )
         .await
         .expect("promoting edit");
+    // #632, the other half: a lineage that DOES originate reports no decline.
+    // MUTATION: report the decline unconditionally, or tighten
+    // `MAX_YDOC_UPDATE_BYTES` under a healthy document, and this fails.
+    assert_eq!(promoted.sharing_declined, None);
 
     // A later edit, journaled as a delta against the SAME lineage. Without it
     // a re-seeded base is undetectable: a fresh seed of the current text still
@@ -825,7 +833,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     enable_sync(&db, WS);
 
     let update = doc.plaintext_insert(0, "tiny");
-    handle
+    let append = handle
         .ydoc_record_update(
             key.clone(),
             PATH.to_owned(),
@@ -842,6 +850,36 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
         .await
         .expect("the promoting edit is accepted, not rolled back");
     supervisor.close(&db).expect("close actor");
+
+    // #632: the decline says WHY. It used to be `Ok(None)` — the same answer
+    // origination gives for "already claimed", "this workspace does not
+    // replicate", and "a dependency is unresolved" — so a document that had
+    // quietly stopped being shareable was indistinguishable from one that had
+    // nothing to do.
+    let declined = append
+        .sharing_declined
+        .expect("a lineage past the base cap declines OUT LOUD");
+    assert_eq!(declined.constraint, "MAX_YDOC_UPDATE_BYTES");
+    assert_eq!(
+        declined.limit_bytes,
+        dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+    );
+    assert!(
+        declined.observed_bytes > declined.limit_bytes,
+        "the refusal reports the size it measured: {declined:?}"
+    );
+    let named = declined.to_string();
+    for part in [
+        "MAX_YDOC_UPDATE_BYTES",
+        &declined.limit_bytes.to_string(),
+        &declined.observed_bytes.to_string(),
+        "bytes",
+    ] {
+        assert!(
+            named.contains(part),
+            "the refusal must name {part}: {named}"
+        );
+    }
 
     assert!(
         local_ops(&db).is_empty(),

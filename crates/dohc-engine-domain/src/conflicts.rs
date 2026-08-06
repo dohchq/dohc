@@ -5,9 +5,9 @@ use crate::records::{
     DeleteResult, DeleteTextFile, RenameResult, TextSnapshot, WriteResult, WriteText,
 };
 use crate::store::{
-    VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, moment_exists,
-    next_moment_order, record_request, validate_delete_input, validate_moment_id, validate_path,
-    validate_write_input, version_is_active, write_text_in_tx,
+    VersionedTextStore, bounded_identifier, delete_text_in_tx, hash_fields, lookup_request,
+    moment_exists, next_moment_order, record_request, validate_delete_input, validate_identifier,
+    validate_moment_id, validate_path, validate_write_input, version_is_active, write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -767,8 +767,18 @@ impl VersionedTextStore<'_> {
     where
         F: FnOnce(&Transaction<'_>, &ResolveTextConflictResult) -> Result<(), DomainError>,
     {
-        validate_path_like_id(&input.workspace_id, "workspace_id")?;
-        validate_path_like_id(&input.conflict_id, "conflict_id")?;
+        validate_identifier(&input.workspace_id, "workspace_id")?;
+        validate_identifier(&input.conflict_id, "conflict_id")?;
+        // The three identifiers this request contributes to its OWN answer.
+        // Each rides the write and delete blocks several times over
+        // (`resolve_answer_beside_conflict_bytes` counts twelve places), so an
+        // unbounded one turns a request inside its frame into an answer past
+        // it. Length only: a resolution that neither writes nor deletes never
+        // spends them, and the branches that do run them through
+        // `validate_write_input` / `validate_delete_input` (#654).
+        bounded_identifier(&input.object_id, "object_id")?;
+        bounded_identifier(&input.write_moment_id, "moment_id")?;
+        bounded_identifier(&input.delete_moment_id, "moment_id")?;
         let (resolution_kind, merged_text) = match &input.resolution {
             ResolveConflictKind::KeepCurrent => ("keep-current", ""),
             ResolveConflictKind::ApplyIncoming => ("apply-incoming", ""),
@@ -1182,9 +1192,9 @@ pub fn write_binary_file_in_tx(
             reason: "binary file path is not a normalized tracked path",
         });
     }
-    validate_path_like_id(&input.workspace_id, "workspace id must not be empty")?;
-    validate_path_like_id(&input.version_id, "version id must not be empty")?;
-    validate_path_like_id(&input.object_id, "object id must not be empty")?;
+    validate_identifier(&input.workspace_id, "workspace_id")?;
+    validate_identifier(&input.version_id, "version_id")?;
+    validate_identifier(&input.object_id, "object_id")?;
     validate_moment_id(&input.moment_id)?;
     if !has_binary_blob(tx, &input.binary_sha256)? {
         return Err(DomainError::InvalidInput {
@@ -1488,14 +1498,6 @@ fn delete_input(input: &ResolveTextConflict, version_id: &str, path: &str) -> De
         metadata_correlation_id: input.metadata_correlation_id.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,
-    }
-}
-
-fn validate_path_like_id(value: &str, reason: &'static str) -> Result<(), DomainError> {
-    if value.is_empty() {
-        Err(DomainError::InvalidInput { reason })
-    } else {
-        Ok(())
     }
 }
 

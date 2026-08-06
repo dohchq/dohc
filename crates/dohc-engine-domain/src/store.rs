@@ -28,8 +28,8 @@ use crate::records::{
     TextBlobRead, TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
 };
 use dohc_engine_storage::{
-    EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
-    enqueue_delete_job, enqueue_job, put_binary_blob,
+    EngineStore, FaultInjector, MAX_IDENTIFIER_BYTES, MaterializationJobSpec, Preimage,
+    StorageError, TxnOutcome, enqueue_delete_job, enqueue_job, put_binary_blob,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -74,8 +74,8 @@ impl<'a> VersionedTextStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<VersionRecord, DomainError> {
-        non_empty(workspace_id, "workspace_id")?;
-        non_empty(main_version_id, "version_id")?;
+        validate_identifier(workspace_id, "workspace_id")?;
+        validate_identifier(main_version_id, "version_id")?;
 
         if let Some(existing_main) = self
             .store
@@ -119,7 +119,7 @@ impl<'a> VersionedTextStore<'a> {
         &self,
         workspace_id: &str,
     ) -> Result<Option<VersionRecord>, DomainError> {
-        non_empty(workspace_id, "workspace_id")?;
+        validate_identifier(workspace_id, "workspace_id")?;
         self.store.read_with(|conn| {
             let row = conn
                 .query_row(
@@ -260,8 +260,8 @@ impl<'a> VersionedTextStore<'a> {
     where
         F: FnOnce(&Transaction<'_>, &RenameResult) -> Result<(), DomainError>,
     {
-        non_empty(&input.workspace_id, "workspace_id")?;
-        non_empty(&input.version_id, "version_id")?;
+        validate_identifier(&input.workspace_id, "workspace_id")?;
+        validate_identifier(&input.version_id, "version_id")?;
         validate_moment_id(&input.moment_id)?;
         let mut normalized_input = input.clone();
         normalized_input.from_path = validate_addressable_plaintext_path(&input.from_path)?;
@@ -448,9 +448,9 @@ impl<'a> VersionedTextStore<'a> {
     where
         F: FnOnce(&Transaction<'_>, &str, Option<(&str, &str)>) -> Result<(), DomainError>,
     {
-        non_empty(&input.workspace_id, "workspace_id")?;
-        non_empty(&input.version_id, "version_id")?;
-        non_empty(&input.mutation_moment_id, "moment_id")?;
+        validate_identifier(&input.workspace_id, "workspace_id")?;
+        validate_identifier(&input.version_id, "version_id")?;
+        validate_identifier(&input.mutation_moment_id, "moment_id")?;
         let mut normalized_input = input.clone();
         normalized_input.path = validate_addressable_plaintext_path(&input.path)?;
         let input = &normalized_input;
@@ -903,7 +903,7 @@ impl<'a> VersionedTextStore<'a> {
         sha256: &str,
         hydrate_over_cap: bool,
     ) -> Result<Option<BinaryBlobRead>, DomainError> {
-        non_empty(workspace_id, "workspace_id")?;
+        validate_identifier(workspace_id, "workspace_id")?;
         self.store.read_with(|conn| {
             let referenced: bool = conn
                 .query_row(
@@ -998,7 +998,7 @@ impl<'a> VersionedTextStore<'a> {
         sha256: &str,
         hydrate_over_cap: bool,
     ) -> Result<Option<TextBlobRead>, DomainError> {
-        non_empty(workspace_id, "workspace_id")?;
+        validate_identifier(workspace_id, "workspace_id")?;
         self.store.read_with(|conn| {
             let referenced: bool = conn
                 .query_row(
@@ -1649,9 +1649,9 @@ impl<'a> VersionedTextStore<'a> {
         &self,
         input: &CreateNamedVersion,
     ) -> Result<Option<VersionRecord>, DomainError> {
-        non_empty(&input.workspace_id, "workspace_id")?;
-        non_empty(&input.new_version_id, "version_id")?;
-        non_empty(&input.from_version_id, "version_id")?;
+        validate_identifier(&input.workspace_id, "workspace_id")?;
+        validate_identifier(&input.new_version_id, "version_id")?;
+        validate_identifier(&input.from_version_id, "version_id")?;
         if input.name.is_empty() || input.name.trim() != input.name {
             return Err(DomainError::InvalidVersionName);
         }
@@ -1711,9 +1711,9 @@ impl<'a> VersionedTextStore<'a> {
     where
         F: FnOnce(&Transaction<'_>, &VersionRecord) -> Result<(), DomainError>,
     {
-        non_empty(&input.workspace_id, "workspace_id")?;
-        non_empty(&input.new_version_id, "version_id")?;
-        non_empty(&input.from_version_id, "version_id")?;
+        validate_identifier(&input.workspace_id, "workspace_id")?;
+        validate_identifier(&input.new_version_id, "version_id")?;
+        validate_identifier(&input.from_version_id, "version_id")?;
         if input.name.is_empty() || input.name.trim() != input.name {
             return Err(DomainError::InvalidVersionName);
         }
@@ -1931,8 +1931,9 @@ pub(crate) struct RecordedRequest {
 /// Shared by direct writes and merge/resolve writes so plaintext never lands on
 /// a protected path via any route.
 fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
-    non_empty(&input.workspace_id, "workspace_id")?;
-    non_empty(&input.version_id, "version_id")?;
+    validate_identifier(&input.workspace_id, "workspace_id")?;
+    validate_identifier(&input.version_id, "version_id")?;
+    bounded_identifier(&input.object_id, "object_id")?;
     validate_moment_id(&input.moment_id)?;
     let mut normalized = input.clone();
     normalized.path = validate_plaintext_storable_path(&input.path)?;
@@ -1960,8 +1961,8 @@ fn reject_reserved_capture_origin(metadata_origin: &str) -> Result<(), DomainErr
 /// R07 addressable-plaintext floor (only an ignored path is rejected — an
 /// existing tracked or secret-shadowed file is still deletable).
 fn normalized_delete_input(input: &DeleteTextFile) -> Result<DeleteTextFile, DomainError> {
-    non_empty(&input.workspace_id, "workspace_id")?;
-    non_empty(&input.version_id, "version_id")?;
+    validate_identifier(&input.workspace_id, "workspace_id")?;
+    validate_identifier(&input.version_id, "version_id")?;
     validate_moment_id(&input.moment_id)?;
     let mut normalized = input.clone();
     normalized.path = validate_addressable_plaintext_path(&input.path)?;
@@ -1974,8 +1975,8 @@ pub fn validate_delete_input(input: &DeleteTextFile) -> Result<(), DomainError> 
 }
 
 fn normalized_capture_ingest(input: &CaptureIngest) -> Result<CaptureIngest, DomainError> {
-    non_empty(&input.workspace_id, "workspace_id")?;
-    non_empty(&input.version_id, "version_id")?;
+    validate_identifier(&input.workspace_id, "workspace_id")?;
+    validate_identifier(&input.version_id, "version_id")?;
     let mut normalized = input.clone();
     normalized.path = validate_plaintext_storable_path(&input.path)?;
     validate_text(&normalized.text)?;
@@ -1983,8 +1984,8 @@ fn normalized_capture_ingest(input: &CaptureIngest) -> Result<CaptureIngest, Dom
 }
 
 fn normalized_capture_retire(input: &CaptureRetire) -> Result<CaptureRetire, DomainError> {
-    non_empty(&input.workspace_id, "workspace_id")?;
-    non_empty(&input.version_id, "version_id")?;
+    validate_identifier(&input.workspace_id, "workspace_id")?;
+    validate_identifier(&input.version_id, "version_id")?;
     let mut normalized = input.clone();
     normalized.path = validate_addressable_plaintext_path(&input.path)?;
     Ok(normalized)
@@ -2318,8 +2319,8 @@ pub fn capture_ingest_binary_in_tx(
 ) -> Result<CaptureIngestBinaryResult, DomainError> {
     use crate::conflicts::{PersistBinaryHead, persist_binary_head_in_tx};
 
-    non_empty(&input.workspace_id, "workspace_id")?;
-    non_empty(&input.version_id, "version_id")?;
+    validate_identifier(&input.workspace_id, "workspace_id")?;
+    validate_identifier(&input.version_id, "version_id")?;
     let path = validate_plaintext_storable_path(&input.path)?;
     if input.bytes.len() > MAX_CAPTURE_BINARY_FILE_BYTES {
         return Err(DomainError::InvalidInput {
@@ -3021,8 +3022,9 @@ pub fn write_binary_in_tx(
     // primitive never routes through this fn, so the reservation cannot be
     // forged while capture keeps stamping its own origin.
     reject_reserved_capture_origin(&input.metadata_origin)?;
-    non_empty(&input.workspace_id, "workspace_id")?;
-    non_empty(&input.version_id, "version_id")?;
+    validate_identifier(&input.workspace_id, "workspace_id")?;
+    validate_identifier(&input.version_id, "version_id")?;
+    bounded_identifier(&input.object_id, "object_id")?;
     validate_moment_id(&input.moment_id)?;
     let path = validate_plaintext_storable_path(&input.path)?;
     if !version_exists(tx, &input.workspace_id, &input.version_id)? {
@@ -3714,22 +3716,42 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
     }
 }
 
-fn non_empty(value: &str, field: &'static str) -> Result<(), DomainError> {
+/// The domain's identifier door: non-empty and inside the engine-wide length
+/// bound. Every identifier the domain persists passes through here or through
+/// [`bounded_identifier`], so no route can store one an answer could not then
+/// carry (#654).
+pub(crate) fn validate_identifier(value: &str, field: &'static str) -> Result<(), DomainError> {
     if value.is_empty() {
-        Err(DomainError::InvalidInput {
+        return Err(DomainError::InvalidInput {
             reason: match field {
                 "workspace_id" => "workspace_id must not be empty",
                 "moment_id" => "moment_id must not be empty",
+                "object_id" => "object_id must not be empty",
+                "conflict_id" => "conflict_id must not be empty",
                 _ => "version_id must not be empty",
             },
-        })
-    } else {
-        Ok(())
+        });
     }
+    bounded_identifier(value, field)
+}
+
+/// The length half alone, for the identifiers a caller may legitimately leave
+/// empty: `object_id` is minted only when a write lands on an unaliased path,
+/// and the resolve moment ids are spent only by the branch that writes or
+/// deletes.
+pub(crate) fn bounded_identifier(value: &str, field: &'static str) -> Result<(), DomainError> {
+    if value.len() > MAX_IDENTIFIER_BYTES {
+        return Err(DomainError::IdentifierTooLong {
+            field,
+            limit_bytes: MAX_IDENTIFIER_BYTES,
+            observed_bytes: value.len(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_moment_id(value: &str) -> Result<(), DomainError> {
-    non_empty(value, "moment_id")?;
+    validate_identifier(value, "moment_id")?;
     if value.contains('\u{1f}') {
         return Err(DomainError::InvalidInput {
             reason: "moment_id contains a reserved character",

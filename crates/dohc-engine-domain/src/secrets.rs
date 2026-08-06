@@ -45,7 +45,7 @@
 use crate::error::DomainError;
 use crate::merge::VersionFileChangeStatus;
 use crate::records::{ApplySecretFileFromVersion, InbandSecret};
-use crate::store::validate_path;
+use crate::store::{validate_identifier, validate_path};
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -299,9 +299,9 @@ impl<'a> SecretFileStore<'a> {
         input: &SecretWrite,
         faults: &dyn FaultInjector,
     ) -> Result<SecretWriteResult, DomainError> {
-        non_empty(&input.workspace_id, "workspace_id")?;
-        non_empty(&input.version_id, "version_id")?;
-        non_empty(&input.moment_id, "moment_id")?;
+        validate_identifier(&input.workspace_id, "workspace_id")?;
+        validate_identifier(&input.version_id, "version_id")?;
+        validate_identifier(&input.moment_id, "moment_id")?;
         let path = validate_secret_path(&input.path)?;
         validate_text(&input.text)?;
         validate_origin(&input.metadata_origin)?;
@@ -418,8 +418,8 @@ impl<'a> SecretFileStore<'a> {
         input: &CaptureSecret,
         faults: &dyn FaultInjector,
     ) -> Result<SecretWriteResult, DomainError> {
-        non_empty(&input.workspace_id, "workspace_id")?;
-        non_empty(&input.version_id, "version_id")?;
+        validate_identifier(&input.workspace_id, "workspace_id")?;
+        validate_identifier(&input.version_id, "version_id")?;
         let path = validate_secret_path(&input.path)?;
         let ws = input.workspace_id.clone();
         // OWNERSHIP: a tip written any other way (API, replication) may
@@ -689,7 +689,7 @@ impl<'a> SecretFileStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<(), DomainError> {
-        non_empty(workspace_id, "workspace_id")?;
+        validate_identifier(workspace_id, "workspace_id")?;
         if from_version_id == to_version_id {
             return Err(DomainError::InvalidInput {
                 reason: "fork source and destination versions must differ",
@@ -765,7 +765,7 @@ pub fn fork_version_keyless(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<(), DomainError> {
-    non_empty(workspace_id, "workspace_id")?;
+    validate_identifier(workspace_id, "workspace_id")?;
     if from_version_id == to_version_id {
         return Err(DomainError::InvalidInput {
             reason: "fork source and destination versions must differ",
@@ -1070,10 +1070,10 @@ pub fn apply_secret_file_from_version(
         now_ms,
     } = input;
     let now_ms = *now_ms;
-    non_empty(workspace_id, "workspace_id")?;
-    non_empty(from_version_id, "version_id")?;
-    non_empty(to_version_id, "version_id")?;
-    non_empty(moment_id, "moment_id")?;
+    validate_identifier(workspace_id, "workspace_id")?;
+    validate_identifier(from_version_id, "version_id")?;
+    validate_identifier(to_version_id, "version_id")?;
+    validate_identifier(moment_id, "moment_id")?;
     validate_origin(metadata_origin)?;
     let path = validate_secret_path(path)?;
     let outcome = store.write_with(faults, |tx| {
@@ -1239,9 +1239,9 @@ pub fn restore_secret_file_verbatim_with_metadata(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<SecretRestoreResult, DomainError> {
-    non_empty(workspace_id, "workspace_id")?;
-    non_empty(before_moment_id, "moment_id")?;
-    non_empty(moment_id, "moment_id")?;
+    validate_identifier(workspace_id, "workspace_id")?;
+    validate_identifier(before_moment_id, "moment_id")?;
+    validate_identifier(moment_id, "moment_id")?;
     validate_origin(metadata_origin)?;
     let path = validate_secret_path(path)?;
     let outcome = store.write_with(faults, |tx| {
@@ -1378,9 +1378,9 @@ fn delete_secret_file_inner(
     disk_intent: SecretDeleteDiskIntent,
     faults: &dyn FaultInjector,
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
-    non_empty(&input.workspace_id, "workspace_id")?;
-    non_empty(&input.version_id, "version_id")?;
-    non_empty(&input.moment_id, "moment_id")?;
+    validate_identifier(&input.workspace_id, "workspace_id")?;
+    validate_identifier(&input.version_id, "version_id")?;
+    validate_identifier(&input.moment_id, "moment_id")?;
     let path = validate_secret_path(&input.path)?;
     validate_origin(&input.metadata_origin)?;
 
@@ -1488,8 +1488,8 @@ pub fn capture_secret_retire(
     input: &CaptureSecretRetire,
     faults: &dyn FaultInjector,
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
-    non_empty(&input.workspace_id, "workspace_id")?;
-    non_empty(&input.version_id, "version_id")?;
+    validate_identifier(&input.workspace_id, "workspace_id")?;
+    validate_identifier(&input.version_id, "version_id")?;
     let path = validate_secret_path(&input.path)?;
     let ws = input.workspace_id.clone();
     // OWNERSHIP: a disk-driven retire must never destroy a tip written any
@@ -1695,20 +1695,6 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
         TxnOutcome::Crashed { .. } => Err(DomainError::Storage(StorageError::persist_public(
             std::io::Error::other("crash fault fired before ack"),
         ))),
-    }
-}
-
-fn non_empty(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if value.is_empty() {
-        Err(DomainError::InvalidInput {
-            reason: match field {
-                "workspace_id" => "workspace_id must not be empty",
-                "moment_id" => "moment_id must not be empty",
-                _ => "version_id must not be empty",
-            },
-        })
-    } else {
-        Ok(())
     }
 }
 
