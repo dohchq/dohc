@@ -2,6 +2,7 @@ import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import {
   isDaemonReconnectError,
+  isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
 } from "../live/daemonLiveAdapter";
 import type { Event } from "./generated/Event";
@@ -654,10 +655,13 @@ export class YdocAdapterSession {
       // BEHIND the durable lineage. Resync (which returns the full drained
       // state) and settle exactly once more — the daemon refuses rather
       // than materializing content this editor never saw.
-      if (
-        error instanceof Error &&
-        error.message.includes("ydoc-remote-updates-pending")
-      ) {
+      //
+      // ONE retry, never a loop: a second refusal means peers are still
+      // outrunning this session, and that wants a backoff rather than a tight
+      // retry. It reaches the caller unchanged, and the caller's ladder owns
+      // it — as TRANSIENT, which only the typed discriminator says, because
+      // the wire code alone reads terminal.
+      if (isYdocRemoteUpdatesPendingRefusal(error)) {
         await this.resync();
         raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
       } else {

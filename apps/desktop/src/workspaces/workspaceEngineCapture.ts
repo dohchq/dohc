@@ -32,6 +32,7 @@ import {
   DaemonRefusalError,
   isConflictStaleTargetRefusal,
   isFileLockedRefusal,
+  isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
   YdocReleasedWithSettleFailureError,
   type EngineYdocProviderSession,
@@ -642,6 +643,17 @@ function isFileLockedCause(error: unknown): boolean {
 // left to wait for.
 function isConflictStaleTargetCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isConflictStaleTargetRefusal);
+}
+
+// Peers outran this settle: remote edits drained under the session's lease, so
+// the engine refuses rather than materializing a projection this session never
+// saw. The adapter already resynced and settled once (`YdocLiveAdapter.settle`);
+// a second refusal means the race is still on, and the answer to a race is to
+// wait and try again. It rides the same INVALID_PARAMS/`retry: "no"` shape as a
+// terminal refusal, so only this discriminator keeps the ladder from cancelling
+// a write that would have landed (#650).
+function isRemoteUpdatesPendingCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, isYdocRemoteUpdatesPendingRefusal);
 }
 
 // The wire's own "do not try again" (`retry: no`). Read from a SETTLE, that is
@@ -3221,6 +3233,14 @@ export function createWorkspaceEngineCapture(
         let settleCovers = -1;
         const writeIsProven = (): boolean => settleCovers === updateSeq;
 
+        // Whether the LAST settle answered `materialized: false`. That answer
+        // has one producer: the materialization job was BLOCKED because the
+        // path or an ancestor is a symlink (`JobOutcome::Blocked` <-
+        // `MaterializeError::SymlinkTarget`). Waiting does not restore
+        // containment, so this belongs with the terminal settle refusals, not
+        // with the transient ones the ladder exists to outlast (#651).
+        let targetBlocked = false;
+
         // L's holder: a session the daemon refused to release. Assigned only
         // where a close fails, cleared only where a close succeeds.
         let pendingRelease: WorkspaceEngineYDocProviderSession | null = null;
@@ -3264,6 +3284,14 @@ export function createWorkspaceEngineCapture(
           }
           armDetachedLockedRetry();
         };
+
+        // The one stand-down a clean settle can earn. Named separately because
+        // both discharge paths reach it and the user's next step is the same
+        // from either.
+        const standDownFromBlockedTarget = (): void =>
+          standDownFromWrite(
+            `locked-write retry stopped: the engine committed the settle but did not write ${input.path}. The path or a folder above it is a symlink, and dohc does not write through symlinks. The edits stay in the document's history — replace the symlink with a real folder, then open ${input.path} to write it again.`,
+          );
 
         const payDetachedLockedDebt = async (): Promise<void> => {
           // Another edge may have paid, transferred, or CANCELLED this debt
@@ -3317,6 +3345,11 @@ export function createWorkspaceEngineCapture(
               settleFailure = error;
               throw error;
             }
+            // Assigned on EVERY settle, never only on a blocked one: a
+            // retained session's refused release can re-arm the ladder between
+            // two settles, and a stale yes would stand it down over the settle
+            // that finally wrote.
+            targetBlocked = !result.materialized;
             if (result.materialized) settleCovers = covers;
           };
           try {
@@ -3339,12 +3372,20 @@ export function createWorkspaceEngineCapture(
               // debt (a still-held lock re-arms; anything else reports and
               // re-arms like every other unproven attempt).
               await settleForProof(live.session);
+              // Asked BEFORE the proof: a blocked target is a definite answer
+              // about this write, and `settleCovers` can still hold an earlier
+              // settle's yes.
+              if (targetBlocked) {
+                standDownFromBlockedTarget();
+                return;
+              }
               if (writeIsProven()) {
                 detachedLockedDebts.delete(input.path);
                 return;
               }
-              // The handoff settled without writing the artifact. Nothing
-              // moved, so nothing is discharged.
+              // The handoff settled, but over a projection it did not carry.
+              // Nothing is discharged; the next attempt settles the newer
+              // state.
               armDetachedLockedRetry();
               return;
             }
@@ -3422,6 +3463,12 @@ export function createWorkspaceEngineCapture(
                 throw closeError;
               }
             }
+            if (targetBlocked) {
+              // Same order as the handoff above: a blocked target answers this
+              // write before any proof is consulted.
+              standDownFromBlockedTarget();
+              return;
+            }
             if (!writeIsProven()) {
               // The close returned Ok, but about a projection this settle
               // never carried. That is proof of the RELEASE, not of the
@@ -3440,7 +3487,10 @@ export function createWorkspaceEngineCapture(
               // would only schedule a timer that stands down.
               return;
             }
-            if (isFileLockedCause(retryError)) {
+            if (
+              isFileLockedCause(retryError) ||
+              isRemoteUpdatesPendingCause(retryError)
+            ) {
               armDetachedLockedRetry();
               return;
             }
