@@ -65,14 +65,6 @@ describe("main-process chat authorization", () => {
     expect(handlerSource("markChatThreadRead")).toContain(
       "await assertSharedChannelWritable({",
     );
-
-    // These read-shaped calls can write viewer/sync state. Their shared-view
-    // behavior is deliberately a no-op rather than a rejected background call.
-    expect(handlerSource("markPersonalChatFeedSeen")).toContain(
-      "markPersonalFeedSeenReadOnlySafe",
-    );
-    expect(handlerSource("syncDms")).toContain("createReadAwareChatIpcHandler({");
-    expect(handlerSource("syncDms")).toContain("if (relay && !readOnly)");
   });
 
   it("gates every chat dispatch IPC on the workspace engine capture", () => {
@@ -336,5 +328,33 @@ describe("main-process chat authorization", () => {
     const autoRefusalAt = autoJoin.indexOf("joinedSharedChannelLimitRefusal(");
     expect(autoRefusalAt).toBeGreaterThan(-1);
     expect(autoRefusalAt).toBeLessThan(autoJoin.indexOf("claimDmHome("));
+  });
+
+  // #627 deleted the read-only chat plumbing because these five handlers sit
+  // behind requireEngineCapture, which throws for share views. That gate is
+  // now the only barrier between a share view and their full read/write
+  // paths, so its position is pinned: capture first, stores and sync after.
+  it("acquires the Chats engine capture before any store or sync seam", () => {
+    const gated = [
+      "listChatChannels",
+      "listChatFollows",
+      "listPersonalChatFeed",
+      "markPersonalChatFeedSeen",
+      "syncDms",
+    ];
+
+    for (const channel of gated) {
+      const handler = handlerSource(channel);
+      const captureAt = handler.indexOf("await requireEngineCapture(");
+      expect(captureAt, channel).toBeGreaterThan(-1);
+      const captureCall = handler.slice(captureAt, handler.indexOf(");", captureAt));
+      expect(captureCall, channel).toContain('"Chats"');
+
+      const seamAts = ["linkedChatStoreFor(", "syncWorkspaceSharedChannels("]
+        .map((seam) => handler.indexOf(seam))
+        .filter((at) => at >= 0);
+      expect(seamAts.length, channel).toBeGreaterThan(0);
+      expect(Math.min(...seamAts), channel).toBeGreaterThan(captureAt);
+    }
   });
 });

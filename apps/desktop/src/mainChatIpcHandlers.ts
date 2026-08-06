@@ -45,26 +45,6 @@ export function createWritableChatIpcHandler<
   };
 }
 
-export function createReadAwareChatIpcHandler<
-  Event,
-  Payload extends WorkspacePayload,
-  Context extends WorkspaceContext,
-  Result,
->(input: {
-  assertTrustedSender: (event: Event) => void;
-  parsePayload: (payload: unknown) => Payload;
-  requireContext: (workspaceId: string) => Promise<Context>;
-  isReadOnly: (workspace: Context["workspace"]) => boolean;
-  run: (context: Context, payload: Payload, readOnly: boolean) => Promise<Result>;
-}): MainChatIpcHandler<Event, Result> {
-  return async (event, rawPayload) => {
-    input.assertTrustedSender(event);
-    const payload = input.parsePayload(rawPayload);
-    const context = await input.requireContext(payload.workspaceId);
-    return input.run(context, payload, input.isReadOnly(context.workspace));
-  };
-}
-
 export function createChatChannelIpcHandler<
   Event,
   Payload extends WorkspacePayload,

@@ -358,7 +358,6 @@ import {
   awaitCredentialGeneration,
   chatViewerAuthorId,
   createChatChannelIpcHandler,
-  createReadAwareChatIpcHandler,
   createSharedChannelWritableChatIpcHandler,
   chatShareSessionKey,
   createSetChatReactionIpcHandler,
@@ -522,11 +521,6 @@ import {
   findWorkspaceHeading,
   workspaceHeadingRecords,
 } from "./workspaces/workspaceHeadings";
-import {
-  listChatChannelsReadOnlySafe,
-  listChatFollowsReadOnlySafe,
-  markPersonalFeedSeenReadOnlySafe,
-} from "./workspaces/chatFollowAccess";
 import { addChatMentionsToWorkspaceGraph } from "./workspaces/chatMentionGraphOverlay";
 import {
   resolveChatFileMentionPath,
@@ -6401,15 +6395,9 @@ function registerIpcHandlers(
     // fast and the local rows answer.
     await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
-    // First chat use auto-creates General only for an owned workspace. Merely
-    // listing a shared view is read-only and must not seed durable state.
-    const channels = await listChatChannelsReadOnlySafe({
-      readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
-      seedGeneral: async () => {
-        await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
-      },
-      list: () => store.listChannels({ workspaceId: workspace.workspaceId }),
-    });
+    // First chat use auto-creates General.
+    await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
+    const channels = await store.listChannels({ workspaceId: workspace.workspaceId });
     // Wire identities let the renderer match channels against share grants.
     const wireIdEntries = await Promise.all(
       channels.map(async (channel) => [
@@ -6479,16 +6467,13 @@ function registerIpcHandlers(
     await warmCredentialCache();
     const store = linkedChatStoreFor(workspace);
     const ownerUserId = localUserId();
-    const follows = await listChatFollowsReadOnlySafe({
-      readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
-      seedDefaults: () => store.ensureDefaultChannelFollows({
-        workspaceId: workspace.workspaceId,
-        ownerUserId,
-      }),
-      list: () => store.listFollows({
-        workspaceId: workspace.workspaceId,
-        ownerUserId,
-      }),
+    await store.ensureDefaultChannelFollows({
+      workspaceId: workspace.workspaceId,
+      ownerUserId,
+    });
+    const follows = await store.listFollows({
+      workspaceId: workspace.workspaceId,
+      ownerUserId,
     });
     return ListChatFollowsResult.parse({ follows: follows.map(chatFollowForIpc) });
   });
@@ -6558,12 +6543,10 @@ function registerIpcHandlers(
     await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
     const ownerUserId = localUserId();
-    if (!sharedViewOf(workspace.workspaceId)) {
-      await store.ensureDefaultChannelFollows({
-        workspaceId: workspace.workspaceId,
-        ownerUserId,
-      });
-    }
+    await store.ensureDefaultChannelFollows({
+      workspaceId: workspace.workspaceId,
+      ownerUserId,
+    });
     const page = await store.listPersonalFeed({
       workspaceId: workspace.workspaceId,
       ownerUserId,
@@ -6622,36 +6605,27 @@ function registerIpcHandlers(
     });
   });
 
-  ipcMain.handle(
-    CHANNELS.markPersonalChatFeedSeen,
-    createReadAwareChatIpcHandler({
-      assertTrustedSender,
-      parsePayload: (payload) => MarkPersonalChatFeedSeenPayload.parse(payload),
-      requireContext: (workspaceId) =>
-        requireEngineCapture(workspaceId, "Chats"),
-      isReadOnly: (workspace) => Boolean(sharedViewOf(workspace.workspaceId)),
-      run: async ({ workspace }, input, readOnly) => {
-        await markPersonalFeedSeenReadOnlySafe({
-          readOnly,
-          mark: async () => {
-            await warmCredentialCache();
-            const ownerUserId = localUserId();
-            const replicationOwnerUserId = resolveWorkspaceRelayAuthorId(
-              workspace,
-              cachedCredentials,
-            );
-            await linkedChatStoreFor(workspace).markPersonalFeedSeen({
-              workspaceId: workspace.workspaceId,
-              ownerUserId,
-              ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
-              headCursor: input.headCursor,
-            });
-            if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
-          },
-        });
-      },
-    }),
-  );
+  ipcMain.handle(CHANNELS.markPersonalChatFeedSeen, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = MarkPersonalChatFeedSeenPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats",
+    );
+    await warmCredentialCache();
+    const ownerUserId = localUserId();
+    const replicationOwnerUserId = resolveWorkspaceRelayAuthorId(
+      workspace,
+      cachedCredentials,
+    );
+    await linkedChatStoreFor(workspace).markPersonalFeedSeen({
+      workspaceId: workspace.workspaceId,
+      ownerUserId,
+      ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
+      headCursor: input.headCursor,
+    });
+    if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
+  });
 
   ipcMain.handle(
     CHANNELS.createChatChannel,
@@ -7094,48 +7068,41 @@ function registerIpcHandlers(
   // Reconcile DM state with the relay and return the workspace's DM list.
   // Called by the renderer on Chats mount + a gentle poll while visible; the
   // network part degrades silently offline (local list still serves).
-  ipcMain.handle(
-    CHANNELS.syncDms,
-    createReadAwareChatIpcHandler({
-      assertTrustedSender,
-      parsePayload: (payload) => SyncDmsPayload.parse(payload),
-      requireContext: (workspaceId) =>
-        requireEngineCapture(workspaceId, "Chats"),
-      isReadOnly: (workspace) => Boolean(sharedViewOf(workspace.workspaceId)),
-      run: async ({ workspace }, _input, readOnly) => {
-        await warmCredentialCache();
-        const relay = dmRelayConnection();
-        const store = linkedChatStoreFor(workspace);
-        // The read-shaped DM refresh can auto-join grants and push journal ops.
-        // Shared views may list their existing local rows, but never run those
-        // durable reconciliation steps.
-        if (relay && !readOnly) {
-          try {
-            // Born-shared auto-join: discover + join received DM grants.
-            await autoJoinReceivedDms(workspace, relay);
-            // Push the member's local ops, pull everyone else's, for every joined
-            // DM (and any other joined shared channel).
-            await syncWorkspaceSharedChannels(workspace.workspaceId);
-            // Owner-side liveness: members' ops land in THIS workspace's own relay
-            // bucket; nudge the (debounced) sync engine so they arrive without
-            // waiting for an unrelated file edit. No-op when the workspace has no
-            // cloud engine.
-            activity.queueCloudSync(workspace.workspaceId);
-          } catch (error) {
-            // Offline degradation: never a crash, never a blocked Chats view — the
-            // local DM list still serves and the next pass retries.
-            console.error(`[desktop] DM sync failed for ${workspace.rootPath}:`, error);
-          }
-        }
-        const dms = await listDmRecords({
-          workspaceId: workspace.workspaceId,
-          store,
-          sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
-        });
-        return SyncDmsResult.parse({ available: relay !== null, dms: dms.map(dmRecordForIpc) });
-      },
-    }),
-  );
+  ipcMain.handle(CHANNELS.syncDms, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SyncDmsPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats",
+    );
+    await warmCredentialCache();
+    const relay = dmRelayConnection();
+    const store = linkedChatStoreFor(workspace);
+    if (relay) {
+      try {
+        // Born-shared auto-join: discover + join received DM grants.
+        await autoJoinReceivedDms(workspace, relay);
+        // Push the member's local ops, pull everyone else's, for every joined
+        // DM (and any other joined shared channel).
+        await syncWorkspaceSharedChannels(workspace.workspaceId);
+        // Owner-side liveness: members' ops land in THIS workspace's own relay
+        // bucket; nudge the (debounced) sync engine so they arrive without
+        // waiting for an unrelated file edit. No-op when the workspace has no
+        // cloud engine.
+        activity.queueCloudSync(workspace.workspaceId);
+      } catch (error) {
+        // Offline degradation: never a crash, never a blocked Chats view — the
+        // local DM list still serves and the next pass retries.
+        console.error(`[desktop] DM sync failed for ${workspace.rootPath}:`, error);
+      }
+    }
+    const dms = await listDmRecords({
+      workspaceId: workspace.workspaceId,
+      store,
+      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
+    });
+    return SyncDmsResult.parse({ available: relay !== null, dms: dms.map(dmRecordForIpc) });
+  });
 
   // Start (or continue) a DM: dedupe by recipient set, ensure one live grant
   // per recipient, and send the first message into the single running thread.
