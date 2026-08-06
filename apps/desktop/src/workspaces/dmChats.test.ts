@@ -1,5 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { CHATS_METHOD, ChatsLoopbackEngine, type Request } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,7 +14,7 @@ import {
 } from "./dmChats";
 import type { JoinedSharedChannel } from "./registryStore";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 
 // WS-MU-C3 — the desktop DM orchestration: role derivation (owner vs
 // participant), display labels, and connected-state — all sourced from the
@@ -30,7 +29,7 @@ async function makeStore(): Promise<{
   loopback: ChatsLoopbackEngine;
   seed: (request: Omit<Request, "id" | "workspace">) => Promise<void>;
 }> {
-  const root = await mkdtemp(join(nativeTmpdir(), "dohc-dm-desktop-"));
+  const root = await createTestScratch("dohc-dm-desktop-");
   roots.push(root);
   const loopback = new ChatsLoopbackEngine();
   const client = {

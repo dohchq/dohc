@@ -1,13 +1,13 @@
-import { mkdtemp, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createWorkspaceFolder, resetFailedJoinFolder } from "./createWorkspaceFolder";
+import { createTestScratch } from "./testTemp";
 
 let base: string;
 
 beforeEach(async () => {
-  base = await mkdtemp(join(tmpdir(), "dohc-create-"));
+  base = await createTestScratch("dohc-create-");
 });
 
 describe("createWorkspaceFolder", () => {

@@ -3,13 +3,13 @@ import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
@@ -47,7 +47,7 @@ import * as Y from "yjs";
 const roots: string[] = [];
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-capture-"));
+  const root = await createTestScratch("dohc-engine-capture-");
   roots.push(root);
   return root;
 }

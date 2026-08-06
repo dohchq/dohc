@@ -1,7 +1,6 @@
 import { databaseOpLogPath } from "@dohc/workspace-core";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -9,6 +8,7 @@ import {
   siteSdkWorkspacePath,
   type SiteSdkSearchStarter,
 } from "./siteSdkHost";
+import { createTestScratch } from "./testTemp";
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 async function workspace() {
-  const root = await mkdtemp(join(tmpdir(), "dohc-site-sdk-"));
+  const root = await createTestScratch("dohc-site-sdk-");
   roots.push(root);
   await mkdir(join(root, "notes"), { recursive: true });
   await writeFile(join(root, "notes", "today.md"), "hello from dohc\n");

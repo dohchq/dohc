@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import {
   discoverSiteRoots,
   getSitePackage,
@@ -17,7 +17,7 @@ import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 let root: string;
 
 beforeEach(async () => {
-  root = await mkdtemp(join(nativeTmpdir(), "dohc-site-packages-"));
+  root = await createTestScratch("dohc-site-packages-");
 });
 
 afterEach(async () => {

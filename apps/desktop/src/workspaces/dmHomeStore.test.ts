@@ -1,9 +1,9 @@
 import { chmodSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { claimDmHome, readDmHome, readDmHomes } from "./dmHomeStore";
+import { createTestScratch } from "./testTemp";
 
 // WS-MU-C3 cross-workspace DM contamination fix: a received DM is pinned to
 // EXACTLY ONE local workspace so it can't be materialized into every workspace
@@ -13,7 +13,7 @@ let dir = "";
 const file = () => join(dir, "dohc-dm-homes.json");
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), "dohc-dm-home-"));
+  dir = await createTestScratch("dohc-dm-home-");
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });

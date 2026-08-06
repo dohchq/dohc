@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { killChildTreeWin32, resolveSpawnCommand } from "./windowsSpawn";
+import { createTestScratch } from "../workspaces/testTemp";
 
 // Teardown retries rmdir against asynchronously-released Windows handles, so the
 // hook needs room for the backoff (#372).
@@ -35,7 +35,7 @@ afterEach(async () => {
 });
 
 async function tempDir(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "dohc-windows-spawn-"));
+  const dir = await createTestScratch("dohc-windows-spawn-");
   tempRoots.push(dir);
   return dir;
 }

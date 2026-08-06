@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -6,7 +6,7 @@ import {
   type CloudCredentials,
   type TokenCipher,
 } from "./cloudCredentialStore";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 
 // Stands in for safeStorage: reversible, with a marker so decrypt() can
 // reject ciphertext it did not produce (a foreign keychain's token).
@@ -30,7 +30,7 @@ const credentials: CloudCredentials = {
 let dir: string;
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(nativeTmpdir(), "dohc-cloud-"));
+  dir = await createTestScratch("dohc-cloud-");
 });
 
 function credentialFile(): string {

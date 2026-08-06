@@ -387,17 +387,11 @@ fn to_hex(digest: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("dohc-hashtest-{}-{tag}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
-    }
+    use dohc_test_scratch::ScratchDir;
 
     #[test]
     fn worker_panic_fails_closed_without_wedging() {
-        let dir = temp_dir("panic");
+        let dir = ScratchDir::new_named("hashtest-panic").expect("temp dir");
         for i in 0..6 {
             std::fs::write(dir.join(format!("f{i}.txt")), b"data").expect("write");
         }
@@ -429,7 +423,6 @@ mod tests {
             Ok(true),
             "a panicking hash worker must fail closed (PoolUnavailable) in bounded time, not hang"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -437,7 +430,7 @@ mod tests {
         // A file larger than the pool's cap is abandoned mid-stream and
         // classified OverCap — the defense against a file that grew past the cap
         // after enumeration measured it under the cap.
-        let dir = temp_dir("overcap");
+        let dir = ScratchDir::new_named("hashtest-overcap").expect("temp dir");
         std::fs::write(dir.join("big.bin"), vec![b'z'; 10_000]).expect("write");
         std::fs::write(dir.join("small.bin"), b"tiny").expect("write");
 

@@ -1035,15 +1035,9 @@ fn rss_drain_delta(start: Option<u64>, end: Option<u64>) -> Option<i64> {
 
 // ----------------------------------------------------------------- scenarios
 
-fn make_root(tag: &str, seq: u64) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let mut root = std::env::temp_dir();
-    root.push(format!(
-        "dohc-soak-{tag}-{}-{}-{seq}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&root).expect("mkdir root");
+fn make_root(tag: &str, seq: u64) -> dohc_test_scratch::ScratchDir {
+    let root =
+        dohc_test_scratch::ScratchDir::new_named(&format!("soak-{tag}-{seq}")).expect("mkdir root");
     write_shadow_marker_for_harness(&root, TOKEN).expect("shadow marker");
     root
 }

@@ -1,11 +1,11 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import { captureForFlaggedWorkspace } from "./engineCaptureGate";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import { createTestScratch } from "./testTemp";
 
 // The shared-view pin drives the REAL gate, which never reaches the engine
 // for a shared view — these sessions prove it by throwing on any use.
@@ -25,7 +25,7 @@ const engineUnreachableSessions = new Proxy({} as EngineWorkspaceSessions, {
 let root: string;
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "dohc-activity-"));
+  root = await createTestScratch("dohc-activity-");
 });
 
 afterEach(async () => {

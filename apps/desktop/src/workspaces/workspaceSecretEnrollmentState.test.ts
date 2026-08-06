@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   SECRET_FILE_STORE_RELATIVE_PATH,
@@ -19,6 +18,7 @@ import {
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,
 } from "./workspaceSecretEnrollmentState";
+import { createTestScratch } from "./testTemp";
 
 const WORKSPACE_ID = "workspace-secret-enrollment-state";
 const roots: string[] = [];
@@ -30,7 +30,7 @@ afterEach(async () => {
 });
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-secret-enrollment-"));
+  const root = await createTestScratch("dohc-secret-enrollment-");
   roots.push(root);
   return root;
 }
@@ -109,7 +109,7 @@ describe("desktop workspace secret enrollment state", () => {
   // The relay route table is keyed by the registry's rootPath as an EXACT
   // string, and registry paths are forward-slashed even on Windows. A
   // `resolve()`d copy reaches the daemon as backslashes, misses the route, and
-  // opens the workspace with no relay configuration. mkdtemp already returns
+  // opens the workspace with no relay configuration. The scratch helper returns
   // native separators, so only a deliberately forward-slashed root shows this.
   it("opens the daemon with the caller's rootPath spelling, not a resolved copy", async () => {
     const root = await tempRoot();

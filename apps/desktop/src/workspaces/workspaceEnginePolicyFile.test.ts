@@ -1,9 +1,9 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy";
 import type { TextFileSnapshot } from "@dohc/workspace-contracts/engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import {
   readWorkspaceEnginePolicy,
   resolveEngineSearchPolicy,
@@ -100,7 +100,7 @@ describe("readWorkspaceEnginePolicy + resolveEngineSearchPolicy (fail closed end
   let root: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-policy-"));
+    root = await createTestScratch("dohc-engine-policy-");
   });
 
   afterEach(async () => {

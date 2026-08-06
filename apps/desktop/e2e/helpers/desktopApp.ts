@@ -45,11 +45,11 @@ function requireBuiltDesktopApp(): void {
 // relaunch inside one spec reuses that spec's profile on purpose, exactly as a
 // user relaunching the app keeps theirs.
 //
-// The sandbox is already unique per run (mkdtemp under the OS temp dir) and
+// The sandbox is already unique per run under the test scratch root and
 // its teardown already survives Windows' refusal to unlink an open file:
-// removeTempTree retries EBUSY/EPERM, and cleanupDesktopWorkspace logs a
-// failure rather than failing the spec. A leaked profile under the temp dir
-// costs disk; a shared one costs the run (#530).
+// removeTestScratch retries EBUSY/EPERM, and cleanupDesktopWorkspace logs a
+// failure rather than failing the spec. A leaked profile under the scratch run
+// root costs disk until the sweep; a shared one costs the run (#530).
 async function createUserDataDir(
   workspace: Pick<TempWorkspace, "baseDir">,
 ): Promise<string> {

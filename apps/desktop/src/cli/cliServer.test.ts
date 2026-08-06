@@ -1,11 +1,4 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 import {
@@ -33,7 +26,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
-import { nativeTmpdir } from "../workspaces/testTemp";
+import { createTestScratch } from "../workspaces/testTemp";
 import {
   CLI_ENDPOINT_FILE,
   CLI_SOCKET_FILE,
@@ -233,7 +226,7 @@ describe("CLI socket server", () => {
   }
 
   beforeEach(async () => {
-    tempRoot = await mkdtemp(join(nativeTmpdir(), "dohc-cli-server-"));
+    tempRoot = await createTestScratch("dohc-cli-server-");
     workspaceRoot = join(tempRoot, "workspace");
     stateDir = join(tempRoot, "state");
     await Promise.all([

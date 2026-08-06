@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // test deadline goes to 15s (~6x measured); the cancel ceilings and their
 // widened timeout bands are documented at the tests.
 vi.setConfig({ testTimeout: 15_000 });
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import {
   assertLoopbackOnlyDevServerCommand,
   buildSite,
@@ -27,7 +27,7 @@ import {
 let root: string;
 
 beforeEach(async () => {
-  root = await mkdtemp(join(nativeTmpdir(), "dohc-sites-"));
+  root = await createTestScratch("dohc-sites-");
 });
 
 afterEach(async () => {

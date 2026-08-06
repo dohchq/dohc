@@ -79,6 +79,12 @@ struct ScanFixture {
 }
 
 #[derive(Debug, Deserialize)]
+struct PathFloorVector {
+    path: String,
+    classification: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct FxScanExpected {
     files: Vec<FxMeta>,
 }
@@ -501,17 +507,21 @@ fn extended_trace_covers_all_divergence_prone_paths() {
 
 #[test]
 fn policy_classifier_matches_the_ts_secret_floor_fixture() {
-    let cases = [
-        ("notes/today.md", PathClassification::Tracked),
-        (".env", PathClassification::Secret),
-        ("config/.env.production", PathClassification::Secret),
-        ("secrets%252eenv", PathClassification::Secret),
-        ("secret.env ", PathClassification::Secret),
-        (".dohc/engine/engine.db", PathClassification::Ignored),
-        ("notes/DOHC~1/x.md", PathClassification::Ignored),
-        ("../escape.md", PathClassification::Ignored),
-    ];
-    for (path, expected) in cases {
-        assert_eq!(classify_engine_file_path(path), expected, "{path}");
+    let cases: Vec<PathFloorVector> =
+        serde_json::from_str(include_str!("fixtures/path-floor.json"))
+            .expect("generated path-floor fixture parses");
+    for case in cases {
+        let expected = match case.classification.as_str() {
+            "tracked" => PathClassification::Tracked,
+            "secret" => PathClassification::Secret,
+            "ignored" => PathClassification::Ignored,
+            other => panic!("unexpected TS fixture class {other} for {}", case.path),
+        };
+        assert_eq!(
+            classify_engine_file_path(&case.path),
+            expected,
+            "write floor disagrees with the TypeScript oracle for {}",
+            case.path
+        );
     }
 }

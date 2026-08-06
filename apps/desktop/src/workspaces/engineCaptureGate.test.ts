@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,6 +17,7 @@ import {
   WORKSPACE_SETTINGS_FILE,
   writeWorkspaceSettingsFile,
 } from "./workspaceSettingsFile";
+import { createTestScratch } from "./testTemp";
 
 // The gate now REQUIRES daemon sessions, matching production, where main.ts
 // quits the app if the daemon does not start. These tests only assert null vs
@@ -35,7 +36,7 @@ const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(tempBase, "dohc-engine-gate-"));
+  const root = await createTestScratch("dohc-engine-gate-");
   roots.push(root);
   return root;
 }

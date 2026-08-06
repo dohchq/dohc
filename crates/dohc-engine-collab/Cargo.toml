@@ -46,6 +46,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
+dohc-test-scratch = { path = "../dohc-test-scratch" }
 # Decoding the base64 real-yjs fixture blobs in the cross-engine tests.
 base64 = "0.22"
 # `MAX_TEXT_BYTES` — the largest document body the store accepts, which is what

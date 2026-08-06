@@ -1,0 +1,66 @@
+[
+  {
+    "path": "notes/today.md",
+    "classification": "tracked"
+  },
+  {
+    "path": ".env",
+    "classification": "secret"
+  },
+  {
+    "path": "secrets/.env/nested.md",
+    "classification": "secret"
+  },
+  {
+    "path": "deploy/prod.env",
+    "classification": "secret"
+  },
+  {
+    "path": "config/.env.local",
+    "classification": "secret"
+  },
+  {
+    "path": "deploy/PROD.ENV",
+    "classification": "secret"
+  },
+  {
+    "path": "config/.ENV.LOCAL",
+    "classification": "secret"
+  },
+  {
+    "path": "secret.env ",
+    "classification": "secret"
+  },
+  {
+    "path": "config/.env.local. ",
+    "classification": "secret"
+  },
+  {
+    "path": "secrets%252eenv",
+    "classification": "secret"
+  },
+  {
+    "path": ".dohc/engine/engine.db",
+    "classification": "ignored"
+  },
+  {
+    "path": "notes/DOHC~1/x.md",
+    "classification": "ignored"
+  },
+  {
+    "path": "../escape.md",
+    "classification": "ignored"
+  },
+  {
+    "path": ".envrc",
+    "classification": "tracked"
+  },
+  {
+    "path": "notes/envelope.md",
+    "classification": "tracked"
+  },
+  {
+    "path": "notes/env/config.md",
+    "classification": "tracked"
+  }
+]

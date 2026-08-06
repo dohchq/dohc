@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -8,6 +7,7 @@ import {
   installWorkspaceDataKey,
   loadSecretDataKey,
 } from "./workspaceDataKey";
+import { createTestScratch } from "./testTemp";
 
 const roots: string[] = [];
 
@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-desktop-data-key-"));
+  const root = await createTestScratch("dohc-desktop-data-key-");
   roots.push(root);
   return root;
 }

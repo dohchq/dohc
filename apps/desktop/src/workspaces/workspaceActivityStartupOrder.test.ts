@@ -1,11 +1,11 @@
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
@@ -27,7 +27,7 @@ const WORKSPACE_ID = "activity-startup-order";
 const roots: string[] = [];
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(nativeTmpdir(), "dohc-activity-order-"));
+  const root = await createTestScratch("dohc-activity-order-");
   roots.push(root);
   return root;
 }

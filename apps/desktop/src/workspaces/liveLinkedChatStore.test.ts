@@ -2,16 +2,15 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterAll, describe, expect, it } from "vitest";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
+import { createSuiteTestScratchSync } from "./testTemp";
 
 // prepareWorkspace lstats the workspace root and requires a real directory, so a
 // synthetic path fails ENOENT on every platform.
-const chatReadyRoot = mkdtempSync(join(tmpdir(), "dohc-chat-ready-"));
+const chatReadyRoot = createSuiteTestScratchSync("dohc-chat-ready-");
 
 afterAll(() => {
   rmSync(chatReadyRoot, { recursive: true, force: true });

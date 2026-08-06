@@ -1,5 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -14,6 +13,7 @@ import {
 // store produces: one rule, and the surfaces that show the warning read it
 // from the same place.
 import { hasUnacknowledgedShareSkips } from "../renderer/shareSkipNotice";
+import { createTestScratch } from "./testTemp";
 
 let store: ReturnType<typeof createRegistryStore>;
 let registryPath: string;
@@ -26,7 +26,7 @@ const personal = {
 };
 
 beforeEach(async () => {
-  const dir = await mkdtemp(join(tmpdir(), "dohc-registry-"));
+  const dir = await createTestScratch("dohc-registry-");
   registryPath = join(dir, "workspaces.json");
   store = createRegistryStore(registryPath);
 });

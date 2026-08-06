@@ -972,7 +972,6 @@ mod crash {
                 "no duplicate append"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1006,7 +1005,6 @@ mod crash {
             assert!(matches!(retry, TxnOutcome::Committed(a) if !a.deduped));
             assert_eq!(count(&store, "ydoc_updates", &key), 1);
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1051,6 +1049,5 @@ mod crash {
                 "no duplicate job"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,13 +1,13 @@
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { readOrCreateLocalReactorId } from "./localReactorId";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 
 let dir: string;
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(nativeTmpdir(), "dohc-local-id-"));
+  dir = await createTestScratch("dohc-local-id-");
 });
 
 function idFile(): string {

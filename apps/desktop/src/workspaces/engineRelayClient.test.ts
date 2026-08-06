@@ -1,5 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DaemonRefusalError,
@@ -42,6 +41,7 @@ import { refreshSharedViewOnce } from "./sharedView";
 // refuses.
 const PINNED_SELECTOR = { paths: ["docs"], versionId: null };
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
+import { createTestScratch } from "./testTemp";
 
 class MockDaemon implements EngineDaemonClient {
   readonly requests: Request[] = [];
@@ -172,7 +172,7 @@ afterEach(async () => {
 });
 
 async function harness(daemon = new MockDaemon()) {
-  const rootPath = await mkdtemp(join(tmpdir(), "dohc-relay-client-unit-"));
+  const rootPath = await createTestScratch("dohc-relay-client-unit-");
   roots.push(rootPath);
   const routes = new RelayTransportRouteGuard();
   const source = new RelayConfiguredDaemonClientSource(
@@ -877,7 +877,7 @@ describe("EngineRelayClient", () => {
   });
 
   it("allows a rooted daemon bind after a rootless probe route is released", async () => {
-    const rootPath = await mkdtemp(join(tmpdir(), "dohc-relay-probe-route-"));
+    const rootPath = await createTestScratch("dohc-relay-probe-route-");
     roots.push(rootPath);
     const routes = new RelayTransportRouteGuard();
     let finishProbe!: (response: globalThis.Response) => void;

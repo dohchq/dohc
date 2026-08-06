@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -8,7 +8,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 
 const engine = requireEngineBinaryOrSkip();
 
@@ -16,9 +16,7 @@ describe("live linked chat store real daemon", () => {
   it.skipIf(engine.missing)(
     "real_daemon_chat_flow_round_trips_channel_thread_message_and_read_state",
     async () => {
-      const rootPath = await mkdtemp(
-        join(nativeTmpdir(), "dohc-live-chat-e2e-"),
-      );
+      const rootPath = await createTestScratch("dohc-live-chat-e2e-");
       const workspace = {
         workspaceId: `workspace-live-chat-e2e-${process.pid}`,
         rootPath,

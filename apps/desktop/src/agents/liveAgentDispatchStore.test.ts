@@ -3,10 +3,7 @@ import type {
   Request,
   Response,
 } from "@dohc/workspace-engine-client";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGENT_DISPATCH_RPC_DEADLINE_MS } from "./awaitableAgentDispatchStore";
 import {
   EngineWorkspaceRebindError,
@@ -17,6 +14,7 @@ import {
   TERMINAL_DISPATCH_DEADLINE_MS,
   createLiveAgentDispatchStore,
 } from "./liveAgentDispatchStore";
+import { createSuiteTestScratchSync } from "../workspaces/testTemp";
 
 // EngineWorkspaceSessions.prepareWorkspace lstats the workspace root and requires a
 // real directory -- a guarded-location check the relay work added. A synthetic path
@@ -24,12 +22,8 @@ import {
 // never have resolved on Linux either. Use a real temp dir, as its sibling suite does.
 const WORKSPACE = {
   workspaceId: "workspace-live-dispatch",
-  rootPath: mkdtempSync(join(tmpdir(), "dohc-live-dispatch-")),
+  rootPath: createSuiteTestScratchSync("dohc-live-dispatch-"),
 };
-
-afterAll(() => {
-  rmSync(WORKSPACE.rootPath, { recursive: true, force: true });
-});
 
 const dispatch = {
   workspaceId: WORKSPACE.workspaceId,

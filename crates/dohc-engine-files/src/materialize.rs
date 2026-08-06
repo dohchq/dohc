@@ -2067,21 +2067,17 @@ mod tests {
     use dohc_engine_storage::{
         FaultAction, JobStatus, MaterializationJobSpec, NoFaults, StorageError, enqueue_job,
     };
+    use dohc_test_scratch::ScratchDir;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static SCRATCH_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-
     struct Scratch {
-        root: PathBuf,
+        root: ScratchDir,
     }
 
     impl Scratch {
         fn new(tag: &str) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "dohc-materialize-unit-{tag}-{}-{}",
-                std::process::id(),
-                SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-            ));
+            let root = ScratchDir::new_named(&format!("materialize-unit-{tag}"))
+                .expect("create scratch directory");
             std::fs::create_dir_all(root.join(".dohc").join("engine"))
                 .expect("create scratch engine directory");
             Scratch { root }
@@ -2089,12 +2085,6 @@ mod tests {
 
         fn db(&self) -> PathBuf {
             self.root.join(".dohc").join("engine").join("engine.db")
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
         }
     }
 

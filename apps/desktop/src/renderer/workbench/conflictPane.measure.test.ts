@@ -18,14 +18,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import {
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
@@ -36,6 +29,7 @@ import {
   CONFLICT_PREVIEW_MAX_LINES,
   conflictPreview,
 } from "./conflictPane";
+import { createTestScratchSync } from "../../workspaces/testTemp";
 
 const repoRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 
@@ -219,7 +213,7 @@ createRoot(document.getElementById("root")).render(createElement(Bench));
 
   async function bundle(editingBound: number | null): Promise<string> {
     const { build } = bundleRequire("vite") as typeof import("vite");
-    const directory = mkdtempSync(join(tmpdir(), "dohc-combine-bench-"));
+    const directory = createTestScratchSync("dohc-combine-bench-");
     const entry = join(directory, "entry.js");
     writeFileSync(entry, benchSource);
     try {

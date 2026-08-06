@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import {
   CHATS_METHOD,
@@ -18,7 +18,7 @@ import {
   EngineClientError,
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
-import { nativeTmpdir } from "../workspaces/testTemp";
+import { createTestScratch } from "../workspaces/testTemp";
 import {
   APP_QUIT_EXIT_CODE,
   APP_QUIT_KILL_GRACE_MS,
@@ -186,7 +186,7 @@ interface Fixture {
 const fixtures: Fixture[] = [];
 
 async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
-  const root = await mkdtemp(join(nativeTmpdir(), "dohc-chat-dispatch-"));
+  const root = await createTestScratch("dohc-chat-dispatch-");
   const stateRoot = join(root, "state");
   const appRoot = join(root, "app");
   const workspace = { workspaceId: WORKSPACE_ID, rootPath: root };

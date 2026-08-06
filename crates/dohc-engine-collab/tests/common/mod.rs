@@ -10,47 +10,27 @@ use dohc_engine_collab::{CollabError, DocKey};
 use dohc_engine_storage::{
     EngineStore, FaultAction, FaultInjector, FaultPoint, NoFaults, TxnOutcome,
 };
+use dohc_test_scratch::ScratchDir;
 use serde::Deserialize;
 
 /// A temp engine.db that removes itself on drop.
 pub struct TempStore {
     pub store: EngineStore,
-    dir: PathBuf,
+    _scratch: ScratchDir,
 }
 
-impl Drop for TempStore {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-pub fn unique_dir(tag: &str) -> PathBuf {
-    // A process-wide monotonic counter guarantees uniqueness across parallel
-    // test threads. pid+nanos alone can COLLIDE under the default multi-threaded
-    // test runner (same pid; two threads reading the clock in the same
-    // nanosecond), which produced spurious "engine_migrations already exists"
-    // failures when two threads opened one shared engine.db.
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut base = std::env::temp_dir();
-    let unique = format!(
-        "dohc-r11a-{tag}-{}-{}-{seq}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    base.push(unique);
-    std::fs::create_dir_all(&base).expect("mkdir temp");
-    base
+pub fn unique_dir(tag: &str) -> ScratchDir {
+    ScratchDir::new_named(&format!("r11a-{tag}")).expect("mkdir temp")
 }
 
 /// Open a fresh store at a unique temp path.
 pub fn fresh_store(tag: &str) -> TempStore {
     let dir = unique_dir(tag);
     let store = EngineStore::open(&dir.join("engine.db"), 1_000).expect("open store");
-    TempStore { store, dir }
+    TempStore {
+        store,
+        _scratch: dir,
+    }
 }
 
 /// Open a store at an explicit dir (crash tests manage the dir lifetime by hand

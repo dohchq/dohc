@@ -1,6 +1,5 @@
 import { rgPath } from "@vscode/ripgrep";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
@@ -14,6 +13,7 @@ import {
   type SearchBatch,
   type SearchHandle,
  mountScopedIncludeGlob,} from "./workspaceSearch";
+import { createTestScratch } from "./testTemp";
 
 describe("buildRipgrepArgs", () => {
   it("pins the security-relevant base shape: json, exclusions, caps, -- terminator", () => {
@@ -238,7 +238,7 @@ describe("startRipgrepSearch (real rg)", () => {
   });
 
   async function makeRoot(): Promise<string> {
-    const root = await mkdtemp(join(tmpdir(), "dohc-search-"));
+    const root = await createTestScratch("dohc-search-");
     roots.push(root);
     return root;
   }
@@ -273,7 +273,7 @@ describe("startRipgrepSearch (real rg)", () => {
     await writeFile(join(root, ".dohc", "planted.md"), "sentinelvalue inside dohc\n");
     await writeFile(join(root, ".git", "planted.md"), "sentinelvalue inside git\n");
     await writeFile(join(root, "node_modules", "pkg", "planted.js"), "sentinelvalue\n");
-    const outside = await mkdtemp(join(tmpdir(), "dohc-search-outside-"));
+    const outside = await createTestScratch("dohc-search-outside-");
     roots.push(outside);
     await writeFile(join(outside, "secret.md"), "sentinelvalue outside\n");
     await symlink(outside, join(root, "escape"));
@@ -397,7 +397,7 @@ describe("createSearchRegistry", () => {
   it("kills the previous search when an owner starts a new one", async () => {
     const killed: string[] = [];
     const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) as never });
-    const root = await mkdtemp(join(tmpdir(), "dohc-reg-"));
+    const root = await createTestScratch("dohc-reg-");
     await registry.startSearch(1, root, "s1", { query: "a" }, () => {});
     await registry.startSearch(1, root, "s2", { query: "b" }, () => {});
     expect(killed).toEqual(["s1"]);
@@ -417,7 +417,7 @@ describe("createSearchRegistry", () => {
         };
       }) as never,
     });
-    const root = await mkdtemp(join(tmpdir(), "dohc-reg-"));
+    const root = await createTestScratch("dohc-reg-");
     await registry.startSearch(1, root, "current", { query: "a" }, () => {});
     await registry.startSearch(
       1,
@@ -435,7 +435,7 @@ describe("createSearchRegistry", () => {
   it("cancel kills only a matching searchId; disposeOwner and killAll kill tracked children", async () => {
     const killed: string[] = [];
     const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) as never });
-    const root = await mkdtemp(join(tmpdir(), "dohc-reg-"));
+    const root = await createTestScratch("dohc-reg-");
     await registry.startSearch(1, root, "s1", { query: "a" }, () => {});
     registry.cancel(1, "wrong-id");
     expect(killed).toEqual([]);

@@ -10,6 +10,7 @@ use dohc_engine_storage::{
     MaterializationJobSpec, NoFaults, Preimage, StorageError, classify, create_verified_backup,
     enqueue_job, hex_sha256, load_valid_backup,
 };
+use dohc_test_scratch::ScratchDir;
 use rusqlite::Connection;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -19,25 +20,11 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 
 struct Scratch {
-    root: PathBuf,
+    root: ScratchDir,
 }
 impl Scratch {
     fn new(tag: &str) -> Self {
-        // Counter first: the clock alone is too coarse on Windows to separate
-        // two scratches created in the same tick, and `tag` only saves us for
-        // as long as no two concurrent tests share one.
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let mut root = std::env::temp_dir();
-        root.push(format!(
-            "dohc-r04-{tag}-{}-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&root).expect("mkdir scratch");
+        let root = ScratchDir::new_named(&format!("r04-{tag}")).expect("mkdir scratch");
         Scratch { root }
     }
     fn db_path(&self) -> PathBuf {
@@ -47,12 +34,6 @@ impl Scratch {
         self.root.join(name)
     }
 }
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
 /// A free-space probe returning a fixed number, so disk-full is testable without
 /// filling a disk.
 struct FakeSpace(u64);

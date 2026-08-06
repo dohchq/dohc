@@ -9,20 +9,22 @@
 // correctly claimed workspace into a silent absence.
 import { expect, test } from "@playwright/test";
 import { join } from "node:path";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import {
   relayAdoptedIdentity,
   spawnSyncRelay,
   type SyncRelayHandle,
 } from "./helpers/syncRelay";
 import { claimRelayWorkspace, relayJson, relayServesWorkspace } from "./helpers/relayPeer";
+import {
+  cleanupTestScratch,
+  createTestScratch,
+} from "../src/workspaces/testTemp";
 
 const TOKEN = "test:probe-user";
 
 test("relayPeer helper: 404 absent, 409 without identity, 200 with it", async () => {
   test.setTimeout(120_000);
-  const base = await mkdtemp(join(tmpdir(), "relaypeer-probe-"));
+  const base = await createTestScratch("relaypeer-probe-");
   const relayDb = join(base, "relay.sqlite");
   let relay: SyncRelayHandle | null = null;
   try {
@@ -55,5 +57,6 @@ test("relayPeer helper: 404 absent, 409 without identity, 200 with it", async ()
     expect(await relayServesWorkspace(relay.baseUrl, TOKEN, "adopted", identity)).toBe(true);
   } finally {
     await relay?.stop();
+    await cleanupTestScratch();
   }
 });
