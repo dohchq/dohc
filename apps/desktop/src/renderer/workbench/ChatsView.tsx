@@ -961,10 +961,6 @@ export function ChatsView(props: {
   // The page variant centers the narrow surfaces in a reading column — the
   // thread/channel views already read as pages.
   variant?: "panel" | "page";
-  // A mounted shared workspace is readable but cannot mutate any chat state,
-  // including viewer-local projections such as bookmarks, follows, or read
-  // cursors. Main remains authoritative; this also removes every affordance.
-  readOnly?: boolean;
   // Expand-to-tab: the conversation to open once the overview is ready —
   // the shell hands the live surface's position to whichever instance mounts
   // next, so panel and tab feel like ONE chats surface. Applied once per
@@ -1001,8 +997,7 @@ export function ChatsView(props: {
   readRevision?: number;
 }) {
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead } = props;
-  const readOnly = props.readOnly === true;
-  const collaboration = readOnly ? null : props.collaboration ?? null;
+  const collaboration = props.collaboration ?? null;
   const mentionCandidates = props.mentionCandidates ?? [];
   const fileMentionCandidates = useMemo(
     () =>
@@ -1591,7 +1586,6 @@ export function ChatsView(props: {
   // next caller takes the slot instead of queueing onto it.
   const dmSync = useRef<{ token: number; pending: boolean } | null>(null);
   const refreshDms = useCallback(async () => {
-    if (readOnly) return;
     const active = dmSync.current;
     if (active !== null && active.token === liveToken.current) {
       active.pending = true;
@@ -1620,7 +1614,7 @@ export function ChatsView(props: {
     } finally {
       if (dmSync.current === mine) dmSync.current = null;
     }
-  }, [readOnly, workspaceId]);
+  }, [workspaceId]);
 
   // Workspace switch: drop everything stale and reload from the top.
   useEffect(() => {
@@ -1709,7 +1703,6 @@ export function ChatsView(props: {
         | { kind: "message"; threadId: string; messageId: string };
       mode: "live" | "snapshot";
     }) => {
-      if (readOnly) return;
       const targetId =
         input.target.kind === "thread"
           ? input.target.threadId
@@ -1771,7 +1764,7 @@ export function ChatsView(props: {
         }
       }
     },
-    [bookmarkBusy, bookmarkFor, props.onError, readOnly, workspaceId],
+    [bookmarkBusy, bookmarkFor, props.onError, workspaceId],
   );
 
   // Gentle DM poll while the view is open: the other side's messages arrive
@@ -1914,7 +1907,7 @@ export function ChatsView(props: {
       setMessages(result.messages);
       setReactions(reactionResult.reactions);
       setViewerAuthorId(reactionResult.viewerAuthorId);
-      if (!readOnly && dm.connected) {
+      if (dm.connected) {
         void bridge()
           .markChatThreadRead({
             workspaceId,
@@ -1926,7 +1919,7 @@ export function ChatsView(props: {
           });
       }
     },
-    [readOnly, workspaceId],
+    [workspaceId],
   );
 
   const refreshOpenDm = useCallback(
@@ -1980,7 +1973,7 @@ export function ChatsView(props: {
       // or joined. If that authority is unavailable, fail closed: treating an
       // unknown joined channel as local would re-enable writes and read-cursor
       // mutations across a permission boundary.
-      if (readOnly || channelShares === null) return true;
+      if (channelShares === null) return true;
       let joined: JoinedSharedChannelRow | undefined;
       if (channel.wireId) {
         // Match joinedByWire's last-write-wins semantics so every channel
@@ -1994,7 +1987,7 @@ export function ChatsView(props: {
         (joined.access === "read-only" || joined.ended)
       );
     },
-    [channelShares, readOnly],
+    [channelShares],
   );
 
   const applyThreadSnapshot = useCallback(
@@ -2098,7 +2091,7 @@ export function ChatsView(props: {
         if (!requestIsCurrent()) return;
         setPersonalFeed((current) => (cursor ? [...current, ...page.items] : page.items));
         setPersonalFeedNextCursor(page.nextCursor);
-        if (!readOnly && !cursor && page.headCursor) {
+        if (!cursor && page.headCursor) {
           void bridge()
             .markPersonalChatFeedSeen({
               workspaceId,
@@ -2116,7 +2109,7 @@ export function ChatsView(props: {
         if (requestIsCurrent()) setPersonalFeedLoading(false);
       }
     },
-    [props.onError, readOnly, workspaceId],
+    [props.onError, workspaceId],
   );
 
   // Main emits workspaceActivity for CLI writes, follow mutations, runner
@@ -2239,7 +2232,6 @@ export function ChatsView(props: {
   // The anti-forum move: typing in the channel composer STARTS the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
   const startThread = useCallback(async () => {
-    if (readOnly) return;
     if (nav.level !== "channel") return;
     const body = newThreadBody.trim();
     if (body.length === 0 || startingThread || startingThreadRef.current) return;
@@ -2280,10 +2272,9 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, props, readOnly, startingThread, workspaceId]);
+  }, [nav, newThreadBody, props, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
-    if (readOnly) return;
     if (nav.level !== "thread") return;
     const trimmedBody = composer.trim();
     const resolvingMessageId = resolveTargetMessageId;
@@ -2419,7 +2410,6 @@ export function ChatsView(props: {
     composer,
     nav,
     props,
-    readOnly,
     replyTarget,
     resolveTargetMessageId,
     sendContextKey,
@@ -2433,7 +2423,6 @@ export function ChatsView(props: {
   // slow response never repaints a thread the user already left.
   const toggleReaction = useCallback(
     (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
-      if (readOnly) return;
       const threadId =
         nav.level === "thread"
           ? nav.thread.id
@@ -2455,7 +2444,7 @@ export function ChatsView(props: {
         input,
       );
     },
-    [nav, props, readOnly, viewerAuthorId, workspaceId],
+    [nav, props, viewerAuthorId, workspaceId],
   );
 
   const toggleFeedReaction = useCallback(
@@ -2463,7 +2452,6 @@ export function ChatsView(props: {
       threadId: string,
       input: { messageId: string; emoji: string; nextState: "added" | "removed" },
     ) => {
-      if (readOnly) return;
       if (nav.level !== "channel") return;
       const post = feedPosts[threadId];
       if (!post) return;
@@ -2501,7 +2489,7 @@ export function ChatsView(props: {
         input,
       );
     },
-    [feedPosts, nav.level, props.onError, readOnly, workspaceId],
+    [feedPosts, nav.level, props.onError, workspaceId],
   );
 
   // --- Direct messages (WS-MU-C3) -----------------------------------------
@@ -2531,7 +2519,7 @@ export function ChatsView(props: {
         if (token !== liveToken.current || request !== dmRefreshSeq.current) {
           return;
         }
-        if (!readOnly && dm.connected) {
+        if (dm.connected) {
           setDms((current) =>
             current.map((entry) =>
               entry.channelId === dm.channelId ? { ...entry, unreadCount: 0 } : entry,
@@ -2554,7 +2542,7 @@ export function ChatsView(props: {
         }
       }
     },
-    [loadDmConversation, props, readOnly],
+    [loadDmConversation, props],
   );
 
   const openFeed = useCallback(() => {
@@ -2581,7 +2569,6 @@ export function ChatsView(props: {
         | { kind: "thread"; threadId: string }
         | { kind: "author"; threadId: string; messageId: string },
     ) => {
-      if (readOnly) return;
       const following = followedUi.has(key);
       const token = liveToken.current;
       // A follow write supersedes every older list read or write in this
@@ -2610,12 +2597,11 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not update that follow."));
       }
     },
-    [followedUi, props.onError, readOnly, workspaceId],
+    [followedUi, props.onError, workspaceId],
   );
 
   const toggleChannelFollow = useCallback(
     async (channel: ChatChannelRecord) => {
-      if (readOnly) return;
       if (!channel.wireId) return;
       const key = `channel:${channel.wireId}`;
       const following = followedUi.has(key);
@@ -2640,7 +2626,7 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not update that channel follow."));
       }
     },
-    [followedUi, props.onError, readOnly, workspaceId],
+    [followedUi, props.onError, workspaceId],
   );
 
   const openConversation = useCallback(
@@ -2757,7 +2743,7 @@ export function ChatsView(props: {
   // paused. Token and request guards prevent an older pass from repainting a
   // newer snapshot or a local send.
   useEffect(() => {
-    if (readOnly || nav.level !== "dm") return;
+    if (nav.level !== "dm") return;
     const dm = nav.dm;
     const token = liveToken.current;
     if (!dm.threadId) void refreshOpenDm(dm, token);
@@ -2766,10 +2752,9 @@ export function ChatsView(props: {
       4_000,
     );
     return () => clearInterval(interval);
-  }, [nav, readOnly, refreshOpenDm]);
+  }, [nav, refreshOpenDm]);
 
   const sendDmMessage = useCallback(async () => {
-    if (readOnly) return;
     if (nav.level !== "dm" || !nav.dm.threadId || !nav.dm.connected) return;
     const body = composer.trim();
     if (
@@ -2826,12 +2811,11 @@ export function ChatsView(props: {
         setSending(false);
       }
     }
-  }, [composer, nav, props, readOnly, sendContextKey, sending, workspaceId]);
+  }, [composer, nav, props, sendContextKey, sending, workspaceId]);
 
   // Starting a DM = pick who + say something, one step. Starting one with
   // someone you already message opens the existing conversation.
   const startDm = useCallback(async () => {
-    if (readOnly) return;
     const body = dmDraft.trim();
     const recipients = dmRecipients.trim();
     if (body.length === 0 || recipients.length === 0) return;
@@ -2864,7 +2848,7 @@ export function ChatsView(props: {
       startingDmRef.current = false;
       setStartingDm(false);
     }
-  }, [dmDraft, dmRecipients, openDm, props, readOnly, startingDm, workspaceId]);
+  }, [dmDraft, dmRecipients, openDm, props, startingDm, workspaceId]);
 
   // MU-C4 derived lookups: a channel matches a grant by its WIRE id.
   const joinedByWire = useMemo(() => {
@@ -3064,7 +3048,6 @@ export function ChatsView(props: {
   }, [refreshShares]);
 
   const submitShare = useCallback(async () => {
-    if (readOnly) return;
     // The disabled control is honesty; this is the gate. A submit that slips
     // past it (a stale enter key, a re-render race) would still grow the lane
     // dohc already cannot list. Only the GRANTED lane, though — an outgoing
@@ -3095,7 +3078,6 @@ export function ChatsView(props: {
   }, [
     nav,
     props,
-    readOnly,
     refreshShares,
     shareBusy,
     shareEmail,
@@ -3106,7 +3088,6 @@ export function ChatsView(props: {
 
   const revokeShare = useCallback(
     async (shareId: string) => {
-      if (readOnly) return;
       const token = liveToken.current;
       const session = sessionGeneration.current;
       try {
@@ -3146,12 +3127,11 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not remove that person."));
       }
     },
-    [claimLanes, props, readOnly, refreshShares, takeCommitTicket],
+    [claimLanes, props, refreshShares, takeCommitTicket],
   );
 
   const joinShared = useCallback(
     async (shareId: string) => {
-      if (readOnly) return;
       if (joiningShareId !== null) return;
       const token = liveToken.current;
       setJoiningShareId(shareId);
@@ -3172,12 +3152,11 @@ export function ChatsView(props: {
         setJoiningShareId(null);
       }
     },
-    [joiningShareId, props, readOnly, refreshOverview, workspaceId],
+    [joiningShareId, props, refreshOverview, workspaceId],
   );
 
   const leaveShared = useCallback(
     async (shareId: string) => {
-      if (readOnly) return;
       const token = liveToken.current;
       try {
         await bridge().leaveSharedChannel({ workspaceId, shareId });
@@ -3191,12 +3170,11 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not leave that channel."));
       }
     },
-    [props, readOnly, refreshOverview, workspaceId],
+    [props, refreshOverview, workspaceId],
   );
 
   const createChannel = useCallback(
     async (name: string) => {
-      if (readOnly) return;
       const trimmed = name.trim();
       if (trimmed.length === 0) return;
       const token = liveToken.current;
@@ -3220,7 +3198,7 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not create that channel."));
       }
     },
-    [openChannel, props, readOnly, workspaceId],
+    [openChannel, props, workspaceId],
   );
 
   const goBack = useCallback(() => {
@@ -3327,15 +3305,13 @@ export function ChatsView(props: {
   }, [messages, messagesLoading, nav, scrollToMessage]);
 
   const beginReply = useCallback((message: ChatMessageRecord) => {
-    if (readOnly) return;
     setReplyTarget({
       messageId: message.id,
       authorLabel: chatAuthorLabel(message),
     });
-  }, [readOnly]);
+  }, []);
 
   const beginResolve = useCallback((message: ChatMessageRecord) => {
-    if (readOnly) return;
     setResolveTargetMessageId(message.id);
     // A resolving message is also an explicit reply to the decision-bearing
     // message, preserving both pieces of causal structure in one send.
@@ -3343,10 +3319,9 @@ export function ChatsView(props: {
       messageId: message.id,
       authorLabel: chatAuthorLabel(message),
     });
-  }, [readOnly]);
+  }, []);
 
   const stopThreadRun = useCallback(async () => {
-    if (readOnly) return;
     if (
       nav.level !== "thread" ||
       !dispatchState.liveRun ||
@@ -3382,10 +3357,9 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.liveRun, nav, props, readOnly, workspaceId]);
+  }, [dispatchActionBusy, dispatchState.liveRun, nav, props, workspaceId]);
 
   const resumeThreadDispatch = useCallback(async () => {
-    if (readOnly) return;
     if (nav.level !== "thread" || !dispatchState.paused || dispatchActionBusy) {
       return;
     }
@@ -3417,7 +3391,7 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.paused, nav, props, readOnly, workspaceId]);
+  }, [dispatchActionBusy, dispatchState.paused, nav, props, workspaceId]);
 
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
@@ -3588,7 +3562,7 @@ export function ChatsView(props: {
                       </div>
                     </div>
                     <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line/60 pt-2">
-                      {!readOnly && authorKey ? (
+                      {authorKey ? (
                         <button
                           type="button"
                           data-testid="chats-feed-follow-author"
@@ -3604,52 +3578,40 @@ export function ChatsView(props: {
                           {followedUi.has(authorKey) ? "Following author" : "Follow author"}
                         </button>
                       ) : null}
-                      {!readOnly ? (
-                        <>
-                          <button
-                            type="button"
-                            data-testid="chats-feed-follow-thread"
-                            onClick={() =>
-                              void toggleFeedFollow(threadKey, {
-                                kind: "thread",
-                                threadId: item.thread.id,
-                              })
-                            }
-                            className="rounded-md px-2 py-1 text-[10px] text-muted hover:bg-line/40 hover:text-ink"
-                          >
-                            {followedUi.has(threadKey) ? "Following thread" : "Follow thread"}
-                          </button>
-                          <BookmarkAction
-                            active={Boolean(bookmark)}
-                            busy={bookmarkBusy.has(bookmarkKey)}
-                            destinationPath={bookmark?.destinationPath}
-                            onToggle={(mode) =>
-                              void toggleBookmark({
-                                target: {
-                                  kind: "message",
-                                  threadId: item.thread.id,
-                                  messageId: item.message.id,
-                                },
-                                mode,
-                              })
-                            }
-                            onOpen={
-                              bookmark && props.onOpenPath
-                                ? () => props.onOpenPath?.(bookmark.destinationPath)
-                                : undefined
-                            }
-                            testId="chats-feed-bookmark"
-                          />
-                        </>
-                      ) : null}
-                      {readOnly && bookmark && props.onOpenPath ? (
-                        <BookmarkAction
-                          active
-                          destinationPath={bookmark.destinationPath}
-                          onOpen={() => props.onOpenPath?.(bookmark.destinationPath)}
-                          testId="chats-feed-bookmark"
-                        />
-                      ) : null}
+                      <button
+                        type="button"
+                        data-testid="chats-feed-follow-thread"
+                        onClick={() =>
+                          void toggleFeedFollow(threadKey, {
+                            kind: "thread",
+                            threadId: item.thread.id,
+                          })
+                        }
+                        className="rounded-md px-2 py-1 text-[10px] text-muted hover:bg-line/40 hover:text-ink"
+                      >
+                        {followedUi.has(threadKey) ? "Following thread" : "Follow thread"}
+                      </button>
+                      <BookmarkAction
+                        active={Boolean(bookmark)}
+                        busy={bookmarkBusy.has(bookmarkKey)}
+                        destinationPath={bookmark?.destinationPath}
+                        onToggle={(mode) =>
+                          void toggleBookmark({
+                            target: {
+                              kind: "message",
+                              threadId: item.thread.id,
+                              messageId: item.message.id,
+                            },
+                            mode,
+                          })
+                        }
+                        onOpen={
+                          bookmark && props.onOpenPath
+                            ? () => props.onOpenPath?.(bookmark.destinationPath)
+                            : undefined
+                        }
+                        testId="chats-feed-bookmark"
+                      />
                       <span className="ml-auto text-[9px] uppercase tracking-wide text-subtle">
                         {item.matchedBy.join(" · ")}
                       </span>
@@ -3678,16 +3640,6 @@ export function ChatsView(props: {
   }
 
   if (nav.level === "dm-new") {
-    if (readOnly) {
-      return (
-        <div data-testid="chats-dm-new" className="flex min-h-0 flex-1 flex-col">
-          <BackHeader label="New message" testId="chats-dm-new" onBack={goBack} />
-          <ComposerNotice testId="chats-workspace-readonly-note">
-            This shared workspace is read-only. You can still read its chats.
-          </ComposerNotice>
-        </div>
-      );
-    }
     return (
       <div
         data-testid="chats-dm-new"
@@ -3777,7 +3729,7 @@ export function ChatsView(props: {
                 reactions,
                 viewerAuthorId,
                 onToggle: toggleReaction,
-                readOnly: readOnly || !dm.connected,
+                readOnly: !dm.connected,
               }}
             />
           ) : (
@@ -3789,11 +3741,7 @@ export function ChatsView(props: {
             </div>
           )}
           <TypingIndicator names={presence.typingNames} className="px-2" />
-          {readOnly ? (
-            <ComposerNotice testId="chats-workspace-readonly-note">
-              This shared workspace is read-only. You can still read its chats.
-            </ComposerNotice>
-          ) : dm.connected ? (
+          {dm.connected ? (
             <MentionComposer
               testIdPrefix="chats-dm"
               composerId="chats-dm-composer"
@@ -4295,9 +4243,7 @@ export function ChatsView(props: {
         />
         {threadLocked ? (
           <ComposerNotice testId="chats-readonly-note">
-            {readOnly
-              ? "This shared workspace is read-only. You can still read its chats."
-              : threadJoined?.ended
+            {threadJoined?.ended
               ? "This channel is no longer shared with you. You can still read it."
               : "This channel is read-only for you."}
           </ComposerNotice>
@@ -4398,7 +4344,6 @@ export function ChatsView(props: {
     // work, not here.
     const shareGrantsBlocked = grantedLaneIsOverLimit(shareReadFailure);
     const canShare =
-      !readOnly &&
       nav.channel.kind !== "agent" &&
       channelShares !== null &&
       channelJoined === null &&
@@ -4505,16 +4450,14 @@ export function ChatsView(props: {
             <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
               {joinedChannelLabel(channelJoined)}
             </span>
-            {!readOnly ? (
-              <button
-                type="button"
-                data-testid="chats-leave-shared"
-                onClick={() => void leaveShared(channelJoined.shareId)}
-                className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
-              >
-                Leave
-              </button>
-            ) : null}
+            <button
+              type="button"
+              data-testid="chats-leave-shared"
+              onClick={() => void leaveShared(channelJoined.shareId)}
+              className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+            >
+              Leave
+            </button>
           </div>
         ) : null}
         {canShare && sharePanelOpen ? (
@@ -4699,9 +4642,7 @@ export function ChatsView(props: {
         </div>
         {channelLocked ? (
           <ComposerNotice testId="chats-readonly-note">
-            {readOnly
-              ? "This shared workspace is read-only. You can still read its chats."
-              : channelJoined?.ended
+            {channelJoined?.ended
               ? "This channel is no longer shared with you. You can still read it."
               : "This channel is read-only for you."}
           </ComposerNotice>
@@ -4838,7 +4779,7 @@ export function ChatsView(props: {
                   ) : null}
                   <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" />
                 </button>
-                {!readOnly && channel.wireId ? (
+                {channel.wireId ? (
                   <button
                     type="button"
                     data-testid="chats-channel-follow"
@@ -4900,7 +4841,7 @@ export function ChatsView(props: {
                 </li>
               ))}
             </ul>
-            {!readOnly && dmAvailable ? (
+            {dmAvailable ? (
               <div className="px-3 py-1.5">
                 <button
                   type="button"
@@ -4957,17 +4898,15 @@ export function ChatsView(props: {
                           : "You can read and post"}
                       </span>
                     </span>
-                    {!readOnly ? (
-                      <button
-                        type="button"
-                        data-testid="chats-join-shared"
-                        disabled={joiningShareId !== null}
-                        onClick={() => void joinShared(row.shareId)}
-                        className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-50"
-                      >
-                        {joiningShareId === row.shareId ? "Joining…" : "Join"}
-                      </button>
-                    ) : null}
+                    <button
+                      type="button"
+                      data-testid="chats-join-shared"
+                      disabled={joiningShareId !== null}
+                      onClick={() => void joinShared(row.shareId)}
+                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-50"
+                    >
+                      {joiningShareId === row.shareId ? "Joining…" : "Join"}
+                    </button>
                   </div>
                 </li>
               ))}
@@ -5010,8 +4949,7 @@ export function ChatsView(props: {
           </div>
         ) : null}
       </div>
-      {!readOnly ? (
-        <div className={`shrink-0 border-t border-line p-2 ${pageColumn}`}>
+      <div className={`shrink-0 border-t border-line p-2 ${pageColumn}`}>
         {creatingChannel === null ? (
           <button
             type="button"
@@ -5053,12 +4991,7 @@ export function ChatsView(props: {
             </p>
           </form>
         )}
-        </div>
-      ) : (
-        <ComposerNotice testId="chats-workspace-readonly-note">
-          This shared workspace is read-only. You can still read its chats.
-        </ComposerNotice>
-      )}
+      </div>
     </div>
   );
 }

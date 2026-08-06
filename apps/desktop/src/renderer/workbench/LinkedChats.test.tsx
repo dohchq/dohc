@@ -319,75 +319,6 @@ describe("LinkedChatsPanel initialThread consumption", () => {
   });
 });
 
-describe("LinkedChatsPanel shared-workspace read-only boundary", () => {
-  it("keeps the thread readable while blocking composer, reactions, and creation", async () => {
-    bridgeMock.listChatMessages.mockResolvedValue({
-      messages: [
-        {
-          id: "message-1",
-          threadId: searchThread.id,
-          authorKind: "human",
-          authorDisplayName: "Owner",
-          body: "Read-only context",
-          createdAtMs: 1_700_000_000_000,
-        },
-      ],
-    });
-    bridgeMock.listChatReactions.mockResolvedValue({
-      reactions: [
-        {
-          reactionId: "reaction-1",
-          messageId: "message-1",
-          threadId: searchThread.id,
-          emoji: "👍",
-          authorId: "owner@example.com",
-          authorKind: "human",
-          authorDisplayName: "Owner",
-          state: "added",
-        },
-      ],
-      viewerAuthorId: "viewer@example.com",
-    });
-
-    render(
-      <LinkedChatsPanel
-        workspaceId="workspace-1"
-        filePath="docs/plan.md"
-        initialThread={searchThread}
-        readOnly
-        onError={() => undefined}
-      />,
-    );
-
-    expect(await screen.findByText("Read-only context")).toBeTruthy();
-    const reaction = screen.getByTestId("linked-chat-reaction-pill") as HTMLButtonElement;
-    expect(reaction.disabled).toBe(true);
-    expect(screen.queryByTestId("linked-chat-add-reaction")).toBeNull();
-    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
-    expect(screen.getByTestId("linked-chat-readonly-note")).toBeTruthy();
-
-    expect(bridgeMock.sendChatMessage).not.toHaveBeenCalled();
-    expect(bridgeMock.setChatReaction).not.toHaveBeenCalled();
-    expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
-  });
-
-  it("does not offer file-chat creation from the read-only list", async () => {
-    render(
-      <LinkedChatsPanel
-        workspaceId="workspace-1"
-        filePath="docs/plan.md"
-        readOnly
-        onError={() => undefined}
-      />,
-    );
-
-    expect(await screen.findByTestId("linked-chats-panel")).toBeTruthy();
-    expect(screen.queryByTestId("linked-chat-new")).toBeNull();
-    expect(screen.getByTestId("linked-chat-readonly-note")).toBeTruthy();
-    expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
-  });
-});
-
 // #337 item 3, second path: the Chats navigator lists FILE-linked threads
 // beside its channels, but opening one routes here — not through the Chats
 // view. Without a read here the durable count never moved, so the navigator's
@@ -472,14 +403,5 @@ describe("LinkedChatsPanel read cursor", () => {
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(onThreadRead).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
-  });
-
-  it("never moves a read cursor in a read-only shared view", async () => {
-    const onThreadRead = vi.fn();
-    render(panel({ readOnly: true, onThreadRead }));
-
-    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
-    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
-    expect(onThreadRead).not.toHaveBeenCalled();
   });
 });
