@@ -3102,7 +3102,7 @@ export const OpenEngineYDocSessionResult = z.object({
   // The open did not land AND the engine may still hold this document. Three
   // causes: the open hit its retry deadline while the engine was unreachable
   // (#564), a refused open could not release its session, or a session main
-  // discarded refused to close (#657). Like notInVersion, none of them may
+  // holds for this document will not close (#657). Like notInVersion, none may
   // downgrade to the writable plain editor: the engine may still bind this
   // document, and a plain autosave meanwhile would take the disk path #533
   // closed. The caller stays read-only, states the reason, and offers a retry —

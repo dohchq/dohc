@@ -2599,6 +2599,10 @@ interface EngineYDocSessionEntry {
   session: WorkspaceEngineYDocProviderSession;
   senderId: number;
   workspaceId: string;
+  // The document this session holds. A renderer retries a failed open under a
+  // NEW session id, so the path — not the id — is what lets that retry find the
+  // session whose close failed and release it (#657).
+  path: string;
   // The renderer that owns this session, and the generation it was opened
   // under: a crash-reload reuses the WebContents id, so both are required
   // before pushing a save state back.
@@ -2608,8 +2612,31 @@ interface EngineYDocSessionEntry {
   // are routinely in flight at once, so this is a FIFO, not a scalar — see
   // engineYDocSaveSeq.ts.
   saveSeq: EngineYDocSaveSeqState;
+  // Set by releaseEngineYDocSession when a close failed: the engine may still
+  // hold this document, so no surface may fall back to the writable plain
+  // editor over it and the next open of its path retries the release.
+  closeFailed?: boolean;
 }
 const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
+
+// Every main-side teardown of an engine Y.Doc session goes through here: a
+// discarded open, the close IPC, the renderer teardown. A close that fails
+// keeps the session registered and marked instead of dropping it, so the
+// document it may still hold cannot be answered with the writable plain
+// editor (#657). Returns true when the session was released.
+function releaseEngineYDocSessionEntry(
+  sessionId: string,
+  entry: EngineYDocSessionEntry,
+  reason: string,
+): Promise<boolean> {
+  return releaseEngineYDocSession({
+    sessions: engineYDocSessions,
+    sessionId,
+    entry,
+    reason,
+    onCloseFailed: (message, error) => console.error(message, error),
+  });
+}
 
 // Push a document's REAL save state to the renderer that owns its session.
 // Never throws: this is called from session status hooks and from the IPC
@@ -2655,14 +2682,18 @@ async function waitForPendingEngineYDocOpens(senderId: number): Promise<void> {
   await Promise.all([...(pendingEngineYDocOpensBySender.get(senderId) ?? [])]);
 }
 
-// Close and drop every engine Y.Doc session owned by one renderer (window gone
-// / crashed). Settles the converged state and releases each reservation.
+// Close every engine Y.Doc session owned by one renderer (window gone /
+// crashed / reloading). Settles the converged state and releases each
+// reservation. A session whose close FAILS keeps its entry: the daemon may
+// still hold that document, and deregistering it here would leave the
+// reservation with nothing in main to retry it.
 async function closeEngineYDocSessionsForSender(senderId: number): Promise<void> {
-  const closing: Promise<void>[] = [];
+  const closing: Promise<boolean>[] = [];
   for (const [sessionId, entry] of [...engineYDocSessions]) {
     if (entry.senderId !== senderId) continue;
-    engineYDocSessions.delete(sessionId);
-    closing.push(entry.session.close().catch(() => undefined));
+    closing.push(
+      releaseEngineYDocSessionEntry(sessionId, entry, "renderer teardown"),
+    );
   }
   await Promise.all(closing);
 }
@@ -2687,6 +2718,12 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
       ? stopSitePreviewsForWorkspace(activeWorkspaceId)
       : Promise.resolve(),
   ]);
+  // An open still in flight above registers its session AFTER that sweep read
+  // the registry: the generation advanced, so the open discards the session it
+  // just got, and a discard whose close FAILS registers it. Sweep once more now
+  // that no open is pending, so the reload retries it instead of leaving it for
+  // the next open of that path.
+  await closeEngineYDocSessionsForSender(senderId);
 }
 
 // Close every live engine Y.Doc session (app quit) BEFORE the engine stores are
@@ -7933,19 +7970,41 @@ function registerIpcHandlers(
     const existing = engineYDocSessions.get(input.sessionId);
     if (
       existing &&
-      !(await releaseEngineYDocSession({
-        sessions: engineYDocSessions,
-        sessionId: input.sessionId,
-        entry: existing,
-        path: input.path,
-        reason: "stale session replaced",
-        onCloseFailed: (message, error) => console.error(message, error),
-      }))
+      !(await releaseEngineYDocSessionEntry(
+        input.sessionId,
+        existing,
+        "stale session replaced",
+      ))
     ) {
       return OpenEngineYDocSessionResult.parse({
         available: false,
         openTimedOut: true,
       });
+    }
+    // THIS OPEN IS THE RETRY. A session whose close failed keeps its own id,
+    // and the renderer's "Try again" mints a NEW one, so the release has to be
+    // found by document, not by id. Without this the retry never reaches the
+    // session it is retrying: the daemon answers the fresh one ydoc-session-busy
+    // (workspaceEngineCapture.ts, openYDocSessionTask — a failing-close session
+    // someone still HOLDS keeps refusing), which reads as an ordinary fallback
+    // and puts the writable plain editor back over a document the engine may
+    // still own.
+    for (const [sessionId, entry] of [...engineYDocSessions]) {
+      if (!entry.closeFailed) continue;
+      if (entry.workspaceId !== workspace.workspaceId) continue;
+      if (entry.path !== input.path) continue;
+      if (
+        !(await releaseEngineYDocSessionEntry(
+          sessionId,
+          entry,
+          "unreleased session retried by a new open",
+        ))
+      ) {
+        return OpenEngineYDocSessionResult.parse({
+          available: false,
+          openTimedOut: true,
+        });
+      }
     }
     const finishPendingOpen = beginPendingEngineYDocOpen(sender.id);
     try {
@@ -8033,23 +8092,18 @@ function registerIpcHandlers(
         session,
         senderId: sender.id,
         workspaceId: workspace.workspaceId,
+        path: input.path,
         sender,
         generation,
         saveSeq: createEngineYDocSaveSeqState(),
       };
       // Every path below that refuses this session hands it to
-      // `releaseEngineYDocSession`: a failed close registers it (so main's own
-      // teardowns can retry) and answers read-only, because the plain editor
-      // this would otherwise fall back to is writable.
+      // `releaseEngineYDocSessionEntry`: a failed close registers it (so main's
+      // own teardowns and the next open of this path can retry) and answers
+      // read-only, because the plain editor this would otherwise fall back to
+      // is writable.
       const release = (reason: string): Promise<boolean> =>
-        releaseEngineYDocSession({
-          sessions: engineYDocSessions,
-          sessionId: input.sessionId,
-          entry,
-          path: input.path,
-          reason,
-          onCloseFailed: (message, error) => console.error(message, error),
-        });
+        releaseEngineYDocSessionEntry(input.sessionId, entry, reason);
       // The renderer can die or reload DURING the await above. Close the stale
       // session before crash cleanup completes so its reservation cannot block
       // the replacement renderer's open.
@@ -8135,8 +8189,15 @@ function registerIpcHandlers(
     const input = CloseEngineYDocSessionPayload.parse(payload);
     const entry = engineYDocSessions.get(input.sessionId);
     if (!entry || entry.senderId !== event.sender.id) return;
-    engineYDocSessions.delete(input.sessionId);
-    await entry.session.close().catch(() => undefined);
+    // A close that FAILS keeps the entry (#657). Deregistering it here and
+    // swallowing the error is what turned a held document into a clean
+    // fallback: the renderer's retry opens under a NEW id, and nothing was
+    // left for that open to release. The retry now finds it by path.
+    await releaseEngineYDocSessionEntry(
+      input.sessionId,
+      entry,
+      "renderer closed the document",
+    );
   });
 
   ipcMain.handle(CHANNELS.getUpdateState, (event) => {

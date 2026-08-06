@@ -4,11 +4,13 @@ import { releaseEngineYDocSession } from "./engineYDocSessionRelease";
 
 interface TestEntry {
   session: { close: () => Promise<void> };
+  path: string;
   label: string;
+  closeFailed?: boolean;
 }
 
 function entryOf(label: string, close: () => Promise<void>): TestEntry {
-  return { label, session: { close } };
+  return { label, path: "notes/a.md", session: { close } };
 }
 
 describe("releaseEngineYDocSession", () => {
@@ -22,14 +24,50 @@ describe("releaseEngineYDocSession", () => {
       sessions,
       sessionId: "s1",
       entry,
-      path: "notes/a.md",
       reason: "stale session replaced",
       onCloseFailed,
     });
 
     expect(released).toBe(true);
     expect(sessions.has("s1")).toBe(false);
+    expect(entry.closeFailed).toBeUndefined();
     expect(onCloseFailed).not.toHaveBeenCalled();
+  });
+
+  it("MARKS the session when the close fails, and clears the mark by releasing it", async () => {
+    // The mark is how the next open of this document finds the session to
+    // retry: the renderer retries under a NEW session id, so nothing keyed by
+    // id can reach it. An unmarked entry is a LIVE session someone owns.
+    const sessions = new Map<string, TestEntry>();
+    let refuse = true;
+    const entry = entryOf("a", async () => {
+      if (refuse) throw new Error("daemon refused the release");
+    });
+    sessions.set("s1", entry);
+
+    expect(
+      await releaseEngineYDocSession({
+        sessions,
+        sessionId: "s1",
+        entry,
+        reason: "renderer closed the document",
+        onCloseFailed: () => undefined,
+      }),
+    ).toBe(false);
+    expect(entry.closeFailed).toBe(true);
+
+    refuse = false;
+    expect(
+      await releaseEngineYDocSession({
+        sessions,
+        sessionId: "s1",
+        entry,
+        reason: "unreleased session retried by a new open",
+        onCloseFailed: () => undefined,
+      }),
+    ).toBe(true);
+    // Released means gone: the mark cannot outlive the entry that carries it.
+    expect(sessions.has("s1")).toBe(false);
   });
 
   it("KEEPS the session registered when the close fails", async () => {
@@ -47,7 +85,6 @@ describe("releaseEngineYDocSession", () => {
       sessions,
       sessionId: "s1",
       entry,
-      path: "notes/a.md",
       reason: "stale session replaced",
       onCloseFailed: () => undefined,
     });
@@ -69,7 +106,6 @@ describe("releaseEngineYDocSession", () => {
       sessions,
       sessionId: "s1",
       entry,
-      path: "notes/a.md",
       reason: "kind-mismatched lineage",
       onCloseFailed: () => undefined,
     });
@@ -92,7 +128,6 @@ describe("releaseEngineYDocSession", () => {
       sessions,
       sessionId: "s1",
       entry,
-      path: "notes/a.md",
       reason: "kind-mismatched lineage",
       onCloseFailed,
     });
@@ -119,7 +154,6 @@ describe("releaseEngineYDocSession", () => {
       sessions,
       sessionId: "s1",
       entry: stale,
-      path: "notes/a.md",
       reason: "stale session replaced",
       onCloseFailed: () => undefined,
     });
@@ -140,7 +174,6 @@ describe("releaseEngineYDocSession", () => {
       sessions,
       sessionId: "s1",
       entry: stale,
-      path: "notes/a.md",
       reason: "stale session replaced",
       onCloseFailed: () => undefined,
     });
