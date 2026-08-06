@@ -1554,6 +1554,48 @@ describe("engine markdown source view", () => {
     await waitFor(() => expect(opens).toBe(2));
   });
 
+  // codex r15. The Y.Doc-only bypass renders the document when the read
+  // failed — but the readiness signal that retires a pending search jump asks
+  // only about DISK text, which that path never has. The jump stayed pending
+  // in the shell and replayed on a later open of the path: the user clicks a
+  // search result, gets the document, and some unrelated later open jumps to
+  // that old line.
+  //
+  // What it does NOT do is APPLY the jump. No engine-backed document does:
+  // the line jump's only seam is the plain source textarea, which engine mode
+  // does not render (the comment on `pendingScrollLine` says the WYSIWYG
+  // editor takes that seam over when it owns the surface). This path behaves
+  // exactly like every other engine document — consumed, not applied — and
+  // making it the one place a jump lands would be a feature smuggled into a
+  // bugfix.
+  it("retires the search jump when the document comes back through the Y.Doc", async () => {
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    const onScrollConsumed = vi.fn();
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      readWorkspaceText: vi.fn(async () => {
+        throw new Error("read failed");
+      }),
+    });
+
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 3, nonce: 1 }}
+        onScrollConsumed={onScrollConsumed}
+      />,
+    );
+
+    // The document is on screen through the bound Y.Doc, with no disk text.
+    await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
+    expect(screen.queryByText("Couldn't read this file.")).toBeNull();
+
+    // MUTATION: keep `textReady` on the disk read alone -> this never fires,
+    // the shell holds the jump, and it replays on a later open of this path.
+    await waitFor(() => expect(onScrollConsumed).toHaveBeenCalled());
+  });
+
   // codex on the round-9 head: the SAME failed-read branch, but reached with a
   // draft already pending. `openTimedOut` was carried only by the child's
   // `readOnly` — and this branch unmounts the child in the commit that would

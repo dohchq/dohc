@@ -1356,6 +1356,107 @@ describe("EngineWorkspaceSessions", () => {
       expect(attempts).toBe(2);
     });
 
+    it("refuses the NEXT call when an earlier one recovered past the window", async () => {
+      // codex r15, and it is the bound's own hole. The gates lived on the
+      // failure path, so a call that failed, RECOVERED and returned left the
+      // budget spent with nothing to notice: the next call started unbounded.
+      // In the document open that is the version read recovering and then
+      // admitting the provider open past the window — the capture chain held
+      // with no deadline left to stop it, which is the hold #564 removes.
+      const workspace = await tempWorkspace("workspace-spent-then-next");
+      const client = new MockClient("handle-spent-then-next");
+      let nowMs = 5_000;
+      let secondCall = 0;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .withRetryBudget(2_000, async () => {
+          let attempts = 0;
+          // Call 1 fails once — starting the clock — waits out the whole
+          // budget, and then SUCCEEDS. Nothing on this path throws.
+          await sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              if (attempts === 1) throw { code: "transport-error" };
+              nowMs += 5_000;
+              return "recovered";
+            },
+            { retryTransportErrors: true },
+          );
+          // MUTATION: check the budget only at region entry and after a
+          // failure -> this call runs, and everything it opens is unbounded.
+          return await sessions.run(workspace, async () => {
+            secondCall += 1;
+            return "unbounded";
+          });
+        })
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(secondCall).toBe(0);
+      const deadline = outcome as EngineWorkspaceRetryDeadlineError;
+      expect(deadline.constraint).toBe("withRetryBudget budgetMs");
+      expect(deadline.limitMs).toBe(2_000);
+      // The failure that started the clock rides along, so the refusal says
+      // what the region was recovering from.
+      expect(deadline.cause).toMatchObject({ code: "transport-error" });
+    });
+
+    it("refuses the NEXT call when quit arrives between two calls", async () => {
+      // The same gap, reached the other way: `withRetryBudget` checks
+      // `shuttingDown` at region entry, so a flag that flips between two calls
+      // was never consulted and the region went on holding the chain.
+      const workspace = await tempWorkspace("workspace-quit-between");
+      const client = new MockClient("handle-quit-between");
+      let secondCall = 0;
+      const sessions = new EngineWorkspaceSessions({
+        currentClient: () => client,
+      });
+
+      const outcome = await sessions
+        .withRetryBudget(60_000, async () => {
+          await sessions.run(workspace, async () => "first");
+          sessions.beginShutdown();
+          return await sessions.run(workspace, async () => {
+            secondCall += 1;
+            return "unbounded";
+          });
+        })
+        .catch((error: unknown) => error);
+
+      // MUTATION: consult `shuttingDown` only at region entry -> the quit
+      // teardown waits behind a call this region had not started yet.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      expect(secondCall).toBe(0);
+    });
+
+    it("keeps running a region whose budget clock never started", async () => {
+      // The invariant the gate must not break: a healthy attempt costs the
+      // budget nothing, however long it takes, so a region that has not
+      // FAILED yet is never refused for time alone.
+      const workspace = await tempWorkspace("workspace-healthy-region");
+      const client = new MockClient("handle-healthy-region");
+      let nowMs = 5_000;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions.withRetryBudget(1_000, async () => {
+        await sessions.run(workspace, async () => {
+          nowMs += 60_000;
+          return "slow but healthy";
+        });
+        return await sessions.run(workspace, async () => "second");
+      });
+
+      expect(outcome).toBe("second");
+    });
+
     it("rejects an invalid deadline instead of quietly voiding it", async () => {
       const workspace = await tempWorkspace("workspace-bad-deadline");
       const client = new MockClient("handle-bad-deadline");

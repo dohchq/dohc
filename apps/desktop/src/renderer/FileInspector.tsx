@@ -2755,11 +2755,24 @@ export function FileInspector(props: {
           undoText: props.pendingUndo.undoText,
         }
       : undefined;
+  // An engine document that BOUND does not need the file read: the canonical
+  // Y.Doc is the content, and main holds the live session. Without this, a
+  // read that failed before a successful retry left the user at "Couldn't
+  // read this file." with no document and no way back, while the session it
+  // describes was live (#564, codex round 3).
+  const engineDocBound = engine.available && engine.doc !== null;
   // Consume the jump AFTER the child view's own effects applied it (child
   // effects run before this parent effect). Text views wait for the loaded
   // text; every other kind has nowhere to land, so consume immediately.
+  //
+  // A bound Y.Doc counts as the text, because it IS the document: the branch
+  // below is bypassed and this commit shows the user everything it is ever
+  // going to show for this jump. Asking only about DISK text left the jump
+  // pending on the one path that has none, and the shell replayed it on a
+  // later open of that path (#564, codex r15).
   const { scrollTarget, onScrollConsumed } = props;
-  const textReady = !isText || (text !== null && loadedPath === props.path);
+  const textReady =
+    !isText || engineDocBound || (text !== null && loadedPath === props.path);
   useEffect(() => {
     if (scrollTarget && scrollTarget.path === props.path && textReady) {
       onScrollConsumed?.();
@@ -2810,12 +2823,6 @@ export function FileInspector(props: {
     );
   }
 
-  // An engine document that BOUND does not need the file read: the canonical
-  // Y.Doc is the content, and main holds the live session. Without this, a
-  // read that failed before a successful retry left the user at "Couldn't
-  // read this file." with no document and no way back, while the session it
-  // describes was live (#564, codex round 3).
-  const engineDocBound = engine.available && engine.doc !== null;
   if (isText && !engineDocBound && (text === null || loadedPath !== props.path)) {
     // Keep the inspector frame mounted while loading/erroring so the surface
     // is stable (and testable) rather than flickering between containers.

@@ -312,6 +312,10 @@ export class EngineWorkspaceSessions {
     // is what the budget spans: a per-run counter resets on each `run` and
     // would report "across 1 attempts" for a wait that covered six.
     attempts: number;
+    // What the region was recovering from. A run refused at its START has no
+    // failure of its own to name, and a refusal that names none sends the
+    // reader looking for the wrong thing.
+    lastError: unknown;
   }>();
 
   constructor(
@@ -364,6 +368,7 @@ export class EngineWorkspaceSessions {
       );
     }
     const startedAtMs = this.now();
+    this.refuseSpentRegion(workspace.workspaceId, startedAtMs);
     const entry = await this.acquire(workspace.workspaceId);
     try {
       const maxAttempts = options.retryTransportErrors
@@ -392,7 +397,7 @@ export class EngineWorkspaceSessions {
             entry.binding = null;
           }
           const retryable = retryAfterReconnect || retryAfterTransport;
-          this.noteBudgetAttempt();
+          this.noteBudgetAttempt(error);
           // A failure this ladder will not retry never reaches the gates: a
           // permission refusal is not a timeout however long we waited.
           if (!retryable) throw error;
@@ -457,7 +462,13 @@ export class EngineWorkspaceSessions {
     // by construction, and an opening document is read-only (#533).
     if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();
     return await this.retryBudgets.run(
-      { budgetMs, failedAtMs: null, startedAtMs: this.now(), attempts: 0 },
+      {
+        budgetMs,
+        failedAtMs: null,
+        startedAtMs: this.now(),
+        attempts: 0,
+        lastError: undefined,
+      },
       task,
     );
   }
@@ -465,11 +476,46 @@ export class EngineWorkspaceSessions {
   // One failed daemon attempt, counted on the ambient budget so the refusal
   // can report what the WAIT actually cost rather than one ladder's share.
   // The first failure also starts the budget's clock: see `failedAtMs`.
-  private noteBudgetAttempt(): void {
+  private noteBudgetAttempt(cause?: unknown): void {
     const budget = this.retryBudgets.getStore();
     if (budget === undefined) return;
     budget.attempts += 1;
     budget.failedAtMs ??= this.now();
+    // A churned open has no error of its own; it must not erase the one the
+    // region is actually recovering from.
+    if (cause !== undefined) budget.lastError = cause;
+  }
+
+  /**
+   * The two questions every run in a bounded region asks BEFORE it starts.
+   *
+   * They used to be asked only at region entry and after a failure, which
+   * leaves the same hole twice: a call that fails, RECOVERS and returns leaves
+   * the budget spent with nothing left to notice it, and a call that begins
+   * after `beginShutdown` was never checked at all when the flag flipped
+   * between two calls. Either way the next call ran unbounded — in the
+   * document open, a recovered version read admitting the provider open past
+   * the window, holding the capture chain with no deadline left to stop it.
+   * That is the hold #564 exists to bound (#564, codex r15).
+   *
+   * Outside a region this does nothing: work that is not abandonable keeps
+   * retrying at quit on purpose, because an accepted write must not be
+   * dropped.
+   */
+  private refuseSpentRegion(workspaceId: string, startedAtMs: number): void {
+    const budget = this.retryBudgets.getStore();
+    if (budget === undefined) return;
+    if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();
+    // A healthy attempt costs the budget nothing, however long it took, so a
+    // region that has not failed yet is never refused for time alone.
+    if (budget.failedAtMs === null) return;
+    this.throwPastRetryDeadline(
+      workspaceId,
+      undefined,
+      startedAtMs,
+      budget.attempts,
+      budget.lastError,
+    );
   }
 
   // The one deadline gate every retry ladder consults, on both sides of its
@@ -739,7 +785,7 @@ export class EngineWorkspaceSessions {
         if (error instanceof EngineWorkspaceRebindError) throw error;
         if (error instanceof EngineWorkspaceRetryDeadlineError) throw error;
         lastError = error;
-        this.noteBudgetAttempt();
+        this.noteBudgetAttempt(error);
         // EVERY retry decision this ladder makes settles here, including the
         // ones for errors it re-opens immediately. Gating only the
         // "daemon may be relaunching" errors left a bare `continue` behind it,
