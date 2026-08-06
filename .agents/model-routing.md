@@ -25,7 +25,8 @@ code quality, and API design.
 | Model         | Cost score | Intelligence | Taste |
 | ------------- | ---------: | -----------: | ----: |
 | `gpt-5.6-sol` |          9 |            8 |     6 |
-| `opus-5`      |          8 |            6 |     8 |
+| `opus-5`      |          8 |            7 |     8 |
+| `sonnet-5`    |          9 |            5 |     7 |
 | `fable-5`     |          2 |            9 |     9 |
 
 Treat these scores as observed preferences, not vendor benchmarks.
@@ -47,6 +48,7 @@ more routing branches under this user's cost limits.
 | --------- | ------------------------------------------------------------------------------------ |
 | `fable`   | The hardest, longest, most ambiguous work, especially when taste matters.            |
 | `opus`    | Complex reasoning, independent review, and user-facing work that needs strong taste. |
+| `sonnet`  | Routine, well-scoped Claude work, including implementation, writing, and review.      |
 
 Never use Haiku.
 
@@ -73,6 +75,7 @@ to save tokens, cost, or latency.
 
 - Use Sol for bulk work, mechanical changes, clear implementation, analysis,
   migrations, investigation, and computer use.
+- Use Sonnet for routine, well-scoped Claude work.
 - Use Fable or Opus for user-facing UI, copy, and API design.
 - Require a model with a taste score of at least 7 for user-facing decisions.
 - Use Fable or Opus for review. Add Sol when an independent Codex perspective
