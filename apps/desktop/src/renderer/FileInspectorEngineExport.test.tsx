@@ -24,7 +24,10 @@ vi.setConfig({ testTimeout: 15_000 });
 
 const DOC_MARKDOWN = "# Plan\n\nBody from the last read.\n";
 
-function engineBridge(markdown: string, options?: { available?: boolean }) {
+function engineBridge(
+  markdown: string,
+  options?: { available?: boolean; openTimedOut?: boolean },
+) {
   const serverDoc = markdownToYDoc(markdown);
   return {
     readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false })),
@@ -38,11 +41,14 @@ function engineBridge(markdown: string, options?: { available?: boolean }) {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "default" as const,
     })),
-    openEngineYDocSession: vi.fn(async () =>
-      options?.available === false
+    openEngineYDocSession: vi.fn(async () => {
+      if (options?.openTimedOut === true) {
+        return { available: false, openTimedOut: true };
+      }
+      return options?.available === false
         ? { available: false }
-        : { available: true, initialUpdate: Y.encodeStateAsUpdate(serverDoc) },
-    ),
+        : { available: true, initialUpdate: Y.encodeStateAsUpdate(serverDoc) };
+    }),
     applyEngineYDocUpdate: vi.fn(async () => undefined),
     closeEngineYDocSession: vi.fn(async () => undefined),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
@@ -103,6 +109,62 @@ describe("engine-mode export with no mounted serializer", () => {
     // exported as if it were the live document.
     expect(await screen.findByText("Document not open")).toBeTruthy();
     expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
+  });
+
+  // codex r19: the same rule, one state over. A timed-out open leaves the
+  // LOCAL branch on screen — the plain editor, read-only, over the file — while
+  // the daemon may still hold a session whose Y.Doc took replicated updates the
+  // file has never seen. Exporting the disk body there reports a document that
+  // is not the document, which is what the engine branch already refuses to do.
+  it("refuses the export while a timed-out open may still hold the document", async () => {
+    const user = userEvent.setup();
+    const bridge = engineBridge(DOC_MARKDOWN, { openTimedOut: true });
+    vi.stubGlobal("dohcDesktop", bridge);
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    // The timeout notice is up and the document is read-only beside it.
+    await screen.findByTestId("engine-open-timeout-notice", {}, { timeout: 5_000 });
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+
+    // MUTATION: serialize the disk cache during `openTimedOut` -> a .md file
+    // that is missing whatever the held session already took.
+    expect(await screen.findByText("Document not open")).toBeTruthy();
+    expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
+  });
+
+  it("exports again once the retry answers that the document is local", async () => {
+    const user = userEvent.setup();
+    let opens = 0;
+    const bridge = engineBridge(DOC_MARKDOWN);
+    const openEngineYDocSession = vi.fn(async () => {
+      opens += 1;
+      // The retry answers "not engine-backed": the file IS the document again,
+      // so the refusal must lift with it.
+      return opens === 1
+        ? { available: false, openTimedOut: true }
+        : { available: false };
+    });
+    vi.stubGlobal("dohcDesktop", { ...bridge, openEngineYDocSession });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("engine-open-timeout-notice", {}, { timeout: 5_000 });
+    await user.click(screen.getByText("Try again"));
+    await vi.waitFor(() =>
+      expect(screen.queryByTestId("engine-open-timeout-notice")).toBeNull(),
+    );
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+
+    await vi.waitFor(() =>
+      expect(bridge.exportDocumentFile).toHaveBeenCalledTimes(1),
+    );
+    expect(bridge.exportDocumentFile).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "markdown", content: DOC_MARKDOWN }),
+    );
   });
 
   it("exports the read body when the document is not engine-backed", async () => {

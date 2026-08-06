@@ -1857,7 +1857,16 @@ function MarkdownView(props: {
               <DocumentMenu
                 workspaceId={props.workspaceId}
                 suggestedName={filenameStem(props.path)}
-                getMarkdown={() => serializeDraftRef.current()}
+                // The same rule the engine branch answers to: emit the
+                // document, or refuse. A timed-out open leaves this branch
+                // showing the DISK, while the engine may still hold a session
+                // whose Y.Doc took replicated updates the file has never seen
+                // (#564, codex r19) — the read-only editor beside this menu is
+                // the same statement. The refusal reads "Document not open",
+                // and the notice below it offers the retry that resolves this.
+                getMarkdown={() =>
+                  engine.openTimedOut ? null : serializeDraftRef.current()
+                }
               />
             ) : null}
           </>

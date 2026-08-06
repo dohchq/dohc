@@ -1613,6 +1613,63 @@ describe("EngineWorkspaceSessions", () => {
       expect(opensAfterClose.count).toBe(0);
     });
 
+    it("refuses on time when a stale client never answers its cleanup close", async () => {
+      // codex r19, and the r18 class in one more flavor: the doors bound what
+      // STARTS, and this await sat between two of them. When the client churns
+      // mid-open the loser's binding is closed — and a `workspace.close` on a
+      // client that is connected but UNRESPONSIVE never answers, so the region
+      // waited there past its budget and past quit with the gate one line
+      // away. Cleanup for a generation nobody will use again does not get to
+      // hold the capture chain.
+      //
+      // Under the defect this test does not fail, it HANGS: the first cleanup
+      // close never settles, so the run never returns and the case becomes the
+      // file's timeout.
+      const workspace = await tempWorkspace("workspace-stale-close-hangs");
+      let nowMs = 5_000;
+      let reads = 0;
+      let closeStarted = 0;
+      // Every open answers and then finds the client changed under it, so the
+      // ladder churns — and every loser's cleanup close hangs.
+      const churning = (): EngineDaemonClient => ({
+        close: () => undefined,
+        async sendRequest(request) {
+          if (request.method === "workspace.close") {
+            closeStarted += 1;
+            return await new Promise<never>(() => {});
+          }
+          // Each open costs 4,000 ms against a 2,000 ms window.
+          nowMs += 4_000;
+          return { id: request.id, result: { workspace: "churning" } };
+        },
+      });
+      const generations = [churning(), churning(), churning(), churning()];
+      const sessions = new EngineWorkspaceSessions(
+        {
+          currentClient: () => {
+            const client = generations[Math.min(reads, generations.length - 1)];
+            reads += 1;
+            return client as EngineDaemonClient;
+          },
+        },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .withRetryBudget(2_000, async () =>
+          await sessions.run(workspace, async () => "unreachable", {
+            retryTransportErrors: true,
+          }),
+        )
+        .catch((error: unknown) => error);
+
+      // MUTATION: await the cleanup close -> this never resolves and the
+      // region is held by a daemon request nothing bounds.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      // The cleanup was still ISSUED — it is best-effort, not skipped.
+      expect(closeStarted).toBeGreaterThan(0);
+    });
+
     it("keeps running a region whose budget clock never started", async () => {
       // The invariant the gate must not break: a healthy attempt costs the
       // budget nothing, however long it takes, so a region that has not

@@ -462,7 +462,8 @@ export class EngineWorkspaceSessions {
 
   /**
    * THE INVARIANT: no daemon request starts after the region's budget or its
-   * shutdown fired, whatever the caller awaited in between.
+   * shutdown fired, and none blocks the region between the doors either —
+   * whatever the caller awaited in between.
    *
    * Three review rounds found the same hole in three different awaits — the
    * gap between two runs (r15), the rebind ladder inside a run (r17), and the
@@ -799,7 +800,15 @@ export class EngineWorkspaceSessions {
         if (entry.opening?.promise === promise) entry.opening = null;
       }
       if (this.source.currentClient() !== client) {
-        await this.closeBinding(binding).catch(() => undefined);
+        // NOT awaited, and that is the point. This is cleanup for a client
+        // generation nobody will use again: no caller reads its result, and
+        // the `.catch` already says failure is acceptable. Awaiting it put a
+        // daemon request with no deadline BETWEEN two doors — a stale client
+        // that is connected but unresponsive held the region here, past its
+        // budget and past quit, with the gates one line away (#564, codex
+        // r19). The doors bound what STARTS; nothing may block the region
+        // between them either.
+        void this.closeBinding(binding).catch(() => undefined);
         // A churned open is a failed daemon attempt the budget paid for. Left
         // uncounted, a wait this ladder caused reported "across 0 attempts".
         this.noteBudgetAttempt();
