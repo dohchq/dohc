@@ -220,6 +220,8 @@ async fn resolving_keep_current_folds_the_choice_into_the_lineage() {
                 author_json: None,
                 now_ms: 11,
                 request_id: None,
+                // This caller builds no wire answer, so nothing bounds the row here.
+                conflict_answer_budget_bytes: usize::MAX,
             },
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
@@ -355,6 +357,8 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
                 author_json: None,
                 now_ms: 11,
                 request_id: None,
+                // This caller builds no wire answer, so nothing bounds the row here.
+                conflict_answer_budget_bytes: usize::MAX,
             },
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
@@ -465,6 +469,8 @@ async fn an_oversized_resolution_fold_reports_its_measurements() {
                 author_json: None,
                 now_ms: 11,
                 request_id: None,
+                // This caller builds no wire answer, so nothing bounds the row here.
+                conflict_answer_budget_bytes: usize::MAX,
             },
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
@@ -548,6 +554,8 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
                 author_json: None,
                 now_ms: 500,
                 request_id: None,
+                // This caller builds no wire answer, so nothing bounds the row here.
+                conflict_answer_budget_bytes: usize::MAX,
             },
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
@@ -626,6 +634,8 @@ async fn a_resolution_refuses_while_a_session_holds_the_document() {
                 author_json: None,
                 now_ms: 11,
                 request_id: None,
+                // This caller builds no wire answer, so nothing bounds the row here.
+                conflict_answer_budget_bytes: usize::MAX,
             },
             leases.clone(),
             Arc::new(NoFaults),
@@ -717,6 +727,8 @@ async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
                 author_json: None,
                 now_ms: 11,
                 request_id: None,
+                // This caller builds no wire answer, so nothing bounds the row here.
+                conflict_answer_budget_bytes: usize::MAX,
             },
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
@@ -791,6 +803,8 @@ async fn an_idempotent_retry_survives_a_live_session() {
                         author_json: None,
                         now_ms: 11,
                         request_id: Some("retry-request-1".to_owned()),
+                        // This caller builds no wire answer, so nothing bounds the row here.
+                        conflict_answer_budget_bytes: usize::MAX,
                     },
                     leases,
                     Arc::new(NoFaults),
