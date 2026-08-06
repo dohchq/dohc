@@ -184,19 +184,87 @@ describe("orphanedDrafts persistence (#600)", () => {
     expect(atRiskOrphanedDraftIds()).toHaveLength(1);
   });
 
+  // The pair below reads the boundary exactly, so the capture's clock is
+  // frozen: a second Date.now() call can tick a millisecond past the one
+  // inside the capture, and the age these tests mean to set would be off by
+  // that tick.
+  // The floor runs on the way OUT of storage too. Nothing `storeDraft` writes
+  // can hit this — it classifies the same path with the same pure function —
+  // so the row below is what an older build, another tool, or a hand-edited
+  // profile leaves in a plaintext key anything in the profile can write.
+  it("refuses a stored row whose path the floor calls secret, and scrubs it", async () => {
+    const capturedAt = Date.now();
+    localStorage.setItem(
+      ORPHANED_DRAFT_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: 1,
+          workspaceId: "ws-1",
+          path: ".env",
+          text: "API_KEY=shh",
+          capturedAtMs: capturedAt,
+        },
+        {
+          id: 2,
+          workspaceId: "ws-1",
+          path: "a.md",
+          text: "kept",
+          capturedAtMs: capturedAt,
+        },
+      ]),
+    );
+    // MUTATION (load floor): drop isPersistableDraftPath from
+    // loadStoredDrafts. The secret row is restored into the notice AND left in
+    // plaintext storage, and both assertions below fail.
+    const next = await relaunch();
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", ".env")).toHaveLength(0);
+    expect(storedText()).not.toContain("shh");
+    // ...and the row beside it is untouched.
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
+    ).toEqual(["kept"]);
+  });
+
+  // A rename dohc did not perform reaches this store as nothing at all: no
+  // explorer op fires, and the renderer cannot tell an external rename from a
+  // delete. Both must therefore behave like a delete, which KEEPS the draft —
+  // guessing the other way deletes the user's only copy of their text. What
+  // the floor still guarantees is the invariant over storage itself: every
+  // stored path is one the floor allows, and the row stays listed and
+  // dismissable.
+  it("keeps a draft whose file moved outside dohc, exactly as it keeps a deleted one", async () => {
+    captureOrphanedDraft("ws-1", "a.md", "captured while tracked");
+    // The file becomes `.env` on disk, with dohc closed. Nothing re-keys the
+    // row, so it restores on its captured path.
+    // MUTATION (purge on absence): drop rows whose path a listing no longer
+    // shows. Every offline delete then destroys its recovery text too, and
+    // the delete rule above ("keeps drafts whose path a delete projects to
+    // null") is the same rule this one states for a move.
+    const next = await relaunch();
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
+    ).toEqual(["captured while tracked"]);
+    const stored = JSON.parse(storedText()) as { path: string }[];
+    expect(stored.map((row) => row.path)).toEqual(["a.md"]);
+  });
+
   it("forgets a recovery nothing claimed within the retention window", async () => {
+    const capturedAt = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(capturedAt);
     captureOrphanedDraft("ws-1", "a.md", "abandoned");
     // MUTATION (expiry): drop the retention filter. Abandoned recoveries
     // accumulate for the life of the install.
-    const next = await relaunch(Date.now() + ORPHANED_DRAFT_RETENTION_MS + 1);
+    const next = await relaunch(capturedAt + ORPHANED_DRAFT_RETENTION_MS);
     expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
     // Cleaned out of storage, not just hidden from the restore.
     expect(storedText()).not.toContain("abandoned");
   });
 
   it("keeps a recovery one millisecond short of expiring", async () => {
+    const capturedAt = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(capturedAt);
     captureOrphanedDraft("ws-1", "a.md", "still fresh");
-    const next = await relaunch(Date.now() + ORPHANED_DRAFT_RETENTION_MS - 1);
+    const next = await relaunch(capturedAt + ORPHANED_DRAFT_RETENTION_MS - 1);
     expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(1);
   });
 

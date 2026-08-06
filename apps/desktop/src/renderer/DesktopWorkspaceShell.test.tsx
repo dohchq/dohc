@@ -7486,6 +7486,37 @@ describe("set-aside draft recovery", () => {
     // ...and it names both ways out, so the warning offers what it demands.
     expect(section.textContent).toContain("Copy an edit to keep its text");
     expect(section.textContent).toContain("Dismiss deletes it for good");
+    // A persisted row makes no lifetime claim of its own either.
+    expect(
+      within(section).queryByTestId("recovery-list-window-only"),
+    ).toBeNull();
+  });
+
+  // #600: dropping the blanket disclosure was right for the rows that now
+  // survive a quit, and it left the rows that still do NOT — a secret path
+  // plaintext storage refuses (#446), a write the quota refused — looking
+  // exactly like the durable ones. The lifetime moved onto the row.
+  it("marks the set-aside edits that still die with the window", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    captureOrphanedDraft(WORKSPACE.workspaceId, "notes/a.md", "Persisted");
+    captureOrphanedDraft(WORKSPACE.workspaceId, ".env", "API_KEY=shh");
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    // MUTATION (row lifetime): render the marker for every row, or for none.
+    // Either way the panel stops telling the two apart, and the user cannot
+    // see which edit the next quit destroys.
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    const marked = screen
+      .getAllByTestId("recovery-list-row")
+      .filter(
+        (row) => within(row).queryByTestId("recovery-list-window-only") !== null,
+      );
+    expect(marked).toHaveLength(1);
+    expect(marked[0].textContent).toContain(".env");
+    expect(marked[0].textContent).toContain("Only in this window");
   });
 
   // #579 review r4: a failed save-first flush aborts the switch, the

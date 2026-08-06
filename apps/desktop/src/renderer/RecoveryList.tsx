@@ -125,6 +125,22 @@ export function RecoveryList(props: {
                 {row.workspaceLabel}
               </span>
             ) : null}
+            {/* Most rows survive a quit (#600), and one kind does not: a
+                secret-classified path never enters plaintext storage (#446),
+                and a refused write leaves the text in memory. The lifetime
+                belongs to the ROW, so the row carries it — a list that mixes
+                the two (the notice center) would otherwise show a lost edit
+                and a durable one as the same thing. No caller opts out: the
+                close dialog lists only these, and repeating the fact there
+                costs less than a flag a caller can set wrong. */}
+            {row.persisted ? null : (
+              <span
+                data-testid="recovery-list-window-only"
+                className="ml-2 text-[10px] text-warning"
+              >
+                Only in this window
+              </span>
+            )}
           </span>
           <div className="flex shrink-0 items-center gap-2">
             <CopyDraftButton text={row.draft.text} />

@@ -86,10 +86,19 @@ function writeRows(rows: readonly StoredOrphanedDraft[]): boolean {
   }
 }
 
-// Every recovery still worth restoring, oldest first. Expired rows and rows
-// the floor no longer allows are dropped here AND removed from storage: a
-// path renamed onto `.env` between two runs must not leave its plaintext
-// behind.
+// Every recovery still worth restoring, oldest first. Expired rows go, and so
+// does any row this build's floor refuses — both are dropped here AND removed
+// from storage. localStorage is plaintext that an older build or another tool
+// can write, so a stored row is classified again on the way out instead of
+// being trusted because it is stored.
+//
+// The floor reads a PATH, not a file. A rename dohc PERFORMS re-keys the row
+// and drops it when the new path is secret (`remapStoredDraftPaths`). A rename
+// dohc did not perform — done outside the app, or between two runs — leaves
+// the row on the path it was captured on: nothing in the renderer can tell
+// that rename from a delete, and a delete must keep its draft. The row stays
+// listed in the notice center, where Dismiss deletes it, and expires with the
+// rest.
 export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] {
   const rows = readRows();
   const kept = rows.filter(
