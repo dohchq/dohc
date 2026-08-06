@@ -11188,6 +11188,26 @@ fn now_ms() -> Result<i64, WireError> {
 }
 
 fn map_runtime(error: RuntimeError) -> WireError {
+    // A materialization that exhausted its replace retries against a lock an
+    // external program holds on the ARTIFACT. The settle committed and the
+    // write job is durably pending, so the ONLY missing piece is a later
+    // attempt — which is exactly `Overloaded`'s retry contract
+    // (afterBackoff). Flattening it to Internal (retry: no) is what left a
+    // locked file's save landing only on the next unrelated settle (#554).
+    //
+    // Matched on the VARIANT, never on `code()`: the code delegates through
+    // `MaterializeError::Storage`, so a busy SQLite handle answers
+    // "file-locked" too — and the desktop would then tell the user another
+    // program has their DOCUMENT open while it retried a database contention.
+    // Every other materialization failure — a busy engine database included —
+    // falls through to the Internal tail below. Only the artifact lock has a
+    // retry behind it, so only the artifact lock may say `afterBackoff`.
+    if matches!(
+        &error,
+        RuntimeError::Materialize(dohc_engine_files::MaterializeError::FileLocked)
+    ) {
+        return wire(ErrorCode::Overloaded, "file-locked");
+    }
     if matches!(
         &error,
         RuntimeError::Collab(CollabError::ReplayParityViolation { .. })
@@ -11511,6 +11531,41 @@ mod tests {
     use std::time::Duration;
 
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// #595 round 8: the artifact lock and a busy engine database are two
+    /// different contentions, and only the first may be reported as
+    /// `file-locked` — the desktop turns that message into "another program
+    /// has this file open" and retries the ARTIFACT write against it. The
+    /// code() of MaterializeError::Storage DELEGATES to the storage error, so
+    /// matching on the code alone reported a busy SQLite handle as an
+    /// artifact lock. Matching the variant is what keeps them apart.
+    ///
+    /// Round 14 narrowed the answer: the busy store keeps the prior terminal
+    /// mapping. Only `file-locked` may be `Overloaded`, because only
+    /// `file-locked` has a retry behind it — the desktop's ladder accepts
+    /// nothing else, so any other `afterBackoff` message advertises a retry
+    /// nobody performs.
+    ///
+    /// MUTATION: match on `materialize.code() == "file-locked"` again -> the
+    /// storage case below reports "file-locked".
+    #[test]
+    fn a_busy_engine_store_is_not_reported_as_a_locked_artifact() {
+        let artifact = map_runtime(RuntimeError::Materialize(
+            dohc_engine_files::MaterializeError::FileLocked,
+        ));
+        assert_eq!(artifact.code, ErrorCode::Overloaded);
+        assert_eq!(artifact.message, "file-locked");
+
+        let store = map_runtime(RuntimeError::Materialize(
+            dohc_engine_files::MaterializeError::Storage(
+                dohc_engine_storage::StorageError::FileLocked,
+            ),
+        ));
+        assert_ne!(store.message, "file-locked");
+        // Terminal, not a retry the caller cannot collect on.
+        assert_eq!(store.code, ErrorCode::Internal);
+        assert_eq!(store.message, "workspace operation failed");
+    }
 
     #[test]
     fn encoded_length_agrees_with_the_encoder_that_builds_the_frame() {

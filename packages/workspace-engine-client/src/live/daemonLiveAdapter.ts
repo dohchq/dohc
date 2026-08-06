@@ -111,14 +111,17 @@ export function isDaemonReconnectError(error: unknown): boolean {
 // INVALID_PARAMS, so only the MESSAGE names which refusal this is. Keep each
 // discriminator at this protocol boundary so a caller cannot accidentally
 // reinterpret every INVALID_PARAMS refusal as the one it handles.
-function refusalMessageOf(error: unknown): string | null {
+function refusalMessageOf(
+  error: unknown,
+  code: DaemonErrorCode = "INVALID_PARAMS",
+): string | null {
   const wireError =
     error instanceof DaemonRefusalError
       ? { code: error.wireCode, message: error.message }
       : isRecord(error) && isRecord(error.wireError)
         ? error.wireError
         : null;
-  if (wireError?.code !== "INVALID_PARAMS") return null;
+  if (wireError?.code !== code) return null;
   return typeof wireError.message === "string" ? wireError.message : null;
 }
 
@@ -131,6 +134,15 @@ export function isYdocSessionNotFoundRefusal(error: unknown): boolean {
 // committed to the same object first. `DomainError::ConflictStaleTarget`.
 export function isConflictStaleTargetRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "conflict-stale-target";
+}
+
+// The settle committed, but the artifact replace exhausted its retries
+// against a handle an external program still holds
+// (`MaterializeError::FileLocked`). The write job is durably pending, so the
+// caller retries the settle with backoff until the handle releases — OVERLOADED
+// is the wire's retry-after-backoff contract, and the message names the lock.
+export function isFileLockedRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") === "file-locked";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

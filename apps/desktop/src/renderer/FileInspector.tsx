@@ -24,7 +24,11 @@ import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { bridge } from "./bridge";
-import { useEngineDoc, type UseEngineDoc } from "./collab/useEngineDoc";
+import {
+  useEngineDoc,
+  type EngineDocSaveState,
+  type UseEngineDoc,
+} from "./collab/useEngineDoc";
 import {
   applyFrontmatter,
   orderFrontmatter,
@@ -773,6 +777,46 @@ function useAutosavedTextDraft(props: {
 // change into history like any other file change — the editor is just another
 // writer, never a privileged one. Live co-editing (Yjs) layers onto this
 // surface for shared workspaces in the collab step.
+// What the engine save-state chip says, one row per state. A `Record` over the
+// state union rather than a ternary chain, so a new save state is a
+// compile-time omission instead of one that silently renders "Couldn't save".
+// `recovery` is the shell's own state (#579), not an engine one: an unresolved
+// set-aside draft beside a settled document.
+//
+// `title` is absent where the label already says everything.
+const ENGINE_CHIP: Record<
+  EngineDocSaveState | "recovery",
+  { label: string; title?: string }
+> = {
+  saved: { label: "Saved" },
+  saving: { label: "Saving…" },
+  error: {
+    label: "Couldn't save",
+    title:
+      "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit.",
+  },
+  "file-locked": {
+    label: "File in use",
+    title:
+      "Another program has this file open, so dohc can't update it on disk. dohc has your edits saved and retries until the file is free.",
+  },
+  "read-only": {
+    label: "Read-only",
+    title:
+      "This document is shared with you to read. Your changes stay on screen but are not saved.",
+  },
+  "changed-on-disk": {
+    label: "Changed on disk",
+    title:
+      "This file changed outside dohc while it was open. Open History to restore your text.",
+  },
+  recovery: {
+    label: "Edit set aside",
+    title:
+      "A set-aside edit is not saved. Copy or dismiss it in the notice below.",
+  },
+};
+
 function MarkdownView(props: {
   body: string;
   workspaceId: string;
@@ -1283,10 +1327,13 @@ function MarkdownView(props: {
       onSaveStateChange?.(saveState);
       return;
     }
-    // The shell's dot has three states; a read-only or changed-on-disk refusal
-    // is an unsaved document as far as the tab is concerned.
+    // The shell's dot has three states; a read-only, file-locked, or
+    // changed-on-disk refusal is an unsaved document as far as the tab is
+    // concerned.
     onSaveStateChange?.(
-      engine.saveState === "read-only" || engine.saveState === "changed-on-disk"
+      engine.saveState === "read-only" ||
+        engine.saveState === "file-locked" ||
+        engine.saveState === "changed-on-disk"
         ? "error"
         : engine.saveState,
     );
@@ -1618,34 +1665,14 @@ function MarkdownView(props: {
               <span
                 data-testid="markdown-save-state"
                 data-state={engineChipState}
-                title={
-                  engineChipState === "error"
-                    ? "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit."
-                    : engineChipState === "read-only"
-                      ? "This document is shared with you to read. Your changes stay on screen but are not saved."
-                      : engineChipState === "changed-on-disk"
-                        ? "This file changed outside dohc while it was open. Open History to restore your text."
-                        : engineChipState === "recovery"
-                          ? "A set-aside edit is not saved. Copy or dismiss it in the notice below."
-                          : undefined
-                }
+                title={ENGINE_CHIP[engineChipState].title}
                 className={`font-mono text-[11px] ${
                   engineChipState === "saved" || engineChipState === "saving"
                     ? "text-subtle"
                     : "text-danger"
                 }`}
               >
-                {engineChipState === "saved"
-                  ? "Saved"
-                  : engineChipState === "saving"
-                    ? "Saving…"
-                    : engineChipState === "read-only"
-                      ? "Read-only"
-                      : engineChipState === "changed-on-disk"
-                        ? "Changed on disk"
-                        : engineChipState === "recovery"
-                          ? "Edit set aside"
-                          : "Couldn't save"}
+                {ENGINE_CHIP[engineChipState].label}
               </span>
               <button
                 type="button"
