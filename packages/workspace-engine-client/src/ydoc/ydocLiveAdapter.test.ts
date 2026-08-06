@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { DaemonRefusalError } from "../live/daemonLiveAdapter";
 import {
@@ -60,6 +60,50 @@ function findPartiallyAppliedMalformedUpdate(fullUpdate: Uint8Array): Uint8Array
     }
   }
   throw new Error("The fixture did not expose a non-atomic Yjs apply prefix.");
+}
+
+// A stand-in for the settle scheduler the provider builds when the caller does
+// not supply one (`setTimeout` + `clearTimeout`). It is faithful on the three
+// behaviors the provider depends on: the delay reaches the timer, a canceller
+// cancels ONLY the timer it was issued for, and a timer that already fired can
+// no longer be cancelled — `fire` removes the entry before running it, exactly
+// as the event loop does.
+function settleScheduler(): {
+  armed: ReadonlyArray<{ fn: () => void; ms: number }>;
+  delays: number[];
+  schedule: (fn: () => void, ms: number) => () => void;
+  fire: () => void;
+} {
+  const armed: Array<{ fn: () => void; ms: number }> = [];
+  const delays: number[] = [];
+  return {
+    armed,
+    delays,
+    schedule(fn, ms) {
+      const entry = { fn, ms };
+      armed.push(entry);
+      delays.push(ms);
+      return () => {
+        const index = armed.indexOf(entry);
+        if (index >= 0) armed.splice(index, 1);
+      };
+    },
+    fire() {
+      const entry = armed.shift();
+      if (entry === undefined) {
+        throw new Error("No settle timer is armed.");
+      }
+      entry.fn();
+    },
+  };
+}
+
+// Drain the microtask queue to quiescence. Draining only until the expected
+// thing happened stops one tick before anything that happens AFTER it, which
+// is how an assertion about what the provider did NOT do passes without ever
+// discriminating.
+async function drain(): Promise<void> {
+  for (let tick = 0; tick < 100; tick += 1) await Promise.resolve();
 }
 
 describe("YdocLiveAdapter", () => {
@@ -614,27 +658,23 @@ describe("YdocLiveAdapter", () => {
     const settleErrors: unknown[] = [];
     const settleStarts: number[] = [];
     const settled: unknown[] = [];
-    let fireDebouncedSettle: (() => void) | null = null;
+    // Capture the debounced callback so the test drives the REAL debounced
+    // path (the one that swallowed the failure) rather than settleNow.
+    const scheduler = settleScheduler();
     const provider = await openEngineYdocProviderSession({
       transport,
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH,
       contentKind: "plaintext",
+      settleDebounceMs: 100,
       onRemoteUpdate: () => undefined,
       onSettleStart: () => settleStarts.push(settleStarts.length),
       onSettleError: (error) => settleErrors.push(error),
       onSettled: (result) => {
         settled.push(result);
       },
-      // Capture the debounced callback so the test drives the REAL debounced
-      // path (the one that swallowed the failure) rather than settleNow.
-      scheduleSettle: (fn) => {
-        fireDebouncedSettle = fn;
-        return () => {
-          fireDebouncedSettle = null;
-        };
-      },
+      scheduleSettle: scheduler.schedule,
     });
 
     const update = plaintextUpdate(provider.initialUpdate, (text) => {
@@ -642,14 +682,13 @@ describe("YdocLiveAdapter", () => {
     });
     await provider.applyLocalUpdate(update);
 
-    expect(fireDebouncedSettle).not.toBeNull();
-    const fire = fireDebouncedSettle!;
-    fireDebouncedSettle = null;
-    fire();
-    // The debounced settle rejects internally; let the chain drain.
-    for (let tick = 0; tick < 50 && settleErrors.length === 0; tick += 1) {
-      await Promise.resolve();
-    }
+    expect(scheduler.armed).toHaveLength(1);
+    scheduler.fire();
+    // The debounced settle rejects internally. Drain to QUIESCENCE, not until
+    // the error lands: the retry decision happens a microtask AFTER
+    // onSettleError, so stopping at the error made the last assertion below
+    // pass whether or not the provider re-armed.
+    await drain();
 
     expect(settleErrors[0]).toBe(settleFailure);
     // A settle STARTED, so a caller can show "saving" honestly...
@@ -658,7 +697,7 @@ describe("YdocLiveAdapter", () => {
     expect(settled).toEqual([]);
     // An ordinary settle failure is NOT retried: a refusal that trying again
     // cannot help (stale target, invalid input) would only repeat itself.
-    expect(fireDebouncedSettle).toBeNull();
+    expect(scheduler.armed).toHaveLength(0);
 
     await provider.close({ settle: false });
   });
@@ -667,7 +706,10 @@ describe("YdocLiveAdapter", () => {
   // it, with the settle scheduler captured so the ladder can be driven a rung
   // at a time. Shared by the two tests below; each drives it differently,
   // because a debounced settle and an explicit flush are different behaviors.
-  async function openAgainstALockedFile(text: string) {
+  async function openAgainstALockedFile(
+    text: string,
+    options?: { settleDebounceMs?: number },
+  ) {
     const engine = seedPlaintextEngine();
     const lock = { held: true };
     const lockedRefusal = new DaemonRefusalError(
@@ -685,35 +727,41 @@ describe("YdocLiveAdapter", () => {
     };
     const settleErrors: unknown[] = [];
     const settled: unknown[] = [];
-    const delays: number[] = [];
-    const scheduled: Array<{ fn: () => void; ms: number }> = [];
+    const scheduler = settleScheduler();
     const provider = await openEngineYdocProviderSession({
       transport,
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH,
       contentKind: "plaintext",
-      settleDebounceMs: 100,
+      // Omitted deliberately when the caller wants the DEFAULT debounce: the
+      // ladder's first rung is that default, which is the only place the
+      // default is observable without a wall clock.
+      ...(options?.settleDebounceMs !== undefined
+        ? { settleDebounceMs: options.settleDebounceMs }
+        : {}),
       onRemoteUpdate: () => undefined,
       onSettleError: (error) => settleErrors.push(error),
       onSettled: (result) => {
         settled.push(result);
       },
-      scheduleSettle: (fn, ms) => {
-        delays.push(ms);
-        scheduled.push({ fn, ms });
-        return () => {
-          const index = scheduled.findIndex((entry) => entry.fn === fn);
-          if (index >= 0) scheduled.splice(index, 1);
-        };
-      },
+      scheduleSettle: scheduler.schedule,
     });
     await provider.applyLocalUpdate(
       plaintextUpdate(provider.initialUpdate, (body) => {
         body.insert(0, text);
       }),
     );
-    return { provider, lock, lockedRefusal, settleErrors, settled, delays, scheduled };
+    return {
+      engine,
+      provider,
+      lock,
+      lockedRefusal,
+      settleErrors,
+      settled,
+      scheduler,
+      delays: scheduler.delays,
+    };
   }
 
   it("retries a file-locked settle on a doubling delay until the lock releases", async () => {
@@ -721,34 +769,120 @@ describe("YdocLiveAdapter", () => {
     // in the engine — the ONLY missing piece is a later attempt. The provider
     // re-arms itself on a doubling delay, so the save lands when the external
     // handle releases instead of waiting for an unrelated future edit.
-    const { provider, lock, lockedRefusal, settleErrors, settled, delays, scheduled } =
-      await openAgainstALockedFile("typed against a locked file");
+    const { provider, lock, lockedRefusal, settleErrors, settled, delays, scheduler } =
+      await openAgainstALockedFile("typed against a locked file", {
+        settleDebounceMs: 100,
+      });
 
     // Fire the armed settle; while the lock holds, every failure re-arms the
     // next attempt itself: debounce, then doubling — 100, 100, 200, 400 —
     // and every failure still reaches onSettleError (nothing goes quiet).
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      expect(scheduled).toHaveLength(1);
-      const { fn } = scheduled.shift()!;
-      fn();
-      // Drain until the failure has re-armed the next attempt.
-      for (let tick = 0; tick < 50 && scheduled.length === 0; tick += 1) {
-        await Promise.resolve();
-      }
+      expect(scheduler.armed).toHaveLength(1);
+      scheduler.fire();
+      await drain();
     }
     expect(settleErrors).toEqual([lockedRefusal, lockedRefusal, lockedRefusal]);
     expect(delays).toEqual([100, 100, 200, 400]);
 
     // The lock releases; the pending retry lands the write by itself.
     lock.held = false;
-    const { fn: retry } = scheduled.shift()!;
-    retry();
-    for (let tick = 0; tick < 50 && settled.length === 0; tick += 1) {
-      await Promise.resolve();
-    }
+    scheduler.fire();
+    await drain();
     expect(settled).toHaveLength(1);
-    // Success re-arms nothing and resets the ladder for any future lock.
-    expect(scheduled).toHaveLength(0);
+    // Success re-arms nothing.
+    expect(scheduler.armed).toHaveLength(0);
+
+    await provider.close({ settle: false });
+  });
+
+  it("resets the ladder once a settle reaches disk, so the next lock starts over", async () => {
+    // The reset is what keeps a document that is locked twice in a session
+    // from inheriting the first lock's grown delay — the second lock must be
+    // retried as promptly as the first, not minutes later.
+    const { provider, lock, settled, delays, scheduler } =
+      await openAgainstALockedFile("typed against a locked file", {
+        settleDebounceMs: 100,
+      });
+
+    // Climb two rungs: armed at 100, retry at 100, retry at 200.
+    scheduler.fire();
+    await drain();
+    scheduler.fire();
+    await drain();
+    expect(delays).toEqual([100, 100, 200]);
+
+    // The lock releases and the pending retry lands the write.
+    lock.held = false;
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+
+    // A LATER lock: the next failure must re-arm at the debounce, not at 400.
+    lock.held = true;
+    await provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (body) => {
+        body.insert(0, "typed again");
+      }),
+    );
+    scheduler.fire();
+    await drain();
+    expect(delays).toEqual([100, 100, 200, 100, 100]);
+
+    await provider.close({ settle: false });
+  });
+
+  it("caps the ladder so a long-held lock still retries on a bounded delay", async () => {
+    // The cap bounds how long the on-disk artifact stays stale after the lock
+    // releases. Without it the delay doubles without limit and a file locked
+    // for an afternoon is retried hours after the handle is gone.
+    const { provider, delays, scheduler } = await openAgainstALockedFile(
+      "typed against a long-held lock",
+      { settleDebounceMs: 4000 },
+    );
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      scheduler.fire();
+      await drain();
+    }
+    expect(delays).toEqual([4000, 4000, 8000, 10_000, 10_000]);
+
+    await provider.close({ settle: false });
+  });
+
+  it("starts the ladder at the DEFAULT debounce when the caller sets none", async () => {
+    const { provider, delays, scheduler } = await openAgainstALockedFile(
+      "typed with the default debounce",
+    );
+
+    scheduler.fire();
+    await drain();
+    expect(delays).toEqual([800, 800]);
+
+    await provider.close({ settle: false });
+  });
+
+  it("lets an edit made during the backoff own the timer instead of adding one", async () => {
+    // An edit is the strongest retry trigger there is, so the settle it arms
+    // supersedes the ladder's. Arming a second timer alongside it would leave
+    // the edit's timer orphaned and settle the document twice.
+    const { provider, delays, scheduler } = await openAgainstALockedFile(
+      "typed against a locked file",
+      { settleDebounceMs: 100 },
+    );
+
+    // Start the settle, then type again while it is still in flight.
+    scheduler.fire();
+    void provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (body) => {
+        body.insert(0, "typed during the backoff");
+      }),
+    );
+    await drain();
+
+    // ONE timer: the edit's. The refused settle deferred to it.
+    expect(scheduler.armed).toHaveLength(1);
+    expect(delays).toEqual([100, 100]);
 
     await provider.close({ settle: false });
   });
@@ -757,27 +891,251 @@ describe("YdocLiveAdapter", () => {
     // settleNow rejects to its caller — a delete or merge must fail loudly —
     // but the write it left pending is the same one, so the background retry
     // is armed as well.
-    const { provider, lock, lockedRefusal, settled, scheduled } =
-      await openAgainstALockedFile("flushed against a locked file");
-
-    // The debounced settle the edit armed is superseded by the explicit flush,
-    // so the ladder below is the flush's own.
-    scheduled.length = 0;
+    const { provider, lock, lockedRefusal, settled, scheduler } =
+      await openAgainstALockedFile("flushed against a locked file", {
+        settleDebounceMs: 100,
+      });
 
     await expect(provider.settleNow()).rejects.toBe(lockedRefusal);
-    for (let tick = 0; tick < 50 && scheduled.length === 0; tick += 1) {
-      await Promise.resolve();
-    }
-    expect(scheduled.map((entry) => entry.ms)).toEqual([100]);
+    await drain();
+    // The debounced settle the edit armed was superseded by the explicit
+    // flush, so the one armed timer is the flush's own retry.
+    expect(scheduler.armed.map((entry) => entry.ms)).toEqual([100]);
 
     lock.held = false;
-    scheduled.shift()!.fn();
-    for (let tick = 0; tick < 50 && settled.length === 0; tick += 1) {
-      await Promise.resolve();
-    }
+    scheduler.fire();
+    await drain();
     expect(settled).toHaveLength(1);
 
     await provider.close({ settle: false });
+  });
+
+  it("debounces on its OWN timers when the caller supplies no scheduler", async () => {
+    // Every other provider test in this file replaces the settle scheduler, so
+    // this is the one place the provider's own setTimeout/clearTimeout runs. A
+    // debounce that never fires never writes the file; a cancel that never
+    // clears wakes a released session and reports a failure against a document
+    // the user already closed. The clock is driven, not waited on.
+    vi.useFakeTimers();
+    try {
+      const engine = seedPlaintextEngine();
+      const settled: unknown[] = [];
+      const sessionErrors: unknown[] = [];
+      const provider = await openEngineYdocProviderSession({
+        transport: engine,
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+        settleDebounceMs: 50,
+        onRemoteUpdate: () => undefined,
+        onSessionError: (error) => sessionErrors.push(error),
+        onSettled: (result) => {
+          settled.push(result);
+        },
+      });
+
+      await provider.applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (text) => {
+          text.insert(0, "debounced onto the provider's own timer");
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(49);
+      expect(settled).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveLength(1);
+
+      // A second edit arms another timer. `close` runs its cancel before its
+      // first await, so the arm and the cancel land in the same tick.
+      const pending = provider.applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (text) => {
+          text.insert(0, "armed then cancelled");
+        }),
+      );
+      await provider.close({ settle: false });
+      await pending.catch(() => undefined);
+      const settlesAtClose = engine.requests.filter(
+        (request) => request.method === YDOC_METHOD.settle,
+      ).length;
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(
+        engine.requests.filter(
+          (request) => request.method === YDOC_METHOD.settle,
+        ),
+      ).toHaveLength(settlesAtClose);
+      expect(sessionErrors).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("arms a settle when the engine delivers a remote update", async () => {
+    // An engine-delivered update is content this editor has not written to the
+    // artifact yet. Without arming a settle it sits in the session until some
+    // unrelated later edit happens to flush it.
+    const engine = seedPlaintextEngine("seed");
+    const remoteUpdates: Uint8Array[] = [];
+    const scheduler = settleScheduler();
+    const provider = await openEngineYdocProviderSession({
+      transport: engine,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      settleDebounceMs: 100,
+      onRemoteUpdate: (update) => remoteUpdates.push(update),
+      scheduleSettle: scheduler.schedule,
+    });
+
+    expect(scheduler.armed).toHaveLength(0);
+    await provider.applyExternalMarkdownEdit("external edit");
+
+    expect(remoteUpdates).toHaveLength(1);
+    expect(scheduler.armed.map((entry) => entry.ms)).toEqual([100]);
+
+    await provider.close({ settle: false });
+  });
+
+  it("treats an onSettled failure as a settle failure", async () => {
+    // onSettled is what lands the .md. When it throws, the bytes never reached
+    // the file — a caller told the settle SUCCEEDED would show "Saved" over a
+    // stale artifact.
+    const engine = seedPlaintextEngine("seed");
+    const landingFailure = new Error("injected artifact write failure");
+    const settleErrors: unknown[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport: engine,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleError: (error) => settleErrors.push(error),
+      onSettled: () => {
+        throw landingFailure;
+      },
+      scheduleSettle: () => () => undefined,
+    });
+
+    await expect(provider.settleNow()).rejects.toBe(landingFailure);
+    expect(settleErrors).toEqual([landingFailure]);
+
+    await provider.close({ settle: false });
+  });
+
+  it("aborts a settle after a SYNCHRONOUS local edit failure", async () => {
+    // An ill-formed edit throws out of applyLocalUpdate without ever attaching
+    // to the journal chain, so the chain the settle awaits resolves clean.
+    // Settling anyway would write an artifact missing the edit the user just
+    // made, and report success for it.
+    const engine = seedPlaintextEngine();
+    const settleErrors: unknown[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport: engine,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleError: (error) => settleErrors.push(error),
+      scheduleSettle: () => () => undefined,
+    });
+
+    expect(() =>
+      provider.applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (text) => {
+          text.insert(0, "\ud800");
+        }),
+      ),
+    ).toThrow(IllFormedUtf16EditError);
+
+    await expect(provider.settleNow()).rejects.toBeInstanceOf(
+      IllFormedUtf16EditError,
+    );
+    expect(settleErrors[0]).toBeInstanceOf(IllFormedUtf16EditError);
+    expect(engine.requests.map((request) => request.method)).not.toContain(
+      YDOC_METHOD.settle,
+    );
+
+    await provider.close({ settle: false });
+  });
+
+  it("waits for an in-flight settle before releasing the session", async () => {
+    // Releasing while a settle is still at the engine races the write against
+    // the lease teardown: close resolves, the capture layer lifts its path
+    // guard, and the settle that was still landing the artifact finishes
+    // against a session that is already gone.
+    const engine = seedPlaintextEngine("seed");
+    let releaseSettle!: () => void;
+    const settleGate = new Promise<void>((resolve) => {
+      releaseSettle = resolve;
+    });
+    const order: string[] = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.settle) {
+          await settleGate;
+          order.push("settled");
+        }
+        if (request.method === YDOC_METHOD.close) order.push("released");
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+
+    const settling = provider.settleNow();
+    const closing = provider.close({ settle: false });
+    await drain();
+    // The close is parked on the settle chain: nothing has been released.
+    expect(order).toEqual([]);
+
+    releaseSettle();
+    await settling;
+    await closing;
+
+    expect(order).toEqual(["settled", "released"]);
+    expect(engine.activeSessionIds()).toHaveLength(0);
+  });
+
+  it("ignores a local update that arrives after the session released", async () => {
+    // The session and its lease are gone, so there is nothing to journal and
+    // nothing to retry: a late keystroke from a torn-down editor must not
+    // reject into a caller that has no session left to act on.
+    const engine = seedPlaintextEngine();
+    const provider = await openEngineYdocProviderSession({
+      transport: engine,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+
+    await provider.close({ settle: false });
+    await expect(
+      provider.applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (text) => {
+          text.insert(0, "typed after teardown");
+        }),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(engine.recordedUpdates).toHaveLength(0);
+    expect(engine.requests.map((request) => request.method)).toEqual([
+      YDOC_METHOD.open,
+      YDOC_METHOD.close,
+    ]);
   });
 
   it("announces a settle at the JOURNAL BARRIER, not when it finally runs", async () => {

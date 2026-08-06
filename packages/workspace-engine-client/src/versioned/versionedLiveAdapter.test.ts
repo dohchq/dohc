@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { EngineRequestError } from "../daemon/engineClient";
 import type { Request } from "../ydoc/generated/Request";
 import type { Response } from "../ydoc/generated/Response";
 import {
@@ -955,14 +956,12 @@ describe("VersionedLiveAdapter", () => {
   it("returns null when the daemon reports a missing binary blob", async () => {
     const client: MinimalDaemonClient = {
       close: () => undefined,
-      async sendRequest(): Promise<Response> {
-        throw {
-          wireError: {
-            code: "INVALID_PARAMS",
-            message: "file-not-found",
-            retry: "no",
-          },
-        };
+      async sendRequest(request): Promise<Response> {
+        throw new EngineRequestError(request.id, {
+          code: "INVALID_PARAMS",
+          message: "file-not-found",
+          retry: "no",
+        });
       },
     };
     const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
@@ -980,14 +979,12 @@ describe("VersionedLiveAdapter", () => {
   it("preserves the store null contract when an older daemon refuses a text-headed binary read", async () => {
     const client: MinimalDaemonClient = {
       close: () => undefined,
-      async sendRequest() {
-        throw {
-          wireError: {
-            code: "INVALID_PARAMS",
-            message: "text-head-not-binary",
-            retry: "no",
-          },
-        };
+      async sendRequest(request) {
+        throw new EngineRequestError(request.id, {
+          code: "INVALID_PARAMS",
+          message: "text-head-not-binary",
+          retry: "no",
+        });
       },
     };
     const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
@@ -1006,14 +1003,12 @@ describe("VersionedLiveAdapter", () => {
   it("does not hide unrelated invalid binary-read parameters as an absent value", async () => {
     const client: MinimalDaemonClient = {
       close: () => undefined,
-      async sendRequest() {
-        throw {
-          wireError: {
-            code: "INVALID_PARAMS",
-            message: "invalid-version",
-            retry: "no",
-          },
-        };
+      async sendRequest(request) {
+        throw new EngineRequestError(request.id, {
+          code: "INVALID_PARAMS",
+          message: "invalid-version",
+          retry: "no",
+        });
       },
     };
     const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
@@ -1428,14 +1423,12 @@ describe("VersionedLiveAdapter", () => {
   it("maps daemon refusals through the shared retryability contract", async () => {
     const client: MinimalDaemonClient = {
       close: () => undefined,
-      async sendRequest(): Promise<Response> {
-        throw {
-          wireError: {
-            code: "SESSION_EXPIRED",
-            message: "reopen",
-            retry: "afterReconnect",
-          },
-        };
+      async sendRequest(request): Promise<Response> {
+        throw new EngineRequestError(request.id, {
+          code: "SESSION_EXPIRED",
+          message: "reopen",
+          retry: "afterReconnect",
+        });
       },
     };
 
