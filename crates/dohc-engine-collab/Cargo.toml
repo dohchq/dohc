@@ -48,6 +48,11 @@ serde_json = "1"
 [dev-dependencies]
 # Decoding the base64 real-yjs fixture blobs in the cross-engine tests.
 base64 = "0.22"
+# `MAX_TEXT_BYTES` — the largest document body the store accepts, which is what
+# `MAX_YDOC_UPDATE_BYTES` is measured against (#549). A dev-dependency on
+# purpose: the relationship is a checked fact in `ydoc_full_state_size.rs`, not
+# a production coupling from the CRDT layer to the document store.
+dohc-engine-domain = { path = "../dohc-engine-domain" }
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

@@ -423,6 +423,54 @@ struct ResolveTarget {
     status: String,
     chosen_from: String,
     resolution: Option<String>,
+    /// The target's OWN sides. Mirroring a remote decision is only correct
+    /// when the local conflict is the sender's mirror image, and that is a
+    /// fact about these two ids — never something `metadata_origin` can
+    /// answer.
+    current_latest_moment_id: Option<String>,
+    incoming_latest_moment_id: Option<String>,
+}
+
+/// How the local conflict is oriented relative to the sender's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolveOrientation {
+    /// The local conflict holds the same side in the same slot: apply the
+    /// sender's decision verbatim.
+    Same,
+    /// The local conflict's sides are swapped relative to the sender's, so
+    /// the decision must be mirrored to mean the same thing.
+    Mirrored,
+    /// Neither pairing matched, or the payload did not carry both ids.
+    Unknown,
+}
+
+/// Compare head identities rather than assuming an orientation.
+///
+/// Both replicas of a Y.Doc base conflict (#546) open it from the SAME third
+/// party's base, so both hold `current = own local head` and
+/// `incoming = the peer's base` — identically oriented, not mirrored. And
+/// `sync_conflict_id` sorts its two roots, so those replicas compute the
+/// SAME conflict id and the resolve matches by id. Mirroring that on the
+/// strength of `metadata_origin == "sync"` inverts it: a peer that chose
+/// `apply-incoming` is read as `keep-current`, and the receiver closes its
+/// review gate holding the very head the reviewer rejected. A review gate
+/// must never produce the opposite of the reviewed decision.
+fn resolve_orientation(payload: &ResolvePayload, target: &ResolveTarget) -> ResolveOrientation {
+    let (Some(sender_current), Some(sender_incoming)) = (
+        payload.current_latest_moment_id.as_deref(),
+        payload.incoming_latest_moment_id.as_deref(),
+    ) else {
+        return ResolveOrientation::Unknown;
+    };
+    let local_current = target.current_latest_moment_id.as_deref();
+    let local_incoming = target.incoming_latest_moment_id.as_deref();
+    if local_current == Some(sender_current) && local_incoming == Some(sender_incoming) {
+        return ResolveOrientation::Same;
+    }
+    if local_current == Some(sender_incoming) && local_incoming == Some(sender_current) {
+        return ResolveOrientation::Mirrored;
+    }
+    ResolveOrientation::Unknown
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,8 +520,24 @@ fn apply_resolve(
     let mut choice = parse_choice(&payload.chosen_from)?;
     let mut resolution = parse_resolution(&payload.resolution)?;
     if target.metadata_origin == "sync" {
-        choice = mirror_choice(choice);
-        resolution = mirror_resolution(resolution);
+        match resolve_orientation(&payload, &target) {
+            // Same-oriented: the sender's label already names the side this
+            // replica holds in that slot. Mirroring would invert the review.
+            ResolveOrientation::Same => {}
+            ResolveOrientation::Mirrored => {
+                choice = mirror_choice(choice);
+                resolution = mirror_resolution(resolution);
+            }
+            // Orientation unproven — the payload omitted a head id, or
+            // neither pairing matched. Mirroring is the established contract
+            // for the moment lane, whose replicated conflicts are opened by
+            // the very peer now resolving them and are therefore mirror
+            // images by construction.
+            ResolveOrientation::Unknown => {
+                choice = mirror_choice(choice);
+                resolution = mirror_resolution(resolution);
+            }
+        }
     }
     if target.status == "resolved" {
         if target.chosen_from != choice_str(choice)
@@ -1102,7 +1166,8 @@ fn resolve_target(
     };
     let _ = payload.path.as_deref();
     tx.query_row(
-        "SELECT conflict_id, path, metadata_origin, status, chosen_from, resolution \
+        "SELECT conflict_id, path, metadata_origin, status, chosen_from, resolution, \
+                current_latest_moment_id, incoming_latest_moment_id \
          FROM conflicts WHERE workspace_id = ?1 AND status = 'open' \
            AND target_version_id = ?2 AND current_latest_moment_id IS ?3 \
            AND incoming_latest_moment_id IS ?4 \
@@ -1120,7 +1185,8 @@ fn query_target_by_id(
     conflict_id: &str,
 ) -> Result<Option<ResolveTarget>, SyncError> {
     tx.query_row(
-        "SELECT conflict_id, path, metadata_origin, status, chosen_from, resolution \
+        "SELECT conflict_id, path, metadata_origin, status, chosen_from, resolution, \
+                current_latest_moment_id, incoming_latest_moment_id \
          FROM conflicts WHERE workspace_id = ?1 AND conflict_id = ?2",
         params![workspace_id, conflict_id],
         map_resolve_target,
@@ -1137,6 +1203,8 @@ fn map_resolve_target(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResolveTarget
         status: row.get(3)?,
         chosen_from: row.get(4)?,
         resolution: row.get(5)?,
+        current_latest_moment_id: row.get(6)?,
+        incoming_latest_moment_id: row.get(7)?,
     })
 }
 
@@ -1303,6 +1371,132 @@ mod tests {
             "chosenFrom": "current",
             "metadata": { "origin": "sync" }
         })
+    }
+
+    /// A resolve payload carrying the sender's own two sides.
+    fn oriented_resolve_payload(
+        id: &str,
+        chosen_from: &str,
+        resolution: &str,
+        sender_current: &str,
+        sender_incoming: &str,
+    ) -> serde_json::Value {
+        json!({
+            "conflictId": id,
+            "status": "resolved",
+            "chosenFrom": chosen_from,
+            "resolution": resolution,
+            "updatedAtMs": 3_000,
+            "targetVersionId": "main",
+            "path": "doc.md",
+            "currentLatestMomentId": sender_current,
+            "incomingLatestMomentId": sender_incoming
+        })
+    }
+
+    #[test]
+    fn a_same_oriented_sync_resolution_is_not_mirrored() {
+        // Two replicas of a Y.Doc base conflict (#546) open it from the SAME
+        // third party's base, so both hold `current = own local head` and
+        // `incoming = the peer's base` — identically oriented. And
+        // `sync_conflict_id` sorts its roots, so both compute the same
+        // conflict id and this resolve matches by id.
+        //
+        // Mirroring on the strength of `metadata_origin == "sync"` inverted
+        // it: a peer that chose `apply-incoming` was read as `keep-current`,
+        // and the receiver closed its review gate holding the very head the
+        // reviewer rejected — a review gate producing the opposite of the
+        // reviewed decision.
+        //
+        // MUTATION: mirror unconditionally again (the old
+        // `if metadata_origin == "sync"` body) — the head below stays
+        // "receiver current" and this fails.
+        let (_scratch, mut store) = store();
+        seed_current(&mut store, "receiver current");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "base-peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("conflict_same_orient", "receiver current", "peer base"),
+            ),
+            &NoFaults,
+        )
+        .expect("open the same-oriented base conflict");
+
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "base-peer",
+                1,
+                "conflict.resolve",
+                oriented_resolve_payload(
+                    "conflict_same_orient",
+                    "incoming",
+                    "applied-incoming",
+                    // The sender's sides are the SAME way round as ours.
+                    "current-moment",
+                    "incoming-moment",
+                ),
+            ),
+            &NoFaults,
+        )
+        .expect("apply the peer's decision");
+
+        assert_eq!(
+            read_text(&mut store),
+            "peer base",
+            "the peer chose the incoming side; a same-oriented replica must apply it verbatim"
+        );
+    }
+
+    #[test]
+    fn a_mirror_image_sync_resolution_still_mirrors() {
+        // The moment lane's replicated conflicts ARE mirror images: the peer
+        // resolving them is the one whose moment opened ours, so its
+        // `current` is our `incoming`. That contract must survive the fix
+        // above. MUTATION: stop mirroring the swapped case — the head below
+        // becomes "peer base" and this fails.
+        let (_scratch, mut store) = store();
+        seed_current(&mut store, "receiver current");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "moment-peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("conflict_mirrored", "receiver current", "peer base"),
+            ),
+            &NoFaults,
+        )
+        .expect("open the mirror-image conflict");
+
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "moment-peer",
+                1,
+                "conflict.resolve",
+                oriented_resolve_payload(
+                    "conflict_mirrored",
+                    "incoming",
+                    "applied-incoming",
+                    // Swapped: what the sender calls `current` is our
+                    // `incoming`.
+                    "incoming-moment",
+                    "current-moment",
+                ),
+            ),
+            &NoFaults,
+        )
+        .expect("apply the peer's decision");
+
+        assert_eq!(
+            read_text(&mut store),
+            "receiver current",
+            "a mirror-image conflict must still invert the label to mean the same side"
+        );
     }
 
     fn seed_current(store: &mut EngineStore, text: &str) {

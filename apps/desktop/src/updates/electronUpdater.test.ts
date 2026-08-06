@@ -39,7 +39,13 @@ function fakeUpdater() {
       for (const listener of listeners.get(eventName) ?? []) listener(...args);
     },
   };
+  // electron-updater's quitAndInstall is ONE-SHOT (#579 review, r10): a
+  // second call returns without quitting. The double models the latch so a
+  // test can never pass by relying on a re-call the dependency ignores.
+  let quitAndInstallLatched = false;
   updater.quitAndInstall.mockImplementation(() => {
+    if (quitAndInstallLatched) return;
+    quitAndInstallLatched = true;
     updater.emit("before-quit-for-update");
   });
   return updater;
@@ -49,7 +55,7 @@ async function startWith(updater: ReturnType<typeof fakeUpdater>, options: {
   isPackaged?: boolean;
   env?: NodeJS.ProcessEnv;
   currentVersion?: string;
-  onBeforeQuitForUpdate?: () => void;
+  quitForStagedRestart?: () => void;
 } = {}): Promise<AutoUpdateController | null> {
   return startAutoUpdates({
     isPackaged: options.isPackaged ?? true,
@@ -57,7 +63,7 @@ async function startWith(updater: ReturnType<typeof fakeUpdater>, options: {
     currentVersion: options.currentVersion ?? "1.2.3",
     startupDelayMs: 60 * 60_000,
     pollIntervalMs: 60 * 60_000,
-    onBeforeQuitForUpdate: options.onBeforeQuitForUpdate,
+    quitForStagedRestart: options.quitForStagedRestart,
     importUpdater: async () => ({ autoUpdater: updater }),
   });
 }
@@ -159,9 +165,16 @@ describe("electron updater actions", () => {
     });
   });
 
-  it("installs only after update-downloaded and only once", async () => {
+  // The latch is pulled ONCE (#579 review, r10). What a second request means
+  // changed in r18: it used to be refused, which stranded the update whenever
+  // a recovery warning vetoed the first restart's unload. The restart is not
+  // lost — electron-updater installs it on the next quit — so a second
+  // request completes it by quitting, and this is MAIN's fact to hold, not a
+  // renderer module variable a reload resets.
+  it("installs only after update-downloaded, pulls the latch once, and completes a staged restart", async () => {
     const updater = fakeUpdater();
-    const controller = await startWith(updater);
+    const quitForStagedRestart = vi.fn();
+    const controller = await startWith(updater, { quitForStagedRestart });
     expect(controller).not.toBeNull();
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
@@ -174,9 +187,17 @@ describe("electron updater actions", () => {
     await expect(controller!.installUpdate()).resolves.toMatchObject({
       accepted: true,
     });
+    expect(quitForStagedRestart).not.toHaveBeenCalled();
+
+    // MUTATION (staged restart): return accepted:false here instead. The
+    // second Restart reports a generic install failure and nothing ever
+    // finishes the update.
     await expect(controller!.installUpdate()).resolves.toMatchObject({
-      accepted: false,
+      accepted: true,
     });
+    expect(quitForStagedRestart).toHaveBeenCalledTimes(1);
+    // MUTATION (one-shot): drop the restartStaged branch so quitAndInstall
+    // runs again. electron-updater ignores it, and the app never quits.
     expect(updater.quitAndInstall).toHaveBeenCalledTimes(1);
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
   });
@@ -194,20 +215,6 @@ describe("electron updater actions", () => {
       status: "downloading",
       percent: 100,
     });
-  });
-
-  it("runs bounded quit cleanup when the updater begins installing", async () => {
-    const updater = fakeUpdater();
-    const onBeforeQuitForUpdate = vi.fn();
-    const controller = await startWith(updater, { onBeforeQuitForUpdate });
-    expect(controller).not.toBeNull();
-
-    updater.emit("checking-for-update");
-    updater.emit("update-downloaded", { version: "1.2.4" });
-    await controller!.installUpdate();
-
-    expect(onBeforeQuitForUpdate).toHaveBeenCalledTimes(1);
-    expect(updater.quitAndInstall).toHaveBeenCalledTimes(1);
   });
 
   it("reports quitAndInstall failures as rejected restart requests", async () => {
@@ -250,16 +257,6 @@ describe("electron updater actions", () => {
         message: "Could not restart into the update.",
       },
     });
-  });
-
-  it("runs bounded quit cleanup for updater before-quit-for-update events", async () => {
-    const updater = fakeUpdater();
-    const onBeforeQuitForUpdate = vi.fn();
-    await startWith(updater, { onBeforeQuitForUpdate });
-
-    updater.emit("before-quit-for-update");
-
-    expect(onBeforeQuitForUpdate).toHaveBeenCalledTimes(1);
   });
 
   it("stops scheduled checks when the controller is stopped", async () => {
@@ -308,6 +305,30 @@ describe("publicUpdateState", () => {
       version: "1.0.1",
       canCheck: false,
       canInstall: true,
+    });
+  });
+
+  // #579 review r17: quitAndInstall's latch never clears, so gating install on
+  // it stranded a ready update for the rest of the run whenever the restart
+  // was interrupted — a recovery warning whose "Go back" had nothing to go
+  // back to. The restart is not lost; it is finishable by quitting.
+  it("keeps a STAGED restart offerable while blocking a new check", () => {
+    const checking = transition(initialUpdateState, { type: "check" });
+    const ready = transition(checking, { type: "downloaded", version: "1.0.1" });
+
+    // MUTATION (staged restart offerable): gate canInstall on restartStaged
+    // again. The Restart button disappears for the rest of the app run.
+    expect(
+      publicUpdateState(ready, {
+        currentVersion: "1.0.0",
+        channel: "latest",
+        restartStaged: true,
+      }),
+    ).toMatchObject({
+      status: "ready",
+      canInstall: true,
+      // ...but staging is done, so there is nothing to re-check for.
+      canCheck: false,
     });
   });
 

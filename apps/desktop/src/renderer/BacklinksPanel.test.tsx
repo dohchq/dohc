@@ -61,7 +61,13 @@ describe("BacklinksPanel", () => {
 
   it("keeps ordinary backlinks when chat mention lookup fails", async () => {
     const { listChatFileMentions } = stubBacklinksWithChatFailure(TWO_SOURCES);
-    render(<BacklinksPanel workspaceId="ws-1" path="notes/target.md" />);
+    render(
+      <BacklinksPanel
+        workspaceId="ws-1"
+        path="notes/target.md"
+        chatMentionsAvailable
+      />,
+    );
 
     await screen.findByTestId("backlinks");
     expect(listChatFileMentions).toHaveBeenCalledWith({
@@ -71,6 +77,22 @@ describe("BacklinksPanel", () => {
     expect(screen.getByTestId("backlinks-count").textContent).toBe("3");
     expect(screen.getAllByTestId("backlink-source")).toHaveLength(2);
     expect(screen.queryByTestId("chat-file-mentions")).toBeNull();
+  });
+
+  // `listChatFileMentions` is a Chats call: it goes through
+  // requireEngineCapture in main, so a workspace with no capture — a shared
+  // view — can only be refused. The refusal is swallowed by the .catch above,
+  // which is why nothing else can see this call. Backlinks themselves are not
+  // an engine call and must still be read.
+  it("asks for no chat mentions when the caller says they are unavailable", async () => {
+    const { getBacklinks, listChatFileMentions } =
+      stubBacklinksWithChatFailure(TWO_SOURCES);
+    render(<BacklinksPanel workspaceId="ws-1" path="notes/target.md" />);
+
+    await screen.findByTestId("backlinks");
+    expect(getBacklinks).toHaveBeenCalled();
+    expect(listChatFileMentions).not.toHaveBeenCalled();
+    expect(screen.getByTestId("backlinks-count").textContent).toBe("3");
   });
 
   it("opens the source document when a mention is clicked", async () => {

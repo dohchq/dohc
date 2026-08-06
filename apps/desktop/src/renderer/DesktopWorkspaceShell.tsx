@@ -76,6 +76,12 @@ import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import {
+  noteWorkspaceLabel,
+  remapOrphanedDraftPaths,
+  useOrphanedDraftPaths,
+} from "./orphanedDrafts";
+import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
 // chunk resolved, and every character typed in that gap went to whatever the
@@ -258,6 +264,33 @@ function historyOffPlaceholderCopy(
   // one next step that reliably re-runs both reads (no lighter re-read is
   // wired on this surface).
   return "History is unavailable. dohc could not confirm whether this workspace records history. Restart dohc to try again.";
+}
+
+// What a persisted version-compare tab may claim when the version surface is
+// off and the workspace is not a shared view (#626). Same rule as
+// `historyOffPlaceholderCopy` above, and one rule of its own: **a capability
+// flag is not a count**. `historyRecordingUnavailable` says the recorder
+// could not be BUILT this session; versions created before it can still be on
+// disk and reachable after the restart this copy prescribes. "You have no
+// versions" is a claim about durable data, and dohc does not make one it has
+// not established. Every line here says what dohc cannot do now, and none of
+// them says what does not exist.
+export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): string {
+  // #483: the warning already names the unreadable file and the fix, and the
+  // opt-out line below would blame a Settings toggle nobody touched.
+  if (syncStatus?.settingsWarning) return syncStatus.settingsWarning;
+  if (syncStatus?.historyRecordingUnavailable) {
+    // #505: a failure, not a decision, and not an emptiness.
+    return "dohc could not open versions for this workspace. Your files still save normally. Restart dohc to try again.";
+  }
+  if (syncStatus?.historyRecordingOff) {
+    // The real opt-out. The engine is off, so versions cannot be opened here
+    // — which is not the same as there being none.
+    return "Versions are off for this workspace. The workspace engine is turned off in Settings → Advanced. Turn it on and reopen the workspace to compare versions.";
+  }
+  // Main has not said anything is wrong, so the renderer's own read failing
+  // is all this surface knows. No cause, and no claim about what exists.
+  return "Versions are unavailable. dohc could not confirm whether this workspace has versions. Close this tab to go back to your files.";
 }
 
 export function chatsNavigationRequiresRemount(
@@ -1142,6 +1175,29 @@ export function DesktopWorkspaceShell(props: {
   // whatever the renderer's own capability read said.
   const statusSaysNoRecorder = (status: SyncStatusResult | null) =>
     Boolean(status?.historyRecordingOff || status?.historyRecordingUnavailable);
+  // Whether main's capture decision for THIS workspace has landed. The
+  // surfaces that call on mount need it, and no reading of the status can
+  // supply it:
+  //
+  // - `statusSaysNoRecorder(null)` is false, so a MISSING status reads as a
+  //   recorder (#620's first fix attempt).
+  // - Main registers the workspace's activity entry before it awaits the
+  //   capture build, with the recorder fields at their "nothing is wrong"
+  //   defaults (`workspaceActivity.ts`). So a PRESENT status reads as a
+  //   recorder too, while the build is still running.
+  //
+  // Both are the same mistake: a default read as an answer. `openWorkspace`
+  // resolving is the answer, and it is the only one available here — main
+  // awaits the capture build before it returns, and `getSyncStatus` does not
+  // await anything at all (its handler reads the entry as it stands).
+  //
+  // This shell opens the workspace TWICE — the effect below re-runs when the
+  // settings read changes `refreshHistory`'s identity — and both calls answer
+  // after the decision because main hands a concurrent second open the first
+  // one's promise (`main.ts`, `ensureWorkspaceActivityOpen`). That invariant
+  // is what makes this fact a fact; the pins below drive it the way main
+  // behaves, with one promise answering every call.
+  const [captureDecidedFor, setCaptureDecidedFor] = useState<string | null>(null);
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
   const [cloudStatus, setCloudStatus] = useState<CloudStatusResult | null>(null);
@@ -1246,6 +1302,19 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
+  // Set-aside recovery markers (#567): every path holding a draft marks its
+  // tab and Open Editors row — inactive tabs included, because the store is
+  // knowable for all of them (#579 review, r4). Deliberately NOT part of
+  // activeTabDirty, which drives save-first machinery that cannot save these
+  // (#579 review, P2). The store outlives tabs and version switches, so no
+  // save-first prompt is owed.
+  const recoveryPaths = useOrphanedDraftPaths(workspaceId);
+  // The global recovery list (the close dialog, above this shell) labels
+  // rows with the name the UI shows here — the raw id is a UUID (#579
+  // review, r10).
+  useEffect(() => {
+    noteWorkspaceLabel(workspaceId, workspaceName(props.workspace));
+  }, [workspaceId, props.workspace]);
   // Every workbench destination change invalidates an in-flight canonical DM
   // lookup. Kept beside the central mutateWb seam so file/graph/history/tab
   // navigation cannot be missed by a one-off opener.
@@ -1516,6 +1585,11 @@ export function DesktopWorkspaceShell(props: {
     };
   }, [workspaceId]);
 
+  // The close warning for set-aside drafts lives ABOVE the error boundary
+  // (RecoveryCloseGuard in main.tsx, #579 review r5) — a guard here would
+  // unmount with a crashed shell and the crash screen's reload would destroy
+  // the drafts unannounced.
+
   // Latest-wins: fourteen call sites issue listings — mount, the watcher,
   // imports, restores, the share pull — and they can resolve out of order. An
   // older snapshot committing last would show a stale tree AND make the
@@ -1671,8 +1745,8 @@ export function DesktopWorkspaceShell(props: {
   // but the share's open deliberately installed no capture, and every
   // engine-moments call could only error. Capability identity comes from
   // main's registry summary. This gates the HISTORY surface and, below, the
-  // VERSIONS surface (#589), for the same reason and from the same fact.
-  // Chats keep their own share-aware gating.
+  // VERSIONS surface (#589) and CHATS (#615), for the same reason and from
+  // the same fact.
   const isShareView = Boolean(props.workspace.shareView);
   // Engine history page state (flagged workspaces): newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
@@ -2022,7 +2096,43 @@ export function DesktopWorkspaceShell(props: {
   // danger banner about a Settings toggle nobody touched — again on each
   // share refresh, which re-keys the selector. Same branch as the history
   // surface above: capability identity comes from main's registry summary.
-  const versionsEnabled = engineEnabled && !isShareView;
+  //
+  // The third clause is the one the history surface already carries (#542):
+  // after a failed capture build the renderer's own read still says engine-on
+  // for a perfectly NORMAL workspace, and every version call is refused the
+  // same way — the same retries and the same danger banner, from a different
+  // cause (#620). Main's status is the single answer to "does anything record
+  // here", so it overrides that read here exactly as it does for history —
+  // and it can only override it once main has DECIDED, which is the third
+  // clause. History reads `!statusSaysNoRecorder` alone because it issues
+  // nothing until the open resolves and its placeholder must not claim an
+  // opt-out main has not established (#542). The version selector calls the
+  // moment it mounts, so it waits for the decision.
+  //
+  // THE version capability. Every version entry point reads this one value —
+  // the selector, the Try-in-version banner and review card, and the
+  // persisted compare tab below — so the fact is decided once. A surface that
+  // re-derives it drifts, which is exactly how the compare tab kept mounting
+  // after #614 gated the selector.
+  const captureDecided = captureDecidedFor === workspaceId;
+  const versionsEnabled =
+    engineEnabled &&
+    !isShareView &&
+    captureDecided &&
+    !statusSaysNoRecorder(syncStatus);
+  // Chats gate on the SHARE FACT ONLY (#615). A shared view gets no capture,
+  // so main refuses every Chats call — the panel, the tab, the graph's chat
+  // mentions and the linked-mentions panel under every open document all
+  // reached requireEngineCapture for a capability the share never had, and
+  // every one of them reads this single value now.
+  //
+  // Deliberately NOT the capture decision the versions gate above waits for.
+  // On a workspace that is not a shared view but whose capture build FAILED,
+  // every Chats surface is still offered and every Chats call still errors —
+  // the #620 symptom on these surfaces. That is pre-existing, and #628 owns
+  // it, because closing it needs a copy decision this gate does not: Chats is
+  // a persistent sidebar, so it cannot just become an empty state.
+  const chatsEnabled = engineEnabled && !isShareView;
   // Bumped after a version switch/merge/conflict resolution so open editors
   // re-read their file content immediately (FileInspector refreshKey).
   const [versionEpoch, setVersionEpoch] = useState(0);
@@ -2087,7 +2197,18 @@ export function DesktopWorkspaceShell(props: {
         // conflict resolution names the version the page already describes,
         // so nothing is dropped for them.
         dropContradictedEngineHistory();
-      } else {
+      } else if (
+        // The versions gate again, off the status MIRROR for the same reason
+        // refreshHistory uses it (#620): this callback also runs from the
+        // conflict review dialog, which the notice center opens with no
+        // version surface on screen. Not asking leaves the previous statement
+        // standing — what the catch below already does. Same four clauses as
+        // `versionsEnabled`, so the fetch cannot outlive the render gate.
+        engineEnabled &&
+        !isShareView &&
+        captureDecidedFor === workspaceId &&
+        !statusSaysNoRecorder(syncStatusRef.current)
+      ) {
         // Nobody could name it: the operation changed no version, or it failed
         // and left an unknown one active. Ask. This read is the only remaining
         // asynchronous boundary, and a failure leaves the previous statement
@@ -2123,7 +2244,10 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [
+      captureDecidedFor,
       dropContradictedEngineHistory,
+      engineEnabled,
+      isShareView,
       noteActiveEngineVersion,
       refreshFiles,
       refreshHistory,
@@ -2557,6 +2681,12 @@ export function DesktopWorkspaceShell(props: {
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
+      // Set-aside drafts key by path, so recovery follows the same projection
+      // as tabs and pins (#579 review, P1) — a rename must not strand the
+      // notice on the old path while the tab remaps to the new one.
+      remapOrphanedDraftPaths(workspaceId, (path) =>
+        projectTreePath(path, changes),
+      );
       const current = wbRef.current;
       const next = remapWorkbenchPaths(current, (path) =>
         projectTreePath(path, changes),
@@ -2568,7 +2698,7 @@ export function DesktopWorkspaceShell(props: {
         remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
       );
     },
-    [mutateWb],
+    [mutateWb, workspaceId],
   );
 
   // Share mounts: the registry is loaded once at boot, so the shell owns a
@@ -2772,7 +2902,10 @@ export function DesktopWorkspaceShell(props: {
   }, [reportShellError]);
   const installDesktopUpdate = useCallback(async () => {
     try {
-      const result = await bridge().installUpdate();
+      // Through the guard (#579 review, r8 + r10): with set-aside drafts
+      // present the recovery dialog opens INSTEAD of the one-shot install.
+      const result = await requestGuardedUpdateInstall();
+      if (result === null) return;
       if (!result.accepted) {
         reportShellError(
           "Could not install the update.",
@@ -2862,7 +2995,18 @@ export function DesktopWorkspaceShell(props: {
     void (async () => {
       try {
         const status = await bridge().openWorkspace({ workspaceId });
-        if (!cancelled) setSyncStatus(status);
+        // Main awaits the capture build before it answers, so this is the
+        // moment the decision exists — and the status committed beside it is
+        // the first one that describes a decided workspace (#626). The two
+        // commit together, so "decided" never runs ahead of what it decided.
+        // Recorded per workspace, so a switch cannot inherit it, and never
+        // retracted: this effect re-runs whenever refreshHistory's identity
+        // changes, and retracting here would blink every version surface off
+        // and on when the settings read lands.
+        if (!cancelled) {
+          setSyncStatus(status);
+          setCaptureDecidedFor(workspaceId);
+        }
         await refreshFiles();
         await refreshHistory();
       } catch (error) {
@@ -2922,8 +3066,9 @@ export function DesktopWorkspaceShell(props: {
         setQuickOpenOpen((open) => !open);
       } else if (event.key === "b" && event.altKey) {
         // Ctrl+Alt+B mirrors VS Code's secondary-sidebar toggle. No-op for
-        // unflagged workspaces (they have no Chats panel to show).
-        if (engineEnabled) {
+        // unflagged workspaces and shared views (they have no Chats panel to
+        // show).
+        if (chatsEnabled) {
           event.preventDefault();
           mutateWb(toggleChats);
         }
@@ -2939,7 +3084,7 @@ export function DesktopWorkspaceShell(props: {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeActiveTab, engineEnabled, mutateWb, openSettings, reportShellError]);
+  }, [chatsEnabled, closeActiveTab, mutateWb, openSettings, reportShellError]);
 
   const openWorkspaceFolder = useCallback(async () => {
     try {
@@ -3010,9 +3155,9 @@ export function DesktopWorkspaceShell(props: {
             },
           ]
         : []),
-      // The Chats panel exists only for workspace-engine-flagged workspaces —
-      // no flag, no command.
-      ...(engineEnabled
+      // The Chats panel exists only for workspace-engine-flagged workspaces
+      // that are not shared views — no capability, no command.
+      ...(chatsEnabled
         ? [
             {
               id: "toggle-chats",
@@ -3071,7 +3216,7 @@ export function DesktopWorkspaceShell(props: {
       requestExplorerCreate,
       checkForDesktopUpdates,
       installDesktopUpdate,
-      engineEnabled,
+      chatsEnabled,
       openSettings,
       reportShellError,
       workspaceId,
@@ -3242,6 +3387,7 @@ export function DesktopWorkspaceShell(props: {
         activeTab={wb.activeTab}
         openTabs={wb.tabs}
         dirtyTab={activeTabDirty ? wb.activeTab : null}
+        recoveryPaths={recoveryPaths}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
@@ -3340,7 +3486,7 @@ export function DesktopWorkspaceShell(props: {
           visible: wb.sidebarVisible,
           onToggle: () => mutateWb(toggleSidebar),
         }}
-        {...(engineEnabled
+        {...(chatsEnabled
           ? {
               chatsSidebar: {
                 visible: wb.chatsVisible,
@@ -3528,7 +3674,7 @@ export function DesktopWorkspaceShell(props: {
                   refreshKey={graphKey}
                   onOpenPath={openPathWithHeading}
                   onOpenChatThread={openGraphChatThread}
-                  chatMentionsAvailable={engineEnabled}
+                  chatMentionsAvailable={chatsEnabled}
                   variant="panel"
                 />
               </Suspense>
@@ -3564,6 +3710,7 @@ export function DesktopWorkspaceShell(props: {
                   tabs={wb.tabs}
                   activeTab={wb.activeTab}
                   activeTabDirty={activeTabDirty}
+                  recoveryPaths={recoveryPaths}
                   onActivate={activateEditorTab}
                   onClose={closeFileTab}
                   onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
@@ -3599,6 +3746,7 @@ export function DesktopWorkspaceShell(props: {
               tabs={wb.tabs}
               activeTab={wb.activeTab}
               activeTabDirty={activeTabDirty}
+              recoveryPaths={recoveryPaths}
               onActivate={activateEditorTab}
               onClose={closeFileTab}
               onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
@@ -3645,7 +3793,7 @@ export function DesktopWorkspaceShell(props: {
                   refreshKey={graphKey}
                   onOpenPath={openPathWithHeading}
                   onOpenChatThread={openGraphChatThread}
-                  chatMentionsAvailable={engineEnabled}
+                  chatMentionsAvailable={chatsEnabled}
                   variant="page"
                 />
               </Suspense>
@@ -3657,14 +3805,30 @@ export function DesktopWorkspaceShell(props: {
                 {historyTimeline}
               </div>
             ) : isMomentDiffTabPath(wb.activeTab) ? (
-              <EngineMomentDiffPage
-                workspaceId={workspaceId}
-                tabPath={wb.activeTab ?? ""}
-                onBeforeRestore={flushActiveDraft}
-                onOpenFile={openFile}
-                registerActiveUndo={registerActiveUndo}
-                onRestored={refreshAfterHistoryRestore}
-              />
+              isShareView ? (
+                // A persisted moment-diff tab on a shared view (#621).
+                // Virtual tabs survive restore, so this tab outlives the
+                // History surface that opened it — and that surface no longer
+                // exists here (#540). The page would ask main for a moment a
+                // shared view has none of. It states the same capability the
+                // History placeholder states, and the tab stays closeable.
+                <div
+                  data-testid="moment-diff-share-view"
+                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                >
+                  A shared view records no history. Close this tab to go back
+                  to the shared files.
+                </div>
+              ) : (
+                <EngineMomentDiffPage
+                  workspaceId={workspaceId}
+                  tabPath={wb.activeTab ?? ""}
+                  onBeforeRestore={flushActiveDraft}
+                  onOpenFile={openFile}
+                  registerActiveUndo={registerActiveUndo}
+                  onRestored={refreshAfterHistoryRestore}
+                />
+              )
             ) : isHistoryDiffTabPath(wb.activeTab) ? (
               // A persisted pre-flip tab (legacy change-set diff). The legacy
               // history store is retired; the tab stays closeable but renders
@@ -3677,18 +3841,43 @@ export function DesktopWorkspaceShell(props: {
                 no longer available. Current history lives in the History rail.
               </div>
             ) : isVersionCompareTabPath(wb.activeTab) ? (
-              isShareView ? (
-                // A persisted compare tab on a shared view (#589). The page
-                // asks main for the versions, and a shared view has none —
-                // the same refusal the selector used to raise as a danger
-                // banner. The tab stays closeable and states the capability.
-                <div
-                  data-testid="version-compare-share-view"
-                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
-                >
-                  A shared view has no versions to compare. Close this tab to
-                  go back to the shared files.
-                </div>
+              // A persisted compare tab reads THE version capability, like
+              // every other version entry point. Gating it on the share fact
+              // alone left the whole #620 cause open: on a workspace whose
+              // capture build failed the page still mounted, called
+              // listWorkspaceVersions and compareWorkspaceVersions, and said
+              // "Could not compare with Main."
+              !versionsEnabled ? (
+                isShareView ? (
+                  // A persisted compare tab on a shared view (#589). The page
+                  // asks main for the versions, and a shared view has none —
+                  // the same refusal the selector used to raise as a danger
+                  // banner. The tab stays closeable and states the capability.
+                  <div
+                    data-testid="version-compare-share-view"
+                    className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                  >
+                    A shared view has no versions to compare. Close this tab to
+                    go back to the shared files.
+                  </div>
+                ) : !captureDecided ? (
+                  // Main has not decided yet. The tab must not mount the page
+                  // and must not state a capability either: neither read the
+                  // shell has done proves anything about what main recorded
+                  // (#542), so this window gets a load state, not a claim.
+                  <PanelLoading label="versions" />
+                ) : (
+                  // Main decided, and the answer was no recorder — or the
+                  // renderer's own read failed, which asserts nothing. One
+                  // line, chosen by the cause main established, and never an
+                  // assertion about what is on disk.
+                  <div
+                    data-testid="version-compare-off"
+                    className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                  >
+                    {versionCompareOffCopy(syncStatus)}
+                  </div>
+                )
               ) : (
                 <VersionComparePage
                   // Remount per version AND per state change so the diff
@@ -3699,7 +3888,7 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             ) : isChatsTabPath(wb.activeTab) ? (
-              engineEnabled ? (
+              chatsEnabled ? (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
                   <LazyChatsView
                     key={`${workspaceId}:${chatsPageRevision}`}
@@ -3707,6 +3896,19 @@ export function DesktopWorkspaceShell(props: {
                     variant="page"
                   />
                 </Suspense>
+              ) : isShareView ? (
+                // A persisted Chats tab on a shared view (#615). The
+                // neighbouring line blames the Settings flag, and a share
+                // never touched it: the share's open installs no capture, so
+                // main refuses every Chats call. State the capability, and
+                // name the next step the tab really has.
+                <div
+                  data-testid="chats-page-share-view"
+                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                >
+                  A shared view has no chats. Close this tab to go back to the
+                  shared files.
+                </div>
               ) : (
                 <div
                   data-testid="chats-page-off"
@@ -3748,6 +3950,10 @@ export function DesktopWorkspaceShell(props: {
                 engineVersionKey={versionEpoch}
                 onOpenPath={openPathWithHeading}
                 onOpenChatMention={openChatMention}
+                // The linked-mentions panel asks main for chat mentions, which
+                // is a Chats call like any other (#615) — same gate as the
+                // panel, the tab and the graph's toggle.
+                chatMentionsAvailable={chatsEnabled}
                 scrollTarget={searchScrollTarget ?? undefined}
                 headingTarget={
                   headingTarget?.path === wb.activeTab
@@ -3800,11 +4006,11 @@ export function DesktopWorkspaceShell(props: {
         </main>
 
         {/* Chats panel — the right-hand secondary sidebar (flagged
-            workspaces only). Hidden entirely while collapsed; the
-            titlebar Chats button, Ctrl+Alt+B, or the toggle-chats
-            command bring it back. History lives in the left History view
-            and the history tab — never here. */}
-        {engineEnabled && wb.chatsVisible ? (
+            workspaces that are not shared views). Hidden entirely while
+            collapsed; the titlebar Chats button, Ctrl+Alt+B, or the
+            toggle-chats command bring it back. History lives in the left
+            History view and the history tab — never here. */}
+        {chatsEnabled && wb.chatsVisible ? (
           <ChatsPanel
             width={wb.chatsWidth}
             onWidthChange={(width) => mutateWb((state) => setChatsWidth(state, width))}
@@ -3857,6 +4063,7 @@ export function DesktopWorkspaceShell(props: {
       </div>
 
       <StatusBar
+        workspaceId={workspaceId}
         workspaceName={workspaceName(props.workspace)}
         syncStatus={syncStatus}
         agentActive={agentActive}

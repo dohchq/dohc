@@ -1234,6 +1234,7 @@ enum Command {
     },
     ConflictResolve {
         input: ResolveTextConflict,
+        leases: LeaseRegistry,
         root_dir: Option<PathBuf>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -3497,10 +3498,11 @@ impl ActorHandle {
     pub async fn conflict_resolve(
         &self,
         input: ResolveTextConflict,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
-        self.conflict_resolve_with_root(input, None, faults, token)
+        self.conflict_resolve_with_root(input, leases, None, faults, token)
             .await
     }
 
@@ -3509,17 +3511,19 @@ impl ActorHandle {
     pub async fn conflict_resolve_indexed(
         &self,
         input: ResolveTextConflict,
+        leases: LeaseRegistry,
         root_dir: PathBuf,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
-        self.conflict_resolve_with_root(input, Some(root_dir), faults, token)
+        self.conflict_resolve_with_root(input, leases, Some(root_dir), faults, token)
             .await
     }
 
     async fn conflict_resolve_with_root(
         &self,
         input: ResolveTextConflict,
+        leases: LeaseRegistry,
         root_dir: Option<PathBuf>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -3528,6 +3532,7 @@ impl ActorHandle {
         self.tx
             .send(Command::ConflictResolve {
                 input,
+                leases,
                 root_dir,
                 faults,
                 token,
@@ -7475,6 +7480,7 @@ fn worker_main(
             }
             Command::ConflictResolve {
                 input,
+                leases,
                 root_dir,
                 faults,
                 token,
@@ -7484,6 +7490,7 @@ fn worker_main(
                     &mut store,
                     &input,
                     root_dir.as_deref(),
+                    &leases,
                     faults.as_ref(),
                     &token,
                 );
@@ -8885,6 +8892,29 @@ fn ydoc_open_state_on_store(
         // behind the active editor with no event or resync signal.
         dohc_engine_sync::drain_deferred_ydoc_for_key(store, &key, &NoFaults)?;
     }
+    // An open sync conflict on this object freezes the OPEN as well as the
+    // settle: the claimed lineage may be a peer's unreviewed base, and
+    // serving it would put the editor on the very side the conflict
+    // preserves the head against — the user types into unreviewed content
+    // and resolution rewrites the lineage under the live client. Refuse
+    // with the same reason the settle freeze uses; resolution lifts both.
+    if expected_key_matches
+        && store
+            .read_with(|conn| {
+                dohc_engine_sync::open_sync_conflict_for_object(
+                    conn,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                )
+            })?
+            .is_some()
+    {
+        return Err(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "ydoc-conflict-open",
+        }
+        .into());
+    }
     let persisted = dohc_engine_collab::load_persisted(store, &key)?;
     // "Existing" means durable DOC STATE, not a bare marker: a local-only
     // close prunes every CRDT row and leaves head_update_seq == 0
@@ -9168,6 +9198,28 @@ fn ydoc_settle_on_store(
             if !ydoc_marker_has_durable_state(&marker) {
                 return Err(dohc_engine_collab::CollabError::NoMarker.into());
             }
+            // An open sync conflict on this object FREEZES the settle: the
+            // lineage may hold a peer's base the user has not reviewed, and
+            // settling would materialize it over the preserved head — the
+            // clobbering settle #338 refuses. Resolution folds the choice
+            // into the lineage (`fold_resolution_into_ydoc_in_tx`) and lifts
+            // the freeze.
+            if store
+                .read_with(|conn| {
+                    dohc_engine_sync::open_sync_conflict_for_object(
+                        conn,
+                        &key.workspace_id,
+                        &key.version_id,
+                        &key.object_id,
+                    )
+                })?
+                .is_some()
+            {
+                return Err(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-conflict-open",
+                }
+                .into());
+            }
             // Acked-but-deferred remote envelopes must land BEFORE the
             // projection — but if any actually apply, the CLIENT's doc has
             // not seen them: settling would materialize content the user
@@ -9257,15 +9309,27 @@ fn ydoc_settle_on_store(
         // over stale disk bytes) AND a changed-projection settle (whose new
         // job's preimage is the unmaterialized head; skipping the replay
         // would strand it in a permanent materialization conflict).
-        let pending_job_id = format!("ydoc-mat_{}", current.latest_moment_id);
+        // The head's pending job can be a SETTLE job or a conflict-RESOLUTION
+        // job: a resolution write on this object enqueues `resolve-mat_<id>`
+        // and the fold advances last_settled_sha in the same transaction, so
+        // skipping it here would leave the disk pre-resolution while every
+        // marker reports the choice as settled.
+        let mut pending_job = None;
+        for prefix in ["ydoc-mat_", "resolve-mat_"] {
+            let candidate = format!("{prefix}{}", current.latest_moment_id);
+            if let Some(job) = store
+                .load_materialization_job(&candidate)?
+                .filter(|job| job.status == dohc_engine_storage::JobStatus::Pending)
+            {
+                pending_job = Some(job);
+                break;
+            }
+        }
         // PENDING only: a completed/conflicted job must not replay here — a
         // completed one would re-read the target on every settle (and fail
         // the whole settle pre-commit on a transient read error), and a
         // conflicted one already ran its compensation.
-        if let Some(job) = store
-            .load_materialization_job(&pending_job_id)?
-            .filter(|job| job.status == dohc_engine_storage::JobStatus::Pending)
-        {
+        if let Some(job) = pending_job {
             // Suppression BEFORE the replace, exactly like the fresh path —
             // the watcher can observe the replayed bytes the instant they
             // land; retract on a conflicted job.
@@ -10604,13 +10668,51 @@ fn conflict_resolve_on_store(
     store: &mut EngineStore,
     input: &ResolveTextConflict,
     root_dir: Option<&std::path::Path>,
+    leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<ResolveTextConflictResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store)
+    // A LIVE editor holds the document this resolution would rewrite. The
+    // fold commits a full-document update to the durable Y.Doc, and the
+    // client keeps editing the copy it already has: its next update merges
+    // from pre-resolution state, so the reviewed choice is reversed or the
+    // live edits are lost — the same property the open/settle freeze
+    // protects, breached from the other side (the session is already
+    // holding the document rather than trying to acquire it).
+    //
+    // Refuse rather than mutate underneath it. The caller closes or resyncs
+    // the session and resolves again; `ydoc_resync_on_store` is the door
+    // that makes that recoverable.
+    // `status='open'` is what stops this guard outranking the idempotency
+    // contract. A resolution that COMMITTED and lost its response is retried
+    // with the same `request_id`; the domain's request ledger replays the
+    // recorded result and rewrites nothing, so refusing that retry for a live
+    // lease would turn a lost response into a different answer. Only a
+    // resolution that has not committed can still rewrite a held document,
+    // and only that one is refused.
+    let held_object: Option<(String, String)> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT target_version_id, current_object_id FROM conflicts              WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
+            params![input.workspace_id, input.conflict_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map(|row| row.and_then(|(version, object)| object.map(|object| (version, object))))
+        .map_err(StorageError::corrupt_public)
+    })?;
+    if let Some((version_id, object_id)) = held_object
+        && let Ok(key) = DocKey::new(input.workspace_id.clone(), version_id, object_id)
+        && leases.is_held(&key)
+    {
+        return Err(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "ydoc-session-live",
+        }
+        .into());
+    }
+    let result = VersionedTextStore::new(store)
         .resolve_text_conflict_with(input, faults, |tx, result| {
             if let Some(delete) = result.delete.as_ref() {
                 delete_file_search_index(
@@ -10620,6 +10722,19 @@ fn conflict_resolve_on_store(
                     &delete.object.object_id,
                 )
                 .map_err(search_domain)?;
+                // A deletion is a reviewed outcome carrying no bytes to
+                // fold, so the write path skipped it and the canonical rows
+                // survived — the next `ydoc.update` found the path absent,
+                // accepted it, and projected the retained lineage back into
+                // a snapshot, reversing the deletion the user approved.
+                // Retire the lineage so the reviewed outcome is what remains.
+                dohc_engine_sync::retire_ydoc_lineage_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &delete.before.version_id,
+                    &delete.object.object_id,
+                )
+                .map_err(map_fold_error)?;
             }
             if let Some(write) = result.write.as_ref()
                 && let Some(root_dir) = root_dir
@@ -10640,9 +10755,108 @@ fn conflict_resolve_on_store(
             // READER drops any candidate whose live head is binary
             // (`search::query::live_head_is_binary`), which is the same
             // freeze-then-filter contract every other binary overwrite uses.
+            //
+            // A TEXT resolution on a Y.Doc-backed object must also become
+            // canonical in the lineage, in this same transaction, or the
+            // next inbound delta silently reverses the user's choice.
+            // Keep-current writes nothing, so its chosen text is the
+            // conflict's own current side. A delete resolution is not
+            // folded: deleting a replicated Y.Doc path is its own machinery,
+            // and the projection guard plus the settle freeze already keep
+            // an open conflict's head safe.
+            if let Some(write) = result.write.as_ref() {
+                dohc_engine_sync::fold_resolution_into_ydoc_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &write.snapshot.version_id,
+                    &write.snapshot.object_id,
+                    &write.snapshot.path,
+                    &write.snapshot.text,
+                    input.now_ms,
+                )
+                .map_err(map_fold_error)?;
+            } else if matches!(
+                result.conflict.resolution,
+                Some(dohc_engine_domain::ConflictResolution::KeptCurrent)
+            ) && let Some(snapshot) = result.conflict.current.snapshot.as_ref()
+            {
+                dohc_engine_sync::fold_resolution_into_ydoc_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &result.conflict.target_version_id,
+                    &snapshot.object_id,
+                    &snapshot.path,
+                    &snapshot.text,
+                    input.now_ms,
+                )
+                .map_err(map_fold_error)?;
+            }
             Ok(())
         })
-        .map_err(RuntimeError::from)
+        .map_err(RuntimeError::from)?;
+    // The fold appends full-document rewrites; give it the append path's
+    // self-bounding (`self_bound_log`), or repeated conflicts grow
+    // `ydoc_updates` without bound. Best-effort exactly like the append: the
+    // fold is already durable, a skipped or crashed compaction folds next
+    // time, and `maybe_compact` no-ops below threshold and while updates are
+    // pending.
+    let folded_object = result.write.as_ref().map_or_else(
+        || {
+            result.conflict.current.snapshot.as_ref().map(|snapshot| {
+                (
+                    result.conflict.target_version_id.clone(),
+                    snapshot.object_id.clone(),
+                )
+            })
+        },
+        |write| {
+            Some((
+                write.snapshot.version_id.clone(),
+                write.snapshot.object_id.clone(),
+            ))
+        },
+    );
+    if let Some((version_id, object_id)) = folded_object
+        && let Ok(key) = DocKey::new(input.workspace_id.clone(), version_id, object_id)
+        && dohc_engine_collab::read_marker(store, &key)?.is_some()
+    {
+        let _ = dohc_engine_collab::maybe_compact(
+            store,
+            &key,
+            dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD,
+            faults,
+            input.now_ms,
+        )?;
+    }
+    Ok(result)
+}
+
+/// Map a resolution-fold failure into the resolving transaction's error
+/// domain: payload-shaped refusals stay refusals, storage stays storage.
+fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::DomainError {
+    match error {
+        dohc_engine_sync::SyncError::InvalidInput { reason } => {
+            dohc_engine_domain::DomainError::InvalidInput { reason }
+        }
+        // The fold's size refusal carries its measurements; wrapping it as
+        // state-corrupt would throw them away and misreport a bounded input
+        // as corruption.
+        dohc_engine_sync::SyncError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        } => dohc_engine_domain::DomainError::PayloadTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        },
+        dohc_engine_sync::SyncError::Storage(storage) => {
+            dohc_engine_domain::DomainError::Storage(storage)
+        }
+        other => dohc_engine_domain::DomainError::Storage(
+            dohc_engine_storage::StorageError::corrupt_public(other),
+        ),
+    }
 }
 
 /// Execute a run of bounded units, checking `token` BETWEEN units. Each unit is

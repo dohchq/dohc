@@ -1,8 +1,14 @@
 import {
   classifyPath,
   DOHC_TRASH_GUARD,
+  collisionVariantPlan,
   notARealFolderRefusal,
   outsideWorkspaceRefusal,
+  nameUnitFor,
+  sameFsEntry,
+  entryCharBudget,
+  trashEntryPlan,
+  WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
@@ -15,7 +21,7 @@ import {
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -64,21 +70,6 @@ function isInside(parent: string, child: string): boolean {
     !rel.startsWith("..") &&
     !rel.startsWith(`${sep}`)
   );
-}
-
-// Truncate a (decorative) basename so `${prefix}${name}` fits NAME_MAX — the
-// 255-BYTE per-component limit on ext4/APFS/NTFS. Byte-accurate, not char:
-// a multibyte sequence split at the cut decodes to U+FFFD, which we trim so
-// the trash entry never carries a dangling replacement char.
-function fitWithinNameMax(name: string, prefix: string): string {
-  const NAME_MAX = 255;
-  const budget = NAME_MAX - Buffer.byteLength(prefix, "utf8");
-  if (budget <= 0) return "";
-  if (Buffer.byteLength(name, "utf8") <= budget) return name;
-  return Buffer.from(name, "utf8")
-    .subarray(0, budget)
-    .toString("utf8")
-    .replace(/\uFFFD+$/, "");
 }
 
 // Head bytes read to find a markdown page's `icon` frontmatter. The icon is a
@@ -302,17 +293,129 @@ export async function resolveImportDestination(
 // as skipped instead of probing forever.
 const MAX_COLLISION_RENAMES = 99;
 
-// "report.md" + attempt 2 -> "report (2).md". Dotfiles (".env") and
-// extensionless names suffix at the end (".env (2)", "Makefile (2)").
-// The stem is byte-truncated so the variant never exceeds NAME_MAX — a
-// near-255-byte basename colliding must degrade to a shorter variant, not
-// abort the whole import with ENAMETOOLONG (codex P2).
-function collisionVariant(name: string, attempt: number): string {
-  const dot = name.lastIndexOf(".");
-  const stem = dot > 0 ? name.slice(0, dot) : name;
-  const extension = dot > 0 ? name.slice(dot) : "";
-  const marker = ` (${attempt})`;
-  return `${fitWithinNameMax(stem, marker + extension)}${marker}${extension}`;
+// "report.md" + attempt 2 -> "report (2).md", longest first. The naming rule
+// is shared with the trash, because it is the same rule: fit the component in
+// the platform's unit, and keep a shorter candidate for the composed-path
+// limit where one applies. Without that second rung a colliding multibyte name
+// in a deep folder composes past MAX_PATH and copyFile answers ENOENT, which
+// aborts the whole import.
+function collisionVariants(
+  name: string,
+  attempt: number,
+  maxEntryChars: number,
+): string[] {
+  return collisionVariantPlan(name, attempt, {
+    unit: nameUnitFor(process.platform),
+    maxEntryChars,
+  });
+}
+
+/**
+ * COULD this copy failure be about the name being too long? Exported for unit
+ * testing, as `extractFrontmatterIcon` above is: neither an ENOENT from a
+ * vanished source nor a real MAX_PATH refusal is arrangeable on demand in that
+ * suite, and getting the two confused is the whole point.
+ *
+ * `maxEntryChars` must be the SAME budget that shaped the candidate list. An
+ * earlier revision compared the composed path against `WINDOWS_MAX_PATH_CHARS`
+ * directly, with no platform check anywhere in the copy loop -- so on macOS and
+ * Linux, where a 259-character path is ordinary, a genuinely missing source
+ * read as a length refusal, walked the shorter rungs, and was counted as
+ * SKIPPED instead of aborting the batch. Two copies of one fact, disagreeing.
+ *
+ * "Could" is as far as arithmetic gets for ENOENT. See `bothStillThere`.
+ */
+export function couldBeLengthRefusal(
+  code: string | undefined,
+  candidate: string,
+  maxEntryChars: number,
+): boolean {
+  // Says so outright, on every platform.
+  if (code === "ENAMETOOLONG") return true;
+  // Windows reports an over-long path as ENOENT. So does a missing source,
+  // everywhere -- so ENOENT can only be about length where a composed-path
+  // limit actually applies AND this name exceeds it. Off Windows the budget is
+  // Infinity and this is never true.
+  return code === "ENOENT" && candidate.length > maxEntryChars;
+}
+
+// The arithmetic above says an over-budget name COULD be refused for length.
+// It cannot say it WAS. On a long-path-aware Windows host the budget is not
+// the real limit -- a 300-character path works there -- so an ENOENT means
+// something that should exist does not: the source moved after the file dialog
+// validated it, or the destination folder went away. Predicting from the
+// budget silently counted that as `skipped`, and a user does not notice a
+// skipped line.
+//
+// So ask, exactly as the ladder does for the rename. Only on the ambiguous
+// branch: ENAMETOOLONG never reaches here, and neither does any other errno.
+async function bothStillThere(source: string, absDir: string): Promise<boolean> {
+  const [sourceThere, dirThere] = await Promise.all([
+    lstat(source).then(
+      () => true,
+      () => false,
+    ),
+    lstat(absDir).then(
+      () => true,
+      () => false,
+    ),
+  ]);
+  return sourceThere && dirThere;
+}
+
+// Why a trash ladder stopped before its next rung. Three outcomes, not two:
+// "dohc could not check" is a different fact from "something changed it", and
+// reporting the second when only the first was established is the same defect
+// this file's delete path was fixed for -- a confident claim on no evidence.
+type LadderStop = "gone" | "replaced" | "unchecked";
+
+/**
+ * The decision, separated from the I/O. Exported for unit testing, as
+ * extractFrontmatterIcon above is: an EACCES on the second look is not
+ * arrangeable in this suite, and it is the case that carries the defect.
+ *
+ * `null` means "same entry, carry on".
+ */
+export function classifyLadderProbe(
+  started: { ino: number; dev: number } | null,
+  probe:
+    | { looked: true; now: { ino: number; dev: number } }
+    | { looked: false; code: string | undefined },
+): LadderStop | null {
+  // No starting identity means there is nothing to compare against, so the
+  // question cannot be answered rather than answered "changed".
+  if (!started) return "unchecked";
+  // Only ENOENT means absence. EACCES, EIO and the rest establish nothing
+  // about the path -- they establish that dohc could not look.
+  if (!probe.looked) return probe.code === "ENOENT" ? "gone" : "unchecked";
+  const identity = sameFsEntry(started, probe.now);
+  if (identity === "same") return null;
+  return identity === "replaced" ? "replaced" : "unchecked";
+}
+
+async function ladderStop(
+  target: string,
+  started: Stats | null,
+): Promise<LadderStop | null> {
+  const probe = await lstat(target).then(
+    (now) => ({ looked: true as const, now }),
+    (error: unknown) => ({
+      looked: false as const,
+      code: (error as NodeJS.ErrnoException).code,
+    }),
+  );
+  return classifyLadderProbe(started, probe);
+}
+
+function ladderStopReason(name: string, stop: LadderStop): string {
+  switch (stop) {
+    case "gone":
+      return `dohc did not move ${name} to the trash. ${name} is no longer at that path: something else moved or deleted it.`;
+    case "replaced":
+      return `dohc did not move ${name} to the trash. A different entry is at that path now: something replaced it while dohc worked.`;
+    case "unchecked":
+      return `dohc did not move ${name} to the trash. dohc could not check that path, so it stopped rather than move something it could not identify.`;
+  }
 }
 
 // One copy that never overwrites: COPYFILE_EXCL on every attempt, retrying
@@ -326,15 +429,32 @@ async function copyWithoutOverwrite(
   absDir: string,
   name: string,
 ): Promise<string | null> {
+  // ONE budget, used both to shape the candidates and to classify a failure.
+  // Two copies of this fact can disagree, and did.
+  const maxEntryChars = entryCharBudget(absDir, process.platform);
   for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
-    const candidate = attempt === 1 ? name : collisionVariant(name, attempt);
-    try {
-      await copyFile(source, join(absDir, candidate), constants.COPYFILE_EXCL);
-      return candidate;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENAMETOOLONG") return null;
-      if (code !== "EEXIST") throw error;
+    // Longest first, exactly as the trash ladder does: a shorter name is used
+    // only once the platform has actually refused the longer one for length.
+    const candidates =
+      attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
+    for (const [rung, candidate] of candidates.entries()) {
+      try {
+        await copyFile(source, join(absDir, candidate), constants.COPYFILE_EXCL);
+        return candidate;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        // EEXIST is the collision itself: take the next attempt NUMBER, not a
+        // shorter spelling of this one.
+        if (code === "EEXIST") break;
+        if (!couldBeLengthRefusal(code, candidate, maxEntryChars)) throw error;
+        // "Could" is not enough for an ENOENT: it is the one code that also
+        // means something vanished. A missing source or destination folder is
+        // a real failure and must surface, not be shortened into a skip.
+        if (code === "ENOENT" && !(await bothStillThere(source, absDir))) throw error;
+        // No shorter rung left: a name this filesystem cannot hold skips the
+        // source instead of aborting the batch.
+        if (rung === candidates.length - 1) return null;
+      }
     }
   }
   return null;
@@ -671,10 +791,49 @@ export async function moveIntoWorkspaceTrash(
   // bytes. The per-call UUID makes every trash entry unique. The basename is
   // decorative, so truncate it to fit NAME_MAX (255 bytes on ext4/APFS/NTFS):
   // a long source name + the 50-odd-byte unique prefix must not ENAMETOOLONG.
+  // Renaming down a ladder rather than predicting which limit applies: the
+  // real name first, then the component-fitted one, then one that also fits
+  // the legacy MAX_PATH limit -- each reached only because the platform
+  // refused the one above it. A name that fits is never shortened, and the
+  // trash keeps no record of the original, so a dropped character is gone.
   const prefix = `${Date.now()}-${randomUUID()}-`;
-  const trashed = join(trashDir, `${prefix}${fitWithinNameMax(basename(target), prefix)}`);
-  await rename(target, trashed);
-  return trashed;
+  const plan = trashEntryPlan(basename(target), prefix, {
+    unit: nameUnitFor(process.platform),
+    maxEntryChars: entryCharBudget(trashDir, process.platform),
+  });
+  // Captured ONCE, before the first rename. A rung that failed for length
+  // leaves a window in which another process can REPLACE the source, and the
+  // next rung would move the replacement into the trash and report the delete
+  // done -- for a file the user never selected. Re-reading this per rung would
+  // compare the source with itself and reopen the window.
+  const started = await lstat(target).catch(() => null);
+  let moveError: unknown = null;
+  for (const [rung, candidate] of plan.candidates.entries()) {
+    if (rung > 0) {
+      const stop = await ladderStop(target, started);
+      // "could not check" stops it too: absent evidence is not permission to
+      // move a file this code can no longer prove is the right one.
+      if (stop) throw new Error(ladderStopReason(basename(target), stop));
+    }
+    const trashed = join(trashDir, candidate);
+    try {
+      await rename(target, trashed);
+      return trashed;
+    } catch (error) {
+      moveError = error;
+      // Only a length failure earns a shorter name. Windows reports an
+      // over-long path as ENOENT, which is how #613 disguised itself;
+      // anything else is not about length.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENAMETOOLONG" && code !== "ENOENT") throw error;
+    }
+  }
+  if (plan.exhausted) {
+    throw new Error(
+      `dohc could not move ${basename(target)} to the workspace trash. The trash folder is ${trashDir.length} characters deep, and this platform allows ${WINDOWS_MAX_PATH_CHARS} characters for a whole path, which leaves no room for a trash entry name. Move the workspace to a shorter path.`,
+    );
+  }
+  throw moveError;
 }
 
 // Export bounds: policy caps for what main will buffer into one in-memory

@@ -369,6 +369,35 @@ const bridge: DohcDesktopBridge = {
     }
     return { accepted: raw.accepted, completed: raw.completed, state };
   },
+  onQuitRequested: (listener: () => void) => {
+    const handler = () => listener();
+    ipcRenderer.on(CHANNELS.quitRequested, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.quitRequested, handler);
+  },
+  onRecoveryCheckRequested: (listener: (requestId: number) => void) => {
+    const handler = (_event: unknown, requestId: unknown) => {
+      // Only a number ever crosses this boundary; anything else is dropped.
+      if (typeof requestId === "number") listener(requestId);
+    };
+    ipcRenderer.on(CHANNELS.recoveryCheckRequested, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.recoveryCheckRequested, handler);
+  },
+  answerRecoveryCheck: async (payload: {
+    requestId: number;
+    blocked: boolean;
+  }) => {
+    await ipcRenderer.invoke(CHANNELS.recoveryCheckAnswer, {
+      requestId: payload.requestId,
+      blocked: payload.blocked,
+    });
+  },
+  holdQuit: async () => {
+    await ipcRenderer.invoke(CHANNELS.holdQuit);
+  },
+  resumeQuit: async () => {
+    await ipcRenderer.invoke(CHANNELS.resumeQuit);
+  },
   // Content search (Phase E5.0): results stream main→renderer as bounded
   // batches; the searchId round-trips so stale batches drop renderer-side.
   searchWorkspace: (payload) =>

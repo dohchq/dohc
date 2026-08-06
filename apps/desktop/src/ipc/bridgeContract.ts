@@ -3407,6 +3407,20 @@ export interface DohcDesktopBridge {
   getUpdateState(): Promise<UpdateStateEvent>;
   checkForUpdates(): Promise<UpdateCheckResult>;
   installUpdate(): Promise<UpdateActionResult>;
+  // Quit interception (#567): main asks before a quit proceeds so set-aside
+  // drafts can warn FIRST — electron-updater's quitAndInstall is one-shot,
+  // so the decision must come before any destructive call. The renderer
+  // either holds the quit (its dialog owns the decision) or resumes it.
+  onQuitRequested(listener: () => void): () => void;
+  // Main re-checks recovery drafts at the quit boundary (#579 review, r12):
+  // the renderer answers whether any unresolved set-aside edit would be lost.
+  onRecoveryCheckRequested(listener: (requestId: number) => void): () => void;
+  answerRecoveryCheck(payload: {
+    requestId: number;
+    blocked: boolean;
+  }): Promise<void>;
+  holdQuit(): Promise<void>;
+  resumeQuit(): Promise<void>;
   // Workspace content search (Phase E5.0). Resolves when the search has been
   // ACCEPTED and the rg child spawned; results stream separately through
   // onSearchResults. Issuing a new search cancels the previous one in main.

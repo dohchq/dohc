@@ -1,3 +1,4 @@
+use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_domain::{MAX_CAPTURE_BINARY_FILE_BYTES, MAX_TEXT_BYTES};
 use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex_sha256};
 use rusqlite::{OptionalExtension, params};
@@ -9,12 +10,18 @@ use crate::journal::crashes;
 pub enum BlobKind {
     Text,
     Binary,
+    /// A Y.Doc update or full-state base. Stored beside [`BlobKind::Binary`] in
+    /// `binary_blobs`, but its own kind because it carries its own ceiling: a
+    /// CRDT payload is not a captured binary file and must not inherit that
+    /// file's cap (#549).
+    Ydoc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlobContent {
     Text(String),
     Binary(Vec<u8>),
+    Ydoc(Vec<u8>),
 }
 
 impl BlobContent {
@@ -22,6 +29,7 @@ impl BlobContent {
         match self {
             BlobContent::Text(_) => BlobKind::Text,
             BlobContent::Binary(_) => BlobKind::Binary,
+            BlobContent::Ydoc(_) => BlobKind::Ydoc,
         }
     }
 }
@@ -41,6 +49,7 @@ pub const fn blob_ceiling(kind: BlobKind) -> (&'static str, usize) {
             "MAX_CAPTURE_BINARY_FILE_BYTES",
             MAX_CAPTURE_BINARY_FILE_BYTES,
         ),
+        BlobKind::Ydoc => ("MAX_YDOC_UPDATE_BYTES", MAX_YDOC_UPDATE_BYTES),
     }
 }
 
@@ -50,7 +59,9 @@ pub const fn blob_ceiling(kind: BlobKind) -> (&'static str, usize) {
 pub const MAX_INGEST_BLOB_BYTES: usize = {
     let text = blob_ceiling(BlobKind::Text).1;
     let binary = blob_ceiling(BlobKind::Binary).1;
-    if text > binary { text } else { binary }
+    let ydoc = blob_ceiling(BlobKind::Ydoc).1;
+    let widest = if text > binary { text } else { binary };
+    if ydoc > widest { ydoc } else { widest }
 };
 
 /// Hash-verify and hydrate a bounded content-addressed blob in one transaction.
@@ -67,7 +78,7 @@ pub fn hydrate_blob_content(
 ) -> Result<TxnOutcome<()>, SyncError> {
     let bytes = match &blob.content {
         BlobContent::Text(text) => text.as_bytes(),
-        BlobContent::Binary(bytes) => bytes.as_slice(),
+        BlobContent::Binary(bytes) | BlobContent::Ydoc(bytes) => bytes.as_slice(),
     };
     let (constraint, limit_bytes) = blob_ceiling(blob.content.kind());
     if bytes.len() > limit_bytes {
@@ -104,7 +115,10 @@ pub fn hydrate_blob_content(
                     .map_err(SyncError::persist)?;
                 }
             }
-            BlobContent::Binary(bytes) => {
+            // A Y.Doc payload shares `binary_blobs` with a captured file: the
+            // table is content-addressed and kind-free. Only the CEILING is
+            // per-kind, and that was already applied above.
+            BlobContent::Binary(bytes) | BlobContent::Ydoc(bytes) => {
                 let existing: Option<(i64, Vec<u8>)> = tx
                     .query_row(
                         "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",

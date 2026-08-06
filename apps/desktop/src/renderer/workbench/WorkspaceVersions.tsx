@@ -164,6 +164,12 @@ export function VersionMenu(props: {
     [snapshot],
   );
   const onMain = (active?.kind ?? "main") === "main";
+  // The version this workspace is on, readable inside async continuations
+  // without a stale closure (assigned during render, readOnlyRef precedent).
+  // performSwitch's failure path compares against it: a switch that never
+  // took must not be announced as a version change.
+  const activeVersionIdRef = useRef<string | null>(null);
+  activeVersionIdRef.current = snapshot?.activeVersionId ?? null;
 
   const closeMenu = useCallback((refocus = true) => {
     setMenuOpen(false);
@@ -175,6 +181,20 @@ export function VersionMenu(props: {
   const performSwitch = useCallback(
     async (versionId: string) => {
       const token = beginOperation();
+      const before = activeVersionIdRef.current;
+      // Did the switch IPC start? The failure path below keys on this, not
+      // on whether the version moved: main settles and CLOSES live Y.Doc
+      // sessions before it sets the active version, so a switch that failed
+      // mid-way leaves the version unchanged AND the sessions dead — only
+      // the reopen re-binds them (#579 review, r7).
+      let switchIssued = false;
+      // The success path announces BEFORE its selector refresh, so a refresh
+      // that fails must not announce again (#579 review, r18). A second
+      // announcement bumps the version epoch a second time, and that
+      // same-version reopen moves a freshly typed edit into set-aside
+      // recovery — which is in-memory only and dies on the next reload — for
+      // a selector-refresh failure that changed nothing.
+      let announced = false;
       setBusy("switch");
       setInlineError(null);
       try {
@@ -183,6 +203,7 @@ export function VersionMenu(props: {
         // switch) may resolve after this panel was unmounted or superseded,
         // and a stale continuation must not mutate or repaint.
         if (token !== operationToken.current) return;
+        switchIssued = true;
         await bridge().switchWorkspaceVersion({ workspaceId, versionId });
         if (token !== operationToken.current) return;
         // The switch succeeded, so this IS the active version now — say so
@@ -191,6 +212,7 @@ export function VersionMenu(props: {
         // already be in flight, and every await between here and the
         // announcement is a window it can answer in.
         props.onWorkspaceStateChanged(versionId);
+        announced = true;
         await refresh();
       } catch (error) {
         if (token !== operationToken.current) return;
@@ -200,6 +222,24 @@ export function VersionMenu(props: {
         // re-read reports, and if that read fails too, nobody knows.
         const recovered = await refresh().catch(() => null);
         if (token !== operationToken.current) return;
+        // Suppress the reopen ONLY when the failure happened BEFORE the
+        // switch IPC started (the pre-switch flush): nothing main-side ran,
+        // the live sessions are untouched, and a reopen would set the
+        // pending draft aside on the same version for nothing (#579 review,
+        // r4). Once the switch IPC has started, announce even if the version
+        // never moved — main may have closed the live sessions on its way to
+        // the failure, and without the reopen the editor keeps a Y.Doc whose
+        // session is gone (#579 review, r7). An unknown outcome (the re-read
+        // failed too) also announces: showing an uncertain reality beats
+        // staying blind.
+        if (announced) return;
+        if (
+          !switchIssued &&
+          recovered !== null &&
+          recovered.activeVersionId === before
+        ) {
+          return;
+        }
         props.onWorkspaceStateChanged(recovered?.activeVersionId);
       } finally {
         if (token === operationToken.current) setBusy(null);

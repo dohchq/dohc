@@ -6791,6 +6791,7 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
         ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-session-live"),
+            conflicts_opened: 0,
         })
     );
 
@@ -6937,6 +6938,888 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
 }
 
 #[test]
+fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
+    // #546: the receiver's head came from capture/local writes and belongs to
+    // no shared lineage. The FIRST inbound base must not silently replace it:
+    // the lineage lands (claimed, acked), the head stays, and one moment-lane
+    // shaped sync conflict opens. Mutation check: restore the unconditional
+    // `project_and_write_in_tx` call in the base branch — the head assertion
+    // and the conflict-count assertion below both fail.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    let local_write = engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-div',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-div".to_owned(),
+                    path: "notes/plan.md".to_owned(),
+                    text: "local truth".to_owned(),
+                    moment_id: "m-local-1".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))
+        })
+        .expect("local head");
+    assert!(matches!(
+        local_write,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+    let local_sha = dohc_engine_storage::hex_sha256("local truth".as_bytes());
+
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "remote truth");
+    let base_bytes = base_doc.encode_full_state();
+    let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
+    let base_op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-div",
+            "path": "notes/plan.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    let outcome =
+        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-base-conflict"),
+            conflicts_opened: 1,
+        })
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
+        0,
+        "the divergent base still acks — the lineage must keep advancing"
+    );
+
+    // The head is untouched.
+    let head_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.version_id='main' AND s.object_id='object-div'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("head");
+    assert_eq!(
+        head_text, "local truth",
+        "the base must not clobber the head"
+    );
+
+    // The lineage itself landed: replicated marker, claimed base.
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-div").expect("key");
+    let marker = dohc_engine_collab::read_marker(&engine, &key)
+        .expect("marker read")
+        .expect("marker");
+    assert_eq!(marker.regime, dohc_engine_collab::Regime::Replicated);
+    assert!(marker.base_claimed, "the base claim still lands");
+
+    // One moment-lane shaped conflict: current = local head, incoming = the
+    // base projection, both hydratable from `blobs`.
+    let remote_sha = dohc_engine_storage::hex_sha256("remote truth".as_bytes());
+    let (status, origin, current_blob, incoming_blob): (String, String, String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT status, metadata_origin, current_blob_sha256, incoming_blob_sha256 \
+                 FROM conflicts WHERE workspace_id='ws'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("conflict row");
+    assert_eq!((status.as_str(), origin.as_str()), ("open", "sync"));
+    assert_eq!(current_blob, local_sha);
+    assert_eq!(incoming_blob, remote_sha);
+    let incoming_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT text FROM blobs WHERE sha256=?1",
+                [&remote_sha],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("incoming blob text");
+    assert_eq!(incoming_text, "remote truth");
+
+    // A later delta must not sneak past the open conflict either: the head
+    // stays, and the conflict's incoming side coalesces to the freshest
+    // remote projection. Mutation check: drop the open-conflict guard in
+    // `project_and_write_in_tx` — the head assertion below fails.
+    let delta = base_doc.plaintext_insert(0, "more ");
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let delta_op = envelope(
+        "peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-div",
+            "path": "notes/plan.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "isBaseState": false
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases).expect("delta applies");
+    let head_after_delta: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.version_id='main' AND s.object_id='object-div'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("head after delta");
+    assert_eq!(head_after_delta, "local truth");
+    let merged_sha = dohc_engine_storage::hex_sha256("more remote truth".as_bytes());
+    let (conflict_count, incoming_after): (i64, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*), MAX(incoming_blob_sha256) FROM conflicts \
+                 WHERE workspace_id='ws' AND status='open'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("coalesced conflict");
+    assert_eq!(
+        conflict_count, 1,
+        "the delta coalesces, it opens nothing new"
+    );
+    assert_eq!(incoming_after, merged_sha);
+}
+
+#[test]
+fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
+    // `lineage_has_state` was a PROXY for "the head was merged", and the two
+    // come apart exactly where it matters. A local-only session crashes
+    // leaving durable unmaterialized rows; capture then records an external
+    // disk edit, so the visible head is newer than anything the lineage
+    // produced. The union is the crashed draft plus the peer's base — the
+    // captured head is in NEITHER — yet the proxy said "rows exist, so the
+    // CRDT is the merge" and the projection overwrote the user's edit with
+    // no conflict at all.
+    //
+    // The fact is `last_settled_sha`: the content this lineage last put on
+    // disk. Same move as the resolve path, where `metadata_origin == "sync"`
+    // was replaced by the head ids the payload already carried.
+    //
+    // MUTATION: gate the divergence check on `!lineage_has_state` again —
+    // the external edit is silently overwritten and the assertions below
+    // fail.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-crashed',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-crashed").expect("key");
+
+    // A local-only session that crashed: durable rows, never settled.
+    let draft = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "crashed draft");
+    dohc_engine_collab::record_local_update_creating_marker(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::LocalOnly,
+        &draft,
+        None,
+        &NoFaults,
+        1_500,
+    )
+    .expect("crashed draft rows");
+
+    // Capture records an EXTERNAL disk edit: the head is now newer than
+    // anything this lineage produced.
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-crashed".to_owned(),
+                    path: "notes/crashed.md".to_owned(),
+                    text: "the user's external edit".to_owned(),
+                    moment_id: "m-external".to_owned(),
+                    metadata_origin: "capture".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_600,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("external edit");
+
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "peer base");
+    let base_sha = engine
+        .put_binary_blob(&base_doc.encode_full_state())
+        .expect("base blob");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &envelope(
+            "peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-crashed",
+                "path": "notes/crashed.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": base_sha,
+                "isBaseState": true
+            }),
+        ),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-base-conflict"),
+            conflicts_opened: 1,
+        }),
+        "a head this lineage never produced must open a conflict"
+    );
+
+    let head: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.object_id='object-crashed'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("head");
+    assert_eq!(
+        head, "the user's external edit",
+        "the external edit survives for review instead of being overwritten"
+    );
+}
+
+#[test]
+fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
+    // The convergent twin of the divergence test: a head whose bytes already
+    // equal the base's projection fast-forwards silently.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-same',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-same".to_owned(),
+                    path: "notes/same.md".to_owned(),
+                    text: "shared truth".to_owned(),
+                    moment_id: "m-local-same".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("local head");
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "shared truth");
+    let base_bytes = base_doc.encode_full_state();
+    let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
+    let base_op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-same",
+            "path": "notes/same.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    let outcome =
+        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: None,
+            conflicts_opened: 0,
+        })
+    );
+    let conflicts: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM conflicts", [], |r| r.get(0))
+                .map_err(SyncError::corrupt)
+        })
+        .expect("conflict count");
+    assert_eq!(
+        conflicts, 0,
+        "a matching head fast-forwards without a conflict"
+    );
+}
+
+#[test]
+fn a_coalesced_conflict_still_recounts_on_redelivery() {
+    // Codex #596 P2: a later delta coalesces the conflict and rewrites its
+    // incoming anchor, so a crash-redelivery recount keyed on the conflict
+    // row finds nothing. The count now lives in an immutable per-envelope
+    // decision record. MUTATION: drop the `record_ydoc_conflicts_opened`
+    // call (or key the recount back on the conflict row) — this returns 0.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-recount',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-recount".to_owned(),
+                    path: "notes/recount.md".to_owned(),
+                    text: "local truth".to_owned(),
+                    moment_id: "m-recount-local".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("local head");
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "remote truth");
+    let base_sha = engine
+        .put_binary_blob(&base_doc.encode_full_state())
+        .expect("base blob");
+    let base_op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-recount",
+            "path": "notes/recount.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base conflicts");
+    // A later delta coalesces the conflict, rewriting its incoming anchor.
+    let delta = base_doc.plaintext_insert(0, "more ");
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let delta_op = envelope(
+        "peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-recount",
+            "path": "notes/recount.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "isBaseState": false
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases).expect("delta coalesces");
+    assert_eq!(
+        crate::router::redelivered_conflicts_opened(&engine, &base_op).expect("recount"),
+        1,
+        "the redelivered base still reports the conflict it opened"
+    );
+}
+
+#[test]
+fn resolution_fold_refuses_while_deferred_updates_are_parked() {
+    // Codex #596 P1: acked-but-parked remote updates were never part of
+    // either reviewed side, and their drain runs after the review gate
+    // closes. The fold — and with it the whole resolution transaction —
+    // refuses until they drain. MUTATION: drop the deferred-updates check in
+    // `fold_resolution_into_ydoc_in_tx` — the Err assertion fails.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-parked',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates \
+                 (workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms) \
+                 VALUES ('ws','main','object-parked','peer',0,1_500)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("parked row");
+    let refused = engine.write_with(&NoFaults, |tx| {
+        crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+            tx,
+            "ws",
+            "main",
+            "object-parked",
+            "notes/parked.md",
+            "chosen text",
+            1_600,
+        )
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(SyncError::InvalidInput {
+                reason: "ydoc-deferred-updates-pending"
+            })
+        ),
+        "a parked queue must refuse the resolution: {refused:?}"
+    );
+}
+
+#[test]
+fn a_fold_that_cannot_reproduce_the_choice_refuses_instead_of_diverging() {
+    // The fold's markdown parser is ASSERTED to be the projector's inverse
+    // and nothing makes that true. Past the quote budget the leftover `> `
+    // markers become paragraph text and the projector escapes them to
+    // `&gt;` — so the fold would commit a lineage projecting bytes the user
+    // never chose while stamping last_settled_sha with the chosen text's
+    // hash in the same statement: the head file saying one thing, the CRDT
+    // another, and the marker asserting they agree. That is the silent
+    // reversal this PR exists to close, arriving through the fold itself.
+    //
+    // MUTATION: delete the re-projection check in
+    // `fold_resolution_into_ydoc_in_tx` — this fold succeeds and the
+    // divergence assertion below fails, proving the guard is what stops it.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-unrepresentable',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-unrepresentable").expect("key");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.richdoc_append_paragraph("original");
+    dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &doc.encode_full_state(),
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim");
+
+    // Deeper than the fold's recursion budget: representable as markdown,
+    // not reproducible by the parser.
+    let unrepresentable = format!("{}deep", "> ".repeat(200));
+    let refused = engine.write_with(&NoFaults, |tx| {
+        crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+            tx,
+            "ws",
+            "main",
+            "object-unrepresentable",
+            "notes/unrepresentable.md",
+            &unrepresentable,
+            1_600,
+        )
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(SyncError::InvalidInput {
+                reason: "ydoc-resolution-not-representable"
+            })
+        ),
+        "a fold that cannot reproduce the choice must refuse: {refused:?}"
+    );
+
+    // And it left nothing behind: no appended update, and the settle marker
+    // does not claim bytes the lineage cannot produce.
+    let (updates, settled): (i64, Option<String>) = engine
+        .read_with(|conn| {
+            Ok::<_, SyncError>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates WHERE workspace_id='ws' \
+                     AND object_id='object-unrepresentable'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+                conn.query_row(
+                    "SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id='ws' \
+                     AND object_id='object-unrepresentable'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+            ))
+        })
+        .expect("post-refusal state");
+    assert_eq!(updates, 0, "the refused fold appended nothing");
+    assert_ne!(
+        settled.as_deref(),
+        Some(dohc_engine_storage::hex_sha256(unrepresentable.as_bytes()).as_str()),
+        "and never stamped the choice it could not store"
+    );
+}
+
+#[test]
+fn recounting_a_malformed_redelivery_returns_zero_instead_of_wedging() {
+    // A malformed `ydoc.update` is refused and ACKED. If the process then
+    // crashes before the relay cursor commits, the next pull replays that
+    // coordinate as `Skipped` and asks the recount helper about it. Decoding
+    // the payload again returned InvalidInput and aborted the whole pull, so
+    // every retry wedged on an operation already durably handled — the
+    // coordinate can never be got past.
+    //
+    // The decision record is keyed by the ENVELOPE coordinate and needs no
+    // payload, so absence reads as zero.
+    //
+    // MUTATION: reparse the payload in `redelivered_conflicts_opened` — this
+    // returns Err and the assertion below fails.
+    let (_scratch, _path, engine) = store();
+    let malformed = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({ "versionId": 5, "not": "a ydoc.update payload" }),
+    );
+    assert_eq!(
+        crate::router::redelivered_conflicts_opened(&engine, &malformed)
+            .expect("a malformed redelivery must recount as zero, not abort the pull"),
+        0
+    );
+}
+
+#[test]
+fn a_resolution_over_an_incomplete_lineage_refuses() {
+    // ONE property with the orientation fix: the reviewed bytes are the
+    // bytes that end up in the lineage, permanently.
+    //
+    // An out-of-order cross-origin update is appended to `ydoc_updates`
+    // while its predecessor is missing, and `apply_ydoc_envelope` skips its
+    // projection for exactly that reason. Resolving over that document
+    // reviews a PARTIAL lineage: when the predecessor lands it integrates
+    // the unseen update and projects it through a review gate that has
+    // already closed, changing the approved head with no second review.
+    //
+    // The deferred-queue check one guard above cannot see this — those rows
+    // were never applied at all, while these are already in the lineage.
+    // Two different records of "not whole yet", which is how consulting one
+    // of them missed the other.
+    //
+    // MUTATION: delete the `has_pending_dependencies()` guard in
+    // `fold_resolution_into_ydoc_in_tx` — the fold succeeds over the partial
+    // document and this refusal assertion fails.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-partial',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-partial").expect("key");
+
+    // A claimed lineage, so the fold reaches its completeness check.
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "base text");
+    let base_sha = engine
+        .put_binary_blob(&base_doc.encode_full_state())
+        .expect("base blob");
+    apply_ydoc_envelope(
+        &mut engine,
+        &envelope(
+            "peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-partial",
+                "path": "notes/partial.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": base_sha,
+                "isBaseState": true
+            }),
+        ),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base claims");
+
+    // A THIRD origin's dependent update lands without its predecessor: it is
+    // durably in `ydoc_updates` and the doc reports a missing dependency.
+    let dep_doc = dohc_engine_collab::Ydoc::wire();
+    let _predecessor = dep_doc.plaintext_insert(0, "dep base");
+    let dependent = dep_doc.plaintext_insert(0, "more ");
+    let dependent_sha = engine.put_binary_blob(&dependent).expect("dependent blob");
+    apply_ydoc_envelope(
+        &mut engine,
+        &envelope(
+            "dep-peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-partial",
+                "path": "notes/partial.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": dependent_sha,
+                "isBaseState": false
+            }),
+        ),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("the dependent update parks in the lineage");
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load")
+        .expect("lineage");
+    assert!(
+        persisted.doc.has_pending_dependencies(),
+        "precondition: the lineage is genuinely incomplete"
+    );
+
+    let refused = engine.write_with(&NoFaults, |tx| {
+        crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+            tx,
+            "ws",
+            "main",
+            "object-partial",
+            "notes/partial.md",
+            "the reviewer's choice",
+            1_700,
+        )
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(SyncError::InvalidInput {
+                reason: "ydoc-incomplete-lineage"
+            })
+        ),
+        "a resolution over a partial lineage must refuse: {refused:?}"
+    );
+}
+
+#[test]
+fn a_fold_the_parser_can_reproduce_still_commits() {
+    // The guard must not refuse everything: a rich choice the parser does
+    // model folds and journals as before.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-representable',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-representable").expect("key");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.richdoc_append_paragraph("original");
+    dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &doc.encode_full_state(),
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim");
+    let chosen = "# Heading\n\nchosen body\n\n- one\n- two";
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+                tx,
+                "ws",
+                "main",
+                "object-representable",
+                "notes/representable.md",
+                chosen,
+                1_600,
+            )
+        })
+        .expect("a representable choice folds");
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load")
+        .expect("lineage");
+    assert_eq!(
+        persisted
+            .doc
+            .project(dohc_engine_collab::ContentKind::Richdoc)
+            .expect("projection")
+            .markdown,
+        chosen,
+        "the lineage projects exactly the chosen bytes"
+    );
+}
+
+#[test]
+fn resolution_fold_names_the_cap_it_hits() {
+    // Codex #596 P2: the fold's size refusal must name the constraint, the
+    // limit, and the observed bytes. MUTATION: revert it to a static
+    // InvalidInput — the BlobTooLarge match fails.
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-fold-cap',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-fold-cap").expect("key");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "small");
+    dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        &doc.encode_full_state(),
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim");
+    let oversized = "x".repeat(dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES + 1);
+    let refused = engine.write_with(&NoFaults, |tx| {
+        crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+            tx,
+            "ws",
+            "main",
+            "object-fold-cap",
+            "notes/fold-cap.md",
+            &oversized,
+            1_600,
+        )
+    });
+    match refused {
+        Err(SyncError::BlobTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        }) => {
+            assert!(constraint.contains("MAX_YDOC_UPDATE_BYTES"));
+            assert_eq!(
+                limit_bytes,
+                dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+            );
+            assert!(observed_bytes > limit_bytes, "observed usage is reported");
+        }
+        other => panic!("the fold cap must name limit and usage: {other:?}"),
+    }
+}
+
+#[test]
 fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
     let (_scratch, _path, mut engine) = store();
     let install_abort_trigger = |engine: &mut EngineStore, trigger_name: &str, table_name: &str| {
@@ -7063,7 +7946,8 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: false,
-            reason: None
+            reason: None,
+            conflicts_opened: 0,
         }))
     ));
     assert_eq!(
@@ -7105,7 +7989,8 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             .expect("early update parks"),
         ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         })
     );
     assert_eq!(
@@ -7219,7 +8104,8 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             apply_ydoc_envelope(&mut engine, &queued, &NoFaults, &NoLiveLeases),
             Ok(ApplyOutcome::Applied(YdocApplyResult {
                 deferred: true,
-                reason: Some("ydoc-lineage-absent")
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
             }))
         ));
         let descendant = envelope(
@@ -7239,7 +8125,8 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             apply_ydoc_envelope(&mut engine, &descendant, &NoFaults, &NoLiveLeases),
             Ok(ApplyOutcome::Applied(YdocApplyResult {
                 deferred: true,
-                reason: Some("ydoc-lineage-absent")
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
             }))
         ));
 
@@ -7499,7 +8386,8 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         }))
     ));
     let deferred: i64 = engine
@@ -7650,7 +8538,8 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
         apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: false,
-            reason: None
+            reason: None,
+            conflicts_opened: 0,
         }))
     ));
     assert_eq!(
@@ -7738,7 +8627,8 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         }))
     ));
     assert_eq!(
@@ -7781,7 +8671,8 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         }))
     ));
     let placeholder_timestamp: i64 = engine
@@ -7879,7 +8770,8 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
             apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
             Ok(ApplyOutcome::Applied(YdocApplyResult {
                 deferred: true,
-                reason: Some("ydoc-lineage-absent")
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
             }))
         ));
     }
@@ -7999,7 +8891,8 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
         apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         }))
     ));
     let base = envelope(
@@ -14129,7 +15022,8 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         apply_ydoc_envelope(&mut engine, &deferred, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
-            reason: Some("ydoc-lineage-absent")
+            reason: Some("ydoc-lineage-absent"),
+            conflicts_opened: 0,
         }))
     ));
 
@@ -15225,6 +16119,274 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
         engine
             .has_binary_blob(&at_cap_sha)
             .expect("binary blob presence")
+    );
+}
+
+/// A Y.Doc payload is its OWN blob kind, and `ydoc.update` must reference it.
+/// While it referenced `BlobKind::Binary` the lineage inherited the
+/// captured-file ceiling — 5 MiB, a number about user uploads — and a base
+/// larger than that was refused on hydrate no matter what the collab layer
+/// allowed (#549).
+///
+/// MUTATION: put `BlobKind::Binary` back in `collect_blob_refs` for
+/// `ydoc.update` and the pull fails with
+/// `BlobTooLarge { constraint: "MAX_CAPTURE_BINARY_FILE_BYTES" }` before the
+/// blob ever reaches the store.
+#[test]
+fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let (ydoc_constraint, ydoc_limit) = blob_ceiling(BlobKind::Ydoc);
+    let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);
+    assert_eq!(ydoc_constraint, "MAX_YDOC_UPDATE_BYTES");
+    assert_ne!(
+        ydoc_constraint, binary_constraint,
+        "the two ceilings must stay separately named"
+    );
+    assert!(
+        ydoc_limit > binary_limit,
+        "the measured Y.Doc bound ({ydoc_limit}) must exceed the captured-file \
+         cap ({binary_limit}) it used to inherit; otherwise the documents this \
+         issue is about are still refused"
+    );
+
+    // Between the two ceilings: the size that used to be unreachable.
+    let base = vec![7u8; binary_limit + 1];
+    let sha256 = dohc_engine_storage::hex_sha256(&base);
+    let op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-oversize-base",
+            "path": "notes/oversize.md",
+            "contentKind": "richdoc",
+            "updateBlobSha256": sha256,
+            "isBaseState": true
+        }),
+    );
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![op],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha256.clone(), base);
+
+    // These bytes are not a Y.Doc, so the APPLY refuses them — but hydration
+    // runs first, and that is what this test is about. The refusal must not be
+    // a ceiling refusal.
+    let outcome = RelaySyncClient::new(relay)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("the pull completes: an oversized-for-binary Y.Doc base is not a transport error");
+    assert!(
+        matches!(outcome, SyncPassOutcome::Complete { .. }),
+        "unexpected pass outcome: {outcome:?}"
+    );
+    assert!(
+        engine.has_binary_blob(&sha256).expect("blob presence"),
+        "the base blob hydrated under the Y.Doc ceiling"
+    );
+}
+
+/// Splitting the ceiling split presence from validation, and only one half
+/// moved. `Binary` and `Ydoc` share `binary_blobs`, so once a Y.Doc base over
+/// the captured-file cap has hydrated legitimately, a LATER `moment.append`
+/// naming the same digest as `binary` was reported already-satisfied — skipping
+/// `hydrate_blob_content`, the only place `MAX_CAPTURE_BINARY_FILE_BYTES` is
+/// enforced. `require_binary_blob` applies no ceiling at all, so an authorized
+/// peer could materialize a 20 MiB Y.Doc payload as an oversized captured file.
+///
+/// The inverse of the defect #549 fixed: there a Y.Doc payload inherited a cap
+/// about user uploads; here a user upload borrows the Y.Doc payload's cap.
+///
+/// The bytes must ALREADY be stored for the hole to open, and one batch cannot
+/// do it: a pass accumulates every page into a single `ops` list and hydrates
+/// once, so both kinds come up missing together and the binary half refuses on
+/// its own ceiling. The precondition here is this machine's OWN origination —
+/// `ydoc_originate_base_in_tx` writes the base through `put_binary_blob`,
+/// bounded only by the 64 MiB store — so no peer is needed to create it.
+///
+/// MUTATION: restore the bare `EXISTS(...)` presence check in
+/// `local_blob_present` and the pull returns `Ok`, the snapshot lands, and the
+/// over-cap binary is materialized.
+#[test]
+fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);
+    let (_, ydoc_limit) = blob_ceiling(BlobKind::Ydoc);
+
+    // A REAL Y.Doc full state, so the first pass genuinely applies and the
+    // lineage really exists. Bytes that merely look like a base would be
+    // refused by the apply, and then the second pass would be running against
+    // a precondition no honest peer could produce.
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, &"x".repeat(binary_limit + 40_000));
+    let payload = doc.encode_full_state();
+    assert!(
+        payload.len() > binary_limit && payload.len() <= ydoc_limit,
+        "the base must sit between the two ceilings: {} bytes",
+        payload.len()
+    );
+    let sha256 = dohc_engine_storage::hex_sha256(&payload);
+
+    let steal = envelope(
+        "peer",
+        0,
+        "moment.append",
+        json!({
+            "momentId": "peer-steal",
+            "versionId": "main",
+            "objectId": "object-steal",
+            "objectCreatedAtMs": 1,
+            "path": "notes/steal.bin",
+            "recordedAtMs": 2_000,
+            "operation": "write",
+            "payloadBeforeBlobSha256": null,
+            "payloadBeforePath": null,
+            "payloadAfterBlobSha256": sha256,
+            "payloadAfterPath": "notes/steal.bin",
+            "payloadAfterContentKind": "binary",
+            "payloadAfterByteLength": payload.len(),
+            "metadata": {"origin": "sync"},
+            "beforePresent": "absent"
+        }),
+    );
+
+    // Pass one: the Y.Doc base hydrates legitimately under its own ceiling.
+    // The precondition: these bytes are already in `binary_blobs`. This is
+    // exactly what `ydoc_originate_base_in_tx` writes when THIS machine starts
+    // a shared lineage — `put_binary_blob`, bounded only by the 64 MiB store —
+    // so the state is one the engine produces itself, with no peer involved.
+    let stored = engine.put_binary_blob(&payload).expect("store the base");
+    assert_eq!(stored, sha256);
+
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![steal],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha256.clone(), payload.clone());
+
+    assert_eq!(
+        RelaySyncClient::new(relay).pull_chat_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Err(RelayError::BlobTooLarge {
+            constraint: binary_constraint,
+            limit_bytes: binary_limit,
+            observed: ObservedBytes::Exact(payload.len()),
+        }),
+        "referencing a stored Y.Doc payload as a captured binary must be refused \
+         by the captured-file ceiling, not admitted because the bytes are in the \
+         shared table"
+    );
+
+    // And nothing of the theft persisted.
+    let snapshots: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE path='notes/steal.bin'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("snapshot count");
+    assert_eq!(snapshots, 0, "no over-cap binary snapshot may materialize");
+}
+
+/// The PUSH side of the same mistake. `upload_missing_blobs` reads the blob out
+/// of the local store before it sends it, and that reader carried the binary
+/// ceiling as a `5 * 1024 * 1024` literal — so a Y.Doc base this engine had just
+/// originated read back as `BlobInvalid`. Wrong constraint, wrong error, and it
+/// would have made the widened bound unusable in the direction that matters
+/// first (#549).
+///
+/// MUTATION: put the literal back in `local_blob_bytes` and the Y.Doc read
+/// fails with `BlobInvalid`.
+#[test]
+fn the_local_blob_reader_measures_against_the_referenced_kind() {
+    let (_scratch, _path, engine) = store();
+    let (_, binary_limit) = blob_ceiling(BlobKind::Binary);
+    let bytes = vec![4u8; binary_limit + 1];
+    let sha256 = engine.put_binary_blob(&bytes).expect("store the blob");
+
+    assert_eq!(
+        crate::relay::local_blob_bytes(&engine, &sha256, BlobKind::Ydoc),
+        Ok(Some(bytes)),
+        "a Y.Doc payload past the captured-file cap is readable for push"
+    );
+    assert_eq!(
+        crate::relay::local_blob_bytes(&engine, &sha256, BlobKind::Binary),
+        Err(RelayError::BlobInvalid),
+        "the same bytes referenced as a captured file are still over ITS ceiling"
+    );
+}
+
+/// The Y.Doc half of the ingest chokepoint. Text and binary are pinned above.
+///
+/// MUTATION: route `BlobContent::Ydoc` through the binary ceiling in
+/// `blob_ceiling` and the at-cap half stops hydrating.
+#[test]
+fn a_ydoc_blob_at_the_ydoc_ceiling_hydrates_and_one_byte_over_is_refused() {
+    let (_scratch, _path, mut engine) = store();
+    let (constraint, limit_bytes) = blob_ceiling(BlobKind::Ydoc);
+    assert_eq!(
+        (constraint, limit_bytes),
+        (
+            "MAX_YDOC_UPDATE_BYTES",
+            dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+        ),
+        "the Y.Doc ingest ceiling is the collab layer's measured payload bound"
+    );
+
+    let at_cap = vec![9u8; limit_bytes];
+    let accepted = BlobHydration {
+        sha256: dohc_engine_storage::hex_sha256(&at_cap),
+        content: BlobContent::Ydoc(at_cap),
+    };
+    assert_eq!(
+        hydrate_blob_content(&mut engine, &accepted, &NoFaults).expect("at-cap Y.Doc hydrates"),
+        TxnOutcome::Committed(())
+    );
+    assert!(
+        engine
+            .has_binary_blob(&accepted.sha256)
+            .expect("blob presence"),
+        "a Y.Doc payload shares the content-addressed binary table"
+    );
+
+    let over_cap = vec![9u8; limit_bytes + 1];
+    let refused = BlobHydration {
+        sha256: dohc_engine_storage::hex_sha256(&over_cap),
+        content: BlobContent::Ydoc(over_cap),
+    };
+    let error = hydrate_blob_content(&mut engine, &refused, &NoFaults)
+        .expect_err("over-cap Y.Doc is refused");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "blob exceeds MAX_YDOC_UPDATE_BYTES: limit {limit_bytes} bytes, observed {} bytes",
+            limit_bytes + 1
+        )
+    );
+    assert!(
+        !engine
+            .has_binary_blob(&refused.sha256)
+            .expect("blob presence"),
+        "an over-cap Y.Doc payload must not persist"
     );
 }
 

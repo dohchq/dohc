@@ -7709,6 +7709,7 @@ impl EngineService {
                     now_ms: local.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
+                self.leases.clone(),
                 open.root,
                 Arc::new(NoFaults),
                 cancellation.token(),
@@ -11070,6 +11071,7 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
             | dohc_engine_crypto::CryptoError::KeyFileMalformed
             | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
         },
+        DomainError::PayloadTooLarge { .. } => ErrorCode::PayloadTooLarge,
         DomainError::WorkspaceNotFound
         | DomainError::VersionNotFound
         | DomainError::InvalidVersion

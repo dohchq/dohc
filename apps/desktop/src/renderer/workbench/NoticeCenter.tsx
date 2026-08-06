@@ -11,6 +11,9 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SyncStatusResult, UpdateStateEvent } from "../../ipc/bridgeContract";
+import { useAllOrphanedDrafts } from "../orphanedDrafts";
+import { RecoveryList } from "../RecoveryList";
+import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { bridge } from "../bridge";
 import type {
   AgentNotification,
@@ -75,6 +78,10 @@ function toneClass(tone: Notice["tone"]): string {
 }
 
 export function NoticeCenter(props: {
+  // Scopes the set-aside section: only the ACTIVE workspace's drafts show
+  // here (#579 review, r6) — another workspace's paths must not leak across
+  // a switch. The app-level close guard deliberately stays global.
+  workspaceId: string;
   syncStatus: SyncStatusResult | null;
   agentActive: boolean;
   conflictSummaries: string[];
@@ -155,7 +162,11 @@ export function NoticeCenter(props: {
     try {
       setInstallPending(true);
       setUpdateActionError(null);
-      const result = await bridge().installUpdate();
+      // Through the guard (#579 review, r8 + r10): with set-aside drafts
+      // present the recovery dialog opens INSTEAD of the one-shot install,
+      // and its confirm makes the only quitAndInstall call.
+      const result = await requestGuardedUpdateInstall();
+      if (result === null) return;
       if (!result.accepted || result.state.status === "error") {
         setUpdateActionError(
           result.state.status === "error"
@@ -376,7 +387,18 @@ export function NoticeCenter(props: {
     updateState,
   ]);
 
-  const count = notices.length;
+  // Set-aside drafts (#567) count as one notice: they may belong to paths
+  // that no longer exist (a deleted file's tab is gone), so this panel is
+  // their always-reachable surface (#579 review, r5) — the list below offers
+  // the same Copy/Dismiss the in-document notice does. Scoped to the active
+  // workspace (#579 review, r6).
+  const allRecoveryRows = useAllOrphanedDrafts();
+  const recoveryRows = useMemo(
+    () =>
+      allRecoveryRows.filter((row) => row.workspaceId === props.workspaceId),
+    [allRecoveryRows, props.workspaceId],
+  );
+  const count = notices.length + (recoveryRows.length > 0 ? 1 : 0);
 
   return (
     <>
@@ -439,7 +461,25 @@ export function NoticeCenter(props: {
               All clear
             </div>
           ) : (
-            <ul className="m-0 max-h-80 list-none overflow-y-auto p-0">
+            <div className="max-h-80 overflow-y-auto">
+              {recoveryRows.length > 0 ? (
+                <section
+                  data-testid="notice-set-aside-edits"
+                  className="border-b border-line px-3 py-2"
+                >
+                  <p className="m-0 text-[12px] font-medium text-ink">
+                    {recoveryRows.length === 1
+                      ? "1 set-aside edit is waiting"
+                      : `${recoveryRows.length} set-aside edits are waiting`}
+                  </p>
+                  <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                    They live only in this window. Copy an edit to keep its
+                    text. Dismiss deletes it for good.
+                  </p>
+                  <RecoveryList workspaceId={props.workspaceId} />
+                </section>
+              ) : null}
+            <ul className="m-0 list-none p-0">
               {notices.map((notice) => (
                 <li
                   key={notice.id}
@@ -496,6 +536,7 @@ export function NoticeCenter(props: {
                 </li>
               ))}
             </ul>
+            </div>
           )}
         </div>
       ) : null}

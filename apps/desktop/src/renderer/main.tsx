@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { DesktopRoot } from "./DesktopRoot";
 import { AppErrorBoundary, installGlobalErrorReporters } from "./ErrorBoundary";
+import { RecoveryCloseGuard } from "./RecoveryCloseGuard";
 import { initTheme } from "./theme";
 import "@fontsource-variable/inter";
 import "@fontsource/ibm-plex-mono/400.css";
@@ -15,10 +16,15 @@ const container = document.getElementById("root");
 if (container) {
   // AppErrorBoundary: an uncaught render error must show the branded
   // recovery screen (reload button), never unmount to a blank window.
+  // RecoveryCloseGuard sits ABOVE it (#579 review, r5): the crash screen's
+  // reload must not destroy in-memory set-aside drafts unannounced, and a
+  // guard inside the crashed tree would unmount with it.
   createRoot(container).render(
-    <AppErrorBoundary>
-      <DesktopRoot />
-    </AppErrorBoundary>,
+    <RecoveryCloseGuard>
+      <AppErrorBoundary>
+        <DesktopRoot />
+      </AppErrorBoundary>
+    </RecoveryCloseGuard>,
   );
 }
 // firstPaint is signalled from DesktopRoot when real content (first-run or the

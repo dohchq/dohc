@@ -66,13 +66,20 @@ type SyncRelayRoute =
   | { route: "presence"; workspaceId: string }
   | { route: "share-presence"; shareId: string };
 
-// Transport cap, deliberately LARGER than the engine's 5 MiB binary-file
-// limit (MAX_VERSIONED_BINARY_FILE_BYTES): text blobs need the headroom and
-// the relay never parses content, so it cannot tell text from binary.
-// The Rust sync-apply path enforces the engine limit by referenced kind on
-// hydrate. An oversized BINARY blob a peer smuggles
-// under this cap is rejected client-side as a protocol violation.
-export const MAX_BLOB_BYTES = 10 * 1024 * 1024;
+// Transport cap. The relay never parses content, so it cannot tell a captured
+// file from a document body from a Y.Doc payload; it carries the WIDEST engine
+// ceiling and lets the Rust sync-apply path enforce the real one by referenced
+// kind on hydrate. A blob a peer smuggles under this cap but over its kind's
+// ceiling is rejected client-side as a protocol violation.
+//
+// The widest is now the Y.Doc payload bound, not the 10 MiB document body:
+// #549 measured a rich document at MAX_TEXT_BYTES encoding to 14.06 MiB of
+// Y.Doc full state, so MAX_YDOC_UPDATE_BYTES is 20 MiB. Under that number a
+// document the engine accepts would be refused 413 here, and the base it needs
+// could never reach a peer. `the_relay_transport_cap_covers_the_widest_engine_ingest_ceiling`
+// (crates/dohc-engine-sync-http/tests/relay_http.rs) reads this line and fails
+// if the two drift.
+export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 export const MAX_PAYLOAD_JSON_BYTES = 256 * 1024;

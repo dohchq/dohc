@@ -95,6 +95,19 @@ pub enum DomainError {
     #[error("invalid text: {reason}")]
     InvalidText { reason: &'static str },
 
+    /// A payload exceeded a measured byte ceiling. Carries the constraint,
+    /// the configured limit, and the observed usage, so the refusal names
+    /// what an agent needs in order to adapt (AGENTS.md: show agents the
+    /// limits they hit).
+    #[error(
+        "payload exceeds {constraint}: limit {limit_bytes} bytes, observed {observed_bytes} bytes"
+    )]
+    PayloadTooLarge {
+        constraint: &'static str,
+        limit_bytes: usize,
+        observed_bytes: usize,
+    },
+
     /// The path failed validation (empty, or a reserved/secret path).
     #[error("invalid path: {reason}")]
     InvalidPath { reason: &'static str },
@@ -166,6 +179,7 @@ impl DomainError {
             DomainError::ConflictNotFound => "conflict-not-found",
             DomainError::ConflictStaleTarget => "conflict-stale-target",
             DomainError::InvalidText { .. } => "invalid-text",
+            DomainError::PayloadTooLarge { .. } => "payload-too-large",
             DomainError::InvalidPath { .. } => "invalid-path",
             DomainError::NotSecretPath => "not-secret-path",
             DomainError::InvalidInput { .. } => "invalid-input",

@@ -1,6 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { DohcMark } from "@dohc/brand";
-import { bridge } from "./bridge";
+import { requestGuardedReload } from "./RecoveryCloseGuard";
 
 // Crash containment for the renderer. React unmounts the ENTIRE tree when a
 // render/lifecycle error reaches the root with no boundary — the user sees a
@@ -143,7 +143,10 @@ export class AppErrorBoundary extends Component<
         <button
           type="button"
           data-testid="app-crash-reload"
-          onClick={() => void bridge().reloadRenderer()}
+          // Through the guard, so a blocked reload resumes as a RELOAD — the
+          // set-aside-draft warning must not turn it into an exit (#579
+          // review, r7).
+          onClick={requestGuardedReload}
           className="mt-1 cursor-pointer rounded border border-line px-3 py-1 text-xs font-semibold text-muted hover:bg-line/50 hover:text-ink"
         >
           Reload dohc

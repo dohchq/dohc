@@ -1425,7 +1425,12 @@ fn a_blob_body_past_the_read_limit_still_names_the_ceiling() {
     //
     // MUTATION: map the read failure back to a bare `RelayError::InvalidResponse`
     // and this fails — the caller learns nothing about which limit it broke.
-    let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Text);
+    //
+    // The read limit derives from the WIDEST ingest ceiling, which is the Y.Doc
+    // payload bound since #549 — not the text ceiling this test used to read.
+    // Reading a kind's ceiling instead of the ingest one made this test pass
+    // only while text happened to be widest.
+    let limit_bytes = dohc_engine_sync::MAX_INGEST_BLOB_BYTES;
     let far_over = limit_bytes + 4096;
     let server = FakeServer::start(move |request| match request.path() {
         path if path.starts_with("/sync/ws/blobs/") => TestResponse::bytes(vec![b'a'; far_over]),
@@ -1468,12 +1473,16 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
     // MAX_INGEST_BLOB_BYTES with the text limit instead.
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine, &json!({}));
-    let (text_constraint, text_limit) = blob_ceiling(BlobKind::Text);
+    let ingest_limit = dohc_engine_sync::MAX_INGEST_BLOB_BYTES;
     let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);
     assert!(
-        binary_limit < text_limit,
-        "this test is only meaningful while the binary ceiling is the tighter one"
+        binary_limit < ingest_limit,
+        "this test is only meaningful while the binary ceiling is tighter than \
+         the loosest ingest ceiling"
     );
+    // A SECRET file, not a Y.Doc update: `ydoc.update` referenced
+    // `BlobKind::Binary` until #549 gave a Y.Doc payload its own kind, and this
+    // test needs an op that genuinely references a captured binary.
     let claimed = hex_sha256(b"a binary blob the relay serves far too much of");
     let handler_claimed = claimed.clone();
     let server = FakeServer::start(move |request| match request.path() {
@@ -1481,14 +1490,14 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
             vec![remote_row(
                 "peer",
                 0,
-                "ydoc.update",
-                json!({"updateBlobSha256": handler_claimed}),
+                "secret.file.put",
+                json!({"ciphertextSha256": handler_claimed}),
             )],
             1,
             false,
         ),
         path if path.starts_with("/sync/ws/blobs/") => {
-            TestResponse::bytes(vec![b'a'; text_limit + 4096])
+            TestResponse::bytes(vec![b'a'; ingest_limit + 4096])
         }
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
@@ -1500,11 +1509,46 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
         RelayError::BlobTooLarge {
             constraint: binary_constraint,
             limit_bytes: binary_limit,
-            observed: ObservedBytes::AtLeast(text_limit + 2),
+            observed: ObservedBytes::AtLeast(ingest_limit + 2),
         }
     );
     assert_ne!(
-        binary_constraint, text_constraint,
-        "the refusal must not name the text ceiling"
+        binary_constraint, "MAX_INGEST_BLOB_BYTES",
+        "the refusal must not name the transport's loosest ceiling"
+    );
+}
+
+/// The relay stores what the engine may send. Both numbers are hand-written,
+/// in different languages, with no shared source — so raising the engine's
+/// widest ingest ceiling past the relay's transport cap would compile, pass
+/// every Rust test, and then fail at runtime with a 413 the sender cannot
+/// anticipate. #549 raised that ceiling for Y.Doc payloads, which is exactly
+/// the change that could cross it.
+///
+/// MUTATION: lower `MAX_BLOB_BYTES` in `services/sync-relay/src/server.ts`
+/// below `MAX_INGEST_BLOB_BYTES` and this fails, naming both values.
+#[test]
+fn the_relay_transport_cap_covers_the_widest_engine_ingest_ceiling() {
+    const RELAY_SERVER_TS: &str = include_str!("../../../services/sync-relay/src/server.ts");
+    let declaration = RELAY_SERVER_TS
+        .lines()
+        .find_map(|line| line.strip_prefix("export const MAX_BLOB_BYTES = "))
+        .expect("services/sync-relay/src/server.ts no longer declares MAX_BLOB_BYTES");
+    let relay_cap: usize = declaration
+        .trim_end_matches(';')
+        .split('*')
+        .map(|factor| {
+            factor
+                .trim()
+                .parse::<usize>()
+                .expect("MAX_BLOB_BYTES is a product of integer literals")
+        })
+        .product();
+    assert!(
+        relay_cap >= dohc_engine_sync::MAX_INGEST_BLOB_BYTES,
+        "the relay caps a blob body at {relay_cap} bytes, under the engine's \
+         widest ingest ceiling MAX_INGEST_BLOB_BYTES ({} bytes): a payload the \
+         engine accepts would be refused 413 on push",
+        dohc_engine_sync::MAX_INGEST_BLOB_BYTES
     );
 }
