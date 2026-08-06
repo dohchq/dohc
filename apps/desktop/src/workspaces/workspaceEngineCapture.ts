@@ -3237,15 +3237,6 @@ export function createWorkspaceEngineCapture(
         let settleCovers = -1;
         const writeIsProven = (): boolean => settleCovers === updateSeq;
 
-        // Whether the LAST settle answered `materialized: false`. That answer
-        // has one producer: the materialization job was BLOCKED because the
-        // target file or one of its ancestors is a symlink
-        // (`JobOutcome::Blocked` <- `MaterializeError::SymlinkTarget`).
-        // Waiting does not restore containment, so this belongs with the
-        // terminal settle refusals, not with the transient ones the ladder
-        // exists to outlast (#651).
-        let targetBlocked = false;
-
         // L's holder: a session the daemon refused to release. Assigned only
         // where a close fails, cleared only where a close succeeds.
         let pendingRelease: WorkspaceEngineYDocProviderSession | null = null;
@@ -3327,9 +3318,16 @@ export function createWorkspaceEngineCapture(
           // so the settle's own failure is tagged here rather than guessed
           // at from the wire code alone.
           let settleFailure: unknown = null;
+          // Answers whether the artifact MOVED. `materialized: false` has one
+          // producer: the materialization job was BLOCKED because the target
+          // file or one of its ancestors is a symlink (`JobOutcome::Blocked`
+          // <- `MaterializeError::SymlinkTarget`). Waiting restores no
+          // containment, so that answer belongs with the terminal settle
+          // refusals rather than the transient ones this ladder exists to
+          // outlast (#651).
           const settleForProof = async (
             session: WorkspaceEngineYDocProviderSession,
-          ): Promise<void> => {
+          ): Promise<boolean> => {
             // Snapshot BEFORE issuing: the projection is taken inside the
             // call, so an update delivered while it is in flight is already
             // outside what it carries. Erring wide costs one extra settle;
@@ -3357,12 +3355,8 @@ export function createWorkspaceEngineCapture(
               settleFailure = error;
               throw error;
             }
-            // Assigned on EVERY settle, never only on a blocked one: a
-            // retained session's refused release can re-arm the ladder between
-            // two settles, and a stale yes would stand it down over the settle
-            // that finally wrote.
-            targetBlocked = !result.materialized;
             if (result.materialized) settleCovers = covers;
+            return result.materialized;
           };
           try {
             if (writeCancelled) {
@@ -3383,11 +3377,11 @@ export function createWorkspaceEngineCapture(
               // it — success IS this write landing, and a failure keeps the
               // debt (a still-held lock re-arms; anything else reports and
               // re-arms like every other unproven attempt).
-              await settleForProof(live.session);
+              const materialized = await settleForProof(live.session);
               // Asked BEFORE the proof: a blocked target is a definite answer
               // about this write, and `settleCovers` can still hold an earlier
               // settle's yes.
-              if (targetBlocked) {
+              if (!materialized) {
                 standDownFromBlockedTarget();
                 return;
               }
@@ -3457,8 +3451,9 @@ export function createWorkspaceEngineCapture(
                 onSettleError: () => undefined,
                 onSettled: () => undefined,
               });
+            let materialized: boolean;
             try {
-              await settleForProof(retrySession);
+              materialized = await settleForProof(retrySession);
             } finally {
               // The release is NOT suppressed: a replicated
               // update arriving between the settle and this release makes
@@ -3475,7 +3470,7 @@ export function createWorkspaceEngineCapture(
                 throw closeError;
               }
             }
-            if (targetBlocked) {
+            if (!materialized) {
               // Same order as the handoff above: a blocked target answers this
               // write before any proof is consulted.
               standDownFromBlockedTarget();
