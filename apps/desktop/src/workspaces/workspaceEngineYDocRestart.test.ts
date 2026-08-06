@@ -2422,6 +2422,10 @@ async function lockedRebindCapture(prefix: string) {
     // release. It reaches the durable lineage; the deaf session never hears
     // it. This is the window a stale write proof survives into.
     peerEditWhileRetained: false,
+    // Parks the NEXT provider open until the test releases it, so a payment
+    // can be caught mid-RPC — the window a destructive finisher runs in.
+    openGate: null as Promise<void> | null,
+    openAttempts: 0,
     // #595 round 12: the engine COMMITS the settle and declines to write the
     // target (a symlinked path or ancestor), so the call resolves clean while
     // the artifact stays stale.
@@ -2441,6 +2445,15 @@ async function lockedRebindCapture(prefix: string) {
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
   ): Promise<EngineYdocProviderSession> => {
+    // Counted BEFORE the gate: `generation` only moves once the open
+    // completes, so a test waiting for a parked payment has to watch the
+    // attempt, not the result.
+    state.openAttempts += 1;
+    if (state.openGate) {
+      const gate = state.openGate;
+      state.openGate = null;
+      await gate;
+    }
     const gen = ++state.generation;
     state.generationOptions.push(options);
     const doc = new Y.Doc();
@@ -3243,6 +3256,50 @@ it("a move cancels a debt that registered while the disk move was in flight", as
   expect(state.settledMarkdowns).toEqual([]);
   await capture.stop();
 }, 20_000);
+
+it("a payment caught mid-RPC by a move does not settle the moved-from path", async () => {
+  // The fence above cancels REGISTRY ENTRIES. It runs off the capture chain,
+  // after the disk move, and it neither waits for an in-flight payment nor
+  // makes one re-check itself — so a payment that already passed its ownership
+  // and cancellation checks and is parked in an awaited RPC sails past the
+  // cancel and settles the moved-from path anyway. Cancelling an entry is not
+  // the same as stopping the write it authorises.
+  //
+  // MUTATION: drop the re-check in `settleForProof` -> the parked payment
+  // resumes and settles, and `settledMarkdowns` is no longer empty.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-move-inflight-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
+
+  const finishMove = await capture.beginFileRename("note.md", "moved.md");
+  const { session } = await openWithOneEdit(capture, "mid-flight edit");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // Park the ladder's next open, then let it fire: the payment is now past
+  // its checks and waiting on the daemon.
+  let releaseOpen!: () => void;
+  state.openGate = new Promise<void>((resolve) => {
+    releaseOpen = resolve;
+  });
+  state.locked = false;
+  await expect
+    .poll(() => state.openAttempts, { timeout: 15_000 })
+    .toBeGreaterThan(1);
+
+  // The move completes and cancels the debt WHILE that payment is parked.
+  await finishMove(true);
+  releaseOpen();
+
+  // THE FACT: the parked payment stops instead of writing the moved-from path.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 25_000);
 
 it("a folder move fences late debts too, on the no-op finisher path", async () => {
   // `beginFileRename` returns a NO-OP finisher for everything the engine

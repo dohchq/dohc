@@ -254,9 +254,21 @@ export function useEngineDoc(input: {
         unsubscribeSaveState = bridge().onEngineYDocSaveState((event) => {
           if (cancelled || token !== openTokenRef.current) return;
           if (event.sessionId !== sessionId) return;
+          // `file-locked` is the one refusal that makes a DURABILITY claim:
+          // its copy tells the user dohc has their edits and is retrying. So
+          // it may only stand for a settle that carries the newest edit. A
+          // keystroke still in flight means this refusal is about older text,
+          // and showing it would promise safety for a sequence the settle
+          // never covered. Same guard "saved" uses, for the same reason —
+          // keep "Saving…" until an event covers the newest edit.
+          if (event.state === "file-locked") {
+            if (event.seq >= localSeq.current) setSaveState(event.state);
+            return;
+          }
+          // These claim nothing about what is held — "error" says the opposite
+          // — so they stand as soon as they arrive, whatever is in flight.
           if (
             event.state === "error" ||
-            event.state === "file-locked" ||
             event.state === "read-only" ||
             event.state === "changed-on-disk"
           ) {

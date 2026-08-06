@@ -815,6 +815,19 @@ export class YDocOpenRacedError extends Error {
   }
 }
 
+// A detached locked-write payment that was cancelled after it started. The
+// payment runs on the capture chain; the edges that cancel it do not, so a
+// delete or move finisher can land while the payment sits in an awaited RPC.
+// Internal to the retry ladder — it never reaches a caller.
+class DetachedPaymentCancelledError extends Error {
+  constructor(readonly workspacePath: string) {
+    super(
+      `locked-write payment for ${workspacePath} was cancelled before its settle could land`,
+    );
+    this.name = "DetachedPaymentCancelledError";
+  }
+}
+
 // What the on-disk artifact says about an otherwise-empty bind. "missing" is
 // the only state that proves the path is not in this version; every other
 // answer, including an unreadable one, refuses the session without making that
@@ -3250,6 +3263,21 @@ export function createWorkspaceEngineCapture(
             // outside what it carries. Erring wide costs one extra settle;
             // erring narrow loses the update entirely.
             const covers = updateSeq;
+            // ASK AGAIN, at the last point where the answer still stops a
+            // write. The check at the top of this payment is stale by now: a
+            // payment runs on the capture chain, but the edges that CANCEL it
+            // do not. A delete or move finisher runs OFF the chain, after its
+            // disk work, so it can cancel while this payment is parked in an
+            // awaited RPC — the version read, the open, the reconnect ladder.
+            // Settling on that stale yes writes the path the user just removed
+            // or moved away, which is the recreation every fence above exists
+            // to prevent.
+            if (
+              writeCancelled ||
+              detachedLockedDebts.get(input.path)?.pay !== payDetachedLockedDebt
+            ) {
+              throw new DetachedPaymentCancelledError(input.path);
+            }
             let result;
             try {
               result = await session.settleNow({ summary: "session close" });
@@ -3373,6 +3401,13 @@ export function createWorkspaceEngineCapture(
             // PROOF: the write landed and the session released.
             detachedLockedDebts.delete(input.path);
           } catch (retryError) {
+            if (retryError instanceof DetachedPaymentCancelledError) {
+              // A destructive edge cancelled this debt mid-payment. It owns the
+              // trace and the lease handback; this payment simply stops, and
+              // must NOT re-arm — the registry no longer names it, and arming
+              // would only schedule a timer that stands down.
+              return;
+            }
             if (isFileLockedCause(retryError)) {
               armDetachedLockedRetry();
               return;

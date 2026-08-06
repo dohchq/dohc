@@ -157,6 +157,37 @@ it("passes a file-locked report through, and a real settle clears it", async () 
   expect(screen.getByTestId("state").textContent).toBe("saved");
 });
 
+it("does not claim File in use for a lock refusal that predates the newest keystroke", async () => {
+  // `file-locked` is the one refusal whose copy makes a durability claim —
+  // dohc has your edits, and it is retrying. A refusal about older text would
+  // promise safety for a keystroke the settle never carried, so it is held to
+  // the same sequence guard "saved" uses.
+  //
+  // MUTATION: accept `file-locked` unconditionally -> this reads
+  // "file-locked" while an edit is still in flight.
+  await mountBound();
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  const firstSeq = harness.applied.at(-1)!.seq;
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  const secondSeq = harness.applied.at(-1)!.seq;
+  expect(secondSeq).toBeGreaterThan(firstSeq);
+
+  // The lock refusal belongs to the settle that started before the second
+  // keystroke. It says nothing about that keystroke, so the document is still
+  // saving, not safely parked under a lock.
+  harness.emit("file-locked", firstSeq);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  // A refusal that DOES cover the newest edit names the blocker.
+  harness.emit("file-locked", secondSeq);
+  expect(screen.getByTestId("state").textContent).toBe("file-locked");
+});
+
 it("does not claim Saved for a settle that predates the newest keystroke", async () => {
   await mountBound();
 
