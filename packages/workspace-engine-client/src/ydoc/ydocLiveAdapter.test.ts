@@ -1178,9 +1178,9 @@ describe("YdocLiveAdapter", () => {
 
     const first = provider.settleNow();
     const second = provider.settleNow();
-    // Drain microtasks: both settles reach their barrier, but neither can
-    // COMPLETE while the first is held at the transport.
-    for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+    // Both settles reach their barrier, but neither can COMPLETE while the
+    // first is held at the transport.
+    await drain();
 
     expect(events.filter((event) => event === "settling")).toHaveLength(2);
     expect(events).not.toContain("settled");
