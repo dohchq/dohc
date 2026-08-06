@@ -1705,6 +1705,104 @@ describe("engine markdown source view", () => {
     expect(flashedBlockText()).toBeUndefined();
   });
 
+  // codex round 2 on 9184cf04. Two results, clicked back to back: the body
+  // jump is still waiting on the editor's settle frames when the frontmatter
+  // one arrives. The newest click is the reader's answer, so the older target
+  // has to go — otherwise it lands the moment those frames run and drags them
+  // away from the result they just asked for.
+  it("drops an unlanded body jump when a frontmatter hit replaces it", async () => {
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+      configurable: true,
+      value: scrollTo,
+    });
+
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+
+    // No await between them: the settle frames are 16ms timers, so the body
+    // target is set and unconsumed when the frontmatter one lands.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 2, nonce: 2 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    // MUTATION: drop the setBlockTarget(null) in the frontmatter branch ->
+    // "Third paragraph." flashes and the matched title is scrolled off.
+    expect(flashedBlockText()).toBeUndefined();
+  });
+
+  // codex round 2 on 9184cf04. The window BEFORE the editor reports back.
+  // Reporting retires an applied jump; a version switch arriving first leaves
+  // the target standing, and the editor that remounts on the new version
+  // applies a block index mapped against the version the reader left.
+  it("drops an unlanded jump when the version switches under it", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // MUTATION: drop the reopenKey guard -> the remounted editor reveals a
+    // block of the new version chosen by the old version's line numbers.
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(flashedBlockText()).toBeUndefined();
+  });
+
   // codex on 76298ccd. A version switch drops the bound Y.Doc while the
   // reopen runs (useEngineDoc), which unmounts this editor. The instance that
   // replaces it has no memory of having applied anything, so a target still

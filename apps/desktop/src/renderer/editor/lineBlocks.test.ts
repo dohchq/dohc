@@ -97,6 +97,27 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine(body, 4)).toBe(1);
   });
 
+  it("ends a setext heading at its underline, blank line or not", () => {
+    // 1 "Title"  2 "====="  3 "Matched body" — two nodes, like an ATX
+    // heading. A lone `-` underlines too, and is not a bullet here.
+    expect(blockIndexForLine("Title\n=====\nMatched body", 3)).toBe(1);
+    expect(blockIndexForLine("Title\n-\nMatched body", 3)).toBe(1);
+    expect(blockIndexForLine("Title\n===  \nMatched body", 3)).toBe(1);
+  });
+
+  it("does not read a rule or a table divider as a setext underline", () => {
+    // No paragraph is open above either one, so both open their own block.
+    expect(blockIndexForLine("Para\n\n---\n\nAfter", 5)).toBe(2);
+    expect(blockIndexForLine("| a |\n| --- |\n| b |\n\nAfter", 5)).toBe(1);
+  });
+
+  it("keeps content indented into a list item inside that list", () => {
+    // 1 "- item"  2 ""  3 "  matched paragraph"  4 ""  5 "After"
+    const body = "- item\n\n  matched paragraph\n\nAfter";
+    expect(blockIndexForLine(body, 3)).toBe(0);
+    expect(blockIndexForLine(body, 5)).toBe(1);
+  });
+
   it("reads CRLF documents with the same line numbers", () => {
     const body = "First\r\n\r\nSecond\r\n\r\nThird";
     expect(blockIndexForLine(body, 5)).toBe(2);
@@ -193,6 +214,80 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
       lands: [
         [3, "two"],
         [5, "Para"],
+      ],
+    },
+    {
+      name: "a setext underline ends the heading without a blank line",
+      body: "Title\n=====\nMatched body",
+      lands: [
+        [2, "Title"],
+        [3, "Matched body"],
+      ],
+    },
+    {
+      name: "a lone dash underlines a setext heading",
+      body: "Title\n-\nMatched body",
+      lands: [
+        [2, "Title"],
+        [3, "Matched body"],
+      ],
+    },
+    {
+      name: "a list opens straight under a setext heading",
+      body: "Title\n=====\n- item\n\nAfter",
+      lands: [
+        [2, "Title"],
+        [3, "item"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a thematic break is its own node, not an underline",
+      body: "Para\n\n---\n\nAfter",
+      lands: [
+        [1, "Para"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a table divider is not an underline",
+      body: "| a |\n| --- |\n| b |\n\nAfter",
+      lands: [
+        [3, "b"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "content indented into a list item stays in that list",
+      body: "- item\n\n  matched paragraph\n\nAfter",
+      lands: [
+        [3, "matched paragraph"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "an indented continuation and a later item are one list",
+      body: "- item\n\n  para\n\n- two\n\nAfter",
+      lands: [
+        [3, "para"],
+        [5, "two"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "an ordered item's continuation stays in that list",
+      body: "1. item\n\n   matched paragraph\n\nAfter",
+      lands: [
+        [3, "matched paragraph"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "an indented code block after a paragraph is its own node",
+      body: "Para\n\n    code line\n\nAfter",
+      lands: [
+        [3, "code line"],
+        [5, "After"],
       ],
     },
   ];

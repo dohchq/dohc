@@ -5,11 +5,13 @@
 //
 // The answer is APPROXIMATE by construction. Blocks are split on blank lines,
 // with three exceptions that cover how documents are actually written: fenced
-// code is inert, a heading always opens a block, and a blank line does not end
-// a LIST the next line continues. That is the top-level shape of an ordinary
-// document, not of every document CommonMark can express — a jump can land a
-// block off. It still shows the reader the passage they searched for; the top
-// of the document shows them nothing.
+// code is inert, a heading always opens a block and ends at its own last line
+// (an ATX line, or a setext underline), and a blank line does not end a LIST
+// the next line continues — with a new item or with content indented into the
+// item above. That is the top-level shape of an ordinary document, not of
+// every document CommonMark can express — a jump can land a block off. It
+// still shows the reader the passage they searched for; the top of the
+// document shows them nothing.
 //
 // A quote is NOT in that exception. CommonMark ends a block quote at an
 // unquoted blank line, so `> one\n\n> two` is two nodes where
@@ -32,6 +34,11 @@ const BULLET_RE = /^[ \t]{0,3}[-+*](?:[ \t]|$)/;
 const ORDERED_RE = /^[ \t]{0,3}\d{1,9}[.)](?:[ \t]|$)/;
 const QUOTE_RE = /^[ \t]{0,3}>/;
 const FENCE_RE = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/;
+// A run of `=` or `-` under a paragraph is that paragraph's setext underline.
+const SETEXT_RE = /^[ \t]{0,3}(?:=+|-+)[ \t]*$/;
+// Content indented into the list item above it. Two columns is where the
+// parser starts reading a line that way, tab or spaces.
+const CONTINUATION_RE = /^(?:\t| {2})/;
 
 type Fence = { marker: string; length: number };
 
@@ -80,9 +87,18 @@ function blockStartLines(body: string): number[] {
       open = false;
       continue;
     }
+    // A setext underline makes the OPEN paragraph a heading and ends it — the
+    // same one-line shape an ATX heading has, so `Title\n===\nBody` is two
+    // nodes. Read before the kinds below, because a lone `-` is also a bullet.
+    if (open && openKind === "other" && SETEXT_RE.test(text)) {
+      open = false;
+      continue;
+    }
     const kind = blockKind(text);
-    const list = kind === "bullet" || kind === "ordered";
-    const resumes = list && kind === openKind && starts.length > 0;
+    const listOpen = openKind === "bullet" || openKind === "ordered";
+    // A blank line does not end a LIST the next line continues — either with
+    // another item of the same kind, or with content indented into the item.
+    const resumes = listOpen && (kind === openKind || CONTINUATION_RE.test(text));
     if (kind === "heading" || (!open && !resumes)) {
       starts.push(index + 1);
       openKind = kind;

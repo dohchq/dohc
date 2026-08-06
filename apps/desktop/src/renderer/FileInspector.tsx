@@ -926,6 +926,15 @@ function MarkdownView(props: {
   const retireBlockTarget = useCallback((nonce: number) => {
     setBlockTarget((current) => (current?.nonce === nonce ? null : current));
   }, []);
+  // A version switch retires a jump the editor has not landed yet. Reporting
+  // back covers the applied one; this covers the window before that, where the
+  // reopen unbinds the Y.Doc and the editor that remounts on the new version
+  // would land an index mapped against the version the reader left.
+  const blockTargetReopenKey = useRef(props.reopenKey);
+  if (props.reopenKey !== blockTargetReopenKey.current) {
+    blockTargetReopenKey.current = props.reopenKey;
+    if (blockTarget) setBlockTarget(null);
+  }
   const scrollTargetNonce = props.scrollTarget?.nonce;
   useEffect(() => {
     if (!props.scrollTarget || props.scrollTarget.path !== props.path) return;
@@ -1277,7 +1286,10 @@ function MarkdownView(props: {
       // The hit is in the frontmatter. The title and properties it names are
       // rendered by PageIdentity/PropertiesPanel ABOVE the editor, so there is
       // no body block to reveal — and revealing the first one would scroll the
-      // real match off the top. Show the top of the document instead.
+      // real match off the top. Show the top of the document instead — and
+      // drop a body jump still waiting on the lazy editor, which names the
+      // result before this one and would land the moment that editor arrives.
+      setBlockTarget(null);
       engineDocPaneRef.current?.scrollTo({ top: 0 });
     } else {
       setBlockTarget({
