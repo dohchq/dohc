@@ -941,33 +941,25 @@ describe("import surfaces a vanished source instead of skipping it", () => {
   // which answers about the LINK, said the source was still there, and let the
   // ladder shorten the name until the source counted as skipped.
   //
-  // Mutation: ask `lstat` for the source again and this test fails -- on
-  // Windows the broken link is skipped, elsewhere it throws a bare ENOENT that
-  // names a path the user can plainly see.
+  // Mutation: ask `lstat` for the source again and this test fails with a bare
+  // ENOENT that names a path the user can plainly see. No deep folder is
+  // needed for it: every ENOENT is probed BEFORE the length arithmetic, so the
+  // over-budget case is the length ladder's own test, not this one.
   it("names a dangling symbolic link instead of skipping it", async () => {
     const base = await mkdtemp(join(tmpdir(), "dohc-dangling-"));
     try {
-      const root = join(
-        base,
-        ...Array.from({ length: 8 }, (_, index) => `nested-folder-${index}`),
-      );
+      const root = join(base, "ws");
       await mkdir(root, { recursive: true });
-      // Over the legacy budget for this folder, which is what sent this ENOENT
-      // down the shorten-the-name ladder instead of surfacing it.
-      const name = `${"n".repeat(120)}.md`;
-      expect(name.length).toBeGreaterThan(259 - root.length - 1);
-      const source = join(base, name);
+      const source = join(base, "link.md");
       await symlink(join(base, "never-existed.md"), source, "file");
       // The link itself is right there -- that is why lstat got it wrong.
       expect((await lstat(source)).isSymbolicLink()).toBe(true);
 
       // The reason and the instruction come BEFORE the name: this renders in a
-      // one-line truncate span, and a 124-character basename in front of them
-      // truncates away everything the user needs.
+      // one-line truncate span, and a basename runs to 255 characters, so
+      // leading with it truncates away everything the user needs.
       await expect(copyIntoWorkspace(root, [source])).rejects.toThrow(
-        new RegExp(
-          `^dohc did not import a symbolic link\\. The file it points to is missing\\. Import that file instead\\. The link is ${name}\\.$`,
-        ),
+        "dohc did not import a symbolic link. The file it points to is missing. Restore that file. Then import it instead. The link is link.md.",
       );
     } finally {
       await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(

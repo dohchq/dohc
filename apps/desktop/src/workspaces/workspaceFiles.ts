@@ -325,7 +325,7 @@ function collisionVariants(
  *
  * "Could" is as far as arithmetic gets for ENOENT, so the copy loop asks the
  * filesystem first and only reaches here when both ends are there. See
- * `missingEnd`.
+ * `classifyCopyEnoent`.
  */
 export function couldBeLengthRefusal(
   code: string | undefined,
@@ -356,10 +356,12 @@ export function couldBeLengthRefusal(
 // was skipped.
 //
 // `null` means both ends are there, so the ENOENT is about the composed path
-// and the ladder may try a shorter name. Everything else aborts the batch, and
-// "unchecked" aborts it with the failure the copy actually hit: a probe that
-// could not look establishes nothing to say instead.
-type MissingEnd = "source" | "danglingLink" | "destination" | "unchecked";
+// and the ladder may try a shorter name. "danglingLink" is the one thing dohc
+// can say better than the copy's own error. "unexplained" is every other
+// answer -- a source that is plainly gone, a destination folder that went away,
+// a probe that could not look -- where the original ENOENT already names a
+// path and dohc has nothing to add, so the batch aborts on that error.
+type CopyEnoent = "danglingLink" | "unexplained";
 
 /**
  * What one probe established about one end. Exported for unit testing, as
@@ -391,17 +393,17 @@ async function probeEnd(path: string) {
   );
 }
 
-async function missingEnd(
+async function classifyCopyEnoent(
   source: string,
   absDir: string,
-): Promise<MissingEnd | null> {
+): Promise<CopyEnoent | null> {
   const [sourceProbe, dirProbe] = await Promise.all([
     probeEnd(source),
     probeEnd(absDir),
   ]);
-  if (dirProbe === "absent") return "destination";
-  if (sourceProbe === "unknown" || dirProbe === "unknown") return "unchecked";
+  if (dirProbe !== "there") return "unexplained";
   if (sourceProbe === "there") return null;
+  if (sourceProbe === "unknown") return "unexplained";
   // Say WHICH nothing the source resolved to. A dangling link is still at the
   // path the user picked, so "no such file" alone sends them to look at
   // something they can plainly see.
@@ -409,24 +411,25 @@ async function missingEnd(
     (entry) => entry.isSymbolicLink(),
     () => false,
   );
-  if (!link) return "source";
+  if (!link) return "unexplained";
   // The link this lstat saw need not be the one the probe missed -- something
   // can put a working link back at that path in between. So ask again, and
   // claim a missing target only while there still is one.
   const target = await probeEnd(source);
   if (target === "there") return null;
-  return target === "absent" ? "danglingLink" : "unchecked";
+  return target === "absent" ? "danglingLink" : "unexplained";
 }
 
 // What the user gets to read when their pick was a link to nothing. A bare
 // ENOENT would name a path that is still right there, so it says which part is
-// missing and what to import instead.
+// missing and gives the two steps in the order they work: the target has to
+// come back before the user can import it.
 //
 // The name goes LAST and once. This renders in a single-line truncate span
 // (DesktopWorkspaceShell), and a basename can be 255 characters -- leading with
 // it pushed both the reason and the instruction off the end of the line.
 function danglingLinkRefusal(source: string): string {
-  return `dohc did not import a symbolic link. The file it points to is missing. Import that file instead. The link is ${basename(source)}.`;
+  return `dohc did not import a symbolic link. The file it points to is missing. Restore that file. Then import it instead. The link is ${basename(source)}.`;
 }
 
 // Why a trash ladder stopped before its next rung. Three outcomes, not two:
@@ -517,11 +520,11 @@ async function copyWithoutOverwrite(
         // destination folder is a real failure and must surface, not be
         // shortened into a skip.
         if (code === "ENOENT") {
-          const missing = await missingEnd(source, absDir);
-          if (missing === "danglingLink") {
+          const enoent = await classifyCopyEnoent(source, absDir);
+          if (enoent === "danglingLink") {
             throw new Error(danglingLinkRefusal(source), { cause: error });
           }
-          if (missing) throw error;
+          if (enoent) throw error;
         }
         if (!couldBeLengthRefusal(code, candidate, maxEntryChars)) throw error;
         // No shorter rung left: a name this filesystem cannot hold skips the
