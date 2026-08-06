@@ -2510,9 +2510,7 @@ async function lockedRebindCapture(prefix: string) {
           // an undecodable one throws inside the settle instead, which
           // re-arms the ladder on its own and proves nothing.
           state.emitUpdateAfterSettle = false;
-          const peer = new Y.Doc();
-          peer.getText("plainText").insert(0, "peer edit");
-          options.onRemoteUpdate(Y.encodeStateAsUpdate(peer));
+          deliverPeerEdit("peer edit");
         }
         return result;
       },
@@ -2528,34 +2526,51 @@ async function lockedRebindCapture(prefix: string) {
           state.peerEditWhileRetained = false;
           deliverPeerEdit("peer edit while retained");
         }
-        if (state.closeFailure) throw state.closeFailure;
+        // ORDER, copied from the provider: the pre-close settle runs FIRST,
+        // and only then is the release attempted. A release that fails has
+        // still run its settle, so `closeFailure` cannot be checked up here.
+        let preCloseError: unknown = null;
         if (closeOptions?.settle === false) {
           state.closesWithSettleFalse += 1;
-          return;
-        }
-        // The pre-close settle, same contract as settleNow: refuses while
-        // locked, records the settled markdown when it lands.
-        state.settleCalls.push(gen);
-        const token = ++tokens;
-        if (state.replicated && state.closeSettleFailure) {
-          options.onSettleError?.(state.closeSettleFailure, token);
-          throw new YdocReleasedWithSettleFailureError(
-            options.path,
-            state.closeSettleFailure,
-          );
-        }
-        if (state.locked) {
-          const refusal = new DaemonRefusalError(
-            { code: "OVERLOADED", message: "file-locked", retry: "afterBackoff" },
-            new Error("daemon response"),
-          );
-          options.onSettleError?.(refusal, token);
-          if (state.replicated) {
-            throw new YdocReleasedWithSettleFailureError(options.path, refusal);
+        } else {
+          // The pre-close settle, same contract as settleNow: refuses while
+          // locked, records the settled markdown when it lands.
+          state.settleCalls.push(gen);
+          const token = ++tokens;
+          if (state.replicated && state.closeSettleFailure) {
+            options.onSettleError?.(state.closeSettleFailure, token);
+            preCloseError = state.closeSettleFailure;
+          } else if (state.locked) {
+            const refusal = new DaemonRefusalError(
+              {
+                code: "OVERLOADED",
+                message: "file-locked",
+                retry: "afterBackoff",
+              },
+              new Error("daemon response"),
+            );
+            options.onSettleError?.(refusal, token);
+            preCloseError = refusal;
+          } else {
+            state.settledMarkdowns.push(doc.getText("plainText").toString());
           }
-          throw refusal;
         }
-        state.settledMarkdowns.push(doc.getText("plainText").toString());
+        // The RELEASE. Its failure is what reaches the caller, and it buries
+        // the pre-close settle's failure exactly as the provider does.
+        if (state.closeFailure) throw state.closeFailure;
+        if (preCloseError !== null) {
+          // The release succeeded over a failed settle. Replicated lineages
+          // compact and release cleanly, which is the shape that produces
+          // this error; a local-only lineage refuses and the raw refusal is
+          // what the escalated settling close ends up throwing.
+          if (state.replicated) {
+            throw new YdocReleasedWithSettleFailureError(
+              options.path,
+              preCloseError,
+            );
+          }
+          throw preCloseError;
+        }
       },
     };
   };
@@ -2697,10 +2712,19 @@ it("a close that fails for a non-lock cause is not retried by the capture layer"
   await expect(session.close()).rejects.toThrow("persist-failed");
   state.closeFailure = null;
 
-  // Past the first retry delay: nothing may have settled or closed.
+  // The pre-close settle ran BEFORE the release and landed — the release is
+  // what failed. This suite used to assert the opposite (nothing settled),
+  // which was the fake's ordering, not the provider's: `close()` settles
+  // first and only then asks the daemon to release (#595 round 15 fake audit).
+  expect(state.settledMarkdowns).toEqual(["stranded edit"]);
+  const settlesAtFailure = state.settleCalls.length;
+
+  // THE invariant this test owns: only a LOCK is worth polling. Past the
+  // first retry delay, no timer has re-run the teardown — no new settle, no
+  // new generation.
   await new Promise((resolve) => setTimeout(resolve, 1_600));
-  expect(state.settledMarkdowns).toEqual([]);
-  expect(state.settleCalls).toEqual([]);
+  expect(state.settleCalls).toHaveLength(settlesAtFailure);
+  expect(state.generation).toBe(1);
   await capture.stop();
 }, 10_000);
 
