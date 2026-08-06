@@ -640,6 +640,110 @@ describe("createCaptureLiveStores", () => {
     });
   });
 
+  it("mutation proof: scans open conflicts without bodies and hydrates only the match (#655)", async () => {
+    // The scanned-past conflict names a digest this workspace does not
+    // reference, so `overCapBlobResult` refuses it the way the daemon refuses
+    // an unauthorized digest. A scan that asked for bodies would hydrate this
+    // row on its way to the match and fail here, not merely read too much.
+    const DECOY_SHA256 = "d".repeat(64);
+    const withheldSide = (blobSha256: string) => ({
+      path: snapshot.path,
+      contentKind: "text" as const,
+      snapshot: {
+        ...snapshot,
+        text: null,
+        sha256: blobSha256,
+        blobSha256,
+        byteLength: OVER_CAP_BYTES.byteLength,
+        inbandLimitBytes: 48 * 1024,
+      },
+      binarySha256: null,
+      binaryByteLength: null,
+      binaryObjectId: null,
+      binaryLatestMomentId: null,
+      metadataSummary: "side summary",
+      metadataCorrelationId: null,
+    });
+    const withheld = (id: string, blobSha256: string): ConflictRecord => ({
+      ...conflict(),
+      id,
+      base: withheldSide(blobSha256),
+      current: withheldSide(blobSha256),
+      incoming: withheldSide(blobSha256),
+    });
+    const pages = [
+      { conflicts: [withheld("scanned-past", DECOY_SHA256)], nextAfterConflictId: "scanned-past" },
+      { conflicts: [withheld("created-conflict", OVER_CAP_SHA256)], nextAfterConflictId: null },
+    ];
+    const requests: Request[] = [];
+    const client = blobClientFor(async (request, deliver) => {
+      requests.push(request);
+      if (request.method === VERSIONED_METHOD.textReadBlob) {
+        return { id: request.id, result: overCapBlobResult(request, deliver) };
+      }
+      if (request.method === VERSIONED_METHOD.textRead) {
+        return { id: request.id, result: snapshot };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge) {
+        return {
+          id: request.id,
+          result: {
+            status: "conflict",
+            conflictId: "created-conflict",
+            deduped: false,
+            comparison: {
+              workspaceId: WORKSPACE_ID,
+              path: "note.md",
+              targetVersionId: "main",
+              sourceVersionId: "draft",
+              base: snapshot,
+              current: snapshot,
+              incoming: { ...snapshot, versionId: "draft", text: "incoming" },
+              status: "diverged",
+            },
+            materializeEnqueued: false,
+            materialized: false,
+            materializeOutcome: "skipped",
+          },
+        };
+      }
+      expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
+      const params = request.params as { afterConflictId?: string };
+      const page = pages[params.afterConflictId === undefined ? 0 : 1];
+      return { id: request.id, result: page };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const result = await store.mergeTextFileFromVersion({
+      workspaceId: WORKSPACE_ID,
+      targetVersionId: "main",
+      sourceVersionId: "draft",
+      path: "note.md",
+      metadata: { origin: "api" },
+    });
+
+    if (result.kind !== "conflict") throw new Error("expected a conflict");
+    // Every side of the match carries its body: the callers of this walk read
+    // them. One blob read serves all three, because they share one digest.
+    for (const side of ["base", "current", "incoming"] as const) {
+      expect(
+        Buffer.from(
+          (result.conflict[side] as { text?: string }).text ?? "",
+          "utf8",
+        ),
+        `conflict.${side}`,
+      ).toEqual(Buffer.from(OVER_CAP_BYTES));
+    }
+    expect(
+      requests
+        .filter((request) => request.method === VERSIONED_METHOD.textReadBlob)
+        .map((request) => (request.params as { sha256: string }).sha256),
+    ).toEqual([OVER_CAP_SHA256]);
+  });
+
   it("mutation proof: preserves a rename moment's source path", async () => {
     const client = clientFor(async (request) => ({
       id: request.id,
