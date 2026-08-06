@@ -323,6 +323,15 @@ export type RelayChatShareLanes =
       received: ChatChannelShareReceivedRow[];
     }
   | { state: "unreachable" }
+  // The relay answered, and the answer is one dohc cannot list. Separate from
+  // "unreachable" because the two owe the user different things: an outage
+  // owes a retry, and this owes the count, the limit, and the fact that
+  // retrying will not change it.
+  | {
+      state: "over-limit";
+      lanes: Array<{ lane: "granted" | "received"; rows: number }>;
+      limit: number;
+    }
   | { state: "signed-out" };
 
 export async function readRelayChatShareLanes(input: {
@@ -331,6 +340,13 @@ export async function readRelayChatShareLanes(input: {
     received?: Array<Record<string, unknown>>;
   }>;
   remoteWorkspaceId: string | null;
+  // Received shares that belong to ANOTHER local workspace: already joined
+  // there, or pinned there by the DM home map. A received grant is
+  // account-wide, so without this the lane is the same in every workspace —
+  // one account-wide problem with it blanks a workspace that has shares of its
+  // own, and an invitation already accepted in Work keeps offering Join in
+  // Personal (#618).
+  shareIdsClaimedElsewhere: ReadonlySet<string>;
 }): Promise<RelayChatShareLanes> {
   let listing: Awaited<ReturnType<typeof input.fetchListing>>;
   try {
@@ -352,7 +368,11 @@ export async function readRelayChatShareLanes(input: {
   // escaping to the contract parse would reject the whole IPC call, which the
   // renderer reads as an unknown listing and clears.
   try {
-    const mapped = mapRelayShareListing(listing, input.remoteWorkspaceId);
+    const mapped = mapRelayShareListing(
+      listing,
+      input.remoteWorkspaceId,
+      input.shareIdsClaimedElsewhere,
+    );
     // Size is validated HERE, not by the contract schema. Every row can be
     // valid and the lane still be one dohc cannot list, and the schema sits
     // outside this guard: an over-cap lane reaching it throws, the IPC call
@@ -364,10 +384,16 @@ export async function readRelayChatShareLanes(input: {
     // lengths are final, and a relay-controlled body should not be fully
     // zod-parsed on the main thread only to be thrown away.
     //
-    // Over-cap resolves UNREACHABLE rather than truncating. "answered" claims
-    // authority: a truncated lane would tell the user that the shares dohc cut
-    // do not exist, and a missing grant reads as a revoked one. dohc could not
-    // read this answer, which is what unreachable means.
+    // Over-cap does not truncate. "answered" claims authority: a truncated
+    // lane would tell the user that the shares dohc cut do not exist, and a
+    // missing grant reads as a revoked one.
+    //
+    // Nor does it report an outage. This answer arrived, and it will arrive
+    // again identically — calling it unreachable gives the surface a Try
+    // again that can never work and no way to say what is wrong. It resolves
+    // OVER-LIMIT, carrying what it observed and the configured limit, and it
+    // is non-authoritative for exactly the same reason unreachable is, so
+    // cached rows still stand.
     const overCap = ([
       ["granted", mapped.granted.length],
       ["received", mapped.received.length],
@@ -379,9 +405,13 @@ export async function readRelayChatShareLanes(input: {
         .map(([lane, rows]) => `"${lane}" holds ${rows} rows`)
         .join(", ");
       console.warn(
-        `[desktop] relay share listing ${lanes}; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing unreachable, so cached rows survive.`,
+        `[desktop] relay share listing ${lanes}; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
       );
-      return { state: "unreachable" };
+      return {
+        state: "over-limit",
+        lanes: overCap.map(([lane, rows]) => ({ lane, rows })),
+        limit: MAX_CHAT_CHANNEL_SHARE_ROWS,
+      };
     }
     return {
       state: "answered",
@@ -401,6 +431,7 @@ function mapRelayShareListing(
     received?: Array<Record<string, unknown>>;
   },
   remoteWorkspaceId: string | null,
+  shareIdsClaimedElsewhere: ReadonlySet<string>,
 ): {
   granted: Array<Record<string, unknown>>;
   received: Array<Record<string, unknown>>;
@@ -433,16 +464,34 @@ function mapRelayShareListing(
     // from another workspace is managed there.
     if (!selector || remoteWorkspaceId === null) continue;
     if (row.workspaceId !== remoteWorkspaceId) continue;
+    // REVOKED grants are the granted lane's tombstones, and they are dropped
+    // rather than listed. The relay keeps returning them to the granter, so
+    // counting them made the cap measure an account's LIFETIME grants: past
+    // 4096 the listing stayed over-limit with every grant revoked, new grants
+    // were blocked, and revoking more could not reduce the count — a permanent
+    // lockout with no user action that helps.
+    //
+    // Same rule the joined lane already follows: a cap may only count what the
+    // user can actually reduce. Nothing displays these either — grantedByWire
+    // skips them — so dropping them shrinks the payload the cap exists to
+    // bound instead of merely uncounting it.
+    if (row.revokedAtMs !== null && row.revokedAtMs !== undefined) continue;
     granted.push({
       shareId: row.shareId,
       ...selector,
       recipientEmail: row.recipientEmail ?? null,
-      revokedAtMs: row.revokedAtMs ?? null,
+      revokedAtMs: null,
     });
   }
   for (const row of receivedRows) {
     const selector = chatSelector(row);
     if (!selector) continue;
+    // Scoped to THIS workspace: a share another local workspace already
+    // claimed is managed there, and listing it here would offer a Join that
+    // contradicts the claim.
+    if (typeof row.shareId === "string" && shareIdsClaimedElsewhere.has(row.shareId)) {
+      continue;
+    }
     received.push({
       shareId: row.shareId,
       ...selector,

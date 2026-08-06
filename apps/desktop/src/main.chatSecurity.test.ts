@@ -238,4 +238,103 @@ describe("main-process chat authorization", () => {
       slice("async function openCliWorkspace(", "const store = linkedChatStoreFor("),
     ).toContain("engineOffRefusal(");
   });
+
+  // #617 codex P1. Both join paths pull the share's log into this workspace's
+  // chat store, and autoJoinReceivedDms claims the DM home first — both
+  // durable. A joined-lane refusal raised AFTER either one leaves the pulled
+  // messages with no registry row, and no row is what
+  // joinedSharedChannelForTarget answers null for: assertSharedChannelWritable
+  // and channelIsLocked then read a READ-ONLY shared channel as a local one
+  // the user may write into. The order is the authorization, so it is pinned
+  // here rather than left to the reader.
+  // A check ahead of an awaited pull is not a gate: two joins at the limit
+  // both pass it, both pull, and the loser's merge throws with its channel
+  // already imported. So the RESERVATION — the merge itself, synchronous over
+  // the cached registry — is what has to precede the pull. The loser then
+  // refuses having pulled nothing.
+  it("reserves the joined-lane slot before either join path pulls anything", () => {
+    const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");
+    const autoJoinEnd = mainSource.indexOf("ipcMain.handle(", autoJoinStart);
+    expect(autoJoinStart).toBeGreaterThan(-1);
+    expect(autoJoinEnd).toBeGreaterThan(autoJoinStart);
+
+    for (const [label, source] of [
+      ["joinSharedChannel", handlerSource("joinSharedChannel")],
+      ["autoJoinReceivedDms", mainSource.slice(autoJoinStart, autoJoinEnd)],
+    ] as const) {
+      const reserveAt = source.indexOf("mergeJoinedChannel(");
+      const pullAt = source.indexOf("pullSharedChannel({");
+      expect(reserveAt, label).toBeGreaterThan(-1);
+      expect(pullAt, label).toBeGreaterThan(-1);
+      expect(reserveAt, label).toBeLessThan(pullAt);
+      // And NOTHING removes the row when the pull fails. A pull is multi-page
+      // and durable, so a failure proves nothing about what landed; a row
+      // removed under landed data is a channel that reads as locally owned
+      // and writable — the reservation's own defect, through the cleanup
+      // path. The row is the write gate: it may never be absent while channel
+      // data exists locally. syncJoinedSharedChannels finishes or ends the
+      // row on a later pass, so the held slot is temporary.
+      const afterPull = source.slice(pullAt);
+      expect(afterPull, label).not.toContain("releaseJoinedSharedChannel(");
+      expect(afterPull, label).not.toContain("sharedChannels.filter(");
+    }
+    // The helper itself is gone, so no caller can reintroduce it by name.
+    expect(mainSource).not.toContain("releaseJoinedSharedChannel");
+  });
+
+  // An ENDED row claims nothing across workspaces. The tombstone stays as its
+  // own workspace's write gate, but leaving is presented as reversible and
+  // silently was not: the invitation stayed filtered out of every other
+  // workspace, and the only offered action in the holder was to rejoin.
+  it("lets an ended row stop claiming a share for every other workspace", () => {
+    const claimStart = mainSource.indexOf(
+      "function shareIdsClaimedByOtherWorkspaces(",
+    );
+    const claimEnd = mainSource.indexOf(
+      "ipcMain.handle(CHANNELS.listChatChannelShares",
+      claimStart,
+    );
+    expect(claimStart).toBeGreaterThan(-1);
+    expect(claimEnd).toBeGreaterThan(claimStart);
+    const claim = mainSource.slice(claimStart, claimEnd);
+    const skipAt = claim.indexOf("if (channel.ended === true) continue;");
+    const addAt = claim.indexOf("claimed.add(channel.shareId);");
+    expect(skipAt).toBeGreaterThan(-1);
+    expect(addAt).toBeGreaterThan(-1);
+    // The skip guards the add, rather than sitting anywhere in the function.
+    expect(skipAt).toBeLessThan(addAt);
+  });
+
+  // Reserving the row before the pull makes it VISIBLE to any sync pass that
+  // starts meanwhile — a relay cadence, listChatChannels, a syncDms refresh —
+  // and that pass pulls every live row. Without the shared serializer two
+  // pulls of the same share run concurrently and race the per-share cursor and
+  // peer updates the serializer exists to protect. Both join paths run outside
+  // a pass, so this queues rather than deadlocking.
+  it("runs each join's first pull under the same per-workspace serializer as the sync pass", () => {
+    expect(mainSource).toContain(
+      "return serializeSharedChannelSync(workspaceId, () =>\n    runSharedChannelSyncPass(workspaceId),",
+    );
+
+    const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");
+    const autoJoinEnd = mainSource.indexOf("ipcMain.handle(", autoJoinStart);
+    for (const [label, source] of [
+      ["joinSharedChannel", handlerSource("joinSharedChannel")],
+      ["autoJoinReceivedDms", mainSource.slice(autoJoinStart, autoJoinEnd)],
+    ] as const) {
+      const serializeAt = source.indexOf("serializeSharedChannelSync(");
+      const pullAt = source.indexOf("pullSharedChannel({");
+      expect(serializeAt, label).toBeGreaterThan(-1);
+      // The pull happens INSIDE the serialized run, not beside it.
+      expect(serializeAt, label).toBeLessThan(pullAt);
+    }
+
+    // The cheap early-out still runs ahead of the DM home claim: a claim left
+    // behind for a join that never happened pins the share to a workspace that
+    // holds no row for it, and every other workspace then skips it for good.
+    const autoJoin = mainSource.slice(autoJoinStart, autoJoinEnd);
+    const autoRefusalAt = autoJoin.indexOf("joinedSharedChannelLimitRefusal(");
+    expect(autoRefusalAt).toBeGreaterThan(-1);
+    expect(autoRefusalAt).toBeLessThan(autoJoin.indexOf("claimDmHome("));
+  });
 });

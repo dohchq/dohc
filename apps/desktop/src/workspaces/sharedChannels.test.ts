@@ -11,11 +11,18 @@ import {
   assertSharedChannelWritable,
   createKeyedSerializer,
   endJoinedChannel,
+  JoinedSharedChannelLimitError,
   joinedSharedChannelForTarget,
+  joinedSharedChannelLimitRefusal,
   mergeJoinedChannel,
   relayFetchWithTimeout,
   syncJoinedSharedChannels,
 } from "./sharedChannels";
+import {
+  ListChatChannelSharesResult,
+  ListJoinedSharedChannelsResult,
+  MAX_CHAT_CHANNEL_SHARE_ROWS,
+} from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { nativeTmpdir } from "./testTemp";
@@ -264,6 +271,206 @@ describe("mergeJoinedChannel", () => {
     );
     expect(rejoinedSameShare.map((row) => row.shareId)).toEqual(["share-other", "share-old"]);
     expect(rejoinedSameShare[1]!.access).toBe("read-only");
+  });
+
+  // WHAT JUSTIFIES THE LIMIT.
+  //
+  // An earlier version of this block claimed to measure representative healthy
+  // accounts. It did not: it declared invented account sizes and checked their
+  // arithmetic, and its central assumption — one DM per correspondent — is not
+  // even the product's shape, because a DM can have several recipients. Codex
+  // was right to reject it, and a fabricated fixture is worse than none: it
+  // reads as evidence.
+  //
+  // The live count has one real contract, and this is it. Every sync pass
+  // walks the LIVE joined channels and does a pull for each, plus a push for
+  // each read-write one — see syncJoinedSharedChannels. So the live count IS
+  // the per-pass relay fan-out, which makes the cap a backpressure threshold
+  // on that fan-out rather than a limit on user work. AGENTS.md exempts
+  // backpressure from the measurement rule and asks it to be justified from
+  // its actual contract instead. This pins the contract.
+  //
+  // The specific number is NOT yet justified by it, and this comment will not
+  // pretend otherwise. Tracked with the total-retention gap; both resolve by
+  // scoping the lane rather than by choosing a better constant.
+  describe("the live count is the per-pass relay fan-out", () => {
+    it("does one pull per live channel and none for a tombstone", async () => {
+      const pulls: string[] = [];
+      const pushes: string[] = [];
+      const channels = [
+        joined({ shareId: "live-rw-1", channelWireId: "wire-1" }),
+        joined({ shareId: "live-rw-2", channelWireId: "wire-2" }),
+        joined({ shareId: "live-ro", channelWireId: "wire-3", access: "read-only" }),
+        joined({ shareId: "tombstone", channelWireId: "wire-4", ended: true }),
+      ];
+      await syncJoinedSharedChannels({
+        rootDir: "/tmp/ws",
+        workspaceId: "ws-1",
+        relay: RELAY,
+        channels,
+        pull: async (input) => {
+          pulls.push(input.shareId);
+          return pullResult(0);
+        },
+        push: async (input) => {
+          pushes.push(input.shareId);
+          return { pushed: 0 };
+        },
+      });
+      const live = channels.filter((channel) => channel.ended !== true);
+      // One pull per live row — the relationship the cap throttles.
+      expect(pulls).toHaveLength(live.length);
+      expect(pulls).not.toContain("tombstone");
+      // And a push for each live read-write row, so the fan-out is bounded by
+      // the live count, never by the total.
+      expect(pushes).toEqual(["live-rw-1", "live-rw-2"]);
+      expect(pulls.length + pushes.length).toBeGreaterThan(live.length);
+    });
+  });
+
+  function fullLane() {
+    return Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS }, (_, index) =>
+      joined({ shareId: `share-${index}`, channelWireId: `wire-${index}` }),
+    );
+  }
+  const newcomer = { shareId: "share-new", channelWireId: "wire-new" };
+
+  it("refuses a join that would grow the lane past the limit, naming the limit", () => {
+    const full = fullLane();
+    // At the limit, one more row is one too many.
+    expect(() => mergeJoinedChannel(full, joined(newcomer))).toThrow(
+      JoinedSharedChannelLimitError,
+    );
+    // The refusal names the constraint, the observed count, the configured
+    // limit, its unit, and a recovery — nothing else reports it.
+    const message = `This workspace has ${MAX_CHAT_CHANNEL_SHARE_ROWS} shared chat channels; the limit is ${MAX_CHAT_CHANNEL_SHARE_ROWS}. Leave a shared channel, then join this one.`;
+    expect(joinedSharedChannelLimitRefusal(full, newcomer)).toBe(message);
+    expect(() => mergeJoinedChannel(full, joined(newcomer))).toThrow(message);
+  });
+
+  // #617 codex P2: the refusal above prescribes leaving a channel, and
+  // leaving only marks the row ended. If ended rows kept their place in the
+  // budget the instruction would be false — the lane would stay full for
+  // good. The recovery it names has to work.
+  it("frees capacity when the user leaves a channel, which is what the refusal tells them to do", () => {
+    const full = fullLane();
+    expect(joinedSharedChannelLimitRefusal(full, newcomer)).not.toBeNull();
+
+    const afterLeave = endJoinedChannel(full, "share-3");
+    // Nothing was deleted — the tombstone still gates writes into share-3.
+    expect(afterLeave).toHaveLength(MAX_CHAT_CHANNEL_SHARE_ROWS);
+    expect(afterLeave.find((row) => row.shareId === "share-3")?.ended).toBe(true);
+    // And the join it refused now fits.
+    expect(joinedSharedChannelLimitRefusal(afterLeave, newcomer)).toBeNull();
+    const merged = mergeJoinedChannel(afterLeave, joined(newcomer));
+    expect(merged).toHaveLength(MAX_CHAT_CHANNEL_SHARE_ROWS + 1);
+    expect(merged.filter((row) => row.ended !== true)).toHaveLength(
+      MAX_CHAT_CHANNEL_SHARE_ROWS,
+    );
+  });
+
+  // The pre-flight check exists so both join paths can refuse BEFORE they
+  // pull the share's log and claim its DM home. It must answer from registry
+  // rows alone, and it must agree with the merge in both directions.
+  it("answers the same refusal the merge would raise, from the rows alone", () => {
+    const full = fullLane();
+    expect(joinedSharedChannelLimitRefusal(full, newcomer)).not.toBeNull();
+    // A re-join replaces a row, so it never grows the live set.
+    expect(
+      joinedSharedChannelLimitRefusal(full, {
+        shareId: "share-7",
+        channelWireId: "wire-7",
+      }),
+    ).toBeNull();
+    // A lane of pure tombstones consumes no budget at all.
+    const tombstones = full.map((row) => ({ ...row, ended: true }));
+    expect(joinedSharedChannelLimitRefusal(tombstones, newcomer)).toBeNull();
+    expect(() => mergeJoinedChannel(tombstones, joined(newcomer))).not.toThrow();
+  });
+
+  // A lane an earlier build already grew past the limit must stay repairable:
+  // a re-join replaces a row, so it never grows the lane, and refusing it
+  // would strand the account with rows it can no longer correct.
+  it("still repairs a row in an over-limit lane, because replacing one does not grow it", () => {
+    const over = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) =>
+      joined({ shareId: `share-${index}`, channelWireId: `wire-${index}` }),
+    );
+    expect(
+      joinedSharedChannelLimitRefusal(over, {
+        shareId: "share-7",
+        channelWireId: "wire-7",
+      }),
+    ).toBeNull();
+    const repaired = mergeJoinedChannel(
+      over,
+      joined({ shareId: "share-7", channelWireId: "wire-7", access: "read-only" }),
+    );
+    expect(repaired).toHaveLength(MAX_CHAT_CHANNEL_SHARE_ROWS + 1);
+    expect(repaired[repaired.length - 1]!.access).toBe("read-only");
+    // And it still refuses to grow it further.
+    expect(() =>
+      mergeJoinedChannel(over, joined({ shareId: "share-new", channelWireId: "wire-new" })),
+    ).toThrow(JoinedSharedChannelLimitError);
+  });
+
+  // The row cap the relay lanes enforce must never be able to reject the
+  // JOINED lane: these rows decide channelIsLocked, so a listing that refuses
+  // them locks every channel read-only, and the count only grows (#617).
+  it("lists an over-limit joined lane instead of rejecting the whole listing", () => {
+    const over = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) => ({
+      shareId: `share-${index}`,
+      channelWireId: `wire-${index}`,
+      access: "read-write" as const,
+      granterEmail: null,
+      ended: false,
+    }));
+    expect(() =>
+      ListChatChannelSharesResult.parse({
+        joined: over,
+        sessionKey: "https://relay.example||user-1",
+        relay: { state: "answered", granted: [], received: [] },
+      }),
+    ).not.toThrow();
+    expect(() => ListJoinedSharedChannelsResult.parse({ joined: over })).not.toThrow();
+  });
+});
+
+// #617 codex round 3: there is deliberately NO release helper. A pull is
+// multi-page and durable, so a failure proves nothing about what landed, and a
+// row removed under landed data is a channel that reads as locally owned. The
+// reservation stays; syncJoinedSharedChannels finishes it or ends it.
+describe("a failed join keeps its reservation", () => {
+  it("leaves the row in place so the write gate still covers the channel", () => {
+    const reserved = mergeJoinedChannel(
+      [joined({ shareId: "share-old", channelWireId: "wire-old" })],
+      joined({ shareId: "share-new", channelWireId: "wire-new", access: "read-only" }),
+    );
+    // The row a failed pull leaves behind is still a row: read-only, so
+    // assertSharedChannelWritable refuses writes into it.
+    const row = reserved.find((entry) => entry.shareId === "share-new");
+    expect(row?.access).toBe("read-only");
+    expect(row?.ended).toBeUndefined();
+    // And it is live, so the next sync pass pulls it again rather than
+    // stranding it.
+    expect(reserved.filter((entry) => entry.ended !== true)).toHaveLength(2);
+  });
+
+  // The case codex named: a rejoin whose merge displaced an ended tombstone.
+  // Removing the new row would erase that tombstone too and leave the wire
+  // ungated — strictly worse than never having touched it.
+  it("never leaves a wire that had a tombstone with no row at all", () => {
+    const tombstone = joined({
+      shareId: "share-revoked",
+      channelWireId: "wire-1",
+      ended: true,
+    });
+    const rejoined = mergeJoinedChannel(
+      [tombstone],
+      joined({ shareId: "share-regranted", channelWireId: "wire-1" }),
+    );
+    expect(rejoined).toHaveLength(1);
+    // Whatever happens to the pull, SOME row still answers for wire-1.
+    expect(rejoined.filter((entry) => entry.channelWireId === "wire-1")).toHaveLength(1);
   });
 });
 

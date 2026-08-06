@@ -529,6 +529,7 @@ describe("runtime main chat IPC boundaries", () => {
 describe("readRelayChatShareLanes", () => {
   it("reports a transport failure as unreachable, never as an empty listing", async () => {
     const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.reject(new Error("relay down")),
       remoteWorkspaceId: "remote-1",
     });
@@ -537,6 +538,7 @@ describe("readRelayChatShareLanes", () => {
 
   it("reports a session failure as signed-out, not as a transport outage", async () => {
     const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.reject(
           new RelaySessionError(
@@ -550,6 +552,7 @@ describe("readRelayChatShareLanes", () => {
 
   it("answers an authoritative empty listing when the relay has no rows", async () => {
     const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({}),
       remoteWorkspaceId: "remote-1",
     });
@@ -558,6 +561,7 @@ describe("readRelayChatShareLanes", () => {
 
   it("maps chat-channel rows and scopes grants to this workspace's remote identity", async () => {
     const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve({
           granted: [
@@ -618,6 +622,7 @@ describe("readRelayChatShareLanes", () => {
 
   it("drops every grant when the workspace has no remote identity", async () => {
     const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve({
           granted: [
@@ -654,20 +659,30 @@ describe("readRelayChatShareLanes", () => {
   }
 
   for (const lane of ["granted", "received"] as const) {
-    it(`reports an over-cap ${lane} lane as unreachable, so cached rows survive`, async () => {
+    it(`reports an over-cap ${lane} lane as over-limit, so cached rows survive and the surface can name it`, async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
         const lanes = await readRelayChatShareLanes({
+          shareIdsClaimedElsewhere: new Set<string>(),
           fetchListing: () => Promise.resolve(relayRowsOverCap(lane)),
           remoteWorkspaceId: "remote-1",
         });
-        expect(lanes).toEqual({ state: "unreachable" });
-        // The refusal names the constraint, the limit, the unit, and what it
-        // observed, because nobody reads this path except through this line.
+        // NOT "unreachable": that word means dohc could not read the answer,
+        // and it earns a Try again. This answer arrived and will arrive again
+        // identically, so it carries what it observed and the limit instead,
+        // and the surface names the constraint rather than posing as an
+        // outage (#618 codex).
+        expect(lanes).toEqual({
+          state: "over-limit",
+          lanes: [{ lane, rows: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }],
+          limit: MAX_CHAT_CHANNEL_SHARE_ROWS,
+        });
+        // The log refusal still names the constraint, the limit, the unit, and
+        // what it observed, because nobody reads this path except through it.
         expect(warn).toHaveBeenCalledWith(
           `[desktop] relay share listing "${lane}" holds ${
             MAX_CHAT_CHANNEL_SHARE_ROWS + 1
-          } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing unreachable, so cached rows survive.`,
+          } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
         );
         // The composition is the defect: the guard's answer must survive the
         // contract parse the IPC handler runs immediately after it. This is
@@ -690,6 +705,7 @@ describe("readRelayChatShareLanes", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const lanes = await readRelayChatShareLanes({
+        shareIdsClaimedElsewhere: new Set<string>(),
         fetchListing: () =>
           Promise.resolve({
             ...relayRowsOverCap("granted"),
@@ -697,13 +713,20 @@ describe("readRelayChatShareLanes", () => {
           }),
         remoteWorkspaceId: "remote-1",
       });
-      expect(lanes).toEqual({ state: "unreachable" });
+      expect(lanes).toEqual({
+        state: "over-limit",
+        lanes: [
+          { lane: "granted", rows: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
+          { lane: "received", rows: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
+        ],
+        limit: MAX_CHAT_CHANNEL_SHARE_ROWS,
+      });
       expect(warn).toHaveBeenCalledWith(
         `[desktop] relay share listing "granted" holds ${
           MAX_CHAT_CHANNEL_SHARE_ROWS + 1
         } rows, "received" holds ${
           MAX_CHAT_CHANNEL_SHARE_ROWS + 1
-        } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing unreachable, so cached rows survive.`,
+        } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
       );
     } finally {
       warn.mockRestore();
@@ -721,6 +744,7 @@ describe("readRelayChatShareLanes", () => {
       selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
     }));
     const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({ granted: rows }),
       remoteWorkspaceId: "remote-1",
     });
@@ -757,11 +781,176 @@ describe("readRelayChatShareLanes", () => {
       }),
     );
     const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({ granted: [...listed, ...filteredOut] }),
       remoteWorkspaceId: "remote-1",
     });
     expect(lanes.state).toBe("answered");
     expect(lanes.state === "answered" && lanes.granted).toHaveLength(10);
+  });
+
+  // A received grant is ACCOUNT-wide: the relay answers the same rows in every
+  // workspace. Scoping them to the workspace that claimed them is what keeps
+  // one workspace's sharing surface independent of another's (#618).
+  it("drops received shares another local workspace already claimed", async () => {
+    const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set(["share-in-work"]),
+      fetchListing: () =>
+        Promise.resolve({
+          received: [
+            {
+              shareId: "share-in-work",
+              granterEmail: "owner@example.com",
+              selector: { kind: "chat-channel", channelWireId: "wire-work" },
+            },
+            {
+              shareId: "share-unclaimed",
+              granterEmail: "owner@example.com",
+              selector: { kind: "chat-channel", channelWireId: "wire-free" },
+            },
+          ],
+        }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(lanes.state === "answered" && lanes.received).toEqual([
+      {
+        shareId: "share-unclaimed",
+        channelWireId: "wire-free",
+        access: "read-write",
+        granterEmail: "owner@example.com",
+      },
+    ]);
+  });
+
+  // #618 codex round 5. The relay keeps returning REVOKED grants to the
+  // granter, so counting them made the cap measure an account's LIFETIME
+  // grants: past the cap the listing stayed over-limit with every grant
+  // revoked, and revoking more could not reduce it. Third time this cap
+  // produced a permanent-refusal shape, same cause each time — counting rows
+  // the user cannot remove.
+  it("drops revoked grants, so revoking one gets an account back under the cap", async () => {
+    const grantRows = (revokedFrom: number) =>
+      Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) => ({
+        shareId: `share-${index}`,
+        workspaceId: "remote-1",
+        recipientEmail: "ana@example.com",
+        revokedAtMs: index >= revokedFrom ? 1_700_000_000_000 : null,
+        selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      }));
+
+    // Every grant live: genuinely over the cap.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const allLive = await readRelayChatShareLanes({
+        shareIdsClaimedElsewhere: new Set<string>(),
+        fetchListing: () =>
+          Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS + 1) }),
+        remoteWorkspaceId: "remote-1",
+      });
+      expect(allLive.state).toBe("over-limit");
+    } finally {
+      warn.mockRestore();
+    }
+
+    // Revoke ONE. The relay still returns it, but it no longer counts, so the
+    // account is back under the cap and can list again.
+    const afterOneRevoke = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
+      fetchListing: () =>
+        Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS) }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(afterOneRevoke.state).toBe("answered");
+    expect(
+      afterOneRevoke.state === "answered" && afterOneRevoke.granted,
+    ).toHaveLength(MAX_CHAT_CHANNEL_SHARE_ROWS);
+    // And no revoked row is listed at all — nothing renders them, and carrying
+    // them would leave the payload unbounded while merely uncounting them.
+    expect(
+      afterOneRevoke.state === "answered" &&
+        afterOneRevoke.granted.every((row) => row.revokedAtMs === null),
+    ).toBe(true);
+  });
+
+  // #618 codex round 4: an ENDED row in another workspace claims nothing. The
+  // tombstone is that workspace's own write gate and stays for that, but it
+  // was never an argument for cross-workspace exclusivity — once A has left,
+  // filtering the invitation out of every other workspace makes leaving
+  // irreversible everywhere except A, where the only offered action is to
+  // rejoin. The caller builds the set; this pins what the guard does with it.
+  it("lists a received share again once the workspace holding it has left", async () => {
+    const listing = () =>
+      Promise.resolve({
+        received: [
+          {
+            shareId: "share-left-elsewhere",
+            granterEmail: "owner@example.com",
+            selector: { kind: "chat-channel", channelWireId: "wire-left" },
+          },
+        ],
+      });
+    // While workspace A still holds it live, this workspace does not offer it.
+    const whileHeld = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set(["share-left-elsewhere"]),
+      fetchListing: listing,
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(whileHeld.state === "answered" && whileHeld.received).toHaveLength(0);
+
+    // Once A leaves, its row is ended and claims nothing, so the invitation
+    // comes back here and the share can move.
+    const afterLeave = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
+      fetchListing: listing,
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(
+      afterLeave.state === "answered" && afterLeave.received.map((row) => row.shareId),
+    ).toEqual(["share-left-elsewhere"]);
+  });
+
+  // The acceptance case for #618: another workspace's received lane being
+  // unreadable must not blank a workspace that has shares of its own. The
+  // scoping runs BEFORE the cap, so the rows homed elsewhere never count
+  // against this workspace's lane.
+  it("still answers this workspace's shares when the rows claimed elsewhere would blow the cap", async () => {
+    const claimedElsewhere = Array.from(
+      { length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
+      (_, index) => ({
+        shareId: `share-other-${index}`,
+        granterEmail: "owner@example.com",
+        selector: { kind: "chat-channel", channelWireId: `wire-other-${index}` },
+      }),
+    );
+    const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set(claimedElsewhere.map((row) => row.shareId)),
+      fetchListing: () =>
+        Promise.resolve({
+          granted: [
+            {
+              shareId: "share-mine",
+              workspaceId: "remote-1",
+              recipientEmail: "ana@example.com",
+              revokedAtMs: null,
+              selector: { kind: "chat-channel", channelWireId: "wire-mine" },
+            },
+          ],
+          received: [
+            ...claimedElsewhere,
+            {
+              shareId: "share-here",
+              granterEmail: "owner@example.com",
+              selector: { kind: "chat-channel", channelWireId: "wire-here" },
+            },
+          ],
+        }),
+      remoteWorkspaceId: "remote-1",
+    });
+    expect(lanes.state).toBe("answered");
+    expect(lanes.state === "answered" && lanes.granted).toHaveLength(1);
+    expect(lanes.state === "answered" && lanes.received.map((row) => row.shareId)).toEqual([
+      "share-here",
+    ]);
   });
 });
 
@@ -925,6 +1114,7 @@ describe("handleRelayUnauthorized", () => {
 describe("readRelayChatShareLanes session classification", () => {
   it("reports a stale session's 401 as unreachable, not signed-out", async () => {
     const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.reject(
           new RelaySessionError("Your dohc Cloud session expired.", {
@@ -941,6 +1131,7 @@ describe("readRelayChatShareLanes session classification", () => {
   // unknown listing and clears — the exact clobber this contract prevents.
   it("reports a malformed 200 body as unreachable, not as a rejection", async () => {
     const nullBody = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve(null as unknown as { granted?: Array<Record<string, unknown>> }),
       remoteWorkspaceId: "remote-1",
@@ -948,6 +1139,7 @@ describe("readRelayChatShareLanes session classification", () => {
     expect(nullBody).toEqual({ state: "unreachable" });
 
     const nonArray = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve({ granted: 3 } as unknown as {
           granted?: Array<Record<string, unknown>>;
@@ -960,6 +1152,7 @@ describe("readRelayChatShareLanes session classification", () => {
     // character filters out, and the result would read as an authoritative
     // EMPTY answer — clearing rows out of garbage.
     const stringLane = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve({ granted: "malformed" } as unknown as {
           granted?: Array<Record<string, unknown>>;
@@ -969,6 +1162,7 @@ describe("readRelayChatShareLanes session classification", () => {
     expect(stringLane).toEqual({ state: "unreachable" });
 
     const stringReceived = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve({ received: "malformed" } as unknown as {
           received?: Array<Record<string, unknown>>;
@@ -984,6 +1178,7 @@ describe("readRelayChatShareLanes session classification", () => {
   it("reports invalid row fields as unreachable, not as a rejection", async () => {
     // A chat-channel grant with no shareId at all.
     const missingShareId = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve({
           granted: [
@@ -1001,6 +1196,7 @@ describe("readRelayChatShareLanes session classification", () => {
 
     // A received row whose granterEmail is not an email or null.
     const badEmail = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve({
           received: [
