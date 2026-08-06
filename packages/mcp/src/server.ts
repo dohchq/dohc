@@ -191,7 +191,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_write_file",
     {
       description:
-        "Write any visible workspace file. History: the desktop watcher captures the write as a workspace-engine moment while the app is open (a standalone MCP write is captured on the next desktop open); engine-opted-out workspaces record nothing (historyRecording: off).",
+        "Write any visible workspace file. History: the desktop watcher captures the write as a workspace-engine moment while the app is open (a standalone MCP write is captured on the next desktop open); engine-opted-out workspaces record nothing (historyRecording: off); when dohc cannot read the workspace settings it reports historyRecording: unknown with the cause in historyRecordingUnavailable.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         content: z.string(),

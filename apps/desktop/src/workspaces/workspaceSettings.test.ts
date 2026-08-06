@@ -224,8 +224,11 @@ describe("workspace settings file store", () => {
     // workspace open, so nothing is recorded until the workspace is reopened.
     expect(corruptResult.warning).toContain("Then restart dohc.");
 
-    // The same table packages/mcp asserts against isWorkspaceEngineFlagged.
-    // Both readers share one schema, so both must answer OFF for every body.
+    // The same table packages/mcp asserts against readHistoryRecording. Both
+    // readers share one schema, so neither may turn the engine ON for a body it
+    // rejects. They differ in what they report: this reader recovers to the
+    // defaults, and MCP answers "unknown" rather than naming an opt-out it
+    // cannot read (#641).
     for (const body of [
       JSON.stringify({ version: 2 }),
       JSON.stringify({ experimental: { workspaceEngineAlpha: "false" } }),

@@ -54,7 +54,7 @@ import {
   type CliVerb,
 } from "@dohc/cli/protocol";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
-import { workspaceEngineEnabledInSettings } from "@dohc/workspace-contracts/workspace-settings";
+import { workspaceEngineSetting } from "@dohc/workspace-contracts/workspace-settings";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -403,33 +403,87 @@ async function readFileWindowWithDigest(
 // a copy of it, because a hand-mirrored rule is how the two answers drift.
 // WS-H1 flag flip: the engine is the DEFAULT — an absent group or a missing
 // file resolves ON; only an explicit `workspaceEngineAlpha: false` opts the
-// workspace out. A file that EXISTS but cannot be trusted (symlink,
-// non-regular, oversized, escaped .dohc, unparseable JSON, or any body the
-// schema rejects) may hold that opt-out, so it resolves OFF and the tool
-// reports no recorder rather than naming one that records nothing. Cheap
-// enough to read per mutating call — the flag can flip between desktop opens.
+// workspace out. Cheap enough to read per mutating call — the flag can flip
+// between desktop opens.
+//
+// #641: a file that EXISTS but cannot be trusted (symlink, non-regular,
+// oversized, escaped .dohc, unparseable JSON, any body the schema rejects, or
+// a read that failed) resolves UNKNOWN, not OFF. Both fail closed and neither
+// names a recorder, but OFF asserts the user chose this, and dohc established
+// no such thing. The desktop already carries the split —
+// `historyRecordingOff` beside `historyRecordingUnavailable` in
+// bridgeContract.ts (#483, #505) — and MCP was the surface still collapsing
+// the two.
 const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
+const WORKSPACE_SETTINGS_PATH = ".dohc/settings.local.json";
 
-export async function isWorkspaceEngineFlagged(ctx: ToolContext): Promise<boolean> {
+// Workspace-relative throughout: the agent named a workspace, not a host, and
+// an absolute host path is a fact it cannot act on.
+const CANNOT_READ_SETTINGS =
+  `dohc could not tell whether this workspace records history: it could not read ${WORKSPACE_SETTINGS_PATH}.`;
+
+type HistoryRecordingRead =
+  | { state: "on" }
+  | { state: "off" }
+  | { state: "unknown"; cause: string };
+
+function historyUnknown(detail: string): HistoryRecordingRead {
+  return { state: "unknown", cause: `${CANNOT_READ_SETTINGS} ${detail}` };
+}
+
+// The noun the reader can see at the path, so the instruction says what to
+// look for. "item" covers the rest (a socket, a device node).
+function settingsSquatterNoun(stats: Stats): string {
+  if (stats.isSymbolicLink()) return "link";
+  return stats.isDirectory() ? "folder" : "item";
+}
+
+export async function readHistoryRecording(ctx: ToolContext): Promise<HistoryRecordingRead> {
   const path = join(ctx.root, ".dohc", "settings.local.json");
+  let stats: Stats;
   try {
-    const stats = await lstat(path);
-    if (
-      stats.isSymbolicLink() ||
-      !stats.isFile() ||
-      stats.size > MAX_WORKSPACE_SETTINGS_FILE_BYTES
-    ) {
-      return false;
-    }
-    if (!(await isWithinRealRoot(ctx.root, path))) return false;
-    return workspaceEngineEnabledInSettings(
-      JSON.parse(await readFile(path, "utf8")),
-    );
+    stats = await lstat(path);
   } catch (error) {
     // Only an ABSENT file reads as the default: a new workspace must not be
-    // born opted out. Every other failure may be hiding an opt-out.
-    return (error as NodeJS.ErrnoException).code === "ENOENT";
+    // born opted out, and must not be born unknown either.
+    if (errnoCode(error) === "ENOENT") return { state: "on" };
+    return historyUnknown(
+      `The read failed (${errnoCode(error) ?? "no errno"}). Check that dohc can read that file. Then retry.`,
+    );
   }
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    const noun = settingsSquatterNoun(stats);
+    return historyUnknown(
+      `A ${noun} is at that path, which must be a regular file. Remove or rename that ${noun}. Then retry.`,
+    );
+  }
+  if (stats.size > MAX_WORKSPACE_SETTINGS_FILE_BYTES) {
+    return historyUnknown(
+      `The file is ${stats.size} bytes and the limit is ${MAX_WORKSPACE_SETTINGS_FILE_BYTES} bytes. Shrink it below the limit. Then retry.`,
+    );
+  }
+  if (!(await isWithinRealRoot(ctx.root, path))) {
+    return historyUnknown(
+      "That path leads outside this workspace, and it must stay inside. Remove or rename it. Then retry.",
+    );
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    const code = errnoCode(error);
+    return historyUnknown(
+      code === null
+        ? "The file is not valid JSON. Repair the file. Then retry."
+        : `The read failed (${code}). Check that dohc can read that file. Then retry.`,
+    );
+  }
+  const setting = workspaceEngineSetting(body);
+  return setting.state === "untrusted"
+    ? historyUnknown(
+        `The file does not match the settings schema (${setting.cause}). Repair the file. Then retry.`,
+      )
+    : { state: setting.state };
 }
 
 // Retirement Phase C (WS-H1): MCP writes NO legacy change sets. For an engine
@@ -445,12 +499,35 @@ export async function isWorkspaceEngineFlagged(ctx: ToolContext): Promise<boolea
 // .dohc/history left by pre-flip versions is no longer read (the relic reader
 // retired with @dohc/workspace-history); the read tools below list engine
 // moments only.
-async function recordedChangeFields(
-  ctx: ToolContext,
-): Promise<{ recordedBy: "workspace-engine" } | { historyRecording: "off" }> {
-  return (await isWorkspaceEngineFlagged(ctx))
-    ? { recordedBy: "workspace-engine" as const }
-    : { historyRecording: "off" as const };
+//
+// `historyRecording: "unknown"` is the third arm (#641): dohc could not read
+// the settings file, so it can name neither a recorder nor an opt-out. It
+// carries the cause, because "unknown" alone tells an agent nothing it can act
+// on.
+type RecordedChangeFields =
+  | { recordedBy: "workspace-engine" }
+  | { historyRecording: "off" }
+  | { historyRecording: "unknown"; historyRecordingUnavailable: string };
+
+async function recordedChangeFields(ctx: ToolContext): Promise<RecordedChangeFields> {
+  const history = await readHistoryRecording(ctx);
+  if (history.state === "on") return { recordedBy: "workspace-engine" as const };
+  if (history.state === "off") return { historyRecording: "off" as const };
+  return {
+    historyRecording: "unknown" as const,
+    historyRecordingUnavailable: history.cause,
+  };
+}
+
+// Forward a write's history fields whole. Naming them one by one dropped the
+// unknown arm's cause, which is the only part of it an agent can act on.
+function forwardedRecordedChangeFields(written: RecordedChangeFields): RecordedChangeFields {
+  if ("recordedBy" in written) return { recordedBy: written.recordedBy };
+  if (written.historyRecording === "off") return { historyRecording: "off" as const };
+  return {
+    historyRecording: "unknown" as const,
+    historyRecordingUnavailable: written.historyRecordingUnavailable,
+  };
 }
 
 function failureReason(error: unknown, fallback: string): string {
@@ -557,8 +634,26 @@ async function ensureRecordable(ctx: ToolContext) {
     await safeMetadataDir(ctx);
     return null;
   } catch (error) {
-    return { ok: false as const, reason: failureReason(error, "history unavailable") };
+    return { ok: false as const, reason: metadataDirRefusal(error) };
   }
+}
+
+// #642: the errno used to pass through whole, so an agent read
+// `EPERM: operation not permitted, lstat 'C:\Users\…\ws\.dohc'` — an absolute
+// host path it never supplied and cannot act on.
+//
+// The two failures are told apart by the errno, not by the message: a guard
+// refusal is an Error this code wrote (ensureGuardedDir) and carries no
+// `code`, so it is already workspace-relative and passes through whole. Only
+// a platform failure is translated. The code stays, as detail rather than as
+// the whole message — an agent can act on "EPERM".
+function metadataDirRefusal(error: unknown): string {
+  const code = errnoCode(error);
+  if (code === null) return failureReason(error, DOHC_METADATA_GUARD.lead);
+  return (
+    `${DOHC_METADATA_GUARD.lead} Preparing that folder failed (${code}). dohc changed no files.` +
+    ` Check that dohc can read and write ${DOHC_METADATA_GUARD.path} in this workspace. Then retry.`
+  );
 }
 
 // mkdir{recursive} throws a raw errno (EEXIST, or a Windows variant) when
@@ -2496,11 +2591,9 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
     siteRoot: root.normalized,
     packagePath: normalizedPackagePath,
     dependency: "@dohc/sdk",
-    // Forward the write's history-recording shape honestly (recordedBy for
-    // engine workspaces, historyRecording: "off" for opted-out ones).
-    ...("recordedBy" in written
-      ? { recordedBy: written.recordedBy }
-      : { historyRecording: written.historyRecording }),
+    // Forward the write's history-recording shape honestly, including the
+    // unknown arm's cause.
+    ...forwardedRecordedChangeFields(written),
     importMode: useVendoredBrowserImport ? "vendored-browser-module" : "package",
     usage: useVendoredBrowserImport
       ? `import { dohc } from "./vendor/dohc-sdk/dist/index.js";\nconst text = await dohc.files.read("notes/today.md");`

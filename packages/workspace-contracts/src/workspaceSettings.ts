@@ -83,10 +83,26 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   },
 };
 
-// The one predicate both processes ask of the file's parsed JSON. A file that
-// fails the schema may hold an opt-out we cannot read, so it reads as OPTED
-// OUT — never as the engine-on default.
-export function workspaceEngineEnabledInSettings(raw: unknown): boolean {
+// The one verdict every reader asks of the file's parsed JSON.
+//
+// Three states, not two. A body the schema rejects may hold an opt-out we
+// cannot read, so it is UNTRUSTED — never the engine-on default, and never the
+// opt-out either: "the user turned the engine off" and "dohc could not tell"
+// are different facts, and a reader that reports the first on the evidence for
+// the second states something it did not establish (#641). Both states fail
+// closed, so neither names a recorder.
+export type WorkspaceEngineSetting =
+  | { state: "on" }
+  | { state: "off" }
+  | { state: "untrusted"; cause: string };
+
+export function workspaceEngineSetting(raw: unknown): WorkspaceEngineSetting {
   const parsed = WorkspaceSettings.safeParse(raw);
-  return parsed.success && parsed.data.experimental.workspaceEngineAlpha;
+  if (!parsed.success) {
+    const [issue] = parsed.error.issues;
+    if (!issue) return { state: "untrusted", cause: "the body does not match the schema" };
+    const at = issue.path.join(".");
+    return { state: "untrusted", cause: at ? `${at}: ${issue.message}` : issue.message };
+  }
+  return { state: parsed.data.experimental.workspaceEngineAlpha ? "on" : "off" };
 }
