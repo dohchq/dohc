@@ -472,11 +472,12 @@ async function holdWithoutShareDelete(absolute: string): Promise<() => Promise<v
 }
 
 // The journey behind #337 item 5, end to end through the real daemon. It was
-// filed as "no retry OR error", before PR #495 gave the save indicator honest
-// states. The error half is refuted here; the retry half is recorded, and it
-// is a stale indicator rather than lost text.
+// filed as "no retry OR error". PR #495 gave the save indicator honest
+// states; #554 closes the retry half: a file-locked settle re-arms itself
+// with backoff, so the write lands when the external handle releases — no
+// further edit needed.
 it.skipIf(engine.missing || process.platform !== "win32")(
-  "surfaces a blocked save while a file is locked and recovers on the next settle",
+  "surfaces a locked save and lands it by itself once the lock releases",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-lock-");
     const markerDirectory = join(root, ".dohc", "engine");
@@ -523,12 +524,12 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       release = await holdWithoutShareDelete(absolute);
       await type("locked edit\n");
 
-      // The item's first claim, refuted: the blocked save IS surfaced. The
-      // editor gets the retryable `error` state, whose title tells the user
-      // their edits are here and to try another edit — which is exactly what
-      // lands them below.
+      // The item's first claim, refuted: the blocked save IS surfaced, and
+      // named — the wire carries `file-locked` (Overloaded/afterBackoff), so
+      // the editor gets its own state whose copy names the blocker instead
+      // of advising another edit.
       await expect(session.settleNow()).rejects.toThrow();
-      expect(states).toEqual(["settling", "error"]);
+      expect(states).toEqual(["settling", "file-locked"]);
       expect(errors).toEqual(["ydoc settle of note.md"]);
       expect(await readFile(absolute, "utf8")).toBe("base\n");
 
@@ -537,16 +538,21 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       states.length = 0;
       errors.length = 0;
 
-      // The item's second claim, which STANDS: releasing the lock triggers
-      // nothing. Recorded so a retry has to change this line on purpose. The
-      // window is ~3x the settle debounce; no data is at risk here, only the
-      // indicator, which keeps saying "couldn't save" until the next settle.
-      await delay(2500);
-      expect(states).toEqual([]);
-      expect(await readFile(absolute, "utf8")).toBe("base\n");
+      // The item's second claim, closed (#554): the provider retries the
+      // settle on a doubling delay, so releasing the lock is followed by the
+      // write landing BY ITSELF — no further edit. The retry replays the
+      // durably pending materialization job through the idempotent settle.
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        if ((await readFile(absolute, "utf8")) !== "base\n") break;
+        await delay(200);
+      }
+      expect(await readFile(absolute, "utf8")).toBe("locked edit\nbase\n");
+      expect(states).toContain("saved");
 
-      // And the next settle recovers completely: BOTH edits reach the file,
-      // so nothing the lock blocked was dropped.
+      // And an ordinary settle keeps working after the recovery: BOTH edits
+      // stay in the file, so nothing the lock blocked was dropped.
+      states.length = 0;
       await type("second edit\n");
       await session.settleNow();
       expect(states).toEqual(["settling", "saved"]);

@@ -29,7 +29,10 @@ import {
 // user has switched to B — the stale response is dropped and its session closed.
 
 // "error" = a settle FAILED, so the file on disk is behind what the editor
-// shows. "read-only" = the workspace is a read-only shared view and the edit
+// shows. "file-locked" = the same stale disk, but transient by contract:
+// another program holds the file's handle and the engine retries until it
+// releases (#554), so the copy names the blocker instead of advising an edit.
+// "read-only" = the workspace is a read-only shared view and the edit
 // was discarded outright; retrying cannot help, so it gets its own copy.
 // "changed-on-disk" = the file was edited outside dohc while this document was
 // open, and dohc kept that edit instead of overwriting it (#338).
@@ -38,6 +41,7 @@ export type EngineDocSaveState =
   | "saved"
   | "saving"
   | "error"
+  | "file-locked"
   | "read-only"
   | "changed-on-disk";
 
@@ -250,6 +254,19 @@ export function useEngineDoc(input: {
         unsubscribeSaveState = bridge().onEngineYDocSaveState((event) => {
           if (cancelled || token !== openTokenRef.current) return;
           if (event.sessionId !== sessionId) return;
+          // `file-locked` is the one refusal that makes a DURABILITY claim:
+          // its copy tells the user dohc has their edits and is retrying. So
+          // it may only stand for a settle that carries the newest edit. A
+          // keystroke still in flight means this refusal is about older text,
+          // and showing it would promise safety for a sequence the settle
+          // never covered. Same guard "saved" uses, for the same reason —
+          // keep "Saving…" until an event covers the newest edit.
+          if (event.state === "file-locked") {
+            if (event.seq >= localSeq.current) setSaveState(event.state);
+            return;
+          }
+          // These claim nothing about what is held — "error" says the opposite
+          // — so they stand as soon as they arrive, whatever is in flight.
           if (
             event.state === "error" ||
             event.state === "read-only" ||

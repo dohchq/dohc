@@ -643,7 +643,9 @@ describe("YdocLiveAdapter", () => {
     await provider.applyLocalUpdate(update);
 
     expect(fireDebouncedSettle).not.toBeNull();
-    fireDebouncedSettle!();
+    const fire = fireDebouncedSettle!;
+    fireDebouncedSettle = null;
+    fire();
     // The debounced settle rejects internally; let the chain drain.
     for (let tick = 0; tick < 50 && settleErrors.length === 0; tick += 1) {
       await Promise.resolve();
@@ -654,6 +656,126 @@ describe("YdocLiveAdapter", () => {
     expect(settleStarts).toHaveLength(1);
     // ...and it never reported success, so nothing may claim the file is saved.
     expect(settled).toEqual([]);
+    // An ordinary settle failure is NOT retried: a refusal that trying again
+    // cannot help (stale target, invalid input) would only repeat itself.
+    expect(fireDebouncedSettle).toBeNull();
+
+    await provider.close({ settle: false });
+  });
+
+  // A provider whose settle is refused `file-locked` until the test releases
+  // it, with the settle scheduler captured so the ladder can be driven a rung
+  // at a time. Shared by the two tests below; each drives it differently,
+  // because a debounced settle and an explicit flush are different behaviors.
+  async function openAgainstALockedFile(text: string) {
+    const engine = seedPlaintextEngine();
+    const lock = { held: true };
+    const lockedRefusal = new DaemonRefusalError(
+      { code: "OVERLOADED", message: "file-locked", retry: "afterBackoff" },
+      new Error("daemon response"),
+    );
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.settle && lock.held) {
+          throw lockedRefusal;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const settleErrors: unknown[] = [];
+    const settled: unknown[] = [];
+    const delays: number[] = [];
+    const scheduled: Array<{ fn: () => void; ms: number }> = [];
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      settleDebounceMs: 100,
+      onRemoteUpdate: () => undefined,
+      onSettleError: (error) => settleErrors.push(error),
+      onSettled: (result) => {
+        settled.push(result);
+      },
+      scheduleSettle: (fn, ms) => {
+        delays.push(ms);
+        scheduled.push({ fn, ms });
+        return () => {
+          const index = scheduled.findIndex((entry) => entry.fn === fn);
+          if (index >= 0) scheduled.splice(index, 1);
+        };
+      },
+    });
+    await provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (body) => {
+        body.insert(0, text);
+      }),
+    );
+    return { provider, lock, lockedRefusal, settleErrors, settled, delays, scheduled };
+  }
+
+  it("retries a file-locked settle on a doubling delay until the lock releases", async () => {
+    // #554: a settle refused `file-locked` leaves the write durably pending
+    // in the engine — the ONLY missing piece is a later attempt. The provider
+    // re-arms itself on a doubling delay, so the save lands when the external
+    // handle releases instead of waiting for an unrelated future edit.
+    const { provider, lock, lockedRefusal, settleErrors, settled, delays, scheduled } =
+      await openAgainstALockedFile("typed against a locked file");
+
+    // Fire the armed settle; while the lock holds, every failure re-arms the
+    // next attempt itself: debounce, then doubling — 100, 100, 200, 400 —
+    // and every failure still reaches onSettleError (nothing goes quiet).
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(scheduled).toHaveLength(1);
+      const { fn } = scheduled.shift()!;
+      fn();
+      // Drain until the failure has re-armed the next attempt.
+      for (let tick = 0; tick < 50 && scheduled.length === 0; tick += 1) {
+        await Promise.resolve();
+      }
+    }
+    expect(settleErrors).toEqual([lockedRefusal, lockedRefusal, lockedRefusal]);
+    expect(delays).toEqual([100, 100, 200, 400]);
+
+    // The lock releases; the pending retry lands the write by itself.
+    lock.held = false;
+    const { fn: retry } = scheduled.shift()!;
+    retry();
+    for (let tick = 0; tick < 50 && settled.length === 0; tick += 1) {
+      await Promise.resolve();
+    }
+    expect(settled).toHaveLength(1);
+    // Success re-arms nothing and resets the ladder for any future lock.
+    expect(scheduled).toHaveLength(0);
+
+    await provider.close({ settle: false });
+  });
+
+  it("an explicit flush that hits the lock arms the retry too", async () => {
+    // settleNow rejects to its caller — a delete or merge must fail loudly —
+    // but the write it left pending is the same one, so the background retry
+    // is armed as well.
+    const { provider, lock, lockedRefusal, settled, scheduled } =
+      await openAgainstALockedFile("flushed against a locked file");
+
+    // The debounced settle the edit armed is superseded by the explicit flush,
+    // so the ladder below is the flush's own.
+    scheduled.length = 0;
+
+    await expect(provider.settleNow()).rejects.toBe(lockedRefusal);
+    for (let tick = 0; tick < 50 && scheduled.length === 0; tick += 1) {
+      await Promise.resolve();
+    }
+    expect(scheduled.map((entry) => entry.ms)).toEqual([100]);
+
+    lock.held = false;
+    scheduled.shift()!.fn();
+    for (let tick = 0; tick < 50 && settled.length === 0; tick += 1) {
+      await Promise.resolve();
+    }
+    expect(settled).toHaveLength(1);
 
     await provider.close({ settle: false });
   });
