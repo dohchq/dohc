@@ -51,10 +51,20 @@ export async function releaseEngineYDocSession<
   } catch (error) {
     // Mark it so the next open of this path retries THIS session instead of
     // binding a second writer over it, and register it so that retry (and every
-    // later teardown) can reach it — unless another session now owns this id,
-    // in which case displacing it would strand the live one.
+    // later teardown) can reach it.
     entry.closeFailed = true;
-    if (!sessions.has(sessionId)) sessions.set(sessionId, entry);
+    if (sessions.get(sessionId) !== entry) {
+      // Two opens can share a session id across the handler's awaits, and
+      // displacing the live one would strand it. Dropping this one instead is
+      // the unreachability this module exists to remove — no sweep, no close,
+      // no retry could ever find the lease again — so it takes a derived key.
+      // Nothing looks a session up by that key: everything that must reach it
+      // walks the values (the renderer and quit sweeps) or scans by document
+      // (the open's retry), while a by-id lookup still finds the live owner.
+      let key = sessionId;
+      for (let n = 1; sessions.has(key); n += 1) key = `${sessionId}#failed-${n}`;
+      sessions.set(key, entry);
+    }
     input.onCloseFailed(
       `[desktop] engine Y.Doc session close failed for ${entry.path} ` +
         `(${input.reason}); the engine may still hold the document, so it ` +

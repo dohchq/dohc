@@ -180,5 +180,56 @@ describe("releaseEngineYDocSession", () => {
 
     expect(released).toBe(false);
     expect(sessions.get("s1")).toBe(live);
+    // ...and it is still REACHABLE. Leaving it out of the registry is the
+    // unreachability this module exists to remove: no sweep, no close, and no
+    // retry could ever release the lease again.
+    expect([...sessions.values()]).toContain(stale);
+    expect(sessions.get("s1#failed-1")).toBe(stale);
+  });
+
+  it("reaches an id-collision failure by sweep and by document, and never doubles it", async () => {
+    // The two ways anything finds a failed session: the renderer and quit
+    // sweeps walk the VALUES, and the next open scans by document. Neither
+    // reads the key, which is why a derived one costs nothing.
+    const sessions = new Map<string, TestEntry>();
+    let refuse = true;
+    const live = entryOf("live", async () => undefined);
+    const stale = entryOf("stale", async () => {
+      if (refuse) throw new Error("daemon refused the release");
+    });
+    sessions.set("s1", live);
+
+    await releaseEngineYDocSession({
+      sessions,
+      sessionId: "s1",
+      entry: stale,
+      reason: "stale session replaced",
+      onCloseFailed: () => undefined,
+    });
+
+    // A sweep re-releases it under the key it is registered with. Refused
+    // again, it stays where it is instead of taking a second home.
+    const sweep = async (): Promise<boolean[]> =>
+      Promise.all(
+        [...sessions]
+          .filter(([, entry]) => entry.closeFailed && entry.path === "notes/a.md")
+          .map(([sessionId, entry]) =>
+            releaseEngineYDocSession({
+              sessions,
+              sessionId,
+              entry,
+              reason: "renderer teardown",
+              onCloseFailed: () => undefined,
+            }),
+          ),
+      );
+
+    expect(await sweep()).toEqual([false]);
+    expect(sessions.size).toBe(2);
+    expect(sessions.get("s1#failed-1")).toBe(stale);
+
+    refuse = false;
+    expect(await sweep()).toEqual([true]);
+    expect([...sessions.values()]).toEqual([live]);
   });
 });

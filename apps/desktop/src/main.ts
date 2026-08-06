@@ -7961,43 +7961,29 @@ function registerIpcHandlers(
     if (!capture || !isRichEnginePath(input.path)) {
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
-    // A stale session under this id (e.g. a renderer that reused an id after a
-    // crash) is closed before opening a new one. A close that FAILS does not
-    // clear the way: the daemon may still hold the document, and the next open
-    // of a path whose failing-close session someone still holds keeps refusing
-    // (workspaceEngineCapture.ts, openYDocSessionTask). Answer read-only with a
-    // retry instead of downgrading to a writable plain editor over it.
-    const existing = engineYDocSessions.get(input.sessionId);
-    if (
-      existing &&
-      !(await releaseEngineYDocSessionEntry(
-        input.sessionId,
-        existing,
-        "stale session replaced",
-      ))
-    ) {
-      return OpenEngineYDocSessionResult.parse({
-        available: false,
-        openTimedOut: true,
-      });
-    }
-    // THIS OPEN IS THE RETRY. A session whose close failed keeps its own id,
-    // and the renderer's "Try again" mints a NEW one, so the release has to be
-    // found by document, not by id. Without this the retry never reaches the
-    // session it is retrying: the daemon answers the fresh one ydoc-session-busy
-    // (workspaceEngineCapture.ts, openYDocSessionTask — a failing-close session
-    // someone still HOLDS keeps refusing), which reads as an ordinary fallback
-    // and puts the writable plain editor back over a document the engine may
-    // still own.
-    for (const [sessionId, entry] of [...engineYDocSessions]) {
-      if (!entry.closeFailed) continue;
-      if (entry.workspaceId !== workspace.workspaceId) continue;
-      if (entry.path !== input.path) continue;
+    // PENDING FROM THE FIRST AWAIT, not from the open. A renderer reload waits
+    // on this registration (prepareForRendererReload), and the releases below
+    // await the daemon: outside it, a reload could finish both its sweeps while
+    // this handler sat in a release, and then this handler would take a daemon
+    // session for a generation that no longer exists. The check after the open
+    // does release that session — but the replacement renderer racing the same
+    // document meanwhile gets ydoc-session-busy, which reads as an ordinary
+    // fallback and puts the writable plain editor over it.
+    const finishPendingOpen = beginPendingEngineYDocOpen(sender.id);
+    try {
+      // A stale session under this id (e.g. a renderer that reused an id after
+      // a crash) is closed before opening a new one. A close that FAILS does
+      // not clear the way: the daemon may still hold the document, and the next
+      // open of a path whose failing-close session someone still holds keeps
+      // refusing (workspaceEngineCapture.ts, openYDocSessionTask). Answer
+      // read-only with a retry instead of a writable plain editor over it.
+      const existing = engineYDocSessions.get(input.sessionId);
       if (
+        existing &&
         !(await releaseEngineYDocSessionEntry(
-          sessionId,
-          entry,
-          "unreleased session retried by a new open",
+          input.sessionId,
+          existing,
+          "stale session replaced",
         ))
       ) {
         return OpenEngineYDocSessionResult.parse({
@@ -8005,9 +7991,31 @@ function registerIpcHandlers(
           openTimedOut: true,
         });
       }
-    }
-    const finishPendingOpen = beginPendingEngineYDocOpen(sender.id);
-    try {
+      // THIS OPEN IS THE RETRY. A session whose close failed keeps its own id,
+      // and the renderer's "Try again" mints a NEW one, so the release has to
+      // be found by document, not by id. Without this the retry never reaches
+      // the session it is retrying: the daemon answers the fresh one
+      // ydoc-session-busy (workspaceEngineCapture.ts, openYDocSessionTask — a
+      // failing-close session someone still HOLDS keeps refusing), which reads
+      // as an ordinary fallback and puts the writable plain editor back over a
+      // document the engine may still own.
+      for (const [sessionId, entry] of [...engineYDocSessions]) {
+        if (!entry.closeFailed) continue;
+        if (entry.workspaceId !== workspace.workspaceId) continue;
+        if (entry.path !== input.path) continue;
+        if (
+          !(await releaseEngineYDocSessionEntry(
+            sessionId,
+            entry,
+            "unreleased session retried by a new open",
+          ))
+        ) {
+          return OpenEngineYDocSessionResult.parse({
+            available: false,
+            openTimedOut: true,
+          });
+        }
+      }
       let session: WorkspaceEngineYDocProviderSession;
       try {
         session = await capture.openYDocSession({

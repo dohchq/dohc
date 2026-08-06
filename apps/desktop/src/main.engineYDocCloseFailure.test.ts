@@ -82,7 +82,7 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     expect(retryAt).toBeLessThan(handler.indexOf("capture.openYDocSession"));
     const retry = handler.slice(
       handler.lastIndexOf("for (const [sessionId, entry]", retryAt),
-      handler.indexOf("beginPendingEngineYDocOpen"),
+      handler.indexOf("let session:"),
     );
     // Marked entries only: a LIVE session for this path belongs to whoever
     // opened it, and closing it here would tear down another window's editor.
@@ -90,6 +90,31 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     expect(retry).toContain("entry.workspaceId !== workspace.workspaceId");
     expect(retry).toContain("entry.path !== input.path");
     expect(retry).toContain("openTimedOut: true");
+  });
+
+  it("counts as a pending open from its FIRST await, not from the open", () => {
+    // A reload waits on the pending-open registration. Registering it after the
+    // releases leaves their awaits outside that wait: prepareForRendererReload
+    // can finish both sweeps and reload while this handler sits in a release,
+    // and the handler then takes a daemon session for a generation that no
+    // longer exists — while the replacement renderer's open of the same
+    // document gets ydoc-session-busy, an ordinary fallback to the writable
+    // plain editor.
+    const handler = handlerSource("engineYDocOpen");
+    const beginAt = handler.indexOf("beginPendingEngineYDocOpen(");
+    const tryAt = handler.indexOf("try {", beginAt);
+    expect(beginAt).toBeGreaterThan(-1);
+    expect(tryAt).toBeGreaterThan(beginAt);
+    // Both releases are inside that try — so is every early return they take,
+    // which is what keeps the one `finally` covering all of them.
+    expect(handler.indexOf("stale session replaced")).toBeGreaterThan(tryAt);
+    expect(
+      handler.indexOf("unreleased session retried by a new open"),
+    ).toBeGreaterThan(tryAt);
+    expect(handler.split("finishPendingOpen();").length - 1).toBe(1);
+    expect(handler.indexOf("finishPendingOpen();")).toBeGreaterThan(
+      handler.lastIndexOf("openTimedOut: true"),
+    );
   });
 
   it("registers the sender cleanup hook before the kind check", () => {
