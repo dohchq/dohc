@@ -126,10 +126,35 @@ test("a run root without the sentinel fails instead of reporting clean", async (
 
     assert.equal(report.status, "FAIL", "no sentinel means nothing was looked at");
     assert.match(report.reason, new RegExp(SCRATCH_SENTINEL.replace(".", "\\.")));
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+// A test that removes and recreates the handed-down root loses the sentinel and
+// can still leave a tree. The row's caller generates this root per run and makes
+// it moments before the tests, so it is the caller's to reclaim — and this is
+// the last point in the gate that can. An earlier version of this file asserted
+// the opposite, on the reasoning that a row should not delete a tree it does not
+// own. That reasoning belonged to the version where the row re-derived the path
+// and could land on an unrelated directory; the root is handed down now, so the
+// only tree this can reach is the one the caller made.
+test("a run root without the sentinel is still reclaimed, tree and all", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
+  const runRoot = join(parent, "run");
+  try {
+    const leftBehind = join(runRoot, "leaked-workspace");
+    await mkdir(leftBehind, { recursive: true });
+    await writeFile(join(leftBehind, "engine.db"), "leaked");
+
+    const report = await inspectScratchRun(runRoot);
+
+    assert.equal(report.status, "FAIL");
+    assert.match(report.reason, /run root reclaimed/);
     assert.equal(
       existsSync(runRoot),
-      true,
-      "a root this row does not own must not be deleted by it",
+      false,
+      "a sentinel-less root is still the caller's tree, and leaving it is the leak",
     );
   } finally {
     await rm(parent, { recursive: true, force: true });

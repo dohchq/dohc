@@ -2,7 +2,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import * as Y from "yjs";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import {
@@ -25,8 +25,6 @@ import { createTestScratch } from "./testTemp";
 // `cargo build` (#390). The shared gate also checks apps/desktop/target/debug,
 // which is where the app under test and the staged-binary harnesses put it.
 const engine = requireEngineBinaryOrSkip();
-const roots: string[] = [];
-
 async function waitForPathMoments(
   capture: ReturnType<typeof createWorkspaceEngineCapture>,
   path: string,
@@ -53,19 +51,10 @@ async function waitForPathMoments(
   throw new Error(`Timed out waiting for ${count} captured moments for ${path}.`);
 }
 
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map(
-      async (root) => await rm(root, { recursive: true, force: true }),
-    ),
-  );
-});
-
 it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-e2e-");
-    roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
     await writeFile(
@@ -158,7 +147,6 @@ it.skipIf(engine.missing)(
   "keeps an edit made outside dohc when the open document closes",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-drift-");
-    roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
     await writeFile(
@@ -234,7 +222,6 @@ it.skipIf(engine.missing)(
   "preserves a settled watcher capture across stopAll and a new daemon process",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-stop-");
-    roots.push(root);
     const workspace: CreatedWorkspace = {
       workspaceId: "capture-rust-stop",
       rootPath: root,
@@ -334,7 +321,6 @@ it.skipIf(engine.missing)(
   "reports refusals from the real daemon under their domain error codes",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-codes-");
-    roots.push(root);
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
@@ -373,7 +359,6 @@ it.skipIf(engine.missing)(
   "closes clean when the daemon's capture reached an outside edit first",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-race-");
-    roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
     await writeFile(
@@ -494,7 +479,6 @@ it.skipIf(engine.missing || process.platform !== "win32")(
   "surfaces a blocked save while a file is locked and recovers on the next settle",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-lock-");
-    roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
     await writeFile(
@@ -595,7 +579,6 @@ it.skipIf(engine.missing)(
   "keeps the close loud when unsettled edits meet an already-moved head",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-loud-");
-    roots.push(root);
     const markerDirectory = join(root, ".dohc", "engine");
     await mkdir(markerDirectory, { recursive: true });
     await writeFile(
@@ -686,7 +669,6 @@ it.skipIf(engine.missing)(
   "refuses a live session for a path the version does not have, and still opens a new file",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-absent-");
-    roots.push(root);
     const lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,

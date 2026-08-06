@@ -1,11 +1,4 @@
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  rmSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -42,7 +35,6 @@ const suiteScratch = new Set<string>();
 // sees a JS run at all.
 const unresolvedScratch = new Set<string>();
 let startup: Promise<void> | undefined;
-let syncStartupDone = false;
 let processRunId: string | undefined;
 
 function nativeTmpdir(): string {
@@ -218,28 +210,20 @@ export async function isIdleSince(path: string, nowMs: number): Promise<boolean>
   return true;
 }
 
-function isIdleSinceSync(path: string, nowMs: number): boolean {
-  let metadata;
-  try {
-    metadata = lstatSync(path);
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return true;
-    return false;
-  }
-  if (nowMs - metadata.mtimeMs <= MAX_RUN_AGE_MS) return false;
-  if (!metadata.isDirectory()) return true;
-  let names: string[];
-  try {
-    names = readdirSync(path);
-  } catch {
-    return false;
-  }
-  return names.every((name) => isIdleSinceSync(join(path, name), nowMs));
-}
-
+// `.` and `..` are not names, they are directions. `join` folds them away
+// before `mkdtemp` appends its suffix, so a `.` prefix would put the scratch
+// beside the run root and a `..` prefix beside the managed parent — loose in
+// %TEMP%, which is the shape of #605 itself. Neither the reporter, which reads
+// the run root's children, nor the sweep, which reads run roots, would ever see
+// it. They fall back like every other prefix that cannot be a name.
+//
+// The Rust twin has no such hole: it appends `-{sequence}-{nonce}` to the name
+// before joining, so `..` becomes the ordinary filename `..-0-<nonce>`.
+// `a_dot_name_stays_inside_the_run_root` holds that.
 function safePrefix(prefix: string): string {
   const safe = prefix.replace(/[^A-Za-z0-9._-]/gu, "-");
-  return safe.length > 0 ? safe : "scratch-";
+  const isDirection = safe === "." || safe === "..";
+  return safe.length > 0 && !isDirection ? safe : "scratch-";
 }
 
 async function ensureScratchRun(): Promise<void> {
@@ -250,50 +234,12 @@ async function ensureScratchRun(): Promise<void> {
   await startup;
 }
 
+// Only the run root, never a sweep. `testSetup.ts` awaits `sweepOldTestScratch`
+// at module scope, and vitest evaluates a setup file before the test module
+// that needs this — so by the time any synchronous creator runs, the sweep has
+// already happened. Playwright never reaches here: its helpers are async.
 function ensureScratchRunSync(): void {
-  if (syncStartupDone) return;
-  sweepOldTestScratchSync();
   mkdirSync(testScratchRunRoot(), { recursive: true });
-  syncStartupDone = true;
-}
-
-function sweepOldTestScratchSync(): void {
-  const parent = join(nativeTmpdir(), SCRATCH_PARENT);
-  const currentRun = testScratchRunRoot();
-  let names: string[];
-  try {
-    names = readdirSync(parent);
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return;
-    throw error;
-  }
-  const nowMs = Date.now();
-  for (const name of names) {
-    const path = join(parent, name);
-    if (path === currentRun) continue;
-    let metadata;
-    try {
-      metadata = lstatSync(path);
-    } catch (error) {
-      if (errorCode(error) === "ENOENT") continue;
-      throw error;
-    }
-    if (!metadata.isDirectory() || !isIdleSinceSync(path, nowMs)) {
-      continue;
-    }
-    try {
-      rmSync(path, {
-        recursive: true,
-        force: true,
-        maxRetries: process.platform === "win32" ? WINDOWS_CLEANUP_ATTEMPTS - 1 : 0,
-        retryDelay: WINDOWS_CLEANUP_DELAY_MS,
-      });
-    } catch (error) {
-      console.error(
-        `scratch sweep could not remove aged run ${path} after ${cleanupAttempts()} attempts: ${errorMessage(error)}`,
-      );
-    }
-  }
 }
 
 async function cleanupRegistered(paths: Set<string>): Promise<void> {
@@ -303,17 +249,15 @@ async function cleanupRegistered(paths: Set<string>): Promise<void> {
 }
 
 async function removeTreeWithRetry(path: string): Promise<Error | undefined> {
-  const attempts = cleanupAttempts();
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      await rm(path, { recursive: true, force: true });
-      return undefined;
-    } catch (error) {
-      if (attempt === attempts) return toError(error);
-      await new Promise((resolve) =>
-        setTimeout(resolve, WINDOWS_CLEANUP_DELAY_MS * attempt),
-      );
-    }
+  try {
+    await rm(path, {
+      recursive: true,
+      force: true,
+      maxRetries: cleanupAttempts() - 1,
+      retryDelay: WINDOWS_CLEANUP_DELAY_MS,
+    });
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
   }
   return undefined;
 }
@@ -349,6 +293,3 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function toError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
-}

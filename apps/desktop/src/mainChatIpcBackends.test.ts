@@ -1,4 +1,3 @@
-import { rm } from "node:fs/promises";
 import {
   ChatsLoopbackEngine,
   type Request,
@@ -7,7 +6,7 @@ import {
 import {
   type LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./ipc/channels";
 import {
   createChatChannelIpcHandler,
@@ -278,20 +277,9 @@ function loopbackClient(engine: ChatsLoopbackEngine) {
   };
 }
 
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map(async (root) => {
-      await rm(root, { recursive: true, force: true });
-    }),
-  );
-});
-
 describe("main chat IPC live backend", () => {
     it("round_trips_channels_threads_messages_read_decision_reaction_bookmark_and_follow", async () => {
       const rootPath = await createTestScratch("dohc-main-chat-live-");
-      roots.push(rootPath);
       const workspace = {
         workspaceId: "workspace-live",
         rootPath,
@@ -442,7 +430,6 @@ describe("main chat IPC live backend", () => {
 describe("desktop linked chat factory", () => {
   it("keeps_file_thread_path_hints_on_the_live_list_threads_shape", async () => {
     const rootPath = await createTestScratch("dohc-live-chat-hint-");
-    roots.push(rootPath);
     const workspace = {
       workspaceId: "workspace-live-hint",
       rootPath,
@@ -485,7 +472,6 @@ describe("desktop linked chat factory", () => {
 
   it("bounds_file_thread_path_hint_enrichment_requests", async () => {
     const rootPath = await createTestScratch("dohc-live-chat-hint-bound-");
-    roots.push(rootPath);
     const workspace = {
       workspaceId: "workspace-live-hint-bound",
       rootPath,
@@ -572,7 +558,6 @@ describe("desktop linked chat factory", () => {
 
   it("rebinds_read_calls_after_transport_loss_without_retrying_writes", async () => {
     const rootPath = await createTestScratch("dohc-live-chat-read-retry-");
-    roots.push(rootPath);
     const workspace = {
       workspaceId: "workspace-live-read-retry",
       rootPath,

@@ -78,11 +78,6 @@ impl ScratchDir {
     pub fn path(&self) -> &Path {
         &self.path
     }
-
-    /// Return a path below the scratch directory.
-    pub fn join(&self, path: impl AsRef<Path>) -> PathBuf {
-        self.path.join(path)
-    }
 }
 
 impl Deref for ScratchDir {
@@ -324,22 +319,17 @@ mod tests {
     /// deliberate and expected in the test log.
     #[test]
     fn a_panicking_test_still_removes_its_scratch_directory() {
-        let recorded = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let sink = std::sync::Arc::clone(&recorded);
+        let scratch = ScratchDir::new_named("panic-test").expect("scratch");
+        let path = scratch.path().to_owned();
+        fs::write(scratch.join("file.txt"), "content").expect("write fixture");
 
+        // The guard moves into the closure, so the unwind is what drops it.
         let outcome = std::panic::catch_unwind(move || {
-            let scratch = ScratchDir::new_named("panic-test").expect("scratch");
-            *sink.lock().expect("record scratch path") = Some(scratch.path().to_owned());
-            fs::write(scratch.join("file.txt"), "content").expect("write fixture");
+            let _held = scratch;
             panic!("EXPECTED: a simulated test failure holding a live scratch directory");
         });
 
         assert!(outcome.is_err(), "the closure must have panicked");
-        let path = recorded
-            .lock()
-            .expect("read scratch path")
-            .clone()
-            .expect("the panicking closure recorded its scratch path");
         assert!(
             !path.exists(),
             "a panicking test must still remove its scratch directory"
@@ -374,6 +364,24 @@ mod tests {
             resolved, handed_down,
             "the handed-down root must be used verbatim, never re-derived"
         );
+    }
+
+    /// The JS twin's `safePrefix` had to reject `.` and `..` outright, because
+    /// it joins the bare prefix and `join` folds a direction away before
+    /// `mkdtemp` adds its suffix. Nothing here has to reject them, because the
+    /// suffix comes first and `..-0-<nonce>` is an ordinary filename. This
+    /// holds that difference, so the twins cannot drift apart on it.
+    #[test]
+    fn a_dot_name_stays_inside_the_run_root() {
+        for name in ["..", "."] {
+            let scratch = ScratchDir::new_named(name).expect("scratch");
+            let parent = scratch.path().parent().expect("scratch has a parent");
+            assert_eq!(
+                parent,
+                current_run_root().expect("run root"),
+                "a scratch named {name:?} escaped the run root"
+            );
+        }
     }
 
     #[test]

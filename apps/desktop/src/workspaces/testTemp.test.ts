@@ -6,12 +6,13 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   cleanupSuiteTestScratch,
   createTestScratch,
   sweepScratchParent,
+  testScratchRunRoot,
 } from "./testTemp";
 
 const HOUR_MS = 60 * 60 * 1_000;
@@ -54,6 +55,21 @@ describe("test scratch", () => {
     expect(await pathExists(live), "the sweep removed a recent run").toBe(true);
     expect(await pathExists(current), "the sweep removed the current run").toBe(true);
   });
+
+  // `join` folds `.` and `..` away before mkdtemp adds its suffix, so a scratch
+  // named for a direction lands beside the run root, or beside the managed
+  // parent — loose in %TEMP%, seen by neither the reporter nor the sweep.
+  it.each([".", ".."])(
+    "keeps a scratch named %j inside the run root",
+    async (prefix) => {
+      const scratch = await createTestScratch(prefix);
+
+      expect(
+        dirname(scratch),
+        "a prefix that is a direction, not a name, must not move the scratch",
+      ).toBe(testScratchRunRoot());
+    },
+  );
 
   // A link is a leaf, not a door. Reading through one asks about a tree the
   // abandoned run does not own, and the answer pins it: an external target

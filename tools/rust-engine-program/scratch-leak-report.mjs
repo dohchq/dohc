@@ -57,9 +57,14 @@ export async function inspectScratchRun(runRoot) {
   }
 
   if (!names.includes(SCRATCH_SENTINEL)) {
+    // Reclaimed anyway. The caller generates this root per run and creates it
+    // moments before the tests — a test that removed and recreated it loses the
+    // sentinel but can still have left a tree, and this is the last point in
+    // the gate that can remove one.
+    const cleanupFailure = await reclaim(runRoot);
     return {
       status: "FAIL",
-      reason: `scratch run root ${runRoot} has no ${SCRATCH_SENTINEL}, so this is not the tree the run used; "0 entries" here would mean nothing was looked at, not that nothing leaked`,
+      reason: `scratch run root ${runRoot} has no ${SCRATCH_SENTINEL}, so this is not the tree the run used; "0 entries" here would mean nothing was looked at, not that nothing leaked; ${reclamation(cleanupFailure)}`,
       entryCount: 0,
       descendants: 0,
       bytes: 0,
@@ -90,17 +95,8 @@ export async function inspectScratchRun(runRoot) {
   // Reclaim the run root either way. Every test binary has exited by now, so
   // the handles that beat the in-process guards are gone and this succeeds —
   // which is what keeps "a completed gate run leaves nothing" true.
-  let cleanupFailure;
-  try {
-    await rm(runRoot, {
-      recursive: true,
-      force: true,
-      maxRetries: process.platform === "win32" ? 7 : 0,
-      retryDelay: 100,
-    });
-  } catch (error) {
-    cleanupFailure = error instanceof Error ? error.message : String(error);
-  }
+  const cleanupFailure = await reclaim(runRoot);
+  const measured = { entryCount, descendants, bytes, leaked };
 
   // A measurement that could not finish is reported ahead of the limits, and it
   // carries the reclamation outcome with it: the two facts a reader needs are
@@ -108,11 +104,8 @@ export async function inspectScratchRun(runRoot) {
   if (measurementFailure) {
     return {
       status: "FAIL",
-      reason: `scratch measurement failed: ${measurementFailure}; counted at least ${observed(entryCount, descendants, bytes)} before stopping; ${cleanupFailure ? `and the run root could not be reclaimed: ${cleanupFailure}` : "run root reclaimed"}; leaked directories: ${leaked.join(", ")}`,
-      entryCount,
-      descendants,
-      bytes,
-      leaked,
+      reason: `scratch measurement failed: ${measurementFailure}; counted at least ${observed(entryCount, descendants, bytes)} before stopping; ${reclamation(cleanupFailure)}; leaked directories: ${leaked.join(", ")}`,
+      ...measured,
     };
   }
 
@@ -122,10 +115,7 @@ export async function inspectScratchRun(runRoot) {
     return {
       status: "FAIL",
       reason: `run root could not be reclaimed after the run: ${cleanupFailure}; observed ${observed(entryCount, descendants, bytes)}; leaked directories: ${leaked.join(", ")}`,
-      entryCount,
-      descendants,
-      bytes,
-      leaked,
+      ...measured,
     };
   }
 
@@ -140,10 +130,7 @@ export async function inspectScratchRun(runRoot) {
     return {
       status: "FAIL",
       reason: `scratch ${breached}; observed ${observed(entryCount, descendants, bytes)}; leaked directories: ${leaked.join(", ")}; run root reclaimed after measurement`,
-      entryCount,
-      descendants,
-      bytes,
-      leaked,
+      ...measured,
     };
   }
 
@@ -153,10 +140,7 @@ export async function inspectScratchRun(runRoot) {
       entryCount === 0
         ? `0 entries, 0 bytes (${SCRATCH_SENTINEL} confirmed the tree was walked)`
         : `${observed(entryCount, descendants, bytes)} left by shutdown races, within the ${LEAK_ENTRY_LIMIT}-entry and ${LEAK_BYTE_LIMIT}-byte limits; run root reclaimed`,
-    entryCount,
-    descendants,
-    bytes,
-    leaked,
+    ...measured,
   };
 }
 
@@ -168,6 +152,29 @@ export async function inspectScratchRun(runRoot) {
 // for one yet, and the printed number is how that evidence accumulates.
 function observed(entryCount, descendants, bytes) {
   return `${entryCount} entries (${descendants} descendants) and ${bytes} bytes`;
+}
+
+// Remove the run root, and report why not. Every return path that has reached
+// the tree runs this: whatever else the row says, a tree left on disk after the
+// gate is the leak the row exists to report.
+async function reclaim(runRoot) {
+  try {
+    await rm(runRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 7 : 0,
+      retryDelay: 100,
+    });
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return undefined;
+}
+
+function reclamation(cleanupFailure) {
+  return cleanupFailure
+    ? `and the run root could not be reclaimed: ${cleanupFailure}`
+    : "run root reclaimed";
 }
 
 // Bytes and every file and directory below `path`, itself included. The count
