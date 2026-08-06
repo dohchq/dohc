@@ -1,18 +1,18 @@
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   rmSync,
-  statSync,
 } from "node:fs";
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
   rm,
   rmdir,
-  stat,
 } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -144,7 +144,12 @@ export async function sweepScratchParent(
     if (path === currentRun) continue;
     let metadata;
     try {
-      metadata = await stat(path);
+      // `lstat` for the same reason `isIdleSince` uses it, and for one more: a
+      // cyclic link left by a killed run answers `stat` with ELOOP, which is
+      // not ENOENT, so the sweep would throw and every later test process would
+      // fail its startup sweep on it. A link is not a run root — skip it, as
+      // the Rust twin's `entry.file_type()` already does.
+      metadata = await lstat(path);
     } catch (error) {
       if (errorCode(error) === "ENOENT") continue;
       throw error;
@@ -185,10 +190,16 @@ function scratchRunId(): string {
 /// deeper inside is written. A soak that spends a day writing into a workspace
 /// it created in its first minute leaves the root looking untouched, so reading
 /// only the root would delete live work. Stop at the first recent thing found.
+///
+/// `lstat`, never `stat`: a link is a leaf here, exactly as `symlink_metadata`
+/// makes it one in the Rust twin. Following one asks about a tree this run does
+/// not own — an external target with recent files would pin an abandoned run
+/// forever, and a cycle answers `ELOOP`, which reads as "still busy" and pins it
+/// the same way.
 export async function isIdleSince(path: string, nowMs: number): Promise<boolean> {
   let metadata;
   try {
-    metadata = await stat(path);
+    metadata = await lstat(path);
   } catch (error) {
     if (errorCode(error) === "ENOENT") return true;
     return false;
@@ -210,7 +221,7 @@ export async function isIdleSince(path: string, nowMs: number): Promise<boolean>
 function isIdleSinceSync(path: string, nowMs: number): boolean {
   let metadata;
   try {
-    metadata = statSync(path);
+    metadata = lstatSync(path);
   } catch (error) {
     if (errorCode(error) === "ENOENT") return true;
     return false;
@@ -262,7 +273,7 @@ function sweepOldTestScratchSync(): void {
     if (path === currentRun) continue;
     let metadata;
     try {
-      metadata = statSync(path);
+      metadata = lstatSync(path);
     } catch (error) {
       if (errorCode(error) === "ENOENT") continue;
       throw error;

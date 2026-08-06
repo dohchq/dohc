@@ -256,7 +256,13 @@ fn is_idle_since(path: &Path, now: SystemTime, max_age: Duration) -> bool {
     let Ok(entries) = fs::read_dir(path) else {
         return false;
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        // An entry this process cannot read is not an entry that is idle. Every
+        // other error here already keeps the run; discarding these would let the
+        // sweep delete a tree whose liveness it never established.
+        let Ok(entry) = entry else {
+            return false;
+        };
         if !is_idle_since(&entry.path(), now, max_age) {
             return false;
         }

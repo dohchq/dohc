@@ -1,4 +1,11 @@
-import { mkdir, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  lutimes,
+  mkdir,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -46,6 +53,41 @@ describe("test scratch", () => {
     expect(await pathExists(old), "the sweep must remove an aged run").toBe(false);
     expect(await pathExists(live), "the sweep removed a recent run").toBe(true);
     expect(await pathExists(current), "the sweep removed the current run").toBe(true);
+  });
+
+  // A link is a leaf, not a door. Reading through one asks about a tree the
+  // abandoned run does not own, and the answer pins it: an external target
+  // still being written to reads as recent work, so the dead run is never
+  // swept. The Rust twin uses `symlink_metadata` and this must match it.
+  // `symlink(..., "junction")` is a junction on Windows — no privilege needed —
+  // and an ordinary symlink everywhere else, where the type argument is ignored.
+  it("does not follow a link out of an abandoned run", async () => {
+    const harness = await createTestScratch("linked-activity-");
+    const parent = join(harness, "runs");
+    const abandoned = join(parent, "killed-run");
+    const outside = join(harness, "someone-elses-workspace");
+    await mkdir(abandoned, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "engine.db"), "live");
+    const link = join(abandoned, "link-to-live-work");
+    await symlink(outside, link, "junction");
+
+    const nowMs = Date.now();
+    // The link and the run are ancient; only the link's target is recent.
+    const when = new Date(nowMs - 49 * HOUR_MS);
+    await lutimes(link, when, when);
+    await age(abandoned, nowMs, 49);
+
+    await sweepScratchParent(parent, join(parent, "current-run"), nowMs);
+
+    expect(
+      await pathExists(abandoned),
+      "recent work behind a link is not this run's work, so the run is idle",
+    ).toBe(false);
+    expect(
+      await pathExists(join(outside, "engine.db")),
+      "the sweep must never delete through a link",
+    ).toBe(true);
   });
 
   // Every worker of a vitest run shares one handed-down root, and each test

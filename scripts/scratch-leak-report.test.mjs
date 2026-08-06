@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,13 +9,20 @@ import {
   inspectScratchRun,
 } from "../tools/rust-engine-program/scratch-leak-report.mjs";
 
+// The payload is a length, not content: `inspectScratchRun` reads `lstat().size`
+// and never opens a file. `truncate` sets that length without writing the
+// bytes, so the byte-limit case costs no disk I/O — 400 MiB of real writes in a
+// unit test is slow wherever a virus scanner watches %TEMP%, and fails outright
+// on a disk already low, which is the very condition this row exists to report.
 async function plant(runRoot, count, bytesEach) {
   await mkdir(runRoot, { recursive: true });
   await writeFile(join(runRoot, SCRATCH_SENTINEL), "run-id");
   for (let index = 0; index < count; index++) {
     const directory = join(runRoot, `leaked-workspace-${index}`);
     await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, "payload.bin"), Buffer.alloc(bytesEach));
+    const payload = join(directory, "payload.bin");
+    await writeFile(payload, "");
+    await truncate(payload, bytesEach);
   }
 }
 
