@@ -17,6 +17,7 @@ import {
 import type { Request } from "../ydoc/generated/Request";
 import type { Response } from "../ydoc/generated/Response";
 import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import { EngineClientError } from "./engineClient";
 import {
   EngineDaemonUnavailableError,
   type EngineDaemonClient,
@@ -29,6 +30,15 @@ import {
   isEngineWorkspaceOpenRefusedError,
   WORKSPACE_OPEN_DEADLINE_MS,
 } from "./engineWorkspaceSessions";
+
+// What the real client throws when the daemon's transport drops
+// (`engineClient.ts` — "transport-error"). The retry gate duck-types on
+// `.code`, so a bare `{ code: "transport-error" }` also passes it; using the
+// real class keeps the ladder under test from depending on a value that is
+// looser than anything the transport can produce.
+function transportFailure(): EngineClientError {
+  return new EngineClientError("transport-error", "Engine transport failed.");
+}
 
 const roots: string[] = [];
 
@@ -191,7 +201,7 @@ describe("EngineWorkspaceSessions", () => {
         { workspaceId: "workspace", rootPath },
         async () => {
           mutationAttempts += 1;
-          throw { code: "transport-error" };
+          throw transportFailure();
         },
       ),
     ).rejects.toMatchObject({ code: "transport-error" });
@@ -770,7 +780,7 @@ describe("EngineWorkspaceSessions", () => {
             async () => {
               attempts += 1;
               nowMs += 2_500;
-              throw { code: "transport-error" };
+              throw transportFailure();
             },
             { retryTransportErrors: true },
           ),
@@ -855,7 +865,7 @@ describe("EngineWorkspaceSessions", () => {
             async () => {
               attempts += 1;
               nowMs += 2_450;
-              throw { code: "transport-error" };
+              throw transportFailure();
             },
             { retryTransportErrors: true },
           ),
@@ -999,7 +1009,7 @@ describe("EngineWorkspaceSessions", () => {
               // recovery spent) and ends outside it, which is the case this
               // pins.
               nowMs += 3_000;
-              throw { code: "transport-error" };
+              throw transportFailure();
             },
             { retryTransportErrors: true },
           ),
@@ -1169,7 +1179,7 @@ describe("EngineWorkspaceSessions", () => {
               nowMs += 3_000;
               // Quit arrives while the LAST allowed attempt is in flight.
               if (nowMs >= 6_000) sessions.beginShutdown();
-              throw { code: "transport-error" };
+              throw transportFailure();
             },
             { retryTransportErrors: true },
           ),
@@ -1249,14 +1259,14 @@ describe("EngineWorkspaceSessions", () => {
           await sessions
             .run(workspace, async () => {
               nowMs += 2_000;
-              throw { code: "transport-error" };
+              throw transportFailure();
             })
             .catch(() => undefined);
           return await sessions.run(
             workspace,
             async () => {
               nowMs += 2_000;
-              throw { code: "transport-error" };
+              throw transportFailure();
             },
             { retryTransportErrors: true },
           );
@@ -1307,7 +1317,7 @@ describe("EngineWorkspaceSessions", () => {
               // A slow FIRST attempt (2s) the budget must not charge, then
               // failures that spend it.
               nowMs += 2_000;
-              throw { code: "transport-error" };
+              throw transportFailure();
             },
             { retryTransportErrors: true },
           ),
@@ -1352,7 +1362,7 @@ describe("EngineWorkspaceSessions", () => {
             // hits one transport blip. Attempt 2 binds immediately.
             if (attempts === 1) {
               nowMs += 10_000;
-              throw { code: "transport-error" };
+              throw transportFailure();
             }
             return "bound";
           },
@@ -1392,7 +1402,7 @@ describe("EngineWorkspaceSessions", () => {
             workspace,
             async () => {
               attempts += 1;
-              if (attempts === 1) throw { code: "transport-error" };
+              if (attempts === 1) throw transportFailure();
               nowMs += 5_000;
               return "recovered";
             },
@@ -1464,7 +1474,7 @@ describe("EngineWorkspaceSessions", () => {
           // succeeds — after the whole window has gone by.
           if (opens === 1) {
             nowMs += 100;
-            throw { code: "transport-error" };
+            throw transportFailure();
           }
           nowMs += 5_000;
           return { id: request.id, result: { workspace: "rebind-spends" } };
@@ -1552,7 +1562,7 @@ describe("EngineWorkspaceSessions", () => {
             workspace,
             async () => {
               attempts += 1;
-              if (attempts === 1) throw { code: "transport-error" };
+              if (attempts === 1) throw transportFailure();
               return "recovered";
             },
             { retryTransportErrors: true },
@@ -1698,7 +1708,7 @@ describe("EngineWorkspaceSessions", () => {
           async () => {
             attempts += 1;
             // One failure starts the budget's clock, and the retry binds.
-            if (attempts === 1) throw { code: "transport-error" };
+            if (attempts === 1) throw transportFailure();
             return "bound";
           },
           { retryTransportErrors: true },
@@ -1744,7 +1754,7 @@ describe("EngineWorkspaceSessions", () => {
                   attempts += 1;
                   // The daemon blips once; an accepted write retries through
                   // it even at quit.
-                  if (attempts === 1) throw { code: "transport-error" };
+                  if (attempts === 1) throw transportFailure();
                   return "settled";
                 },
                 { retryTransportErrors: true },
@@ -1835,7 +1845,7 @@ describe("EngineWorkspaceSessions", () => {
           await sessions.run(
             workspace,
             async () => {
-              throw { code: "transport-error" };
+              throw transportFailure();
             },
             { retryTransportErrors: true },
           ),
@@ -1999,7 +2009,7 @@ describe("EngineWorkspaceSessions", () => {
                 attempts += 1;
                 // Quit lands while the first attempt is in flight.
                 if (attempts === 1) sessions.beginShutdown();
-                throw { code: "transport-error" };
+                throw transportFailure();
               },
               { retryTransportErrors: true },
             ),
@@ -2068,7 +2078,7 @@ describe("EngineWorkspaceSessions", () => {
           workspace,
           async () => {
             attempts += 1;
-            if (attempts < 3) throw { code: "transport-error" };
+            if (attempts < 3) throw transportFailure();
             return "landed";
           },
           { retryTransportErrors: true },
@@ -2115,7 +2125,7 @@ describe("EngineWorkspaceSessions", () => {
           workspace,
           async () => {
             attempts += 1;
-            if (nowMs < 100) throw { code: "transport-error" };
+            if (nowMs < 100) throw transportFailure();
             return "landed";
           },
           { retryTransportErrors: true },

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { EngineRequestError } from "../daemon/engineClient";
 import type { Request } from "../ydoc/generated/Request";
 import type { Response } from "../ydoc/generated/Response";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
@@ -865,14 +866,12 @@ describe("ChatsLiveAdapter", () => {
     async (retry, disposition) => {
       const refusalClient: MinimalDaemonClient = {
         close: () => undefined,
-        async sendRequest(): Promise<Response> {
-          throw {
-            wireError: {
-              code: "OVERLOADED",
-              message: "busy",
-              retry,
-            },
-          };
+        async sendRequest(request): Promise<Response> {
+          throw new EngineRequestError(request.id, {
+            code: "OVERLOADED",
+            message: "busy",
+            retry,
+          });
         },
       };
 
