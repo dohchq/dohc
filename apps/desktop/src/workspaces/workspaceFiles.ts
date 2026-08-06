@@ -323,7 +323,9 @@ function collisionVariants(
  * read as a length refusal, walked the shorter rungs, and was counted as
  * SKIPPED instead of aborting the batch. Two copies of one fact, disagreeing.
  *
- * "Could" is as far as arithmetic gets for ENOENT. See `bothStillThere`.
+ * "Could" is as far as arithmetic gets for ENOENT, so the copy loop asks the
+ * filesystem first and only reaches here when both ends are there. See
+ * `missingEnd`.
  */
 export function couldBeLengthRefusal(
   code: string | undefined,
@@ -347,20 +349,48 @@ export function couldBeLengthRefusal(
 // budget silently counted that as `skipped`, and a user does not notice a
 // skipped line.
 //
-// So ask, exactly as the ladder does for the rename. Only on the ambiguous
-// branch: ENAMETOOLONG never reaches here, and neither does any other errno.
-async function bothStillThere(source: string, absDir: string): Promise<boolean> {
+// So ask, exactly as `copyFile` asks: `stat`, which FOLLOWS the source link,
+// because that is what the copy did. An earlier revision asked `lstat`, which
+// answers about the LINK -- so a source that was a symlink to a missing target
+// read as "still there", its ENOENT was charged to length, and the broken link
+// was skipped.
+//
+// `null` means both ends are there, so the ENOENT is about the composed path
+// and the ladder may try a shorter name.
+type MissingEnd = "source" | "danglingLink" | "destination";
+
+async function missingEnd(
+  source: string,
+  absDir: string,
+): Promise<MissingEnd | null> {
   const [sourceThere, dirThere] = await Promise.all([
-    lstat(source).then(
+    stat(source).then(
       () => true,
       () => false,
     ),
-    lstat(absDir).then(
+    stat(absDir).then(
       () => true,
       () => false,
     ),
   ]);
-  return sourceThere && dirThere;
+  if (!dirThere) return "destination";
+  if (sourceThere) return null;
+  // Say WHICH nothing the source resolved to. A dangling link is still at the
+  // path the user picked, so "no such file" alone sends them to look at
+  // something they can plainly see.
+  const link = await lstat(source).then(
+    (entry) => entry.isSymbolicLink(),
+    () => false,
+  );
+  return link ? "danglingLink" : "source";
+}
+
+// What the user gets to read when their pick was a link to nothing. A bare
+// ENOENT would name a path that is still right there, so it says which part is
+// missing and what to import instead.
+function danglingLinkRefusal(source: string): string {
+  const name = basename(source);
+  return `dohc did not import ${name}. ${name} is a symbolic link, and the file it points to is missing. Import that file instead.`;
 }
 
 // Why a trash ladder stopped before its next rung. Three outcomes, not two:
@@ -446,11 +476,18 @@ async function copyWithoutOverwrite(
         // EEXIST is the collision itself: take the next attempt NUMBER, not a
         // shorter spelling of this one.
         if (code === "EEXIST") break;
+        // ENOENT is the one code that also means something vanished, so ask
+        // before any arithmetic reads it as length. A missing source or
+        // destination folder is a real failure and must surface, not be
+        // shortened into a skip.
+        if (code === "ENOENT") {
+          const missing = await missingEnd(source, absDir);
+          if (missing === "danglingLink") {
+            throw new Error(danglingLinkRefusal(source), { cause: error });
+          }
+          if (missing) throw error;
+        }
         if (!couldBeLengthRefusal(code, candidate, maxEntryChars)) throw error;
-        // "Could" is not enough for an ENOENT: it is the one code that also
-        // means something vanished. A missing source or destination folder is
-        // a real failure and must surface, not be shortened into a skip.
-        if (code === "ENOENT" && !(await bothStillThere(source, absDir))) throw error;
         // No shorter rung left: a name this filesystem cannot hold skips the
         // source instead of aborting the batch.
         if (rung === candidates.length - 1) return null;

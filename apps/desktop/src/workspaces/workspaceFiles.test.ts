@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import {
+  lstat,
   mkdtemp,
   mkdir,
   rm,
@@ -903,6 +904,67 @@ describe("import surfaces a vanished source instead of skipping it", () => {
       await expect(copyIntoWorkspace(root, [missing])).rejects.toMatchObject({
         code: "ENOENT",
       });
+    } finally {
+      await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
+        () => undefined,
+      );
+    }
+  });
+
+  // The narrowest instance of the same defect: the check and the copy
+  // disagreed about what "exists" means. `copyFile` FOLLOWS the source link and
+  // answered ENOENT for a link whose target is gone; the guard asked `lstat`,
+  // which answers about the LINK, said the source was still there, and let the
+  // ladder shorten the name until the source counted as skipped.
+  //
+  // Mutation: ask `lstat` for the source again and this test fails -- on
+  // Windows the broken link is skipped, elsewhere it throws a bare ENOENT that
+  // names a path the user can plainly see.
+  it("names a dangling symbolic link instead of skipping it", async () => {
+    const base = await mkdtemp(join(tmpdir(), "dohc-dangling-"));
+    try {
+      const root = join(
+        base,
+        ...Array.from({ length: 8 }, (_, index) => `nested-folder-${index}`),
+      );
+      await mkdir(root, { recursive: true });
+      // Over the legacy budget for this folder, which is what sent this ENOENT
+      // down the shorten-the-name ladder instead of surfacing it.
+      const name = `${"n".repeat(120)}.md`;
+      expect(name.length).toBeGreaterThan(259 - root.length - 1);
+      const source = join(base, name);
+      await symlink(join(base, "never-existed.md"), source, "file");
+      // The link itself is right there -- that is why lstat got it wrong.
+      expect((await lstat(source)).isSymbolicLink()).toBe(true);
+
+      await expect(copyIntoWorkspace(root, [source])).rejects.toThrow(
+        /symbolic link/,
+      );
+    } finally {
+      await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
+        () => undefined,
+      );
+    }
+  });
+
+  // A link whose target IS there is an ordinary source: the dialog path
+  // deliberately follows it, so it still imports and still gets shortened.
+  it("still imports through a symbolic link whose target exists", async () => {
+    const base = await mkdtemp(join(tmpdir(), "dohc-livelink-"));
+    try {
+      const root = join(base, "ws");
+      await mkdir(root, { recursive: true });
+      const name = `${"n".repeat(120)}.md`;
+      const target = join(base, "target.md");
+      await writeFile(target, "keep me");
+      const source = join(base, name);
+      await symlink(target, source, "file");
+      // A collision forces the variant path, where the ladder lives.
+      await writeFile(join(root, name), "already here");
+
+      const outcome = await copyIntoWorkspace(root, [source]);
+      expect(outcome.skipped).toBe(0);
+      expect(outcome.imported).toHaveLength(1);
     } finally {
       await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
         () => undefined,
