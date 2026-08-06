@@ -308,6 +308,11 @@ async function removeTreeWithRetry(path: string): Promise<Error | undefined> {
 }
 
 async function removeEmptyRunRoot(): Promise<void> {
+  // A handed-down root belongs to whoever handed it down. The Rust gate writes
+  // a sentinel into it and reclaims it once every test binary has exited, and
+  // the Rust helper never removes a run root either. One suite removing a root
+  // its sibling workers still allocate under would ENOENT their next mkdtemp.
+  if (process.env.DOHC_TEST_SCRATCH_ROOT) return;
   try {
     await rmdir(testScratchRunRoot());
   } catch (error) {

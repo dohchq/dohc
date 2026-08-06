@@ -48,6 +48,7 @@ export async function inspectScratchRun(runRoot) {
         status: "FAIL",
         reason: `scratch run root ${runRoot} does not exist, so nothing was inspected; the tests wrote somewhere else and this row would otherwise report a clean run it never looked at`,
         entryCount: 0,
+        descendants: 0,
         bytes: 0,
         leaked: [],
       };
@@ -60,6 +61,7 @@ export async function inspectScratchRun(runRoot) {
       status: "FAIL",
       reason: `scratch run root ${runRoot} has no ${SCRATCH_SENTINEL}, so this is not the tree the run used; "0 entries" here would mean nothing was looked at, not that nothing leaked`,
       entryCount: 0,
+      descendants: 0,
       bytes: 0,
       leaked: names.slice(0, 5),
     };
@@ -67,8 +69,11 @@ export async function inspectScratchRun(runRoot) {
 
   names = names.filter((name) => name !== SCRATCH_SENTINEL);
   let bytes = 0;
+  let descendants = 0;
   for (const name of names) {
-    bytes += await treeBytes(join(runRoot, name));
+    const tree = await measureTree(join(runRoot, name));
+    bytes += tree.bytes;
+    descendants += tree.entries;
   }
   const entryCount = names.length;
   const leaked = names.slice(0, 5);
@@ -93,8 +98,9 @@ export async function inspectScratchRun(runRoot) {
   if (cleanupFailure) {
     return {
       status: "FAIL",
-      reason: `run root could not be reclaimed after the run: ${cleanupFailure}; observed ${entryCount} entries and ${bytes} bytes; leaked directories: ${leaked.join(", ")}`,
+      reason: `run root could not be reclaimed after the run: ${cleanupFailure}; observed ${observed(entryCount, descendants, bytes)}; leaked directories: ${leaked.join(", ")}`,
       entryCount,
+      descendants,
       bytes,
       leaked,
     };
@@ -110,8 +116,9 @@ export async function inspectScratchRun(runRoot) {
         : `byte limit ${LEAK_BYTE_LIMIT} bytes`;
     return {
       status: "FAIL",
-      reason: `scratch ${breached}; observed ${entryCount} entries and ${bytes} bytes; leaked directories: ${leaked.join(", ")}; run root reclaimed after measurement`,
+      reason: `scratch ${breached}; observed ${observed(entryCount, descendants, bytes)}; leaked directories: ${leaked.join(", ")}; run root reclaimed after measurement`,
       entryCount,
+      descendants,
       bytes,
       leaked,
     };
@@ -122,26 +129,48 @@ export async function inspectScratchRun(runRoot) {
     reason:
       entryCount === 0
         ? `0 entries, 0 bytes (${SCRATCH_SENTINEL} confirmed the tree was walked)`
-        : `${entryCount} entries and ${bytes} bytes left by shutdown races, within the ${LEAK_ENTRY_LIMIT}-entry and ${LEAK_BYTE_LIMIT}-byte limits; run root reclaimed`,
+        : `${observed(entryCount, descendants, bytes)} left by shutdown races, within the ${LEAK_ENTRY_LIMIT}-entry and ${LEAK_BYTE_LIMIT}-byte limits; run root reclaimed`,
     entryCount,
+    descendants,
     bytes,
     leaked,
   };
 }
 
-async function treeBytes(path) {
+// The entry count is the limit's unit, so it stays the immediate children of
+// the run root. The descendant count is printed beside it because those two
+// numbers separate a handful of straggler workspaces from one workspace that
+// grew a million files: the row must not report the first while looking at the
+// second. No limit rejects on descendants — there is no measured healthy range
+// for one yet, and the printed number is how that evidence accumulates.
+function observed(entryCount, descendants, bytes) {
+  return `${entryCount} entries (${descendants} descendants) and ${bytes} bytes`;
+}
+
+// Bytes and every file and directory below `path`, itself included. The count
+// is what keeps the row honest about a shape the entry count cannot see: one
+// leaked directory holding a million empty files is 1 entry and 0 bytes, and
+// still exhausts a filesystem. Symlinks are measured, never followed.
+async function measureTree(path) {
   let metadata;
   try {
     metadata = await lstat(path);
   } catch (error) {
-    if (errorCode(error) === "ENOENT") return 0;
+    if (errorCode(error) === "ENOENT") return { bytes: 0, entries: 0 };
     throw error;
   }
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) return metadata.size;
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    return { bytes: metadata.size, entries: 1 };
+  }
   const names = await readdir(path);
   let bytes = 0;
-  for (const name of names) bytes += await treeBytes(join(path, name));
-  return bytes;
+  let entries = 1;
+  for (const name of names) {
+    const child = await measureTree(join(path, name));
+    bytes += child.bytes;
+    entries += child.entries;
+  }
+  return { bytes, entries };
 }
 
 function errorCode(error) {

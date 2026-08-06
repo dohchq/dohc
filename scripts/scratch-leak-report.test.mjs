@@ -52,7 +52,8 @@ test("a handful of shutdown stragglers passes but is still reported and reclaime
     assert.equal(report.status, "PASS", "3 entries is inside the measured healthy range");
     assert.equal(report.entryCount, 3, "the count is still reported, never hidden");
     assert.equal(report.bytes, 51, "the bytes are still reported, never hidden");
-    assert.match(report.reason, /3 entries and 51 bytes/);
+    assert.equal(report.descendants, 6, "3 directories each holding one file");
+    assert.match(report.reason, /3 entries \(6 descendants\) and 51 bytes/);
     assert.equal(
       existsSync(runRoot),
       false,
@@ -114,6 +115,32 @@ test("a run root without the sentinel fails instead of reporting clean", async (
       true,
       "a root this row does not own must not be deleted by it",
     );
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+// One directory holding a thousand empty files is 1 entry and 0 bytes, and both
+// of the row's limits are blind to it. The row still passes — there is no
+// measured healthy descendant count to reject against — but it must not report
+// the shape it cannot see as nothing.
+test("one directory full of empty files is counted, not reported as nothing", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
+  const runRoot = join(parent, "run");
+  try {
+    await plant(runRoot, 0, 0);
+    const runaway = join(runRoot, "runaway-workspace");
+    await mkdir(runaway, { recursive: true });
+    for (let index = 0; index < 1_000; index++) {
+      await writeFile(join(runaway, `empty-${index}`), "");
+    }
+
+    const report = await inspectScratchRun(runRoot);
+
+    assert.equal(report.entryCount, 1, "the entry limit sees one directory");
+    assert.equal(report.bytes, 0, "the byte limit sees nothing at all");
+    assert.equal(report.descendants, 1_001, "the directory and its 1,000 files");
+    assert.match(report.reason, /1 entries \(1001 descendants\) and 0 bytes/);
   } finally {
     await rm(parent, { recursive: true, force: true });
   }

@@ -1,7 +1,11 @@
 import { mkdir, stat, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createTestScratch, sweepScratchParent } from "./testTemp";
+import {
+  cleanupSuiteTestScratch,
+  createTestScratch,
+  sweepScratchParent,
+} from "./testTemp";
 
 const HOUR_MS = 60 * 60 * 1_000;
 
@@ -42,6 +46,27 @@ describe("test scratch", () => {
     expect(await pathExists(old), "the sweep must remove an aged run").toBe(false);
     expect(await pathExists(live), "the sweep removed a recent run").toBe(true);
     expect(await pathExists(current), "the sweep removed the current run").toBe(true);
+  });
+
+  // Every worker of a vitest run shares one handed-down root, and each test
+  // file drains at its own `afterAll`. A suite that removed the root while it
+  // was momentarily empty would ENOENT the next `mkdtemp` in another worker.
+  // The supplier reclaims its own root; nothing here may.
+  it("leaves a handed-down run root for whoever handed it down", async () => {
+    const handedDown = await createTestScratch("handed-down-root-");
+    const previous = process.env.DOHC_TEST_SCRATCH_ROOT;
+    process.env.DOHC_TEST_SCRATCH_ROOT = handedDown;
+    try {
+      await cleanupSuiteTestScratch();
+
+      expect(
+        await pathExists(handedDown),
+        "a suite must not remove a root it was handed",
+      ).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.DOHC_TEST_SCRATCH_ROOT;
+      else process.env.DOHC_TEST_SCRATCH_ROOT = previous;
+    }
   });
 
   // This sweep walks the parent that every runtime shares, so the run it is
