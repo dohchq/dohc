@@ -3754,12 +3754,18 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
   await capture.stop();
 }, 40_000);
 
-it("a settle that never reached the artifact is not proof the write landed", async () => {
-  // #595 round 12: a settle RESOLVING is the adjacent operation, not the
-  // write. The engine commits the lineage and answers materialized: false
-  // for a target it declines to write — a symlinked path or ancestor — so
-  // the call comes back clean while the .md stays stale. Discharging the
-  // debt there stranded the closed document's durable edit with no retry.
+it("a settle that committed but wrote nothing stops the ladder and names the symlink", async () => {
+  // #651. A settle RESOLVING is the adjacent operation, not the write: the
+  // engine commits the lineage and answers materialized: false for a target it
+  // declines to write, so the call comes back clean while the .md stays stale
+  // (#595 round 12 caught that much — it stopped discharging the debt there).
+  //
+  // What it did NOT settle is what that answer MEANS. `materialized: false`
+  // has exactly one producer: `JobOutcome::Blocked` <-
+  // `MaterializeError::SymlinkTarget` (crates/dohc-engine-files/src/
+  // materialize.rs) — the path or an ancestor is a symlink. Waiting restores
+  // no containment, so re-arming polls a condition that cannot clear and tells
+  // the user nothing they can act on.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-unmaterialized-");
   const { session } = await openWithOneEdit(capture, "never written");
 
@@ -3775,20 +3781,103 @@ it("a settle that never reached the artifact is not proof the write landed", asy
   state.unmaterialized = true;
   await expect
     .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+  const [stopMessage] = state.errorMessages.filter((message) =>
+    message.includes("symlink"),
+  );
+  // The blocking condition is NAMED, with the path and the way back — not
+  // "the engine cannot write note.md (workspace operation failed)", which is
+  // what the generic terminal stop says one rung later.
+  expect(stopMessage).toContain("note.md");
+  expect(stopMessage).toContain("did not write");
+  expect(stopMessage).toContain("history");
+  // BOTH components, because the engine names neither. `materialized: false`
+  // is the answer whether the symlink is the target FILE or a folder above it
+  // (prepare_target_parent_symlink_free checks the ancestors and the leaf).
+  // An instruction that says only "folder" tells a user whose note.md IS the
+  // symlink to replace it with a directory, which can never materialize.
+  expect(stopMessage).toContain("real file");
+  expect(stopMessage).toContain("real folder");
+
+  // Nothing was ever reported as written. A stand-down must not read as a save.
+  expect(state.settledMarkdowns).toHaveLength(0);
+
+  // THE liveness proof: the ladder is done. Left armed, its next two rungs
+  // both wake inside this window and reopen a session for the same
+  // permanent condition.
+  const settlesAtStandDown = state.settleCalls.length;
+  const generationAtStandDown = state.generation;
+  await new Promise((resolve) => setTimeout(resolve, 8_000));
+  expect(state.settleCalls.length).toBe(settlesAtStandDown);
+  expect(state.generation).toBe(generationAtStandDown);
+  await capture.stop();
+}, 40_000);
+
+it("a settle refused because peers outran it keeps the write ladder alive", async () => {
+  // #650. `ydoc-remote-updates-pending` reports a RACE — remote edits drained
+  // under this session's lease while its settle was in flight — and it clears
+  // as soon as the session resyncs and settles the merged state. It arrives as
+  // INVALID_PARAMS / retry: "no", the same shape as a refusal that answers the
+  // write for good, so the ladder read it as terminal, cancelled the pending
+  // write, and told the user retrying could not change the outcome.
+  //
+  // REACHABILITY, stated honestly: no shipping build raises this. The engine
+  // refuses only for a marker in `Regime::Replicated`
+  // (crates/dohc-engine-runtime/src/actor.rs), and that regime is constructed
+  // only by dohc-engine-sync's inbound apply path — the sync stack is not
+  // built (#356, #378). The refusal is INJECTED here so the classification is
+  // right before two-peer sync makes it reachable.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-remote-pending-");
+  const { session } = await openWithOneEdit(capture, "outrun by a peer");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The lock releases, and peers are now outrunning every settle. By the time
+  // this shape reaches the ladder, `YdocLiveAdapter.settle` has already
+  // resynced and settled once — the ladder owns what comes after that.
+  state.locked = false;
+  state.settleFailure = new DaemonRefusalError(
+    {
+      code: "INVALID_PARAMS",
+      message: "ydoc-remote-updates-pending",
+      retry: "no",
+    },
+    new Error("daemon response"),
+  );
+  await expect
+    .poll(
       () => state.settleCalls.filter((generation) => generation >= 2).length,
       { timeout: 15_000 },
     )
     .toBeGreaterThan(0);
-  expect(state.settledMarkdowns).toHaveLength(0);
 
-  // THE proof of retention: the target becomes writable and the debt is
-  // still there to pay. Discharged on the clean resolve, nothing would be.
-  state.unmaterialized = false;
+  // The ladder KEEPS GOING, and says nothing final about a write that is
+  // still owed. Read from the wire code alone, this is where it stops.
+  const settlesAtRefusal = state.settleCalls.length;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 20_000 })
-    .toEqual(["never written"]);
+    .poll(() => state.settleCalls.length, { timeout: 20_000 })
+    .toBeGreaterThan(settlesAtRefusal);
+  expect(
+    state.errorMessages.filter((message) =>
+      message.includes("locked-write retry stopped"),
+    ),
+  ).toHaveLength(0);
+
+  // THE proof the write survived the race: the peers stop outrunning the
+  // settle, the debt is still owed, and the edit reaches the artifact.
+  state.settleFailure = null;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 25_000 })
+    .toEqual(["outrun by a peer"]);
   await capture.stop();
-}, 40_000);
+}, 60_000);
 
 it("a materialization the engine refuses for good stops the ladder and says why", async () => {
   // #595 round 12: a locked file that turns read-only stops answering

@@ -32,6 +32,7 @@ import {
   DaemonRefusalError,
   isConflictStaleTargetRefusal,
   isFileLockedRefusal,
+  isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
   YdocReleasedWithSettleFailureError,
   type EngineYdocProviderSession,
@@ -642,6 +643,17 @@ function isFileLockedCause(error: unknown): boolean {
 // left to wait for.
 function isConflictStaleTargetCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isConflictStaleTargetRefusal);
+}
+
+// Peers outran this settle: remote edits drained under the session's lease, so
+// the engine refuses rather than materializing a projection this session never
+// saw. The adapter already resynced and settled once (`YdocLiveAdapter.settle`);
+// a second refusal means the race is still on, and the answer to a race is to
+// wait and try again. It rides the same INVALID_PARAMS/`retry: "no"` shape as a
+// terminal refusal, so only this discriminator keeps the ladder from cancelling
+// a write that would have landed (#650).
+function isRemoteUpdatesPendingCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, isYdocRemoteUpdatesPendingRefusal);
 }
 
 // The wire's own "do not try again" (`retry: no`). Read from a SETTLE, that is
@@ -1327,6 +1339,10 @@ export function createWorkspaceEngineCapture(
   // that raced a newer update, a delete that removed the path each say
   // something true about themselves and nothing about the write this debt
   // owes.
+  //
+  // A STAND-DOWN is the one other exit: the engine answered that this write
+  // can never land, so the ladder reports it and gives up. Absence therefore
+  // reads "landed or abandoned", never "landed" alone.
   interface DetachedLockedDebt {
     pay: () => Promise<void>;
     arm: () => void;
@@ -3265,6 +3281,21 @@ export function createWorkspaceEngineCapture(
           armDetachedLockedRetry();
         };
 
+        // The one stand-down a clean settle can earn. Named separately because
+        // both discharge paths reach it and the user's next step is the same
+        // from either.
+        //
+        // WHICH component is the symlink, the wire does not say: the engine
+        // checks the ancestors AND the target file itself
+        // (prepare_target_parent_symlink_free) and answers the same
+        // `materialized: false` either way. So the instruction covers both.
+        // Naming only the folder sent a user whose note.md IS the symlink to
+        // replace it with a directory, which can never materialize.
+        const standDownFromBlockedTarget = (): void =>
+          standDownFromWrite(
+            `locked-write retry stopped: the engine committed the settle but did not write ${input.path}. dohc does not write through symlinks, and either the file or a folder above it is one. The edits stay in the document's history. Replace the linked file with a real file, or the linked folder with a real folder. Then open ${input.path} to write it again.`,
+          );
+
         const payDetachedLockedDebt = async (): Promise<void> => {
           // Another edge may have paid, transferred, or CANCELLED this debt
           // after the timer's own check — a destructive vacate cancels
@@ -3287,9 +3318,16 @@ export function createWorkspaceEngineCapture(
           // so the settle's own failure is tagged here rather than guessed
           // at from the wire code alone.
           let settleFailure: unknown = null;
+          // Answers whether the artifact MOVED. `materialized: false` has one
+          // producer: the materialization job was BLOCKED because the target
+          // file or one of its ancestors is a symlink (`JobOutcome::Blocked`
+          // <- `MaterializeError::SymlinkTarget`). Waiting restores no
+          // containment, so that answer belongs with the terminal settle
+          // refusals rather than the transient ones this ladder exists to
+          // outlast (#651).
           const settleForProof = async (
             session: WorkspaceEngineYDocProviderSession,
-          ): Promise<void> => {
+          ): Promise<boolean> => {
             // Snapshot BEFORE issuing: the projection is taken inside the
             // call, so an update delivered while it is in flight is already
             // outside what it carries. Erring wide costs one extra settle;
@@ -3318,6 +3356,7 @@ export function createWorkspaceEngineCapture(
               throw error;
             }
             if (result.materialized) settleCovers = covers;
+            return result.materialized;
           };
           try {
             if (writeCancelled) {
@@ -3338,13 +3377,21 @@ export function createWorkspaceEngineCapture(
               // it — success IS this write landing, and a failure keeps the
               // debt (a still-held lock re-arms; anything else reports and
               // re-arms like every other unproven attempt).
-              await settleForProof(live.session);
+              const materialized = await settleForProof(live.session);
+              // Asked BEFORE the proof: a blocked target is a definite answer
+              // about this write, and `settleCovers` can still hold an earlier
+              // settle's yes.
+              if (!materialized) {
+                standDownFromBlockedTarget();
+                return;
+              }
               if (writeIsProven()) {
                 detachedLockedDebts.delete(input.path);
                 return;
               }
-              // The handoff settled without writing the artifact. Nothing
-              // moved, so nothing is discharged.
+              // The handoff settled, but over a projection it did not carry.
+              // Nothing is discharged; the next attempt settles the newer
+              // state.
               armDetachedLockedRetry();
               return;
             }
@@ -3404,8 +3451,9 @@ export function createWorkspaceEngineCapture(
                 onSettleError: () => undefined,
                 onSettled: () => undefined,
               });
+            let materialized: boolean;
             try {
-              await settleForProof(retrySession);
+              materialized = await settleForProof(retrySession);
             } finally {
               // The release is NOT suppressed: a replicated
               // update arriving between the settle and this release makes
@@ -3421,6 +3469,12 @@ export function createWorkspaceEngineCapture(
                 pendingRelease = retrySession;
                 throw closeError;
               }
+            }
+            if (!materialized) {
+              // Same order as the handoff above: a blocked target answers this
+              // write before any proof is consulted.
+              standDownFromBlockedTarget();
+              return;
             }
             if (!writeIsProven()) {
               // The close returned Ok, but about a projection this settle
@@ -3440,7 +3494,10 @@ export function createWorkspaceEngineCapture(
               // would only schedule a timer that stands down.
               return;
             }
-            if (isFileLockedCause(retryError)) {
+            if (
+              isFileLockedCause(retryError) ||
+              isRemoteUpdatesPendingCause(retryError)
+            ) {
               armDetachedLockedRetry();
               return;
             }
@@ -5124,6 +5181,14 @@ export function createWorkspaceEngineCapture(
         // text, which the finisher's path rollback cannot undo. The registry
         // is the proof: still named after the payment means it did not land,
         // so the rename REFUSES and the debt survives for the retry ladder.
+        //
+        // Read it in that direction ONLY. A stand-down clears the entry too,
+        // and the rename then does record the stale artifact — deliberately:
+        // no pending write is left to wait for, the newer text stays in the
+        // object's history (writeIfChanged adds a moment and the engine rename
+        // keeps the object id), and the stand-down already told the user.
+        // Refusing there would strand the rename on a condition that no longer
+        // changes.
         // DESCENDANTS too: this method also serves directory
         // moves, so a debt for `dir/note.md` rides a move of `dir`. Left
         // behind, its delayed payment reopens the moved-from path and

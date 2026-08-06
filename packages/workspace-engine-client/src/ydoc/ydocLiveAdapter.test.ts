@@ -1504,6 +1504,67 @@ describe("YdocLiveAdapter", () => {
     await expect(provider.close({ settle: false })).resolves.toBeUndefined();
   });
 
+  it("resyncs once and settles again when a settle is refused for pending remote updates", async () => {
+    // #650. `ydoc-remote-updates-pending` says peers drained edits under this
+    // session's lease, so this doc is BEHIND the durable lineage. The engine
+    // refuses rather than materializing content this editor never saw, and the
+    // cure is to resync (which returns the drained state) and settle the
+    // merged result.
+    //
+    // It rides INVALID_PARAMS / retry: "no", the terminal shape — so the
+    // MESSAGE is the only thing that tells this transient race apart from a
+    // refusal that answers the write for good, and the typed discriminator is
+    // what reads it.
+    //
+    // Not reachable in a shipping build: the engine raises this only for a
+    // marker in `Regime::Replicated`, which only dohc-engine-sync's inbound
+    // apply path constructs — the sync stack is unbuilt (#356, #378). Injected
+    // here so the classification is right before two-peer sync lands.
+    const engine = seedPlaintextEngine();
+    const methods: string[] = [];
+    let refused = false;
+    const remoteUpdatesPending = Object.assign(
+      new Error("ydoc-remote-updates-pending"),
+      {
+        code: "wire-error",
+        wireError: {
+          code: "INVALID_PARAMS",
+          message: "ydoc-remote-updates-pending",
+          retry: "no",
+        },
+      },
+    );
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        methods.push(request.method);
+        if (request.method === YDOC_METHOD.settle && !refused) {
+          refused = true;
+          throw remoteUpdatesPending;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await expect(session.settle()).resolves.toMatchObject({
+      materialized: true,
+    });
+    // The resync sits BETWEEN the two settles. Reordered or missing, the
+    // second settle projects the same state the first was refused for.
+    expect(methods.filter((method) => method !== YDOC_METHOD.open)).toEqual([
+      YDOC_METHOD.settle,
+      YDOC_METHOD.resync,
+      YDOC_METHOD.settle,
+    ]);
+  });
+
   it("detects a per-session event sequence gap and marks the session stale", async () => {
     const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);

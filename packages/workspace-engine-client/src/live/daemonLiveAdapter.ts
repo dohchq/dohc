@@ -145,6 +145,20 @@ export function isFileLockedRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "file-locked";
 }
 
+// Remote edits drained under this session's lease while this settle was in
+// flight, so the doc is BEHIND the durable lineage and the engine refuses
+// rather than materializing content this editor never saw
+// (`DomainError::InvalidInput { reason: "ydoc-remote-updates-pending" }`).
+//
+// TRANSIENT, whatever the wire code says. The refusal reports a race — peers
+// outran a settle — not a verdict on the write, and it clears as soon as this
+// session resyncs and settles the merged state. INVALID_PARAMS carries
+// `retry: "no"`, so a caller that reads the wire code alone classifies it as
+// terminal and cancels a write that would have landed.
+export function isYdocRemoteUpdatesPendingRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "ydoc-remote-updates-pending";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
