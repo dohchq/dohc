@@ -3794,6 +3794,13 @@ it("a settle that committed but wrote nothing stops the ladder and names the sym
   expect(stopMessage).toContain("note.md");
   expect(stopMessage).toContain("did not write");
   expect(stopMessage).toContain("history");
+  // BOTH components, because the engine names neither. `materialized: false`
+  // is the answer whether the symlink is the target FILE or a folder above it
+  // (prepare_target_parent_symlink_free checks the ancestors and the leaf).
+  // An instruction that says only "folder" tells a user whose note.md IS the
+  // symlink to replace it with a directory, which can never materialize.
+  expect(stopMessage).toContain("real file");
+  expect(stopMessage).toContain("real folder");
 
   // Nothing was ever reported as written. A stand-down must not read as a save.
   expect(state.settledMarkdowns).toHaveLength(0);

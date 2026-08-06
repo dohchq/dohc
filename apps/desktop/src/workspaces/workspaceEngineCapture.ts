@@ -1339,6 +1339,10 @@ export function createWorkspaceEngineCapture(
   // that raced a newer update, a delete that removed the path each say
   // something true about themselves and nothing about the write this debt
   // owes.
+  //
+  // A STAND-DOWN is the one other exit: the engine answered that this write
+  // can never land, so the ladder reports it and gives up. Absence therefore
+  // reads "landed or abandoned", never "landed" alone.
   interface DetachedLockedDebt {
     pay: () => Promise<void>;
     arm: () => void;
@@ -3235,10 +3239,11 @@ export function createWorkspaceEngineCapture(
 
         // Whether the LAST settle answered `materialized: false`. That answer
         // has one producer: the materialization job was BLOCKED because the
-        // path or an ancestor is a symlink (`JobOutcome::Blocked` <-
-        // `MaterializeError::SymlinkTarget`). Waiting does not restore
-        // containment, so this belongs with the terminal settle refusals, not
-        // with the transient ones the ladder exists to outlast (#651).
+        // target file or one of its ancestors is a symlink
+        // (`JobOutcome::Blocked` <- `MaterializeError::SymlinkTarget`).
+        // Waiting does not restore containment, so this belongs with the
+        // terminal settle refusals, not with the transient ones the ladder
+        // exists to outlast (#651).
         let targetBlocked = false;
 
         // L's holder: a session the daemon refused to release. Assigned only
@@ -3288,9 +3293,16 @@ export function createWorkspaceEngineCapture(
         // The one stand-down a clean settle can earn. Named separately because
         // both discharge paths reach it and the user's next step is the same
         // from either.
+        //
+        // WHICH component is the symlink, the wire does not say: the engine
+        // checks the ancestors AND the target file itself
+        // (prepare_target_parent_symlink_free) and answers the same
+        // `materialized: false` either way. So the instruction covers both.
+        // Naming only the folder sent a user whose note.md IS the symlink to
+        // replace it with a directory, which can never materialize.
         const standDownFromBlockedTarget = (): void =>
           standDownFromWrite(
-            `locked-write retry stopped: the engine committed the settle but did not write ${input.path}. The path or a folder above it is a symlink, and dohc does not write through symlinks. The edits stay in the document's history — replace the symlink with a real folder, then open ${input.path} to write it again.`,
+            `locked-write retry stopped: the engine committed the settle but did not write ${input.path}. dohc does not write through symlinks, and either the file or a folder above it is one. The edits stay in the document's history. Replace the linked file with a real file, or the linked folder with a real folder. Then open ${input.path} to write it again.`,
           );
 
         const payDetachedLockedDebt = async (): Promise<void> => {
@@ -5174,6 +5186,14 @@ export function createWorkspaceEngineCapture(
         // text, which the finisher's path rollback cannot undo. The registry
         // is the proof: still named after the payment means it did not land,
         // so the rename REFUSES and the debt survives for the retry ladder.
+        //
+        // Read it in that direction ONLY. A stand-down clears the entry too,
+        // and the rename then does record the stale artifact — deliberately:
+        // no pending write is left to wait for, the newer text stays in the
+        // object's history (writeIfChanged adds a moment and the engine rename
+        // keeps the object id), and the stand-down already told the user.
+        // Refusing there would strand the rename on a condition that no longer
+        // changes.
         // DESCENDANTS too: this method also serves directory
         // moves, so a debt for `dir/note.md` rides a move of `dir`. Left
         // behind, its delayed payment reopens the moved-from path and
