@@ -7,8 +7,12 @@
 // with three exceptions that cover how documents are actually written:
 //
 //  - Some blocks END at their own last line, not at a blank one: a heading
-//    (an ATX line, or the setext underline under a paragraph), and a fenced
-//    code block at its closing fence. The line after opens its own block.
+//    (an ATX line, or the setext underline under a paragraph), a thematic
+//    break, and a fenced code block at its closing fence.
+//  - Some blocks START without a blank line above them, interrupting what is
+//    open: a heading, a fence, a thematic break, and — under a PARAGRAPH
+//    only — a quote or a list. An ordered list interrupts only when it counts
+//    from 1, because `2.` under a paragraph is that paragraph's own text.
 //  - Some blocks RUN THROUGH a blank line, because the next line continues
 //    them: another item of the same list, content indented into that item,
 //    and the next chunk of an indented code block.
@@ -33,7 +37,14 @@
 //
 // DOM-free and duck-typed against plain text, same as outline.ts/findReplace.ts.
 
-type BlockKind = "bullet" | "ordered" | "quote" | "heading" | "code" | "other";
+type BlockKind =
+  | "bullet"
+  | "ordered"
+  | "quote"
+  | "heading"
+  | "code"
+  | "break"
+  | "other";
 
 const HEADING_RE = /^[ \t]{0,3}#{1,6}(?:[ \t]|$)/;
 const BULLET_RE = /^[ \t]{0,3}[-+*](?:[ \t]|$)/;
@@ -48,11 +59,20 @@ const CONTINUATION_RE = /^(?:\t| {2})/;
 // Four columns with nothing open above is an INDENTED code block, which runs
 // through its own blank lines and ends where the indentation stops.
 const INDENTED_CODE_RE = /^(?:\t| {4})/;
+// Three or more of one marker, spaces allowed between them and nothing else.
+// Two is a paragraph. `---` under an open paragraph is a setext underline
+// instead, which SETEXT_RE claims first.
+const BREAK_RE = /^[ \t]{0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+// A list can interrupt a paragraph, but an ORDERED one only when it counts
+// from 1: `2.` under a paragraph is that paragraph's own text.
+const INTERRUPTING_ORDERED_RE = /^[ \t]{0,3}1[.)](?:[ \t]|$)/;
 
 type Fence = { marker: string; length: number };
 
 function blockKind(text: string): BlockKind {
   if (HEADING_RE.test(text)) return "heading";
+  // Before the bullet: `- - -` is a break, not a one-item list.
+  if (BREAK_RE.test(text)) return "break";
   if (BULLET_RE.test(text)) return "bullet";
   if (ORDERED_RE.test(text)) return "ordered";
   if (QUOTE_RE.test(text)) return "quote";
@@ -124,13 +144,25 @@ function blockStartLines(body: string): number[] {
     // cannot START under an open paragraph: there an indented line is that
     // paragraph's lazy continuation, not code.
     const leavesCode = openKind === "code" && kind !== "code";
-    if (kind === "heading" || ((opener || leavesCode || !open) && !resumes)) {
+    // Blocks that do not wait for a blank line to start. A list or a quote
+    // interrupts a PARAGRAPH only — under an open list or quote the same line
+    // is that block's own next line, not a new one.
+    const interrupts =
+      !!opener ||
+      kind === "break" ||
+      leavesCode ||
+      (open &&
+        openKind === "other" &&
+        (kind === "bullet" ||
+          kind === "quote" ||
+          (kind === "ordered" && INTERRUPTING_ORDERED_RE.test(text))));
+    if (kind === "heading" || ((interrupts || !open) && !resumes)) {
       starts.push(index + 1);
       openKind = kind;
     }
-    // An ATX heading is one line. The next line opens its own block, blank
-    // line or not — `# Plan\nBody` is two nodes, not one.
-    open = kind !== "heading";
+    // An ATX heading and a thematic break are one line each. The next line
+    // opens its own block, blank line or not — `# Plan\nBody` is two nodes.
+    open = kind !== "heading" && kind !== "break";
     fence = opener;
   }
   return starts;

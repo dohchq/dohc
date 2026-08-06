@@ -111,6 +111,54 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("| a |\n| --- |\n| b |\n\nAfter", 5)).toBe(1);
   });
 
+  it("gives a thematic break its own one-line block", () => {
+    // 1 "Intro"  2 ""  3 "---"  4 "Matched" — three nodes. All three markers
+    // read the same way, and the spaced form is a break, not a one-item list.
+    for (const marker of ["---", "***", "___", "- - -", "-----"]) {
+      const body = `Intro\n\n${marker}\nMatched`;
+      expect(blockIndexForLine(body, 3)).toBe(1);
+      expect(blockIndexForLine(body, 4)).toBe(2);
+    }
+    // Two markers is a paragraph, which the next line continues.
+    expect(blockIndexForLine("Intro\n\n--\nMatched", 4)).toBe(1);
+  });
+
+  it("keeps the setext underline ahead of the thematic break", () => {
+    // Under an OPEN paragraph, `-` and `=` runs underline it. `*` and `_`
+    // cannot, so they stay breaks even there.
+    expect(blockIndexForLine("Intro\n---\nMatched", 3)).toBe(1);
+    expect(blockIndexForLine("Intro\n-----\nMatched", 3)).toBe(1);
+    expect(blockIndexForLine("Intro\n***\nMatched", 2)).toBe(1);
+    expect(blockIndexForLine("Intro\n***\nMatched", 3)).toBe(2);
+    // Nothing else is open, so the break is a break under any other kind.
+    expect(blockIndexForLine("# H\n---\nMatched", 2)).toBe(1);
+    expect(blockIndexForLine("> q\n---\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("- item\n---\nAfter", 2)).toBe(1);
+  });
+
+  it("starts a block where a list or a quote interrupts a paragraph", () => {
+    expect(blockIndexForLine("Intro\n- matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("Intro\n* matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("Intro\n+ matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("Intro\n> matched\n\nAfter", 2)).toBe(1);
+    // An ordered list interrupts only when it counts from 1.
+    expect(blockIndexForLine("Intro\n1. matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("Intro\n1) matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("Intro\n2. matched\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("Intro\n10. matched\n\nAfter", 2)).toBe(0);
+  });
+
+  it("does not let a list or a quote interrupt its own kind", () => {
+    // The interrupt is a PARAGRAPH rule. These lines continue what is open.
+    expect(blockIndexForLine("- one\n- two\n\nPara", 2)).toBe(0);
+    expect(blockIndexForLine("1. one\n2. two\n\nPara", 2)).toBe(0);
+    expect(blockIndexForLine("> one\n> two\n\nPara", 2)).toBe(0);
+    expect(blockIndexForLine("Intro\n- a\n- b\n\nAfter", 3)).toBe(1);
+    // A lone dash still underlines the paragraph above it, list or not.
+    expect(blockIndexForLine("Intro\n-\nMatched", 3)).toBe(1);
+    expect(blockIndexForLine("Intro\n-  \nAfter", 3)).toBe(1);
+  });
+
   it("opens a block at a fence that interrupts a paragraph", () => {
     // 1 "Intro"  2 "~~~"  3 "matched"  4 "~~~"  5 "After" — three nodes.
     const body = "Intro\n~~~\nmatched\n~~~\nAfter";
@@ -407,6 +455,90 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
         [1, "one"],
         [2, "item"],
         [4, "After"],
+      ],
+    },
+    {
+      name: "a thematic break under an open paragraph",
+      body: "Intro\n***\nMatched",
+      lands: [
+        [1, "Intro"],
+        [3, "Matched"],
+      ],
+    },
+    {
+      name: "a setext underline still wins over a break",
+      body: "Intro\n---\nMatched",
+      lands: [
+        [2, "Intro"],
+        [3, "Matched"],
+      ],
+    },
+    {
+      name: "a break ends the block above it whatever that block is",
+      body: "- item\n---\nAfter",
+      lands: [
+        [1, "item"],
+        [3, "After"],
+      ],
+    },
+    {
+      name: "a spaced thematic break is not a one-item list",
+      body: "- item\n\n- - -\n\nAfter",
+      lands: [
+        [1, "item"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a break indented into a list item stays in that list",
+      body: "- item\n\n  ---\n\nAfter",
+      lands: [
+        [1, "item"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a bullet list interrupts a paragraph",
+      body: "Intro\n- matched\n\nAfter",
+      lands: [
+        [1, "Intro"],
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "a quote interrupts a paragraph",
+      body: "Intro\n> matched\n\nAfter",
+      lands: [
+        [1, "Intro"],
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "an ordered list interrupts only when it counts from 1",
+      body: "Intro\n1. matched\n\nAfter",
+      lands: [
+        [1, "Intro"],
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "an ordered list that does not count from 1 is paragraph text",
+      body: "Intro\n2. matched\n\nAfter",
+      lands: [
+        [2, "2. matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "an interrupting list keeps its own later items",
+      body: "Intro\n- a\n- b\n\nAfter",
+      lands: [
+        [1, "Intro"],
+        [3, "b"],
+        [5, "After"],
       ],
     },
     {
