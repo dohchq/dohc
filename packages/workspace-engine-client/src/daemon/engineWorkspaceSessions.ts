@@ -140,7 +140,7 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
   readonly limitMs: number;
   readonly measuredMs: number;
   readonly totalWaitedMs: number;
-  readonly attempts: number;
+  readonly failedAttempts: number;
 
   constructor(
     workspaceId: string,
@@ -151,14 +151,14 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
     measuredFrom: string,
     measuredMs: number,
     totalWaitedMs: number,
-    attempts: number,
+    failedAttempts: number,
     cause: unknown,
   ) {
     super(
       `Rust engine stopped retrying for workspace ${workspaceId}. ` +
         `The ${constraint} limit of ${limitMs}ms was reached: ` +
         `${measuredMs}ms ${measuredFrom}. ` +
-        `The caller waited ${totalWaitedMs}ms in total, across ${attempts} attempts. ` +
+        `The caller waited ${totalWaitedMs}ms in total, across ${failedAttempts} failed attempts. ` +
         `Retry the operation, or wait for the daemon to come back.`,
       { cause },
     );
@@ -168,7 +168,7 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
     this.limitMs = limitMs;
     this.measuredMs = measuredMs;
     this.totalWaitedMs = totalWaitedMs;
-    this.attempts = attempts;
+    this.failedAttempts = failedAttempts;
   }
 }
 
@@ -291,10 +291,13 @@ export class EngineWorkspaceSessions {
     // can state what the caller actually waited, which is the observed usage
     // AGENTS.md asks a rejection to name.
     startedAtMs: number;
-    // Failed attempts across every run the region made, because the region
+    // FAILED attempts across every run the region made, because the region
     // is what the budget spans: a per-run counter resets on each `run` and
-    // would report "across 1 attempts" for a wait that covered six.
-    attempts: number;
+    // would report "1" for a wait that covered six. It counts failures, and
+    // the message says so — a run that failed and then recovered late is one
+    // failed attempt out of two, and reporting "2 attempts" for one recovery
+    // window would be a different (also true) number the reader cannot use.
+    failedAttempts: number;
     // What the region was recovering from. A run refused at its START has no
     // failure of its own to name, and a refusal that names none sends the
     // reader looking for the wrong thing.
@@ -352,6 +355,12 @@ export class EngineWorkspaceSessions {
           options,
           rebindStarted,
         );
+        // AGAIN, because the rebind above can take the whole window with it:
+        // its own ladder waits and retries, and the check before it answered
+        // for a budget that was still live (#564, codex r17). The operation
+        // this admits may be a `ydoc.open`, which carries no deadline of its
+        // own — the exact call this region exists to bound.
+        this.refuseSpentRegion(workspace.workspaceId);
         try {
           return await operation(binding);
         } catch (error) {
@@ -432,7 +441,7 @@ export class EngineWorkspaceSessions {
         budgetMs,
         failedAtMs: null,
         startedAtMs: this.now(),
-        attempts: 0,
+        failedAttempts: 0,
         lastError: undefined,
       },
       task,
@@ -445,7 +454,7 @@ export class EngineWorkspaceSessions {
   private noteBudgetAttempt(cause?: unknown): void {
     const budget = this.retryBudgets.getStore();
     if (budget === undefined) return;
-    budget.attempts += 1;
+    budget.failedAttempts += 1;
     budget.failedAtMs ??= this.now();
     // A churned open has no error of its own; it must not erase the one the
     // region is actually recovering from.
@@ -499,7 +508,7 @@ export class EngineWorkspaceSessions {
       now - budget.startedAtMs,
       // The REGION's count, not one ladder's: the budget spans several runs,
       // each of which restarts `attempt` at 1.
-      budget.attempts,
+      budget.failedAttempts,
       cause,
     );
   }
@@ -555,25 +564,29 @@ export class EngineWorkspaceSessions {
     // the failure (#564, codex P1). An open that cannot finish is abandoned;
     // a write already accepted is not.
     //
-    // Cancelling the armed sleep stays global on purpose: outside a region it
-    // makes the retry happen SOONER, which is what a caller racing the quit
-    // timer needs.
-    if (this.shuttingDown && this.retryBudgets.getStore() !== undefined) {
+    const abandonable = this.retryBudgets.getStore() !== undefined;
+    if (this.shuttingDown && abandonable) {
       return "stop";
     }
     checkDeadline();
     if (!gate.backoff) return "retry";
-    // Reaching here at quit means this run is OUTSIDE a bounded region — the
-    // branch above already stopped the regions. It is racing the quit timer to
-    // finish a write that was already accepted, so it retries at once: a
-    // backoff would spend the window it needs, and `beginShutdown` only ever
-    // cancels the ONE armed sleep, so waiting again here could outlast the
-    // quit entirely.
-    if (this.shuttingDown) return "retry";
+    // Reaching here at quit means this run is OUTSIDE a bounded region: a
+    // write the engine already accepted, racing the forced exit. It KEEPS its
+    // backoff. Retrying at once looked like the way to win that race and was
+    // the opposite (#564, codex r17): the daemon it is racing is relaunching,
+    // so a burst of immediate attempts all fail inside that window, the close
+    // fails, `closeAllEngineYDocSessions` swallows it, and the edit goes with
+    // the exit. Pacing is what lets the second attempt find a daemon.
+    //
+    // The cancel is registered for abandonable work ONLY, for the same
+    // reason: `beginShutdown` resolving this sleep would put the burst back.
     // Checked on BOTH sides of the wait: an attempt that ends just inside the
     // deadline must not ride the backoff over the line and then start a fresh
     // open on a spent budget.
-    await this.interruptibleSleep(transportBackoffMs(gate.attempt));
+    await this.interruptibleSleep(
+      transportBackoffMs(gate.attempt),
+      abandonable,
+    );
     // Same scope as before the wait: quit ends a bounded region's retries, and
     // only a bounded region's.
     if (this.shuttingDown && this.retryBudgets.getStore() !== undefined) {
@@ -583,7 +596,17 @@ export class EngineWorkspaceSessions {
     return "retry";
   }
 
-  private async interruptibleSleep(delayMs: number): Promise<void> {
+  // `cancellable` marks a wait that quit may end: an abandonable region's.
+  // A wait for work that must not be abandoned runs its full backoff, because
+  // the daemon it is waiting for is the one that has to answer.
+  private async interruptibleSleep(
+    delayMs: number,
+    cancellable: boolean,
+  ): Promise<void> {
+    if (!cancellable) {
+      await this.sleep(delayMs);
+      return;
+    }
     let cancel!: () => void;
     const cancelled = new Promise<void>((resolveCancel) => {
       cancel = resolveCancel;

@@ -789,7 +789,7 @@ describe("EngineWorkspaceSessions", () => {
       // The two durations differ by the first attempt, which the budget
       // deliberately does not charge.
       expect(message).toContain("7500ms since the first failure");
-      expect(message).toContain("waited 10000ms in total, across 4 attempts");
+      expect(message).toContain("waited 10000ms in total, across 4 failed attempts");
       expect((outcome as Error).cause).toMatchObject({
         code: "transport-error",
       });
@@ -1224,7 +1224,7 @@ describe("EngineWorkspaceSessions", () => {
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       // MUTATION: stop counting churned opens on the budget -> "across 0
       // attempts" for a wait this ladder is the whole explanation for.
-      expect((outcome as Error).message).toContain("across 2 attempts");
+      expect((outcome as Error).message).toContain("across 2 failed attempts");
     });
 
     it("counts attempts across the whole budget, not one ladder's share", async () => {
@@ -1266,7 +1266,7 @@ describe("EngineWorkspaceSessions", () => {
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       // MUTATION: report the local `attempt` -> "across 1 attempts", a
       // number the reader would take for the whole wait.
-      expect((outcome as Error).message).toContain("across 3 attempts");
+      expect((outcome as Error).message).toContain("across 3 failed attempts");
       // The constraint named is the one the CALLER set. MUTATION: name
       // `retryDeadlineMs` here -> the refusal points an agent at an option
       // with no production caller, which it cannot find or change.
@@ -1443,6 +1443,55 @@ describe("EngineWorkspaceSessions", () => {
       // teardown waits behind a call this region had not started yet.
       expect(outcome).toBeInstanceOf(EngineWorkspaceShuttingDownError);
       expect(secondCall).toBe(0);
+    });
+
+    it("refuses the operation when the rebind spent the window", async () => {
+      // codex r17. The start-of-run gate answered before `openForRun`, and
+      // that call has a ladder of its own: it can wait, retry, recover, and
+      // return with the whole window behind it. The operation it admits may be
+      // the `ydoc.open` that carries no deadline — so the region ended up
+      // holding the capture chain on a budget it had already spent, which is
+      // the hold this whole bound exists to remove.
+      const workspace = await tempWorkspace("workspace-rebind-spends");
+      let nowMs = 5_000;
+      let opens = 0;
+      let operations = 0;
+      const client: EngineDaemonClient = {
+        close: () => undefined,
+        async sendRequest(request) {
+          opens += 1;
+          // The FIRST open fails, which starts the clock, and the retry
+          // succeeds — after the whole window has gone by.
+          if (opens === 1) {
+            nowMs += 100;
+            throw { code: "transport-error" };
+          }
+          nowMs += 5_000;
+          return { id: request.id, result: { workspace: "rebind-spends" } };
+        },
+      };
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { now: () => nowMs, sleep: async () => {} },
+      );
+
+      const outcome = await sessions
+        .withRetryBudget(2_000, async () =>
+          await sessions.run(
+            workspace,
+            async () => {
+              operations += 1;
+              return "held the chain";
+            },
+            { retryTransportErrors: true },
+          ),
+        )
+        .catch((error: unknown) => error);
+
+      // MUTATION: check the region only before `openForRun` -> the operation
+      // runs on a spent budget, unbounded.
+      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(operations).toBe(0);
     });
 
     it("keeps running a region whose budget clock never started", async () => {
@@ -1764,10 +1813,51 @@ describe("EngineWorkspaceSessions", () => {
       // MUTATION: consult `shuttingDown` for every run, not just a bounded
       // region -> one attempt, the write is abandoned, and the edit is gone.
       expect(attempts).toBe(3);
-      // It races the quit timer, so it does not wait between attempts.
-      // MUTATION: drop the at-quit no-backoff return -> the retries sleep, and
-      // `beginShutdown` only ever cancels the ONE armed sleep.
-      expect(sleep).not.toHaveBeenCalled();
+      // It KEEPS its pacing. Quit ends the waiting of abandonable work only,
+      // and the test below is why.
+      expect(sleep).toHaveBeenCalled();
+    });
+
+    it("paces a live document's retry at quit, so a relaunching daemon can answer", async () => {
+      // codex r17 P1. Quit used to make every non-region retry immediate, on
+      // the reasoning that it is racing the quit timer. But the daemon it is
+      // racing is RELAUNCHING, and a burst of synchronous attempts all land
+      // inside that window: six failures in zero elapsed time, a close that
+      // `closeAllEngineYDocSessions` swallows, and `app.exit(0)` discarding an
+      // edit that lived only in the canonical Y.Doc. Fast-failing a retry is
+      // not racing the timer, it is losing to it. Only WAITING is abandoned at
+      // quit, and only for work that may be abandoned.
+      const workspace = await tempWorkspace("workspace-quit-pacing");
+      const client = new MockClient("handle-quit-pacing");
+      let nowMs = 0;
+      let attempts = 0;
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          now: () => nowMs,
+          sleep: async (delayMs) => {
+            nowMs += delayMs;
+          },
+        },
+      );
+      sessions.beginShutdown();
+
+      // The daemon is relaunching: it refuses for 100 ms, then answers. Only a
+      // retry that waits can see the second answer.
+      // MUTATION: return "retry" without backoff at quit -> every attempt runs
+      // at t=0, the write never lands, and the edit is gone at exit.
+      await expect(
+        sessions.run(
+          workspace,
+          async () => {
+            attempts += 1;
+            if (nowMs < 100) throw { code: "transport-error" };
+            return "landed";
+          },
+          { retryTransportErrors: true },
+        ),
+      ).resolves.toBe("landed");
+      expect(attempts).toBe(2);
     });
   });
 

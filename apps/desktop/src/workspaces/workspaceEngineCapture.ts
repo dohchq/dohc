@@ -777,6 +777,32 @@ export class YDocOpenRacedError extends Error {
   }
 }
 
+// The open refused, and its session was NOT released. The daemon reinserts a
+// refused close's entry with its lease held (ydoc_close_inner), so it may
+// still own this document — which makes every refusal that describes the DISK
+// false, whatever the disk says. `main` answers this with `openTimedOut`: the
+// document stays read-only with a retry, and the next open discharges the
+// orphan this left behind (#564, codex r14/r17).
+export class YDocSessionUnreleasedError extends Error {
+  readonly code = "session-unreleased" as const;
+  constructor(
+    readonly workspacePath: string,
+    cause: unknown,
+  ) {
+    super(
+      `${workspacePath} could not be released after the engine refused to open it, so the engine may still hold the document. It is read-only until a retry releases it.`,
+      { cause },
+    );
+    this.name = "YDocSessionUnreleasedError";
+  }
+}
+
+export function isYDocSessionUnreleasedError(
+  error: unknown,
+): error is YDocSessionUnreleasedError {
+  return error instanceof YDocSessionUnreleasedError;
+}
+
 // What the on-disk artifact says about an otherwise-empty bind. "missing" is
 // the only state that proves the path is not in this version; every other
 // answer, including an unreadable one, refuses the session without making that
@@ -3054,12 +3080,9 @@ export function createWorkspaceEngineCapture(
           // the writable plain editor, over a live session (#533/#567's
           // double writer). The deadline keeps its own classification, which
           // main answers with `openTimedOut` (#564, codex r13).
-          const releaseBeforeRefusal = async (): Promise<{
-            error: unknown;
-          } | null> => {
+          const releaseOrRefuse = async (): Promise<void> => {
             try {
               await session.close({ settle: false, settleOnRefusal: false });
-              return null;
             } catch (releaseError) {
               // Whatever refused it, this session is still the daemon's, and
               // the refusal below is the LAST reference to it — no caller
@@ -3069,17 +3092,19 @@ export function createWorkspaceEngineCapture(
               // codex r14).
               liveEntry.orphaned = true;
               retainUnreleased();
+              // The BUDGET's own refusals keep their identity — an agent
+              // reading the message needs the limit that fired. Everything
+              // else becomes the one refusal that is true of all of them:
+              // this session is still the daemon's.
               if (isEngineWorkspaceOpenRefusedError(releaseError)) {
                 throw releaseError;
               }
-              return { error: releaseError };
+              throw new YDocSessionUnreleasedError(input.path, releaseError);
             }
           };
           if (disk === "content") {
-            const release = await releaseBeforeRefusal();
-            const refusal = new YDocUncapturedArtifactError(input.path);
-            if (release !== null) refusal.cause = release.error;
-            throw refusal;
+            await releaseOrRefuse();
+            throw new YDocUncapturedArtifactError(input.path);
           }
           if (disk === "missing" && updatesSeen === 0) {
             // The count cannot be read atomically with the release: the close
@@ -3090,40 +3115,27 @@ export function createWorkspaceEngineCapture(
             // which means exactly "content arrived after all", escalates to a
             // SETTLING close and materializes the path this code is about to
             // call missing.
-            const release = await releaseBeforeRefusal();
-            if (release === null) {
-              // RECHECKED immediately before the claim. The release above
-              // awaited a daemon round trip, and this chain serializes engine
-              // work, not the filesystem — an agent or an external editor can
-              // create the path inside that window, and the queued watcher
-              // then captures a file we just told the user does not exist.
-              //
-              // This NARROWS, it does not close: a writer can always land one
-              // tick after any recheck. It is here because this is the one
-              // terminal decision that makes a user-facing STATEMENT, and a
-              // false one is worth a second syscall. The admit paths take no
-              // recheck deliberately — see the note below.
-              if (
-                (await absentHeadDiskState(rootPath, input.path)) === "missing"
-              ) {
-                throw new YDocPathNotInVersionError(input.path, versionId);
-              }
-              throw new YDocOpenRacedError(input.path);
+            // A refused release means an update won the gap — the daemon is
+            // saying the lineage is dirty — and `releaseOrRefuse` has already
+            // turned that into the unreleased refusal, which is the honest
+            // one: nothing here may claim the path is missing while something
+            // is writing it.
+            await releaseOrRefuse();
+            // RECHECKED immediately before the claim. The release above
+            // awaited a daemon round trip, and this chain serializes engine
+            // work, not the filesystem — an agent or an external editor can
+            // create the path inside that window, and the queued watcher then
+            // captures a file we just told the user does not exist.
+            //
+            // This NARROWS, it does not close: a writer can always land one
+            // tick after any recheck. It is here because this is the one
+            // terminal decision that makes a user-facing STATEMENT, and a
+            // false one is worth a second syscall. The admit paths take no
+            // recheck deliberately — see the note below.
+            if ((await absentHeadDiskState(rootPath, input.path)) === "missing") {
+              throw new YDocPathNotInVersionError(input.path, versionId);
             }
-            // An update won the gap. This session CANNOT be handed back: the
-            // provider already marked itself closed and dropped every
-            // remote-update subscription before the daemon refused, so it would
-            // forward nothing and its initialUpdate predates the update that
-            // caused all this. Nor can it be reopened — a refused close
-            // REINSERTS the daemon entry with its lease held
-            // (ydoc_close_inner), so a fresh open answers ydoc-session-busy
-            // until something closes it — which is why the release above
-            // RETAINED it. Refuse, and do NOT claim the path is missing:
-            // something is writing it, and the next open discharges the
-            // retained session before it binds.
-            const raced = new YDocOpenRacedError(input.path);
-            raced.cause = release.error;
-            throw raced;
+            throw new YDocOpenRacedError(input.path);
           }
         }
         // Registered only after the open succeeds: a secret, already-live or

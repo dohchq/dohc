@@ -20,8 +20,10 @@ import { nativeTmpdir } from "./testTemp";
 import {
   YDOC_OPEN_RETRY_DEADLINE_MS,
   YDocOpenRacedError,
+  YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
   createWorkspaceEngineCapture,
+  isYDocSessionUnreleasedError,
 } from "./workspaceEngineCapture";
 
 // #564: one document open may not hold the capture chain for the whole
@@ -385,6 +387,36 @@ describe("the document open's capture-chain hold (#564)", () => {
 
       await session.close({ settle: false });
       await engine.stop();
+    });
+
+    it("keeps the read-only classification when the daemon refuses the release", async () => {
+      // codex r17 P1. The rethrow covered the BUDGET's refusals only, so an
+      // ordinary one — UnsettledClose, which is the daemon saying an update
+      // raced in and the lineage is dirty — fell through to the disk verdict.
+      // That verdict is one `main` answers with a bare `available: false`, so
+      // the renderer opened the writable plain editor over the session this
+      // very branch had just retained as an orphan, lease and all. The
+      // classification does not depend on WHAT refused the release: while the
+      // session is unreleased the engine may still own the document.
+      const root = await tempRoot();
+      await write(root, "note.md", "uncaptured bytes\n");
+
+      const refusal = await refusalFrom(
+        root,
+        new Error("ydoc close refused: unsettled-close"),
+      );
+
+      // MUTATION: rethrow only budget refusals -> YDocUncapturedArtifactError,
+      // a plain fallback, and two writers on one path.
+      expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
+      expect(refusal).not.toBeInstanceOf(YDocUncapturedArtifactError);
+      // Named for the agent reading it, with the daemon's own refusal kept.
+      expect((refusal as Error).cause).toMatchObject({
+        message: "ydoc close refused: unsettled-close",
+      });
+      // The surface stays read-only because `main` answers this with
+      // `openTimedOut` — the same door the deadline uses.
+      expect(isYDocSessionUnreleasedError(refusal)).toBe(true);
     });
 
     it("reports the shutdown, not a raced open, when quit refuses the release", async () => {

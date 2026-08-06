@@ -431,7 +431,10 @@ import type {
   WorkspaceEngineCapture,
   WorkspaceEngineYDocProviderSession,
 } from "./workspaces/workspaceEngineCapture";
-import { isYDocPathNotInVersionError } from "./workspaces/workspaceEngineCapture";
+import {
+  isYDocPathNotInVersionError,
+  isYDocSessionUnreleasedError,
+} from "./workspaces/workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import {
   createRustEngineDaemon,
@@ -7978,11 +7981,13 @@ function registerIpcHandlers(
         // indistinguishable from intended fallback (it hid a dead engine editor
         // for weeks). Two flags below refuse that downgrade instead:
         // path-not-in-version (#534, the plain editor would write the phantom
-        // back) and an open the engine refused while it may still bind this
-        // document (#564) — a spent retry budget, or a region refused because
-        // the app is quitting. A writable plain editor for either would take
-        // the disk path #533 closed. An uncaptured artifact is really on disk,
-        // so claiming the version does not have it would be false.
+        // back) and an open the engine refused while it may still hold this
+        // document (#564) — a spent retry budget, a region refused because the
+        // app is quitting, or an open whose session the daemon would not
+        // release. A writable plain editor for any of them would take the disk
+        // path #533 closed. An uncaptured artifact whose session WAS released
+        // is really on disk, so it keeps the plain editor: claiming the
+        // version does not have it would be false.
         console.error(
           `[desktop] engine Y.Doc open refused for ${input.path}:`,
           error,
@@ -7990,7 +7995,8 @@ function registerIpcHandlers(
         return OpenEngineYDocSessionResult.parse({
           available: false,
           ...(isYDocPathNotInVersionError(error) ? { notInVersion: true } : {}),
-          ...(isEngineWorkspaceOpenRefusedError(error)
+          ...(isEngineWorkspaceOpenRefusedError(error) ||
+          isYDocSessionUnreleasedError(error)
             ? { openTimedOut: true }
             : {}),
         });
