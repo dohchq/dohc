@@ -14,7 +14,9 @@ import {
 // `workspaceId` filters to one workspace (the notice center — another
 // workspace's paths must not leak across a switch, #579 review r6). The
 // close guard passes none: the whole renderer dies at once, so every
-// workspace's drafts are at stake there.
+// workspace's drafts are at stake there. It passes `atRiskOnly` instead,
+// because a persisted draft is not at stake at all (#600) — it comes back on
+// the next launch, and listing it under "these are lost" would be false.
 //
 // The copy button repeats the quiet swap-and-restore rhythm of
 // FileInspector's CopySourceButton on purpose, WITHOUT importing it: this
@@ -95,12 +97,17 @@ export function DismissDraftControls(props: { onDismiss: () => void }) {
   );
 }
 
-export function RecoveryList(props: { workspaceId?: string }) {
+export function RecoveryList(props: {
+  workspaceId?: string;
+  atRiskOnly?: boolean;
+}) {
   const rows = useAllOrphanedDrafts();
-  const visible =
-    props.workspaceId === undefined
-      ? rows
-      : rows.filter((row) => row.workspaceId === props.workspaceId);
+  const visible = rows.filter(
+    (row) =>
+      (props.workspaceId === undefined ||
+        row.workspaceId === props.workspaceId) &&
+      (props.atRiskOnly !== true || !row.persisted),
+  );
   if (visible.length === 0) return null;
   return (
     <ul data-testid="recovery-list" className="m-0 list-none p-0">

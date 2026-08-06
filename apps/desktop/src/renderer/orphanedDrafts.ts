@@ -1,11 +1,22 @@
 import { useSyncExternalStore } from "react";
+import {
+  clearStoredDrafts,
+  forgetStoredDraft,
+  loadStoredDrafts,
+  remapStoredDraftPaths,
+  storeDraft,
+} from "./orphanedDraftStorage";
 
 // Set-aside drafts (#567): text a reopen took out of the save pipeline, held
 // until the user copies or dismisses it. The store lives OUTSIDE the keyed
 // document view because the notice promises the text stays recoverable —
-// switching or closing the tab must not drop it (#579 review, P1). In-memory
-// by design: the text never reaches disk, because writing it is the clobber
-// the capture exists to prevent, so its lifetime is the app run.
+// switching or closing the tab must not drop it (#579 review, P1).
+//
+// The text never goes back into the document — writing it there is the clobber
+// the capture exists to prevent — but it does reach disk (#600), in the app's
+// own storage and never in the workspace tree. `orphanedDraftStorage` keeps
+// the copy that outlives the app run; this module keeps the copy every surface
+// reads, and `restoreOrphanedDrafts` puts the two together at startup.
 
 export type OrphanedDraft = {
   id: number;
@@ -27,6 +38,11 @@ const pathSetCache = new Map<
   string,
   { version: number; paths: ReadonlySet<string> }
 >();
+// The drafts a restart brings back. Everything else — a secret-classified
+// path the plaintext store refuses, and a draft whose write the storage quota
+// refused — dies with this app run, and only those stay behind the close
+// warning.
+let storedIds: Set<number> = new Set();
 
 function keyFor(workspaceId: string, path: string): string {
   // JSON quotes each part, so two different keys cannot collide.
@@ -55,9 +71,39 @@ export function captureOrphanedDraft(
   text: string,
 ): void {
   const key = keyFor(workspaceId, path);
+  const id = nextId++;
+  // Durable before the notice exists (#600). The write is synchronous, so the
+  // answer the close guard needs is already true here — a draft is at risk
+  // only when storage REFUSED it.
+  if (storeDraft({ id, workspaceId, path, text, capturedAtMs: Date.now() })) {
+    storedIds.add(id);
+  }
   // Append, never overwrite: a second reopen with the first notice still up
   // must not destroy the first draft (#579 review, P2).
-  drafts.set(key, [...(drafts.get(key) ?? EMPTY), { id: nextId++, text }]);
+  drafts.set(key, [...(drafts.get(key) ?? EMPTY), { id, text }]);
+  scheduleNotify();
+}
+
+// Startup restore (#600): the persisted recoveries land in the SAME store the
+// in-document notice, the tab dot, the notice center, and the close warning
+// already read, so every one of those surfaces works unchanged. Synchronous
+// and keyed by workspace, so there is no in-flight response that could repaint
+// a workspace the user has switched away from.
+export function restoreOrphanedDrafts(nowMs: number = Date.now()): void {
+  for (const row of loadStoredDrafts(nowMs)) {
+    // Idempotent: an id this run already holds is the SAME draft, and a
+    // second restore must not turn one notice into two.
+    if (storedIds.has(row.id)) continue;
+    const key = keyFor(row.workspaceId, row.path);
+    drafts.set(key, [
+      ...(drafts.get(key) ?? EMPTY),
+      { id: row.id, text: row.text },
+    ]);
+    storedIds.add(row.id);
+    // Ids stay stable across restarts so a dismissal reaches the right stored
+    // row; this run's captures continue past the highest one restored.
+    if (row.id >= nextId) nextId = row.id + 1;
+  }
   scheduleNotify();
 }
 
@@ -72,6 +118,13 @@ export function dismissOrphanedDraft(
   );
   if (remaining.length === 0) drafts.delete(key);
   else drafts.set(key, remaining);
+  // The stored copy goes with the in-memory one. This is the one path that
+  // retires a draft, so it is the one place the persisted copy can die —
+  // leaving it would show a notice the user has already dealt with on the
+  // next launch. (Copy leaves the draft standing on purpose: taking the text
+  // is not deciding you are done with it.)
+  forgetStoredDraft(id);
+  storedIds.delete(id);
   scheduleNotify();
 }
 
@@ -85,7 +138,12 @@ export function remapOrphanedDraftPaths(
   workspaceId: string,
   project: (path: string) => string | null,
 ): void {
-  let changed = false;
+  // The stored copies move with them, and a rename onto a secret-classified
+  // path drops its plaintext row instead (#446 floor) — those drafts stop
+  // being durable and go back behind the close warning.
+  const demoted = remapStoredDraftPaths(workspaceId, project);
+  for (const id of demoted) storedIds.delete(id);
+  let changed = demoted.size > 0;
   for (const [key, kept] of [...drafts]) {
     const [keyWorkspaceId, path] = JSON.parse(key) as [string, string];
     if (keyWorkspaceId !== workspaceId) continue;
@@ -135,23 +193,27 @@ export function useOrphanedDraftPaths(workspaceId: string): ReadonlySet<string> 
   });
 }
 
-// Whether ANY workspace still holds set-aside drafts. The close warning keys
-// off this (#579 review, r4): the store is in-memory, so closing the window
-// is the one irreversible exit and the user must be told before it runs.
-export function orphanedDraftCount(): number {
-  let count = 0;
-  for (const kept of drafts.values()) count += kept.length;
-  return count;
+// Whether ANY workspace still holds a set-aside draft an exit would DESTROY.
+// The close warning keys off this (#579 review, r4): closing the window is
+// irreversible for these, and the user must be told before it runs.
+//
+// A persisted draft is not one of them (#600) — it comes back on the next
+// launch, and calling it lost would be a lie about durability on every quit.
+// What is left behind the warning is what nothing else can bring back: a
+// secret-classified path the plaintext store refuses, and a draft whose
+// write storage refused.
+export function atRiskOrphanedDraftCount(): number {
+  return atRiskOrphanedDraftIds().length;
 }
 
-// Every unresolved draft's id. The close guard compares this LIVE list against
+// Every at-risk draft's id. The close guard compares this LIVE list against
 // the ids the user approved losing (#579 review, r13) — a count alone cannot
 // tell "the same two drafts" from "one dismissed and one new". A draft the
 // list does not contain was in no warning, and the exit stops for it.
-export function orphanedDraftIds(): readonly number[] {
+export function atRiskOrphanedDraftIds(): readonly number[] {
   const ids: number[] = [];
   for (const kept of drafts.values()) {
-    for (const draft of kept) ids.push(draft.id);
+    for (const draft of kept) if (!storedIds.has(draft.id)) ids.push(draft.id);
   }
   return ids;
 }
@@ -164,6 +226,9 @@ export type OrphanedDraftRow = {
   workspaceLabel: string;
   path: string;
   draft: OrphanedDraft;
+  // Whether this row survives a restart. The close warning lists only the
+  // rows that do not (#600).
+  persisted: boolean;
 };
 
 const workspaceLabels = new Map<string, string>();
@@ -195,7 +260,13 @@ export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
       const [workspaceId, path] = JSON.parse(key) as [string, string];
       const workspaceLabel = workspaceLabels.get(workspaceId) ?? workspaceId;
       for (const draft of kept) {
-        rows.push({ workspaceId, workspaceLabel, path, draft });
+        rows.push({
+          workspaceId,
+          workspaceLabel,
+          path,
+          draft,
+          persisted: storedIds.has(draft.id),
+        });
       }
     }
     allRowsCache = {
@@ -211,5 +282,8 @@ export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
 export function resetOrphanedDrafts(): void {
   drafts.clear();
   workspaceLabels.clear();
+  storedIds = new Set();
+  clearStoredDrafts();
+  nextId = 1;
   scheduleNotify();
 }

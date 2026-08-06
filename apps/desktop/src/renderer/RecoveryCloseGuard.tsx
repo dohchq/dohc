@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import {
-  orphanedDraftCount,
-  orphanedDraftIds,
+  atRiskOrphanedDraftCount,
+  atRiskOrphanedDraftIds,
+  restoreOrphanedDrafts,
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
@@ -60,7 +61,7 @@ export function requestGuardedReload(): void {
 // INSTEAD of the install, whose confirm makes the one and only call.
 // Returns null when the dialog took over — the caller's own flow ends there.
 export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult | null> {
-  if (orphanedDraftCount() === 0 || openRecoveryWarning === null) {
+  if (atRiskOrphanedDraftCount() === 0 || openRecoveryWarning === null) {
     const result = await beginInstall();
     // Main's boundary re-check refuses the install when a reopen set an edit
     // aside after THIS renderer's own check (#579 review, r12). That refusal
@@ -69,7 +70,7 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult 
     // error and the drafts were never mentioned (#579 review, r18). The
     // dialog path already re-prompts; both paths reach the same state, so
     // both must say the same thing.
-    if (!result.accepted && orphanedDraftCount() > 0 && openRecoveryWarning !== null) {
+    if (!result.accepted && atRiskOrphanedDraftCount() > 0 && openRecoveryWarning !== null) {
       openRecoveryWarning({ kind: "update", resume: resumeInstall });
       return null;
     }
@@ -143,31 +144,47 @@ function beginInstall(): Promise<UpdateActionResult> {
 // milliseconds; this only bounds how long the drafts go unguarded.
 const BYPASS_REARM_MS = 10_000;
 
-// Set-aside drafts (#567) live in renderer memory only, so closing,
-// reloading, quitting, or restarting into an update destroys them — and an
-// irreversible change must be announced before it runs (product invariant).
-// Electron cancels a close SILENTLY on preventDefault, so the dialog below
-// is the announcement, and it carries the full recovery list: the warning
-// must offer the very actions it demands (#579 review, r5).
+// Set-aside drafts (#567) are persisted on capture and restored on launch
+// (#600), so most of them now survive closing, reloading, quitting, and
+// restarting into an update. What CANNOT be persisted still dies with the app
+// run — a secret-classified path never enters plaintext storage (#446), and a
+// storage refusal leaves the text in memory — and destroying that text is
+// irreversible, so it must be announced before it runs (product invariant).
+// Electron cancels a close SILENTLY on preventDefault, so the dialog below is
+// the announcement, and it carries the at-risk drafts with their own
+// Copy/Dismiss: the warning must offer the very actions it demands (#579
+// review, r5).
 //
 // This mounts ABOVE AppErrorBoundary (see main.tsx): a crash unmounts the
 // shell, and the crash screen's "Reload dohc" must not destroy the drafts
 // unannounced. The store already lives outside React, so this guard needs
-// nothing from the crashed tree.
-//
-// Persisting the drafts instead is a separate durability decision
-// (storage location, lifetime, secret-path handling), deliberately not
-// taken here (#579 review, r4).
+// nothing from the crashed tree — which is also why the startup restore runs
+// here, in the one component whose lifetime IS the app run.
 export function RecoveryCloseGuard(props: { children: ReactNode }) {
   const [closeWarning, setCloseWarning] = useState<{
     // What the user asked for — the confirm button resumes exactly it.
     kind: UnloadKind;
     resume: (() => Promise<boolean>) | null;
   } | null>(null);
+  // Restored during the FIRST render, not an effect: the notices are up
+  // before the user sees the window, and a beforeunload that arrives between
+  // mount and effect cannot read an empty store. The ref keeps it off every
+  // later render — a repeat is harmless (the restore is idempotent), just
+  // wasted work.
+  const restored = useRef(false);
+  if (!restored.current) {
+    restored.current = true;
+    restoreOrphanedDrafts();
+  }
   // LIVE, not a snapshot (#579 review, r10): the dialog embeds Copy/Dismiss,
   // so the count must follow every dismissal, and an emptied dialog has
-  // nothing left to warn about.
-  const liveDrafts = useAllOrphanedDrafts();
+  // nothing left to warn about. Only the drafts an exit would DESTROY belong
+  // here (#600) — a restored draft comes back on its own.
+  const allDrafts = useAllOrphanedDrafts();
+  const liveDrafts = useMemo(
+    () => allDrafts.filter((row) => !row.persisted),
+    [allDrafts],
+  );
   const liveCount = liveDrafts.length;
   const warningOpen = closeWarning !== null;
   useEffect(() => {
@@ -183,7 +200,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   // to the dialog with its text intact.
   const approvedDraftIds = useRef<ReadonlySet<number>>(new Set());
   const hasUnapprovedDrafts = () =>
-    orphanedDraftIds().some((id) => !approvedDraftIds.current.has(id));
+    atRiskOrphanedDraftIds().some((id) => !approvedDraftIds.current.has(id));
   const rearmGuard = () => {
     bypassCloseGuard.current = false;
     approvedDraftIds.current = new Set();
@@ -316,7 +333,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
               Copy {liveCount === 1 ? "it" : "them"} here to keep the text.
             </p>
             <div className="mt-3 max-h-60 overflow-y-auto">
-              <RecoveryList />
+              <RecoveryList atRiskOnly />
             </div>
             <div className="mt-4 flex justify-end gap-2">
               <button
