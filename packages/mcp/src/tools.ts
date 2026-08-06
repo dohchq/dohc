@@ -122,7 +122,15 @@ const SEARCH_PREVIEW_CHARS = 200;
 // not just whether it is inside. Every failure refuses.
 type RealTarget =
   | { ok: true; relative: string }
-  | { ok: false; reason: "escapes-workspace" | "dangling-symlink" };
+  | { ok: false; reason: "escapes-workspace" }
+  | { ok: false; reason: "dangling-symlink" }
+  | { ok: false; reason: "unresolvable-symlink"; code: string }
+  | { ok: false; reason: "unreadable-path"; code: string };
+
+// The only two errnos that mean NOTHING is at a path. Every other one leaves
+// the question unanswered, and an unanswered question is not a "no".
+const ABSENT_CODES = new Set(["ENOENT", "ENOTDIR"]);
+const UNNAMED_ERROR = "unknown error";
 
 async function realRelativeInRoot(root: string, absolute: string): Promise<RealTarget> {
   let realRoot: string;
@@ -137,16 +145,37 @@ async function realRelativeInRoot(root: string, absolute: string): Promise<RealT
     let real: string;
     try {
       real = await realpath(probe);
-    } catch {
+    } catch (error) {
       // A component realpath cannot resolve is only safe to call "not there
       // yet" when NOTHING is there. A dangling symlink is present, and
       // whatever creates its target later decides where this path lands.
       // That is not hypothetical here: a mutator calls ensureRecordable
       // immediately after this check, which CREATES `.dohc` — so a dangling
       // `meta -> .dohc` would go live between the check and the operation.
-      // lstat separates the two cases; realpath cannot.
-      if (await lstat(probe).then(() => true, () => false)) {
-        return { ok: false, reason: "dangling-symlink" };
+      // lstat separates absent from present; realpath cannot.
+      //
+      // A permission or I/O error answers neither question. Climbing past it
+      // would append the component as spelling, and spelling is exactly what
+      // the reserved rule must not decide on (#638) — so it refuses instead.
+      const realpathCode = errnoCode(error) ?? UNNAMED_ERROR;
+      const climbable = ABSENT_CODES.has(realpathCode) || realpathCode === "ELOOP";
+      if (!climbable) return { ok: false, reason: "unreadable-path", code: realpathCode };
+      const presence = await lstat(probe).then(
+        () => "present",
+        (cause: unknown) => {
+          const code = errnoCode(cause) ?? UNNAMED_ERROR;
+          return ABSENT_CODES.has(code) ? "absent" : code;
+        },
+      );
+      if (presence === "present") {
+        // The link is there and realpath will not follow it. ENOENT proves the
+        // target is missing; ELOOP proves a cycle. Only the first is dangling.
+        return ABSENT_CODES.has(realpathCode)
+          ? { ok: false, reason: "dangling-symlink" }
+          : { ok: false, reason: "unresolvable-symlink", code: realpathCode };
+      }
+      if (presence !== "absent") {
+        return { ok: false, reason: "unreadable-path", code: presence };
       }
       const parent = dirname(probe);
       if (parent === probe) return { ok: false, reason: "escapes-workspace" };
@@ -198,15 +227,7 @@ async function safeResolve(
   const absolute = join(ctx.root, validated.normalized);
   const target = await realRelativeInRoot(ctx.root, absolute);
   if (!target.ok) {
-    return {
-      ok: false,
-      reason:
-        target.reason === "escapes-workspace"
-          ? `path rejected (symlink escapes workspace): ${relativePath}`
-          : `path rejected (a symlink on this path has no target): ${relativePath}. ` +
-            `dohc cannot tell where the path leads. Create the target first, or use ` +
-            `a path with no symlink.`,
-    };
+    return { ok: false, reason: unresolvedPathRefusal(target, relativePath) };
   }
   const realRelative = target.relative;
   // The check above judged the path as SPELLED. An in-workspace symlink can
@@ -223,6 +244,37 @@ async function safeResolve(
     };
   }
   return { ok: true, absolute, normalized: validated.normalized, realRelative };
+}
+
+// A path the resolver could not place. Each cause gets its own next step: a
+// missing target can be created, a cycle cannot, and a filesystem error is
+// about the path's permissions rather than its spelling. One message for all
+// three would send an agent to fix the wrong thing.
+function unresolvedPathRefusal(
+  target: Extract<RealTarget, { ok: false }>,
+  relativePath: string,
+): string {
+  switch (target.reason) {
+    case "escapes-workspace":
+      return `path rejected (symlink escapes workspace): ${relativePath}`;
+    case "dangling-symlink":
+      return (
+        `path rejected (a symlink on this path has no target): ${relativePath}. ` +
+        `dohc cannot tell where the path leads. Create the target first, or use ` +
+        `a path with no symlink.`
+      );
+    case "unresolvable-symlink":
+      return (
+        `path rejected (a symlink on this path cannot be resolved: ${target.code}): ` +
+        `${relativePath}. dohc cannot tell where the path leads. Use a path with ` +
+        `no symlink.`
+      );
+    case "unreadable-path":
+      return (
+        `path rejected (dohc could not check where this path leads: ${target.code}): ` +
+        `${relativePath}. Fix the error on this path, or use another path.`
+      );
+  }
 }
 
 // WHICH rule refuses this resolved path, or null when none does. It names the
@@ -738,6 +790,14 @@ function isSecretWorkspacePath(normalizedPath: string): boolean {
   return classifyEngineFilePathForRead(normalizedPath).kind === "secret";
 }
 
+// The secret floor decided on BOTH spellings of a resolved path. The name the
+// agent asked for is not the name the bytes come from: `notes.md -> .env`
+// passes a check on the request and reads the secret anyway, and every tool
+// that opens a file follows the link. Neither spelling may classify as secret.
+function isSecretResolvedPath(resolved: { normalized: string; realRelative: string }): boolean {
+  return isSecretWorkspacePath(resolved.normalized) || isSecretWorkspacePath(resolved.realRelative);
+}
+
 export async function readWorkspaceFile(
   ctx: ToolContext,
   args: {
@@ -749,29 +809,8 @@ export async function readWorkspaceFile(
 ) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  if (isSecretWorkspacePath(resolved.normalized)) {
+  if (isSecretResolvedPath(resolved)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
-  }
-  // The alias check above classifies the REQUESTED path, but the read below
-  // follows symlinks: an in-workspace link (notes.md -> .env) passes both
-  // guards while the bytes come from the secret. Classify the resolved real
-  // target too, so no alias can read protected contents.
-  const realTarget = await realpath(resolved.absolute).catch(() => null);
-  if (realTarget) {
-    const realRoot = await realpath(ctx.root).catch(() => null);
-    if (!realRoot) {
-      return { ok: false as const, reason: `path rejected (workspace root unresolvable): ${args.path}` };
-    }
-    if (realTarget === realRoot || realTarget.startsWith(realRoot + sep)) {
-      const relativeReal = realTarget
-        .slice(realRoot.length)
-        .split(sep)
-        .filter((segment) => segment.length > 0)
-        .join("/");
-      if (relativeReal && isSecretWorkspacePath(relativeReal)) {
-        return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
-      }
-    }
   }
   try {
     const maxBytes = Math.min(
@@ -1845,9 +1884,11 @@ export async function detectSites(
   const start =
     args.path && args.path.trim().length > 0
       ? await safeResolve(ctx, args.path, "read")
-      : { ok: true as const, absolute: ctx.root, normalized: "" };
+      : { ok: true as const, absolute: ctx.root, normalized: "", realRelative: "" };
   if (!start.ok) return { ok: false as const, reason: start.reason };
-  const allowed = sitePathAllowed(start.normalized);
+  // Where the scan really lands decides the rule (#638): `sites -> .apps`
+  // spells an ordinary folder and reads the legacy tree site tools disown.
+  const allowed = sitePathAllowed(start.realRelative);
   if (!allowed.ok) return allowed;
 
   const info = await lstat(start.absolute).catch(() => null);
@@ -1888,7 +1929,7 @@ export async function createSite(
   const root = await safeResolve(ctx, args.path);
   if (!root.ok) return { ok: false as const, reason: root.reason };
   if (!root.normalized) return { ok: false as const, reason: "site path must name a folder" };
-  const allowed = sitePathAllowed(root.normalized);
+  const allowed = sitePathAllowed(root.realRelative);
   if (!allowed.ok) return allowed;
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
@@ -2039,7 +2080,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
   for (const file of files) {
     const resolved = await safeResolve(ctx, file.path);
     if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-    const fileAllowed = sitePathAllowed(resolved.normalized);
+    const fileAllowed = sitePathAllowed(resolved.realRelative);
     if (!fileAllowed.ok) return fileAllowed;
     if (
       resolved.normalized !== root.normalized &&
@@ -2455,6 +2496,16 @@ export async function publishSite(ctx: ToolContext, args: { siteRoot: string }) 
 
 // --- dohc_import_data -------------------------------------------------------
 
+// A VISIBLE user database under BOTH spellings. The strategy is read off the
+// name, so an alias carries its own: `records.sqlite -> notes/data.sqlite-wal`
+// spells a database while the bytes are a sidecar. Both names must qualify.
+function isVisibleDatabase(resolved: { normalized: string; realRelative: string }): boolean {
+  return (
+    databaseSyncStrategy(resolved.normalized) === "operation-log" &&
+    databaseSyncStrategy(resolved.realRelative) === "operation-log"
+  );
+}
+
 // Imports a delimited/structured source into a NEW visible .sqlite, written
 // safely under the root. Refuses a hidden-internal (.dohc) or sidecar target —
 // only a visible user database is a valid import destination.
@@ -2467,14 +2518,14 @@ export async function importData(
   // Same secret floor as read/search: an import is a read of the source,
   // and importing a secret-classified file (".env.csv", mounted or local)
   // into a visible database would launder its contents past the denial.
-  if (isSecretWorkspacePath(sourceRel.normalized)) {
+  if (isSecretResolvedPath(sourceRel)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
   }
   const dbRel = await safeResolve(ctx, args.databasePath);
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
-  if (databaseSyncStrategy(dbRel.normalized) !== "operation-log") {
+  if (!isVisibleDatabase(dbRel)) {
     return { ok: false as const, reason: `not a visible database target: ${args.databasePath}` };
   }
 
@@ -2530,12 +2581,12 @@ export async function queryDatabase(
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
   // Secret floor before any bytes open: a secret-classified database name
   // (".env.sqlite", mounted or local) is denied like any other secret read.
-  if (isSecretWorkspacePath(dbRel.normalized)) {
+  if (isSecretResolvedPath(dbRel)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
   }
   // Only a VISIBLE user database (parity with import_data): never a sidecar,
   // hidden internal, or a non-db file that merely contains SQLite bytes.
-  if (databaseSyncStrategy(dbRel.normalized) !== "operation-log") {
+  if (!isVisibleDatabase(dbRel)) {
     return { ok: false as const, reason: `not a visible database: ${args.databasePath}` };
   }
   if (!isReadOnlySelect(args.sql)) {

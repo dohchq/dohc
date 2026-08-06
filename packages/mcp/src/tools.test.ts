@@ -2412,3 +2412,145 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 });
+
+// #638 on the surfaces next door. safeResolve hands every tool BOTH spellings
+// of a path; a guard that decides authority has to read the resolved one. Each
+// case here passes its guard on the name the agent asked for, and the guard is
+// the last thing standing between the alias and the bytes behind it.
+describe("a guard that decides authority reads the resolved path", () => {
+  const marker = "MCP_ALIAS_LEAK_31";
+
+  async function importedDatabase(ctx: ToolContext, path: string): Promise<Buffer> {
+    await writeFile(join(ctx.root, "people.csv"), `id,name\n1,${marker}\n`);
+    const imported = await importData(ctx, {
+      sourcePath: "people.csv",
+      databasePath: path,
+      tableName: "people",
+    });
+    expect(imported).toMatchObject({ ok: true });
+    return readFile(join(ctx.root, path));
+  }
+
+  it("refuses an import whose source really is a secret file", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, ".env.csv"), `k,v\nAPI_KEY,${marker}\n`);
+      await symlink(join(ctx.root, ".env.csv"), join(ctx.root, "data.csv"));
+
+      const imported = await importData(ctx, {
+        sourcePath: "data.csv",
+        databasePath: "people.sqlite",
+        tableName: "people",
+      });
+      expect(imported).toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
+      expect(JSON.stringify(imported)).not.toContain(marker);
+      // An import republishes what it reads, so the denial has to leave no
+      // database behind either.
+      await expect(stat(join(ctx.root, "people.sqlite"))).rejects.toThrow();
+    });
+  });
+
+  it("refuses a query whose database really is a secret file", async () => {
+    await withWorkspace(async (ctx) => {
+      const bytes = await importedDatabase(ctx, "people.sqlite");
+      await writeFile(join(ctx.root, ".env.sqlite"), bytes);
+      await symlink(join(ctx.root, ".env.sqlite"), join(ctx.root, "records.sqlite"));
+
+      const queried = await queryDatabase(ctx, {
+        databasePath: "records.sqlite",
+        sql: "SELECT name FROM people",
+      });
+      expect(queried).toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
+      expect(JSON.stringify(queried)).not.toContain(marker);
+    });
+  });
+
+  // The visible-database rule is read off the NAME, so an alias carries its
+  // own: a sidecar is transient and never a standalone file, and an alias that
+  // spells `.sqlite` must not turn one into a queryable database.
+  it("refuses a query whose database really is a sidecar", async () => {
+    await withWorkspace(async (ctx) => {
+      const bytes = await importedDatabase(ctx, "people.sqlite");
+      await writeFile(join(ctx.root, "people.sqlite-wal"), bytes);
+      await symlink(join(ctx.root, "people.sqlite-wal"), join(ctx.root, "records.sqlite"));
+
+      const queried = await queryDatabase(ctx, {
+        databasePath: "records.sqlite",
+        sql: "SELECT name FROM people",
+      });
+      expect(queried).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("not a visible database"),
+      });
+      expect(JSON.stringify(queried)).not.toContain(marker);
+    });
+  });
+
+  it("refuses a site scan whose folder really is the legacy one", async () => {
+    await withWorkspace(async (ctx) => {
+      const legacy = join(ctx.root, LEGACY_APPS_SEGMENT, "portal");
+      await mkdir(legacy, { recursive: true });
+      await writeFile(join(legacy, "index.html"), "<h1>legacy</h1>");
+      await symlink(join(ctx.root, LEGACY_APPS_SEGMENT), join(ctx.root, "shortcut"), "dir");
+
+      const scanned = await detectSites(ctx, { path: "shortcut/portal" });
+      expect(scanned).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining(LEGACY_APPS_SEGMENT),
+      });
+    });
+  });
+
+  it("refuses to create a site whose folder really is the legacy one", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, LEGACY_APPS_SEGMENT), { recursive: true });
+      await symlink(join(ctx.root, LEGACY_APPS_SEGMENT), join(ctx.root, "shortcut"), "dir");
+
+      const created = await createSite(ctx, { path: "shortcut/fresh" });
+      expect(created).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining(LEGACY_APPS_SEGMENT),
+      });
+      await expect(stat(join(ctx.root, LEGACY_APPS_SEGMENT, "fresh"))).rejects.toThrow();
+    });
+  });
+
+  // Climbing past a component realpath cannot resolve is safe only when
+  // NOTHING is there. A permission error answers neither question, and reading
+  // it as absence appends the component as spelling -- which is the exact
+  // input the reserved rule must never decide on.
+  it("refuses a path whose presence the filesystem would not report", async () => {
+    await withWorkspace(async (ctx) => {
+      // Dangling on purpose: realpath stops at `meta`, so lstat is what says
+      // whether anything is there, and here lstat cannot say.
+      await symlink(join(ctx.root, ".dohc"), join(ctx.root, "meta"), "dir");
+      lstatOverride.path = join(ctx.root, "meta");
+      lstatOverride.results = [errnoError("EACCES")];
+      try {
+        const resolved = await safeResolve(ctx, "meta/sneaky");
+        expect(resolved.ok).toBe(false);
+        const reason = refusalReason(resolved);
+        expect(reason).toContain("EACCES");
+        expect(reason).toMatch(/could not check/i);
+      } finally {
+        lstatOverride.path = null;
+        lstatOverride.results = [];
+      }
+    });
+  });
+
+  // A cycle and a missing target both stop realpath, and they owe different
+  // next steps: the missing target can be created, the cycle cannot.
+  it("tells a symlink cycle apart from a symlink with no target", async () => {
+    await withWorkspace(async (ctx) => {
+      await symlink(join(ctx.root, "pong"), join(ctx.root, "ping"), "dir");
+      await symlink(join(ctx.root, "ping"), join(ctx.root, "pong"), "dir");
+      await symlink(join(ctx.root, "absent"), join(ctx.root, "alias"), "dir");
+
+      const cycle = refusalReason(await safeResolve(ctx, "ping"));
+      expect(cycle).toContain("ELOOP");
+      expect(cycle).not.toMatch(/create the target/i);
+
+      expect(refusalReason(await safeResolve(ctx, "alias"))).toMatch(/create the target/i);
+    });
+  });
+});
