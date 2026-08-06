@@ -89,11 +89,15 @@ export function DocumentMenu(props: {
     [],
   );
 
+  // ONE timer, so one label. Merging into the previous feedback stranded it:
+  // the replacement timer only ever clears the newest item, so a second
+  // refusal inside the window left the first item saying "Not ready yet" with
+  // nothing left to retire it.
   function showFeedback(id: DocumentMenuItemId, text: string) {
-    setFeedback((current) => ({ ...current, [id]: text }));
+    setFeedback({ [id]: text });
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     feedbackTimer.current = setTimeout(() => {
-      setFeedback((current) => ({ ...current, [id]: undefined }));
+      setFeedback({});
       setOpen(false);
     }, FEEDBACK_MS);
   }

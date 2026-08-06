@@ -227,7 +227,16 @@ describe("DocumentMenu", () => {
     // The refusal leaves the menu open, so the export item is right there.
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
     await act(async () => {});
-    expect(screen.getAllByText("Not ready yet").length).toBeGreaterThan(0);
+    // ONE label, on the item the user just clicked. There is one timer, so a
+    // second refusal inside its window retires the first item's label as it
+    // replaces the timer — otherwise the copy item keeps saying "Not ready
+    // yet" with nothing left to clear it (codex r14).
+    expect(screen.getAllByText("Not ready yet")).toHaveLength(1);
+    expect(
+      screen
+        .getByTestId("document-menu-item-export-markdown")
+        .textContent,
+    ).toContain("Not ready yet");
     // MUTATION: the same fallback -> a .md file containing one newline,
     // written as if it were the user's document.
     expect(exportDocumentFile).not.toHaveBeenCalled();

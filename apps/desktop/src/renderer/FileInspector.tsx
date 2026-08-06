@@ -1010,15 +1010,16 @@ function MarkdownView(props: {
   // than yDocToMarkdown) keeps import-export's heavy schema/KaTeX stack out of
   // this eager chunk — the mounted WYSIWYG editor already owns the body.
   const serializeEngineDraft = (): string | null => {
-    // The mounted editor is the ONLY serializer of the canonical Y.Doc here.
-    // Without it there is no honest body to emit: `props.body` is the
-    // markdown cache, and on the recovery path (a failed read whose retry
-    // bound the document, #564) that cache is EMPTY while the Y.Doc holds
-    // the user's document. Falling back to it exported an empty file that
-    // looked like a successful export. Refuse instead; the menu says the
-    // document is not ready.
+    // The mounted editor is the ONLY serializer of the canonical Y.Doc, so
+    // without it there is no honest body to emit for an engine-backed
+    // document: `props.body` is the markdown CACHE beside that doc. It lags
+    // every edit the Y.Doc has taken since the read, and on the recovery path
+    // (a failed read whose retry bound the document, #564) it is empty. Both
+    // export a file that is not the user's document while reporting success,
+    // and emptiness was never the thing that made it wrong — the Y.Doc being
+    // canonical is. Refuse; the menu says the document is not ready.
     const editorBody = wysiwygRef.current?.getMarkdown();
-    if (editorBody === undefined && props.body.length === 0) return null;
+    if (editorBody === undefined && engine.doc !== null) return null;
     const body = editorBody ?? markdownEditorBody(props.body);
     const liveMeta = engine.doc
       ? (Object.fromEntries(

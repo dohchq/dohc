@@ -310,6 +310,86 @@ describe("the document open's capture-chain hold (#564)", () => {
       expect(refusal).not.toBeInstanceOf(YDocUncapturedArtifactError);
     });
 
+    // The other half of the same defect, and the one the user feels. The
+    // client stopped waiting; the daemon did not stop working. Its close runs
+    // in a SPAWNED task (crates/dohc-workspace-engine/src/lib.rs,
+    // ydoc_close_inner) that runs to completion whatever happens to the RPC
+    // future, and a genuine close refusal — an update raced in, so the
+    // lineage is dirty — REINSERTS the session entry with its lease held.
+    // The refusal that left this function was the last reference to that
+    // session, so every later open answered ydoc-session-busy and "Try again"
+    // could never work again. Retain it where a close can still reach it.
+    it("discharges the session it could not release, so the retry binds", async () => {
+      const root = await tempRoot();
+      await write(root, "note.md", "uncaptured bytes\n");
+      const { sessions } = recordingSessions();
+      const doc = new Y.Doc();
+      let opens = 0;
+      let closes = 0;
+      const engine = createWorkspaceEngineCapture({
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        rustEngineSessions: sessions,
+        openRustYDocProviderSession: async () => {
+          opens += 1;
+          // Open 1 binds absent-head over content and refuses. Open 2 is the
+          // user's retry, by which point the racing update has landed — the
+          // daemon has a head, so the document binds normally.
+          const absent = opens === 1;
+          return {
+            doc,
+            initialUpdate: Y.encodeStateAsUpdate(doc),
+            contentKind: "plaintext" as const,
+            path: "note.md",
+            head: absent ? ("absent" as const) : ("present" as const),
+            lineage: absent ? ("absent" as const) : ("existing" as const),
+            applyLocalUpdate: async () => undefined,
+            settleNow: async () =>
+              ({ sha256: "a".repeat(64), markdown: "" }) as never,
+            applyExternalMarkdownEdit: async () =>
+              ({ kind: "merged" }) as never,
+            close: async () => {
+              closes += 1;
+              // The refusal release: the budget stopped waiting for it.
+              if (closes === 1) {
+                throw new EngineWorkspaceRetryDeadlineError(
+                  WORKSPACE_ID,
+                  "withRetryBudget budgetMs",
+                  YDOC_OPEN_RETRY_DEADLINE_MS,
+                  "since the first failure",
+                  YDOC_OPEN_RETRY_DEADLINE_MS,
+                  YDOC_OPEN_RETRY_DEADLINE_MS,
+                  2,
+                  new Error("transport-error"),
+                );
+              }
+            },
+          };
+        },
+      });
+      engine.start();
+      await engine.flush();
+
+      const refusal = await engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+      expect(isEngineWorkspaceRetryDeadlineError(refusal)).toBe(true);
+
+      // "Try again". MUTATION: drop the retention (or the discharge) -> the
+      // unreleased session is unreachable, and in production every open from
+      // here answers ydoc-session-busy until the app restarts.
+      const session = await engine.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+      });
+      expect(session.doc).toBe(doc);
+      // The retry closed the stranded session before binding a new one.
+      expect(closes).toBe(2);
+
+      await session.close({ settle: false });
+      await engine.stop();
+    });
+
     it("reports the shutdown, not a raced open, when quit refuses the release", async () => {
       const root = await tempRoot();
       // No file: the sibling branch, which would otherwise claim the open
