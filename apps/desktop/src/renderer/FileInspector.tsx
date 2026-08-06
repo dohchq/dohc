@@ -35,9 +35,11 @@ import {
   parseFrontmatter,
 } from "./markdown/frontmatter";
 import type {
+  BlockNavigationTarget,
   MarkdownEditorHandle,
   MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
+import { blockIndexForLine } from "./editor/lineBlocks";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
@@ -912,11 +914,18 @@ function MarkdownView(props: {
         : undefined,
     [props.pendingUndo],
   );
-  // Search lands HERE (Phase E5.0): the rendered document has no per-line DOM
-  // to anchor, so the smallest honest seam is opening SOURCE mode and
-  // selecting the matched line. Phase E4's WYSIWYG editor takes this seam
-  // over with a real in-document scroll-to-position once it owns the surface.
+  // Search lands HERE. One pending line, two seams that consume it — whichever
+  // surface owns the document: the plain source textarea selects the line, and
+  // the engine editor reveals the block holding it (#661). Exactly one of them
+  // runs, and it retires the line so a later commit cannot replay the jump.
   const [pendingScrollLine, setPendingScrollLine] = useState<number | null>(null);
+  const [blockTarget, setBlockTarget] = useState<BlockNavigationTarget | null>(null);
+  const blockTargetNonce = useRef(0);
+  // The editor reports the jump it landed, and the target goes away. Keyed by
+  // nonce so a report for a jump this view has already replaced is ignored.
+  const retireBlockTarget = useCallback((nonce: number) => {
+    setBlockTarget((current) => (current?.nonce === nonce ? null : current));
+  }, []);
   const scrollTargetNonce = props.scrollTarget?.nonce;
   useEffect(() => {
     if (!props.scrollTarget || props.scrollTarget.path !== props.path) return;
@@ -1175,6 +1184,9 @@ function MarkdownView(props: {
   const [showSource, setShowSource] = useState(false);
   const [sourceMarkdown, setSourceMarkdown] = useState<string | null>(null);
   const readDocumentRef = useRef<HTMLDivElement | null>(null);
+  // The engine branch's scroller. It holds the top-matter (title, properties)
+  // ABOVE the editor, which is where a frontmatter search hit actually lives.
+  const engineDocPaneRef = useRef<HTMLDivElement | null>(null);
   const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<
     number | null
   >(null);
@@ -1240,6 +1252,41 @@ function MarkdownView(props: {
     observer.observe(container, { childList: true, subtree: true });
     return () => observer.disconnect();
   }, [surfaceMode, pendingRenderedHeadingIndex]);
+  // The engine editor's line-jump seam (#661). Engine mode renders no source
+  // textarea, so before this every engine-backed search result opened at the
+  // top of the document. The jump is retired HERE, once, for every engine-
+  // backed open — including the recovery path, whose `props.body` is empty
+  // (the failed read, #564) and therefore resolves to the first block.
+  //
+  // `props.body` is the on-disk Markdown, which is what search numbered its
+  // lines against, so it is the right text to map — even though the canonical
+  // Y.Doc may have moved on since. The block index absorbs small drift.
+  useEffect(() => {
+    if (pendingScrollLine === null || !engineMode) return;
+    // Show the document, not the source projection. A reader who clicked a
+    // search result wants the match, and the editor pane is `hidden` while
+    // source is up — the reveal would land where nobody can see it. Same move
+    // the heading jump makes above.
+    setShowSource(false);
+    const body = markdownEditorBody(props.body);
+    const frontmatterLines = (
+      props.body.slice(0, props.body.length - body.length).match(/\n/g) ?? []
+    ).length;
+    const bodyLine = pendingScrollLine - frontmatterLines;
+    if (bodyLine < 1) {
+      // The hit is in the frontmatter. The title and properties it names are
+      // rendered by PageIdentity/PropertiesPanel ABOVE the editor, so there is
+      // no body block to reveal — and revealing the first one would scroll the
+      // real match off the top. Show the top of the document instead.
+      engineDocPaneRef.current?.scrollTo({ top: 0 });
+    } else {
+      setBlockTarget({
+        index: blockIndexForLine(body, bodyLine),
+        nonce: ++blockTargetNonce.current,
+      });
+    }
+    setPendingScrollLine(null);
+  }, [pendingScrollLine, engineMode, props.body]);
   useEffect(() => {
     if (!showSource || !engine.doc) {
       setSourceMarkdown(null);
@@ -1741,6 +1788,7 @@ function MarkdownView(props: {
             stale mount-time body. The hidden editor stays bound to the Y.Doc,
             so toggling back restores the exact editing state. */}
         <div
+          ref={engineDocPaneRef}
           data-testid="view-markdown"
           data-dohc-doc-pane=""
           hidden={showSource}
@@ -1777,6 +1825,8 @@ function MarkdownView(props: {
                 knownFiles={knownFiles}
                 onOpenWikilink={openWikilink}
                 headingTarget={props.headingTarget}
+                blockTarget={blockTarget ?? undefined}
+                onBlockTargetConsumed={retireBlockTarget}
                 pendingUndo={editorPendingUndo}
                 onPendingUndoConsumed={props.onPendingUndoConsumed}
                 collab={{

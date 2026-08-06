@@ -149,3 +149,83 @@ describe("MarkdownEditor heading navigation", () => {
     ).toBe(true);
   });
 });
+
+// #661: the seam a search line jump lands on. FileInspector maps its pending
+// Markdown line to a top-level block index; this reveals that block.
+describe("MarkdownEditor block navigation", () => {
+  const VALUE = "# Intro\n\nFirst para\n\nSecond para\n\nThird para";
+
+  function renderEditor(blockTarget: { index: number; nonce: number }) {
+    return createElement(MarkdownEditor, {
+      value: VALUE,
+      onDirty: vi.fn(),
+      workspaceId: "workspace-1",
+      path: "notes/plan.md",
+      knownFiles: [],
+      blockTarget,
+    });
+  }
+
+  it("scrolls to and flashes the named block, and repeats on a new nonce", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    const view = render(renderEditor({ index: 2, nonce: 1 }));
+    await screen.findByTestId("markdown-editor");
+
+    // MUTATION: drop the blockTarget effect -> nothing scrolls, and an
+    // engine-backed search result opens at the top of the document again.
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+      ).toBe("Second para"),
+    );
+
+    view.rerender(renderEditor({ index: 3, nonce: 2 }));
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(
+        view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+      ).toBe("Third para"),
+    );
+  });
+
+  it("reveals the nearest block when the index runs past the document", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    const view = render(renderEditor({ index: 99, nonce: 1 }));
+    await screen.findByTestId("markdown-editor");
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+      ).toBe("Third para"),
+    );
+  });
+
+  it("leaves the cursor where it is — an external jump reveals, it does not take over", async () => {
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
+
+    const view = render(renderEditor({ index: 2, nonce: 1 }));
+    await screen.findByTestId("markdown-editor");
+    await waitFor(() =>
+      expect(view.container.querySelector(".dohc-outline-target-flash")).toBeTruthy(),
+    );
+
+    expect(document.activeElement).not.toBe(
+      view.container.querySelector(".ProseMirror"),
+    );
+  });
+});
