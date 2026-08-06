@@ -2,44 +2,26 @@
 //! directory-alias helper (symlink on POSIX, junction/symlink on Windows) used
 //! to prove canonical-identity convergence.
 
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A unique temporary directory, removed on `Drop`. Lives under the OS temp
-/// dir (short paths on Windows, keeping the bundled-SQLite build and long-path
-/// hazards out of scope).
+/// A unique temporary directory, removed on `Drop`. It lives under the shared
+/// run tree in the OS temp directory.
 pub struct ScratchDir {
-    path: PathBuf,
+    inner: dohc_test_scratch::ScratchDir,
 }
 
 impl ScratchDir {
     /// Create a fresh unique scratch directory.
     pub fn new() -> io::Result<Self> {
-        // The nonce is what makes the name unique across *runs*: Windows reuses
-        // PIDs, and a crashed run never runs `Drop`, so pid+counter alone can
-        // name a directory a dead run already left behind.
-        let unique = format!(
-            "dohc-cal1-{}-{}-{:016x}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed),
-            RandomState::new().build_hasher().finish(),
-        );
-        let path = std::env::temp_dir().join(unique);
-        // `create_dir` (not `create_dir_all`): a pre-existing path — stale
-        // state from PID reuse or a prior crash — must fail loudly, never be
-        // silently reused and contaminate a durability test.
-        std::fs::create_dir(&path)?;
-        Ok(ScratchDir { path })
+        Ok(Self {
+            inner: dohc_test_scratch::ScratchDir::new_named("cal1")?,
+        })
     }
 
     /// The root of the scratch directory.
     pub fn path(&self) -> &Path {
-        &self.path
+        self.inner.path()
     }
 
     /// The canonical engine-db location under this workspace
@@ -47,22 +29,14 @@ impl ScratchDir {
     /// path is ready for [`dohc_engine_storage::EngineStore::open`] and for
     /// identity resolution.
     pub fn engine_db_path(&self) -> io::Result<PathBuf> {
-        let engine_dir = self.path.join(".dohc").join("engine");
+        let engine_dir = self.inner.join(".dohc").join("engine");
         std::fs::create_dir_all(&engine_dir)?;
         Ok(engine_dir.join("engine.db"))
     }
 
     /// A sub-path under the scratch root (not created).
     pub fn join(&self, rel: impl AsRef<Path>) -> PathBuf {
-        self.path.join(rel)
-    }
-}
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        // Best-effort cleanup; a leaked temp dir is harmless and never fails a
-        // test.
-        let _ = std::fs::remove_dir_all(&self.path);
+        self.inner.join(rel)
     }
 }
 

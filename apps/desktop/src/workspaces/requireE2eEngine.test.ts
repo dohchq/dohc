@@ -1,16 +1,8 @@
-import {
-  mkdirSync,
-  symlinkSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, symlinkSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { requireE2eEngine } from "../../scripts/require-e2e-engine.mjs";
+import { createTestScratchSync } from "./testTemp";
 
 // The guard that keeps a fresh checkout from running the whole e2e suite
 // against an app that cannot launch (every spec failing inside
@@ -19,7 +11,7 @@ import { requireE2eEngine } from "../../scripts/require-e2e-engine.mjs";
 const roots: string[] = [];
 
 function tempRoot(): string {
-  const dir = mkdtempSync(join(tmpdir(), "dohc-e2e-engine-guard-"));
+  const dir = createTestScratchSync("dohc-e2e-engine-guard-");
   roots.push(dir);
   return dir;
 }

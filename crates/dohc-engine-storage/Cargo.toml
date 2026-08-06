@@ -28,6 +28,9 @@ serde_json = "1"
 # probe, not by filling a disk.
 fs4 = "1"
 
+[dev-dependencies]
+dohc-test-scratch = { path = "../dohc-test-scratch" }
+
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]
 workspace = true

@@ -36,18 +36,34 @@
 // fail the run).
 
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-import { arch, platform, release } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { arch, platform, release, tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
   classifyTreeProvenance,
   formatTreeState,
   readTreeState,
 } from "./tree-provenance.mjs";
+import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
+// Hand the tests the absolute root instead of a name they would re-derive.
+// `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
+// agree only by luck: under WSL the inherited TEMP/TMP point at /mnt/c, which
+// Node returns, while Rust with TMPDIR unset returns /tmp. Deriving it twice
+// let this row count an absent tree and call the run clean.
+const scratchRunId = `rust-gate-${process.pid}-${randomBytes(8).toString("hex")}`;
+const scratchRunRoot = join(tmpdir(), "dohc-test-scratch", scratchRunId);
+process.env.DOHC_TEST_SCRATCH_ROOT = scratchRunRoot;
+// The sentinel is how the row tells "nothing leaked" from "nothing looked".
+// It is written before the tests and required afterwards; if it is missing the
+// row never reached the tree the tests used, whatever the entry count says.
+mkdirSync(scratchRunRoot, { recursive: true });
+writeFileSync(join(scratchRunRoot, SCRATCH_SENTINEL), scratchRunId);
 
 function run(cmd) {
   // shell:true so `cargo`/`cargo.exe` resolve identically under PowerShell,
@@ -198,6 +214,29 @@ for (const step of native.ok ? optional : []) {
   readTreeAfter(step.name);
   if (!r.ok) failed = true;
   results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL" });
+}
+
+console.log(`\n--- scratch leak ---`);
+try {
+  const scratch = await inspectScratchRun(scratchRunRoot);
+  if (scratch.status === "FAIL") failed = true;
+  // Printed on every run, so the count and the bytes stay visible long before
+  // they trip a limit. It rides the row only on FAIL, because a passing
+  // verdict's evidence line is `name=STATUS` rows and nothing else — a
+  // free-form reason has no end a reader can find (require-ci-pass-verdict.mjs).
+  console.log(`  ${scratch.status} — ${scratch.reason}`);
+  results.push({
+    name: "scratch leak",
+    status: scratch.status,
+    reason: scratch.status === "FAIL" ? scratch.reason : undefined,
+  });
+} catch (error) {
+  failed = true;
+  results.push({
+    name: "scratch leak",
+    status: "FAIL",
+    reason: `scratch leak measurement failed: ${error instanceof Error ? error.message : String(error)}`,
+  });
 }
 
 // Provenance closes the run: the series of readings is judged, and a step

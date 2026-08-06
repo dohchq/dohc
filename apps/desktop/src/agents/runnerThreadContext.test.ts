@@ -1,11 +1,10 @@
 import { renderShowMarkdown, type ShowResult } from "@dohc/cli/render";
 import { CHATS_METHOD, ChatsLoopbackEngine } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
-import { nativeTmpdir } from "../workspaces/testTemp";
+import { createTestScratch } from "../workspaces/testTemp";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
 
 const WORKSPACE_ID = "workspace-runner-thread-context";
@@ -17,7 +16,7 @@ describe("buildRunnerThreadContext", () => {
   let store: ReturnType<typeof createLiveLinkedChatStore>;
 
   beforeEach(async () => {
-    root = await mkdtemp(join(nativeTmpdir(), "dohc-runner-thread-context-"));
+    root = await createTestScratch("dohc-runner-thread-context-");
     loopback = new ChatsLoopbackEngine();
     const client = {
       close: () => undefined,

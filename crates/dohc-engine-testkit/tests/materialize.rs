@@ -17,23 +17,20 @@ use dohc_engine_testkit::{
     ScriptedFaults,
     scratch::{try_make_dir_alias, try_make_file_symlink},
 };
+use dohc_test_scratch::ScratchDir;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU32, Ordering},
+};
 
 struct Scratch {
-    root: PathBuf,
+    root: ScratchDir,
 }
 impl Scratch {
     fn new(tag: &str) -> Self {
-        let mut root = std::env::temp_dir();
-        root.push(format!(
-            "dohc-r04-mat-{tag}-{}-{}",
-            std::process::id(),
-            SCRATCH_SEQ.fetch_add(1, Ordering::AcqRel)
-        ));
+        let root =
+            ScratchDir::new_named(&format!("r04-mat-{tag}")).expect("create scratch directory");
         std::fs::create_dir_all(root.join(".dohc").join("engine")).expect("mkdir engine dir");
         Scratch { root }
     }
@@ -44,19 +41,13 @@ impl Scratch {
         self.root.join(".dohc").join("engine").join("engine.db")
     }
     fn target(&self, rel: &str) -> PathBuf {
-        let mut p = self.root.clone();
+        let mut p = self.root.to_path_buf();
         for seg in rel.split('/') {
             p.push(seg);
         }
         p
     }
 }
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
 fn remove_dir_alias(path: &Path) {
     #[cfg(unix)]
     std::fs::remove_file(path).expect("remove directory symlink");

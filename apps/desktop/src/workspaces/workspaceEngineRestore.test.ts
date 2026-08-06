@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,7 +8,7 @@ import {
   type Request,
 } from "@dohc/workspace-engine-client";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
@@ -22,7 +22,7 @@ import {
 const roots: string[] = [];
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-restore-"));
+  const root = await createTestScratch("dohc-engine-restore-");
   roots.push(root);
   return root;
 }

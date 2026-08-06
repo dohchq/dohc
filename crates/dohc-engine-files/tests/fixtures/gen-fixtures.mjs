@@ -22,8 +22,9 @@
 //     `config/secret.env. ` classifies differently on Windows and POSIX.
 // Resolution vectors therefore stay inside the platform-independent shared
 // subset. The floor's own cross-platform parity is asserted by the
-// `dohc-engine-sync` security-contract fixture against `policy.rs`; this
-// fixture exists for the glob / TOML / resolution surface above it.
+// `dohc-engine-sync` security-contract fixture against `policy.rs`. This set
+// also emits focused write-floor vectors for the files crate's differential
+// test. Both fixtures call the live classifier and declare no verdicts by hand.
 import { createRequire } from "node:module";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -72,6 +73,11 @@ const {
 } = await import(
   pathToFileURL(
     join(repoRoot, "packages/security-contract/src/effectivePolicy.ts"),
+  ).href
+);
+const { classifyEngineFilePath } = await import(
+  pathToFileURL(
+    join(repoRoot, "packages/security-contract/src/enginePathFloor.ts"),
   ).href
 );
 await unregisterTsx();
@@ -306,6 +312,29 @@ const resolutionCases = [
   ],
 ];
 
+// ------------------------------------------------------------ path floor
+// Unlike `search_policy.rs`, `policy.rs::classify_engine_file_path` applies
+// case folding and Win32 alias stripping on every platform. These write-floor
+// vectors therefore have the same verdict on Windows and POSIX.
+const pathFloorInputs = [
+  "notes/today.md",
+  ".env",
+  "secrets/.env/nested.md",
+  "deploy/prod.env",
+  "config/.env.local",
+  "deploy/PROD.ENV",
+  "config/.ENV.LOCAL",
+  "secret.env ",
+  "config/.env.local. ",
+  "secrets%252eenv",
+  ".dohc/engine/engine.db",
+  "notes/DOHC~1/x.md",
+  "../escape.md",
+  ".envrc",
+  "notes/envelope.md",
+  "notes/env/config.md",
+];
+
 const fixture = {
   globValidation: globValidationPatterns.map((pattern) => {
     const result = validatePolicyGlob(pattern);
@@ -333,6 +362,11 @@ const fixture = {
   })),
 };
 
+const pathFloorFixture = pathFloorInputs.map((path) => ({
+  path,
+  classification: classifyEngineFilePath(path).kind,
+}));
+
 // smol-toml and the Rust `toml` crate word their syntax errors differently, so
 // a case that fails inside the TOML PARSER can only assert the failure and the
 // `invalid TOML: ` prefix the two ports share. Derived from the oracle's own
@@ -355,4 +389,8 @@ function parseCase(name, toml, parse) {
 writeFileSync(
   join(outputDir, "effective-policy.json"),
   `${JSON.stringify(fixture, null, 2)}\n`,
+);
+writeFileSync(
+  join(outputDir, "path-floor.json"),
+  `${JSON.stringify(pathFloorFixture, null, 2)}\n`,
 );

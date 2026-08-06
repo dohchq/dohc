@@ -1,19 +1,5 @@
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  open,
-  readFile,
-  readdir,
-  rm,
-  stat,
-  symlink,
-  utimes,
-  writeFile,
-  type FileHandle,
-} from "node:fs/promises";
+import { chmod, mkdir, open, readFile, readdir, rm, stat, symlink, utimes, writeFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AGENTS_CHAT_BEGIN_MARKER,
@@ -21,13 +7,14 @@ import {
   AGENTS_CHAT_MANAGED_BLOCK,
   ensureAgentsChatBlock,
 } from "./agentsChatBlock";
+import { createTestScratch } from "../workspaces/testTemp";
 
 describe("ensureAgentsChatBlock", () => {
   let root: string;
   let agentsPath: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), "dohc-agents-chat-"));
+    root = await createTestScratch("dohc-agents-chat-");
     agentsPath = join(root, "AGENTS.md");
   });
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
   requireEngineBinaryOrSkip,
   resolveEngineBinary,
 } from "./engineBinary";
+import { createTestScratchSync } from "../workspaces/testTemp";
 
 // This module decides whether the daemon-driving suites run at all, so a
 // regression here silently restores the skipped coverage that #390 was about.
@@ -19,7 +20,7 @@ import {
 const scratch: string[] = [];
 
 function tempBinary(mtimeSeconds?: number): string {
-  const dir = mkdtempSync(join(tmpdir(), "dohc-engine-binary-test-"));
+  const dir = createTestScratchSync("dohc-engine-binary-test-");
   scratch.push(dir);
   const path = join(dir, "dohc-workspace-engine");
   writeFileSync(path, "not a real binary");

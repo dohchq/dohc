@@ -1,13 +1,4 @@
-import {
-  mkdtemp,
-  readdir,
-  readFile,
-  rename,
-  rm,
-  symlink,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { readdir, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +9,7 @@ import {
   writeUiStateFile,
 } from "./workspaceUiState";
 import { startWorkspaceWatch } from "./workspaceWatcher";
+import { createTestScratch } from "./testTemp";
 
 vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>(
@@ -29,7 +21,7 @@ vi.mock("node:fs/promises", async () => {
 const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(tempBase, "dohc-ui-state-"));
+  const root = await createTestScratch("dohc-ui-state-");
   roots.push(root);
   return root;
 }

@@ -1,5 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import type {
   SecretFileComparePage,
@@ -7,7 +6,7 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
@@ -31,7 +30,7 @@ afterEach(async () => {
 });
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(nativeTmpdir(), "dohc-compare-paging-"));
+  const root = await createTestScratch("dohc-compare-paging-");
   roots.push(root);
   return root;
 }

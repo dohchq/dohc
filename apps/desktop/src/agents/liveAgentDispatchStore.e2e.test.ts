@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ChatsLiveAdapter } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
@@ -8,7 +8,7 @@ import {
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { nativeTmpdir } from "../workspaces/testTemp";
+import { createTestScratch } from "../workspaces/testTemp";
 import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 
 const engine = requireEngineBinaryOrSkip();
@@ -17,9 +17,7 @@ describe("live agent dispatch store real daemon", () => {
   it.skipIf(engine.missing)(
     "real_daemon_dispatch_flow_claims_completes_and_requeues",
     async () => {
-      const root = await mkdtemp(
-        join(nativeTmpdir(), "dohc-live-dispatch-e2e-"),
-      );
+      const root = await createTestScratch("dohc-live-dispatch-e2e-");
       const workspaceId = `workspace-live-e2e-${process.pid}`;
       const markerDirectory = join(root, ".dohc", "engine");
       await mkdir(markerDirectory, { recursive: true });

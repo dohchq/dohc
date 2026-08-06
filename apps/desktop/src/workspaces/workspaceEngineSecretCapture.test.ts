@@ -5,11 +5,11 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import type { SecretFileStore } from "@dohc/workspace-contracts/engine";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
@@ -25,7 +25,7 @@ const ENV_B = `API_KEY=${MARKER}\nEXTRA=b\n`;
 const roots: string[] = [];
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-secret-"));
+  const root = await createTestScratch("dohc-engine-secret-");
   roots.push(root);
   return root;
 }

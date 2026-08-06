@@ -433,12 +433,7 @@ mod tests {
 
     #[test]
     fn load_or_create_mints_once_then_reuses_and_fails_closed_on_corruption() {
-        let dir = std::env::temp_dir().join(format!(
-            "dohc-keyfile-test-{}-{:x}",
-            std::process::id(),
-            std::ptr::from_ref(&()) as usize
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dohc_test_scratch::ScratchDir::new_named("keyfile-test").unwrap();
 
         let first = load_or_create_key_file(&dir).expect("mint");
         let file = dir.join(SECRET_KEY_FILE_RELATIVE);
@@ -464,8 +459,6 @@ mod tests {
             "garbage",
             "a failed load must not rewrite or delete the key file"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(unix)]
@@ -479,11 +472,7 @@ mod tests {
         // MUTATION: delete `options.mode(0o600)` in `create_key_file` -> the mint
         // lands at the umask default (0644 under the usual 022) and this fails.
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "dohc-keymint-mode-test-{}-{:x}",
-            std::process::id(),
-            std::ptr::from_ref(&()) as usize
-        ));
+        let dir = dohc_test_scratch::ScratchDir::new_named("keymint-mode-test").unwrap();
         let _key = create_key_file(&dir).expect("mint");
         let path = dir.join(SECRET_KEY_FILE_RELATIVE);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -502,18 +491,13 @@ mod tests {
             dir_mode, 0o700,
             "the key directory must not advertise the key to other local users"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(unix)]
     #[test]
     fn load_retightens_lax_permissions_to_0600() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "dohc-keyperm-test-{}-{:x}",
-            std::process::id(),
-            std::ptr::from_ref(&()) as usize
-        ));
+        let dir = dohc_test_scratch::ScratchDir::new_named("keyperm-test").unwrap();
         let key = create_key_file(&dir).expect("mint");
         let path = dir.join(SECRET_KEY_FILE_RELATIVE);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -522,6 +506,5 @@ mod tests {
         assert_eq!(loaded, key);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "a restored/hand-copied key is re-tightened");
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

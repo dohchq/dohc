@@ -1,5 +1,3 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
 import {
   ChatsLoopbackEngine,
   type Request,
@@ -8,7 +6,7 @@ import {
 import {
   type LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./ipc/channels";
 import {
   createChatChannelIpcHandler,
@@ -19,7 +17,7 @@ import {
 import type { AwaitableLinkedChatStore } from "./workspaces/awaitableLinkedChatStore";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "./workspaces/liveLinkedChatStore";
-import { nativeTmpdir } from "./workspaces/testTemp";
+import { createTestScratch } from "./workspaces/testTemp";
 
 interface TestEvent {
   trusted: boolean;
@@ -279,22 +277,9 @@ function loopbackClient(engine: ChatsLoopbackEngine) {
   };
 }
 
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map(async (root) => {
-      await rm(root, { recursive: true, force: true });
-    }),
-  );
-});
-
 describe("main chat IPC live backend", () => {
     it("round_trips_channels_threads_messages_read_decision_reaction_bookmark_and_follow", async () => {
-      const rootPath = await mkdtemp(
-        join(nativeTmpdir(), "dohc-main-chat-live-"),
-      );
-      roots.push(rootPath);
+      const rootPath = await createTestScratch("dohc-main-chat-live-");
       const workspace = {
         workspaceId: "workspace-live",
         rootPath,
@@ -444,10 +429,7 @@ describe("main chat IPC live backend", () => {
 
 describe("desktop linked chat factory", () => {
   it("keeps_file_thread_path_hints_on_the_live_list_threads_shape", async () => {
-    const rootPath = await mkdtemp(
-      join(nativeTmpdir(), "dohc-live-chat-hint-"),
-    );
-    roots.push(rootPath);
+    const rootPath = await createTestScratch("dohc-live-chat-hint-");
     const workspace = {
       workspaceId: "workspace-live-hint",
       rootPath,
@@ -489,10 +471,7 @@ describe("desktop linked chat factory", () => {
   });
 
   it("bounds_file_thread_path_hint_enrichment_requests", async () => {
-    const rootPath = await mkdtemp(
-      join(nativeTmpdir(), "dohc-live-chat-hint-bound-"),
-    );
-    roots.push(rootPath);
+    const rootPath = await createTestScratch("dohc-live-chat-hint-bound-");
     const workspace = {
       workspaceId: "workspace-live-hint-bound",
       rootPath,
@@ -578,10 +557,7 @@ describe("desktop linked chat factory", () => {
   });
 
   it("rebinds_read_calls_after_transport_loss_without_retrying_writes", async () => {
-    const rootPath = await mkdtemp(
-      join(nativeTmpdir(), "dohc-live-chat-read-retry-"),
-    );
-    roots.push(rootPath);
+    const rootPath = await createTestScratch("dohc-live-chat-read-retry-");
     const workspace = {
       workspaceId: "workspace-live-read-retry",
       rootPath,

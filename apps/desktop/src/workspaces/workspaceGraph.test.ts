@@ -1,5 +1,4 @@
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -16,11 +15,12 @@ import {
   readWorkspaceBacklinks,
   readWorkspaceGraph,
 } from "./workspaceGraph";
+import { createTestScratch } from "./testTemp";
 
 let root: string;
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "dohc-graph-"));
+  root = await createTestScratch("dohc-graph-");
 });
 
 describe("extractMarkdownGraphLinks", () => {
@@ -270,7 +270,7 @@ describe("readWorkspaceGraph", () => {
     await writeFile(join(root, "notes", "visible.md"), "# Visible\n");
     await writeFile(join(root, "notes", "data.txt"), "[[Visible]]");
 
-    const outside = await mkdtemp(join(tmpdir(), "dohc-graph-outside-"));
+    const outside = await createTestScratch("dohc-graph-outside-");
     await writeFile(join(outside, "secret.md"), "# Secret\n");
     await symlink(join(outside, "secret.md"), join(root, "secret.md"), "file");
 

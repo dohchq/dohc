@@ -1,14 +1,14 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveAgentRun } from "../workspaces/workspaceWatcher";
 import { createAgentIntegration, type McpServerHandle } from "./AgentIntegration";
+import { createTestScratch } from "../workspaces/testTemp";
 
 async function withWorkspace<T>(
   fn: (input: { root: string; setSlot: (r: ActiveAgentRun | null) => void; slots: Array<ActiveAgentRun | null> }) => Promise<T>,
 ): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-agent-test-"));
+  const root = await createTestScratch("dohc-agent-test-");
   const slots: Array<ActiveAgentRun | null> = [];
   try {
     return await fn({ root, setSlot: (r) => slots.push(r), slots });
@@ -194,7 +194,7 @@ describe("AgentIntegration", () => {
   // writer must refuse instead of planting agent-runs.json at the target.
   it("refuses to write agent-runs through a symlinked .dohc and never lands files outside", async () => {
     await withWorkspace(async ({ root, setSlot }) => {
-      const outside = await mkdtemp(join(tmpdir(), "dohc-agent-escape-"));
+      const outside = await createTestScratch("dohc-agent-escape-");
       try {
         await symlink(outside, join(root, ".dohc"), "dir");
         const integration = createAgentIntegration({

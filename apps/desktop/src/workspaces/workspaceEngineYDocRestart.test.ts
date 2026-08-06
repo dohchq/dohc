@@ -1,8 +1,8 @@
 import * as Y from "yjs";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import {
   DaemonRefusalError,
   type EngineYdocProviderSession,
@@ -22,7 +22,7 @@ import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
@@ -30,17 +30,8 @@ import {
   noteSettleStart,
 } from "./engineYDocSaveSeq";
 
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
 async function reconnectFailureCapture(prefix: string) {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), prefix));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch(prefix);
   const workspaceId = prefix.replace(/-+$/, "");
   const loopback = new VersionedLoopbackEngine();
   const state = {
@@ -202,8 +193,7 @@ it("publishes dead-session recovery without masking background capture health", 
 });
 
 it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", async () => {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-restart-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-restart-");
   const loopback = new VersionedLoopbackEngine();
 
   const client = (generation: number): EngineDaemonClient & EngineTransport => ({
@@ -361,8 +351,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
 });
 
 it("opens first when record recovery loses the restarted daemon transport", async () => {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-chain-restart-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-chain-restart-");
   const workspaceHandle = "ydoc-chain-restart";
   const versioned = new VersionedLoopbackEngine();
   versioned.seedTextFile({
@@ -475,8 +464,7 @@ it("opens first when record recovery loses the restarted daemon transport", asyn
 });
 
 it("recovers a non-reconnect local refusal by releasing, rebinding, and replaying", async () => {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-refusal-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-refusal-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -570,8 +558,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
 });
 
 it("releases a close-latched failed generation with settle true before the next edit", async () => {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-close-retry-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-close-retry-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -700,8 +687,7 @@ it("releases a close-latched failed generation with settle true before the next 
 });
 
 it("defers a version switch behind a dead generation until release converges", async () => {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-close-dead-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-close-dead-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -851,8 +837,7 @@ it("defers a version switch behind a dead generation until release converges", a
 });
 
 it("treats typed session-not-found during release-first rebind as already released", async () => {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-gone-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-gone-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -957,8 +942,7 @@ it("an over-cap settle (markdown omitted from the response) leaves the engine's 
   // The capture must recognize that and stand down. Mirroring null onto disk
   // would truncate the user's file to zero bytes, which is the very loss this
   // whole change exists to stop.
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-overcap-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-overcap-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -1060,8 +1044,7 @@ it("a settle whose materialization was BLOCKED reports an error, never Saved", a
   // on disk is still the OLD artifact. With markdown omitted (over-cap) the
   // desktop writes nothing, so nothing else would ever notice. The engine now
   // says `materialized: false` and the editor must not claim Saved.
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-blocked-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-blocked-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -1155,8 +1138,7 @@ it("a settle whose materialization was BLOCKED reports an error, never Saved", a
 });
 
 it("surfaces an unrecoverable local refusal and releases every opened lease", async () => {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-loud-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-loud-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -1289,8 +1271,7 @@ async function daemonDeathCapture(
   loseDurableLineage: () => void;
   applyDaemonSideEdit: (text: string) => void;
 }> {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), prefix));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch(prefix);
   const loopback = new VersionedLoopbackEngine();
   const state = {
     daemonAlive: true,
@@ -2151,8 +2132,7 @@ it("counts a revived edit against the settle its own replay armed", async () => 
 // previous seq: the document reads "Saving…" for good, the same stuck state
 // as the revive path, reached through a different door.
 it("counts an edit recovered from a synchronous provider refusal", async () => {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-sync-refuse-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-sync-refuse-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -2301,8 +2281,7 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
 // of the sort, and a second announcement arriving late is a count moving
 // backwards. Announce exactly once, by construction.
 it("announces a recovered edit exactly once when both arm points run", async () => {
-  const rootPath = await mkdtemp(join(nativeTmpdir(), "dohc-ydoc-async-refuse-"));
-  roots.push(rootPath);
+  const rootPath = await createTestScratch("dohc-ydoc-async-refuse-");
   const loopback = new VersionedLoopbackEngine();
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,

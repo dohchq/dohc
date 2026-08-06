@@ -327,6 +327,7 @@ dependencies = [
  "base64",
  "dohc-engine-domain",
  "dohc-engine-storage",
+ "dohc-test-scratch",
  "rusqlite",
  "serde",
  "serde_json",
@@ -341,6 +342,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "base64",
+ "dohc-test-scratch",
  "getrandom 0.2.17",
  "libc",
  "scrypt",
@@ -373,6 +375,7 @@ version = "0.1.0"
 dependencies = [
  "dohc-engine-storage",
  "dohc-engine-testkit",
+ "dohc-test-scratch",
  "file-id",
  "notify",
  "rustix",
@@ -423,6 +426,7 @@ dependencies = [
 name = "dohc-engine-storage"
 version = "0.1.0"
 dependencies = [
+ "dohc-test-scratch",
  "fs4",
  "rusqlite",
  "serde_json",
@@ -470,6 +474,7 @@ dependencies = [
  "dohc-engine-files",
  "dohc-engine-runtime",
  "dohc-engine-storage",
+ "dohc-test-scratch",
  "rusqlite",
  "tokio",
 ]
@@ -489,6 +494,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dohc-test-scratch"
+version = "0.1.0"
+dependencies = [
+ "filetime",
+]
+
+[[package]]
 name = "dohc-workspace-engine"
 version = "0.1.0"
 dependencies = [
@@ -502,6 +514,7 @@ dependencies = [
  "dohc-engine-storage",
  "dohc-engine-sync",
  "dohc-engine-testkit",
+ "dohc-test-scratch",
  "dohc-workspace-engine",
  "filetime",
  "fs4",

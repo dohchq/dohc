@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   EngineDaemonLifecycle,
@@ -14,7 +14,7 @@ import {
   removeMountFolder,
 } from "./shareMounts";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
-import { nativeTmpdir } from "./testTemp";
+import { createTestScratch } from "./testTemp";
 
 const engine = requireEngineBinaryOrSkip();
 
@@ -22,9 +22,7 @@ describe("share mounts real daemon", () => {
   it.skipIf(engine.missing)(
     "stores durable mount state inside the mount and removes only that mount",
     async () => {
-      const host = await mkdtemp(
-        join(nativeTmpdir(), "dohc-share-mount-rust-e2e-"),
-      );
+      const host = await createTestScratch("dohc-share-mount-rust-e2e-");
       const mount = { shareId: "share-1", label: "alex" };
       const mountRoot = mountRootFor(host, mount.label);
       const siblingRoot = mountRootFor(host, "sam");

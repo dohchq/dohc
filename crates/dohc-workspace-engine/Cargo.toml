@@ -18,6 +18,7 @@ dohc-engine-collab = { path = "../dohc-engine-collab" }
 dohc-engine-runtime = { path = "../dohc-engine-runtime" }
 dohc-engine-sync = { path = "../dohc-engine-sync" }
 dohc-engine-protocol = { path = "../dohc-engine-protocol" }
+dohc-test-scratch = { path = "../dohc-test-scratch", optional = true }
 base64 = "0.22"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -46,7 +47,7 @@ libc = "0.2"
 # `write_rehearsal_token_for_harness`); production builds must not enable it.
 # `tokio/process` lives here because only the harness-gated soak runner
 # spawns child processes.
-harness = ["tokio/process", "dep:filetime"]
+harness = ["tokio/process", "dep:filetime", "dep:dohc-test-scratch"]
 
 [dev-dependencies]
 # `test-util` gives the driver-loop tests paused virtual time, so they can

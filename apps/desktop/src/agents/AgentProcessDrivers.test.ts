@@ -1,11 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentEvent } from "./AgentDriver";
 import { createDesktopAgentDrivers } from "./AgentProcessDrivers";
 import { resolveSpawnCommand } from "../process/windowsSpawn";
+import { createTestScratch } from "../workspaces/testTemp";
 
 const fakeAgent = fileURLToPath(new URL("../../e2e/fixtures/fakeAgentProcess.mjs", import.meta.url));
 const tempRoots: string[] = [];
@@ -24,7 +24,7 @@ async function waitFor(
 }
 
 async function workspaceRoot(): Promise<string> {
-  const root = join(await mkdtemp(join(tmpdir(), "dohc-agent-driver-")), "workspace");
+  const root = join(await createTestScratch("dohc-agent-driver-"), "workspace");
   tempRoots.push(dirname(root));
   await mkdir(join(root, "notes"), { recursive: true });
   return root;

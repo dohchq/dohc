@@ -1,5 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { wrapWorkspaceDataKey } from "@dohc/security-contract/secret-key-envelope";
 import type {
@@ -22,6 +21,7 @@ import {
   type EngineRelayWorkspaceClient,
 } from "./engineRelayClient";
 import { enrollWorkspaceKeyEnvelope } from "./workspaceKeyEnvelopeEnrollment";
+import { createTestScratch } from "./testTemp";
 
 const WORKSPACE_ID = "sentinel-key-envelope-workspace";
 const PASSPHRASE = "sentinel boundary passphrase";
@@ -234,7 +234,7 @@ async function harness(behavior: KeyBehavior): Promise<{
   client: EngineRelayWorkspaceClient;
   sessions: EngineWorkspaceSessions;
 }> {
-  const rootPath = await mkdtemp(join(tmpdir(), "dohc-key-boundary-"));
+  const rootPath = await createTestScratch("dohc-key-boundary-");
   roots.push(rootPath);
   const daemon = new BoundaryRecordingDaemon(behavior);
   daemon.onEvent((event) => daemon.observedEvents.push(structuredClone(event)));

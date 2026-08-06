@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import {
@@ -15,6 +14,7 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
+import { createTestScratch } from "./testTemp";
 
 // This suite used to gate on a private env var of its own, so it kept skipping
 // even where the daemon was built and every other suite ran. It now shares the
@@ -248,7 +248,7 @@ describe("EngineRelayClient real daemon", () => {
 });
 
 async function createShadowRoot(prefix: string): Promise<string> {
-  const rootPath = await mkdtemp(join(tmpdir(), prefix));
+  const rootPath = await createTestScratch(prefix);
   scratchRoots.push(rootPath);
   const markerDirectory = join(rootPath, ".dohc", "engine");
   await mkdir(markerDirectory, { recursive: true });

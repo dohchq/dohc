@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { classifyEngineFilePath } from "@dohc/security-contract";
+import { validateUserWritePath } from "@dohc/workspace-core";
 import type { Event } from "../ydoc/generated/Event";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 import type { Request } from "../ydoc/generated/Request";
@@ -261,93 +263,14 @@ function normalizePath(path: string): string {
   return normalized;
 }
 
-function isAbsolutePathLike(path: string): boolean {
-  return (
-    path.startsWith("/") ||
-    /^[A-Za-z]:[\\/]/u.test(path) ||
-    path.startsWith("\\\\")
-  );
-}
-
-function decodeTrackedPathEscapes(path: string): string {
-  let decoded = path;
-  for (;;) {
-    const next = decoded
-      .replace(/%25/giu, "%")
-      .replace(/%2e/giu, ".")
-      .replace(/%2f/giu, "/")
-      .replace(/%5c/giu, "\\");
-    if (next === decoded) return decoded;
-    decoded = next;
-  }
-}
-
-function stripWindowsAliasSuffix(segment: string): string {
-  return segment.replace(/[. ]+$/u, "");
-}
-
-function isReserved83Alias(segment: string, stem: string): boolean {
-  const match = /^([A-Za-z0-9]{1,8})~(\d+)$/u.exec(segment);
-  if (!match) return false;
-  const digits = match[2] ?? "";
-  const baseLength = Math.min(stem.length, 7 - digits.length);
-  return (
-    baseLength >= 1 &&
-    (match[1] ?? "").toUpperCase() === stem.slice(0, baseLength)
-  );
-}
-
-function policySegments(path: string): string[] {
-  return path
-    .replaceAll("\\", "/")
-    .split("/")
-    .map((segment) => stripWindowsAliasSuffix(segment).toLowerCase());
-}
-
-// Mirrors dohc-engine-files policy::classify_engine_file_path_normalized.
 // Bookmark projections are plaintext, so only a canonical Tracked path may
 // enter the projection queue.
 function normalizeTrackedPath(path: string): string {
-  if (path.includes("\0") || isAbsolutePathLike(path)) {
+  const normalized = validateUserWritePath(path);
+  if (!normalized.ok || classifyEngineFilePath(path).kind !== "tracked") {
     throw new Error("invalid-path");
   }
-  const decoded = decodeTrackedPathEscapes(path);
-  if (isAbsolutePathLike(decoded)) throw new Error("invalid-path");
-  const segments = decoded.replaceAll("\\", "/").split("/");
-  for (const segment of segments) {
-    if (segment === "" || segment === ".") continue;
-    if (segment === ".." || /^[. ]+$/u.test(segment)) {
-      throw new Error("invalid-path");
-    }
-  }
-  const normalized = segments
-    .filter((segment) => segment !== "" && segment !== ".")
-    .join("/");
-  if (normalized.length === 0) throw new Error("invalid-path");
-
-  const classifiedSegments = policySegments(normalized);
-  const first = classifiedSegments[0] ?? "";
-  const reserved =
-    classifiedSegments.some(
-      (segment) =>
-        segment === ".dohc" || isReserved83Alias(segment, "DOHC"),
-    ) ||
-    first === "shared-with-me" ||
-    isReserved83Alias(first, "SHARED");
-  const ignored = classifiedSegments.some(
-    (segment) =>
-      segment === ".dohc" ||
-      segment === ".git" ||
-      segment === "node_modules" ||
-      segment.startsWith(".dohc-write-"),
-  );
-  const basename = classifiedSegments.at(-1) ?? "";
-  const secret =
-    classifiedSegments.some((segment) => segment === ".env") ||
-    basename.endsWith(".env") ||
-    basename.startsWith(".env.");
-  if (reserved || ignored || secret) throw new Error("invalid-path");
-  return normalized;
+  return normalized.normalized;
 }
 
 function validateProjectionPath(path: string): string {

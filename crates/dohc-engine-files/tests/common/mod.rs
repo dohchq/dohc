@@ -6,37 +6,30 @@
 //! these helpers, so unused items are expected in any one crate.
 #![allow(dead_code)]
 
+use dohc_test_scratch::ScratchDir;
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+use std::path::Path;
 
 /// A unique temp directory, removed on `Drop`.
 pub struct Scratch {
-    path: PathBuf,
+    inner: ScratchDir,
 }
 
 impl Scratch {
     pub fn new() -> Self {
-        let unique = format!(
-            "dohc-cal3-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let path = std::env::temp_dir().join(unique);
-        std::fs::create_dir(&path).expect("create scratch dir");
-        Scratch { path }
+        Scratch {
+            inner: ScratchDir::new_named("cal3").expect("create scratch dir"),
+        }
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        self.inner.path()
     }
 
     /// Write a file (creating parents), forward-slash relative path.
     pub fn write(&self, rel: &str, bytes: &[u8]) {
         let path = self
-            .path
+            .inner
             .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create parents");
@@ -47,7 +40,7 @@ impl Scratch {
     /// Delete a file at a relative path.
     pub fn remove(&self, rel: &str) {
         let path = self
-            .path
+            .inner
             .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         std::fs::remove_file(&path).expect("remove file");
     }
@@ -55,10 +48,10 @@ impl Scratch {
     /// Rename a file. Both paths are forward-slash relative.
     pub fn rename(&self, from: &str, to: &str) {
         let from = self
-            .path
+            .inner
             .join(from.replace('/', std::path::MAIN_SEPARATOR_STR));
         let to = self
-            .path
+            .inner
             .join(to.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent).expect("create parents");
@@ -71,7 +64,7 @@ impl Scratch {
     /// expectation honestly).
     pub fn try_symlink(&self, rel: &str, target: &str) -> bool {
         let link = self
-            .path
+            .inner
             .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = link.parent() {
             std::fs::create_dir_all(parent).expect("create parents");
@@ -95,7 +88,7 @@ impl Scratch {
     /// created (for symlink-cycle tests; skipped gracefully if unavailable).
     pub fn try_symlink_dir(&self, rel: &str, target: &Path) -> bool {
         let link = self
-            .path
+            .inner
             .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = link.parent() {
             std::fs::create_dir_all(parent).expect("create parents");
@@ -113,12 +106,6 @@ impl Scratch {
             let _ = target;
             false
         }
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 

@@ -567,29 +567,15 @@ impl WatchedRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU64;
+    use dohc_test_scratch::ScratchDir;
     use std::time::Instant;
 
-    static UNIQUE: AtomicU64 = AtomicU64::new(0);
-
     /// A fresh, existing, watchable temp directory (removed on drop).
-    struct TempRoot(PathBuf);
+    struct TempRoot(ScratchDir);
 
     impl TempRoot {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "dohc-r14-watch-{}-{}",
-                std::process::id(),
-                UNIQUE.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir(&path).expect("create temp root");
-            TempRoot(path)
-        }
-    }
-
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            TempRoot(ScratchDir::new_named("r14-watch").expect("create temp root"))
         }
     }
 

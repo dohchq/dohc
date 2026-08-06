@@ -1,11 +1,4 @@
-import {
-  mkdtemp,
-  readFile,
-  rm,
-  symlink,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -26,6 +19,7 @@ import {
   USER_SETTINGS_FILE,
   writeUserSettingsFile,
 } from "./userSettingsStore";
+import { createTestScratch } from "../workspaces/testTemp";
 
 const roots: string[] = [];
 // WSL can expose the Windows temp directory under /mnt, which is slower and
@@ -33,7 +27,7 @@ const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(tempBase, "dohc-user-settings-"));
+  const root = await createTestScratch("dohc-user-settings-");
   roots.push(root);
   return root;
 }
