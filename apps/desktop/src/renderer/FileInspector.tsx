@@ -1410,59 +1410,6 @@ function MarkdownView(props: {
     scheduleSave();
   }
 
-  /**
-   * "Try again" after a timed-out open (#564).
-   *
-   * A draft typed BEFORE the reopen is still armed here: its 800 ms timer and
-   * `unsavedDraft` outlive the timeout, and a successful retry clears the
-   * write guard — so the timer (or the unmount flush) could write that stale
-   * text over the artifact the engine just bound. Disarm both, and say so.
-   *
-   * It does NOT write the draft first. Writing it would look like landing the
-   * keystrokes and would not: `writeWorkspaceText` updates the FILE only
-   * (main.ts -> workspaceAssets), while the reopen seeds the document from
-   * the engine's HEAD SNAPSHOT and only when no CRDT lineage exists
-   * (`seed_markdown: (!lineage_existing).then(head.text)`, actor.rs
-   * ydoc_open_state_on_store). Capture ingests a file write asynchronously,
-   * so the reopen races it: with a lineage the draft is ignored outright, and
-   * without one the seed is whatever the head held when the open ran. Either
-   * way the next settle overwrites the file — the same clobber, one layer
-   * down, but now reported as saved.
-   *
-   * So the honest outcome is the refusal the user can see: the indicator says
-   * "Couldn't save", and nothing stale reaches disk.
-   *
-   * DELIBERATELY INCOMPLETE, and #604 must not merge before #579. If the
-   * retry BINDS, the engine-backed branch replaces this editor and the typed
-   * text goes with it: a stale write became a silent loss. Preserving it
-   * needs eager serialization plus a recovery surface — the set-aside #579
-   * builds — and a second one here would be the wrong mechanism in the wrong
-   * place. On that rebase: route this draft into #579's set-aside (it gets
-   * the notice and the Copy control), and fold `retryOpening` into #579's
-   * opening gates.
-   *
-   * ORDER MATTERS, and getting it wrong is silent. #579 captures on the
-   * `opening` transition and gates that capture on `unsavedDraft.current`.
-   * The line below clears that flag synchronously, BEFORE `opening` flips —
-   * so a rebase that only deletes the guard leaves the capture a no-op and
-   * the draft is dropped behind an EMPTY recovery list, which is worse than
-   * today's visible "Couldn't save". Capture first, then clear.
-   */
-  function disarmDraftThenRetry(): void {
-    const retry = props.onRetryEngineOpen;
-    if (!retry) return;
-    if (saveTimer.current) {
-      clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    }
-    if (unsavedDraft.current) {
-      // Nothing may write it later — not this timer, not the unmount flush.
-      unsavedDraft.current = false;
-      setSaveState("error");
-    }
-    retry();
-  }
-
   function scheduleSave() {
     if (readOnly) return;
     unsavedDraft.current = true;
@@ -1557,14 +1504,13 @@ function MarkdownView(props: {
       // `opening` — and this cleanup is already willing to WRITE this exact
       // value, so keeping it can only be safer than losing it.
       //
-      // DECLARED UNPINNED. No test enters this branch, and that is a property
-      // of the design rather than a coverage gap: the render-phase capture
-      // clears `unsavedDraft` first on every path a test can construct, so
-      // reaching here needs the engine open and the file read to land in the
-      // same batch. A mutation aimed at it survives against the neighbouring
-      // "no write happens" tests, because turning the capture back into a
-      // `return` still writes nothing — those tests pin the write, not the
-      // rescue. Kept as a backstop, not as covered code.
+      // DECLARED UNPINNED, and it stays that way after #564. No test enters
+      // this branch with a draft the render-phase capture did not already
+      // take: reaching it needs the engine open and the file read to land in
+      // the same batch. Both conditions are conservative on purpose —
+      // `openingRef` holds the last RENDERED value and `writesBlocked` reads
+      // the parent's ref, so neither depends on this view living long enough
+      // to observe the refusal. Kept as a backstop, not as covered code.
       if (writesBlocked() || openingRef.current) {
         captureOrphanedDraft(workspaceId, path, text);
         return;
@@ -1916,8 +1862,13 @@ function MarkdownView(props: {
         }
       />
       {props.truncatedNotice}
+      {/* "Try again" after a timed-out open (#564). It retries and nothing
+          else: the retry changes the request key, so `opening` flips true in
+          that same render and the capture above sets a draft typed before the
+          timeout aside — where the user can copy it — instead of letting it
+          reach disk over the artifact the engine is binding (#567). */}
       {engine.openTimedOut && props.onRetryEngineOpen ? (
-        <EngineOpenTimedOutNotice onRetry={disarmDraftThenRetry} contentShown />
+        <EngineOpenTimedOutNotice onRetry={props.onRetryEngineOpen} contentShown />
       ) : null}
       {orphanedDraftNotice}
       {surfaceMode === "source" ? (
@@ -2746,16 +2697,7 @@ export function FileInspector(props: {
   // hook's request key, so a retry is a fresh open under the same
   // stale-response guard as any other request change.
   const [engineRetryNonce, setEngineRetryNonce] = useState(0);
-  // Is a retry WE asked for still unanswered? Keyed on the hazard, not on
-  // whether the user ever clicked retry: an "ever retried" flag stayed true
-  // for the tab's life, and `opening` goes true again on every version
-  // switch — so a later switch silently refused the draft flush at the
-  // rename/move seam. Set on the click, cleared by the first render that
-  // sees the open answered. A ref, like every other write-guard signal
-  // here, because the guards run outside render.
-  const engineRetryPending = useRef(false);
   const retryEngineOpen = useCallback(() => {
-    engineRetryPending.current = true;
     setEngineRetryNonce((nonce) => nonce + 1);
   }, []);
   const engine = useEngineDoc({
@@ -2790,41 +2732,19 @@ export function FileInspector(props: {
   if (switchReadPending.current && readSeq !== seenReadSeq.current) {
     switchReadPending.current = false;
   }
-  // The child never gets a render carrying this refusal: the branch below
-  // replaces it in the same commit that learns of it, so its own `readOnlyRef`
-  // still holds the pre-refusal value when its unmount flush runs. A REF the
-  // PARENT assigns during render is what crosses that gap — the object identity
-  // is stable, so even the child's first-render closures read the live value.
-  // The retry window blocks writes: "Try again" changes the request key,
-  // which clears `openTimedOut` before the new open answers, and the write
-  // guards deliberately do not read `opening` (#567/#579 own that broader
-  // question) — without this the retry window itself was writable and an
-  // armed autosave raced the Y.Doc bind. It ends the moment the open
-  // answers, whichever way it answers.
-  //
-  // NOTE for the #579 rebase, and it is TWO steps, not one. Delete this and
-  // the ref above: #579 gates the armed autosave on `opening` for every
-  // reopen, a superset of this window. But deleting ONLY this drops the
-  // pending draft silently — see the ordering note on `disarmDraftThenRetry`,
-  // which clears `unsavedDraft.current` before #579's capture can read it.
-  if (!engine.opening) engineRetryPending.current = false;
-  const retryOpening = engineRetryPending.current;
-  // Every refusal the CHILD might never get to render. This component has
-  // exactly two branches that replace the document — path-not-in-version
-  // (#534) and the failed read below — and a refusal that coincides with
-  // either one never reaches the child's own `readOnlyRef`, because the child
-  // unmounts in the same commit that would have set it. Its unmount flush
-  // then runs on the PRE-refusal value and writes.
-  //
-  // `openTimedOut` is in `readOnly` below too, and that was assumed to be
-  // enough: the document renders in the same commit that learns of the
-  // timeout. It does not when the READ failed first — the branch below owns
-  // the surface then, MarkdownView unmounts, and the draft went to disk while
-  // the engine may still own the document (#564, codex). A guard that works
-  // because a child observes a state is defeated by unmounting that child.
+  // Every engine state that is not a bound document, carried for a child that
+  // might never render it. This component has exactly two branches that
+  // replace the document — path-not-in-version (#534) and the failed read
+  // below — and each one replaces the child in the same commit that learns of
+  // the state, so the child's own refs still hold the pre-refusal value when
+  // its unmount flush runs. A guard that works because a child observes a
+  // state is defeated by unmounting that child, which is why these are
+  // carried here rather than derived there. A REF the PARENT assigns during
+  // render is what crosses that gap: the object identity is stable, so even
+  // the child's first-render closures read the live value.
   const writesRefusedRef = useRef(false);
   writesRefusedRef.current =
-    notInVersion || retryOpening || engine.openTimedOut;
+    notInVersion || engine.opening || engine.openTimedOut;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText
