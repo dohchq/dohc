@@ -135,8 +135,9 @@ const UNNAMED_ERROR = "unknown error";
 
 // `noFollow` says the caller mutates the ENTRY at `absolute` rather than
 // reading or writing through it -- delete and a move's source, both of which
-// rename the entry itself. Only the final component changes meaning: a broken
-// link there is the thing being removed, not a step on the way somewhere.
+// rename the entry itself. Only the final component changes meaning: a link
+// there that leads nowhere, or in a circle, is the thing being removed rather
+// than a step on the way somewhere.
 async function realRelativeInRoot(
   root: string,
   absolute: string,
@@ -174,12 +175,17 @@ async function realRelativeInRoot(
       if (!climbable) return { ok: false, reason: "unreadable-path", code: realpathCode };
       try {
         await lstat(probe);
-        // Deleting or renaming a broken link IS the cleanup, so a no-follow
-        // mutation climbs past one at the END of the path the same way it
-        // climbs past a name that is not there. Nothing is relaxed: the parent
-        // chain must still resolve inside the root, and the reserved rule below
-        // still decides on the parent's real path plus this name.
-        if (!noFollow || probe !== absolute || !ABSENT_CODES.has(realpathCode)) {
+        // Deleting or renaming a broken or looping link IS the cleanup, so a
+        // no-follow mutation climbs past one at the END of the path the same
+        // way it climbs past a name that is not there. Getting here means lstat
+        // proved an entry is present and realpath refused to say where it
+        // leads; a rename does not need to know. Nothing else is relaxed: the
+        // parent chain must still resolve inside the root, and the reserved
+        // rule below still decides on the parent's real path plus this name.
+        //
+        // Keyed on the final component, NOT on the errno. A cycle in a PARENT
+        // component fails the lstat below instead, and refuses there.
+        if (!noFollow || probe !== absolute) {
           // The link is there and realpath will not follow it. ENOENT proves
           // the target is missing; ELOOP proves a cycle. Only the first is
           // dangling.

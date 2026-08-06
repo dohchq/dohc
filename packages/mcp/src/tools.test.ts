@@ -2635,4 +2635,51 @@ describe("a guard that decides authority reads the resolved path", () => {
       expect(refusalReason(await safeResolve(ctx, "alias"))).toMatch(/create the target/i);
     });
   });
+
+  // Same cleanup gap as the dangling link, one errno over: a link that leads
+  // in a circle can only be removed, and refusing every path that touches one
+  // refuses the removal too. A rename moves the entry without asking where it
+  // points, so a cycle at the END of the path is the thing being deleted.
+  describe("through a link that leads in a circle", () => {
+    async function withCycle<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
+      return withWorkspace(async (ctx) => {
+        await symlink(join(ctx.root, "pong"), join(ctx.root, "ping"), "dir");
+        await symlink(join(ctx.root, "ping"), join(ctx.root, "pong"), "dir");
+        return fn(ctx);
+      });
+    }
+
+    it("deletes the looping link, and the other half stays behind", async () => {
+      await withCycle(async (ctx) => {
+        await expect(deleteWorkspacePath(ctx, { path: "ping" })).resolves.toMatchObject({
+          ok: true,
+          trashed: true,
+        });
+        await expect(lstat(join(ctx.root, "ping"))).rejects.toThrow();
+        // Broken, not chased: pong is still a link, and now leads nowhere.
+        expect((await lstat(join(ctx.root, "pong"))).isSymbolicLink()).toBe(true);
+        await expect(stat(join(ctx.root, "pong"))).rejects.toThrow();
+      });
+    });
+
+    it("renames the looping link, and it is still a link", async () => {
+      await withCycle(async (ctx) => {
+        await expect(
+          moveWorkspacePath(ctx, { fromPath: "ping", toPath: "loop" }),
+        ).resolves.toMatchObject({ ok: true });
+        await expect(lstat(join(ctx.root, "ping"))).rejects.toThrow();
+        expect((await lstat(join(ctx.root, "loop"))).isSymbolicLink()).toBe(true);
+      });
+    });
+
+    // The cycle is in a PARENT here, so lstat cannot reach the final name at
+    // all. That refuses on its own errno, which is why the relaxation is keyed
+    // on the final component and never on the code.
+    it("still refuses a delete THROUGH the looping link", async () => {
+      await withCycle(async (ctx) => {
+        const deleted = await deleteWorkspacePath(ctx, { path: "ping/note.md" });
+        expect(refusalReason(deleted)).toMatch(/could not check where this path leads/i);
+      });
+    });
+  });
 });
