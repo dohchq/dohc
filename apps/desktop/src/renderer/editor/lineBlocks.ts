@@ -4,7 +4,10 @@
 // against: which top-level block holds that line?
 //
 // The answer is APPROXIMATE by construction. Blocks are split on blank lines,
-// with three exceptions that cover how documents are actually written:
+// with the exceptions that cover how documents are actually written. Every one
+// of them was MEASURED against the real parse in lineBlocks.test.ts, not read
+// off CommonMark — several of these blocks are this editor's own, and the
+// tokenizer disagrees with the spec in places (see the ordered lists below).
 //
 //  - Some blocks END at their own last line, not at a blank one: a heading
 //    (an ATX line, or the setext underline under a paragraph), a thematic
@@ -16,9 +19,12 @@
 //    paragraph's own text. A heading indented into a list item is that item's
 //    heading, not a new block.
 //  - Some blocks RUN THROUGH a blank line, because the next line continues
-//    them: another item of the SAME list (a changed marker is a new list),
-//    content indented to that item's own content column, and the next chunk
-//    of an indented code block.
+//    them: another item of the SAME list, content indented to that item's own
+//    content column, and the next chunk of an indented code block. A list's
+//    identity is its marker AND its kind, so either one changing starts a new
+//    list — except under a `.`-ordered list, which absorbs whatever list line
+//    follows it and takes a continuation at any indent. That leniency is the
+//    tokenizer's, measured; `1)` behaves like a bullet instead.
 //  - A quote absorbs an UNQUOTED line as a lazy continuation until something
 //    inside it ends that: a quoted blank or a quoted fence for any quote, and
 //    for a callout every quoted block start. The quote itself survives — the
@@ -34,10 +40,10 @@
 // reader the passage they searched for; the top of the document shows them
 // nothing.
 //
-// A quote is NOT in that exception. CommonMark ends a block quote at an
-// unquoted blank line, so `> one\n\n> two` is two nodes where
-// `- one\n\n- two` is one loose list. Both rules are checked against the real
-// parse in lineBlocks.test.ts rather than reasoned about here.
+// Indentation is counted in COLUMNS, with a tab reaching the next multiple of
+// four. That is what decides an indented code block and a list continuation,
+// and it is why the kinds are read after it: `\t# H` is four columns deep, so
+// it is code, whatever the `#` looks like.
 //
 // Not renderer/markdown/splitMarkdownBlocks.ts, which answers a different
 // question: it packs many blocks into ~4KB chunks for incremental rendering
@@ -66,7 +72,10 @@ const QUOTE_RE = /^[ \t]{0,3}>/;
 // The quote's `>` prefix, which the tokenizer strips before reading the line
 // underneath it. A callout announces itself on that first stripped line.
 const QUOTE_PREFIX_RE = /^[ \t]{0,3}>[ \t]?/;
-const CALLOUT_RE = /^\[!/;
+// A COMPLETE callout header, mirroring extensions.ts CALLOUT_HEADER_RE. An
+// unclosed `> [!oops` is an ordinary blockquote, which continues lazily where
+// a callout would not.
+const CALLOUT_RE = /^\[![^\]\n]+\]/;
 // Raw HTML, which is a block start to the callout tokenizer but not a kind
 // this module otherwise needs (extensions.ts CALLOUT_LAZY_BREAK_RE).
 const HTML_BLOCK_RE = /^[ \t]{0,3}<[a-zA-Z!/]/;
@@ -77,9 +86,10 @@ const SETEXT_RE = /^[ \t]{0,3}(?:=+|-+)[ \t]*$/;
 // line has to reach. It is the ACTIVE item's marker plus the spaces after it,
 // so `-    item` wants five columns where `- item` wants two.
 const LIST_MARKER_RE = /^[ \t]{0,3}(?:[-+*]|\d{1,9}[.)])/;
-// Four columns with nothing open above is an INDENTED code block, which runs
-// through its own blank lines and ends where the indentation stops.
-const INDENTED_CODE_RE = /^(?:\t| {4})/;
+// Four COLUMNS with nothing open above is an INDENTED code block, which runs
+// through its own blank lines and ends where the indentation stops. Columns,
+// not characters: `   \t` reaches four the same as `    ` does.
+const CODE_COLUMNS = 4;
 // Three or more of one marker, spaces allowed between them and nothing else.
 // Two is a paragraph. `---` under an open paragraph is a setext underline
 // instead, which SETEXT_RE claims first.
@@ -153,13 +163,16 @@ function continuationIndent(text: string): number {
 }
 
 function blockKind(text: string): BlockKind {
+  // First: four columns of indent makes every marker below it literal code.
+  // The patterns count a tab as one CHARACTER, so `\t# H` would read as a
+  // heading where the parser reads four columns and calls it code.
+  if (leadingColumns(text) >= CODE_COLUMNS) return "code";
   if (HEADING_RE.test(text)) return "heading";
   // Before the bullet: `- - -` is a break, not a one-item list.
   if (BREAK_RE.test(text)) return "break";
   if (BULLET_RE.test(text)) return "bullet";
   if (ORDERED_RE.test(text)) return "ordered";
   if (QUOTE_RE.test(text)) return "quote";
-  if (INDENTED_CODE_RE.test(text)) return "code";
   return "other";
 }
 
@@ -300,8 +313,15 @@ function blockStartLines(body: string): number[] {
           kind === "quote" ||
           kind === "table" ||
           (kind === "ordered" && INTERRUPTING_ORDERED_RE.test(text)))) ||
-      // A bullet whose marker changes starts a new list on the spot.
-      (open && openKind === "bullet" && kind === "bullet" && marker !== openMarker) ||
+      // Adjacent lists with no blank line between them. A changed marker or a
+      // changed kind starts a new list — unless the open one is `.`-ordered,
+      // which absorbs whatever list line follows it, the same leniency that
+      // gives it a one-column continuation indent.
+      (open &&
+        listOpen &&
+        openMarker !== "." &&
+        (kind === "bullet" || kind === "ordered") &&
+        (kind !== openKind || marker !== openMarker)) ||
       // Indented, but not far enough to reach the open item's content. Column
       // zero would be a lazy continuation of it; this is neither.
       (open && listOpen && indent > 0 && indent < openIndent);

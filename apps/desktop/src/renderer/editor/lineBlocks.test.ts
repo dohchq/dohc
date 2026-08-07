@@ -148,6 +148,46 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("Intro\n10. matched\n\nAfter", 2)).toBe(0);
   });
 
+  it("starts a new list when the KIND changes, with no blank line", () => {
+    expect(blockIndexForLine("- one\n1. matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("- one\n2. matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("- one\n1) matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("1) one\n- matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("1) a\n1. b", 2)).toBe(1);
+    // A `.`-ordered list absorbs whatever list line follows it, the same
+    // leniency that gives it a one-column continuation indent.
+    expect(blockIndexForLine("1. one\n- matched\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("1. a\n1) b", 2)).toBe(0);
+    // Indented, it is a nested list and stays in the item.
+    expect(blockIndexForLine("- one\n  1. matched\n\nAfter", 2)).toBe(0);
+  });
+
+  it("reads a callout header only when it is complete", () => {
+    // A complete header ends the lazy continuation at a quoted heading; an
+    // unclosed one is an ordinary blockquote, which absorbs the same line.
+    expect(blockIndexForLine("> [!note]\n> # T\nMatched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("> [!note]-\n> # T\nMatched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("> [!note] Title\n> # T\nMatched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("> [!oops\n> # T\nMatched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("> [!]\n> # T\nMatched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("> [note]\n> # T\nMatched\n\nAfter", 3)).toBe(0);
+  });
+
+  it("counts indent in COLUMNS, so a tab reaches code depth", () => {
+    // `   \t` and `\t` both reach column four, where four literal spaces do.
+    for (const prefix of ["\t", " \t", "  \t", "   \t", "    "]) {
+      const body = `| A |\n| --- |\n| r |\n${prefix}matched\n\nAfter`;
+      expect(blockIndexForLine(body, 4)).toBe(1);
+    }
+    // Three columns is still prose.
+    expect(blockIndexForLine("Para\n\n   matched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("Para\n\n   # H\n\nAfter", 3)).toBe(1);
+    // At four columns a marker is literal text, not the block it looks like.
+    expect(blockIndexForLine("\t# H\n\tmore\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("\t- item\n\tmore\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("\t> q\n\tmore\n\nAfter", 2)).toBe(0);
+  });
+
   it("does not let a list or a quote interrupt its own kind", () => {
     // The interrupt is a PARAGRAPH rule. These lines continue what is open.
     expect(blockIndexForLine("- one\n- two\n\nPara", 2)).toBe(0);
@@ -938,6 +978,65 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
         [1, "item"],
         [3, "para"],
         [5, "After"],
+      ],
+    },
+    {
+      name: "a bullet list runs straight into an ordered one",
+      body: "- one\n1. matched\n\nAfter",
+      lands: [
+        [1, "one"],
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "a `)`-ordered list runs straight into a bullet one",
+      body: "1) one\n- matched\n\nAfter",
+      lands: [
+        [1, "one"],
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "a `.`-ordered list absorbs the list line under it",
+      body: "1. one\n- matched\n\nAfter",
+      lands: [
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "an ordered delimiter change needs no blank line",
+      body: "1) a\n1. b",
+      lands: [
+        [1, "a"],
+        [2, "b"],
+      ],
+    },
+    {
+      name: "an incomplete callout header is an ordinary quote",
+      body: "> [!oops\n> # T\nMatched\n\nAfter",
+      lands: [
+        [3, "Matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a tab reaches code depth after a table row",
+      body: "| A |\n| --- |\n| r |\n\tmatched\n\nAfter",
+      lands: [
+        [3, "r"],
+        [4, "matched"],
+        [6, "After"],
+      ],
+    },
+    {
+      name: "a marker four columns in is literal code",
+      body: "\t# H\n\tmore\n\nAfter",
+      lands: [
+        [1, "# H"],
+        [4, "After"],
       ],
     },
     {
