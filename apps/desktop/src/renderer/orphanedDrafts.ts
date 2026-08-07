@@ -29,7 +29,9 @@ const EMPTY: readonly OrphanedDraft[] = [];
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 const drafts = new Map<string, readonly OrphanedDraft[]>();
 const listeners = new Set<() => void>();
-let nextId = 1;
+// Every id this run has handed out, restored rows included. It only grows:
+// see `allocateDraftId`.
+const claimedIds = new Set<number>();
 let notifyQueued = false;
 // Bumped on every mutation; snapshot caches key off it so useSyncExternalStore
 // sees stable references between mutations.
@@ -65,13 +67,32 @@ function scheduleNotify(): void {
   });
 }
 
+// The lowest id nothing in this run holds. Counting UP from the highest one
+// instead is what breaks: a restored id near the end of the safe range takes
+// the count with it, and there `+ 1` returns the same number, so two drafts
+// get one id and one Dismiss deletes both texts. The lowest free id is bounded
+// by how many drafts this run has seen, so it never reaches that end.
+//
+// Synchronous, because a capture runs during a render and cannot await.
+//
+// Ids are never reused, which is why dismissing does not give one back. The
+// close guard remembers the ids the user approved losing (#579 review, r13),
+// and re-issuing a dismissed id inside that window would hand a brand-new
+// draft someone else's approval and exit without ever showing it.
+function allocateDraftId(): number {
+  let id = 1;
+  while (claimedIds.has(id)) id += 1;
+  claimedIds.add(id);
+  return id;
+}
+
 export function captureOrphanedDraft(
   workspaceId: string,
   path: string,
   text: string,
 ): void {
   const key = keyFor(workspaceId, path);
-  const id = nextId++;
+  const id = allocateDraftId();
   // Durable before the notice exists (#600). The write is synchronous, so the
   // answer the close guard needs is already true here — a draft is at risk
   // only when storage REFUSED it.
@@ -99,8 +120,9 @@ export function restoreOrphanedDrafts(nowMs: number = Date.now()): void {
     ]);
     storedIds.add(row.id);
     // Ids stay stable across restarts so a dismissal reaches the right stored
-    // row; this run's captures continue past the highest one restored.
-    if (row.id >= nextId) nextId = row.id + 1;
+    // row. Claiming them is what keeps this run's captures clear of them —
+    // the storage load already guaranteed they are unique and countable from.
+    claimedIds.add(row.id);
   }
 }
 
@@ -282,6 +304,6 @@ export function resetOrphanedDrafts(): void {
   workspaceLabels.clear();
   storedIds = new Set();
   clearStoredDrafts();
-  nextId = 1;
+  claimedIds.clear();
   scheduleNotify();
 }

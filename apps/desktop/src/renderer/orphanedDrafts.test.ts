@@ -407,6 +407,52 @@ describe("orphanedDrafts persistence (#600)", () => {
     ).toEqual(left);
   });
 
+  // The live twin of the repair allocator. Counting up from the highest
+  // RESTORED id walks a fresh capture out of the safe range just as surely:
+  // from MAX_SAFE_INTEGER-1 the second and third captures land on the same id,
+  // and on one path one Dismiss takes both texts.
+  it("gives this run's captures ids of their own, however high the restored one", async () => {
+    const capturedAt = Date.now();
+    localStorage.setItem(
+      ORPHANED_DRAFT_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: Number.MAX_SAFE_INTEGER - 1,
+          workspaceId: "ws-1",
+          path: "a.md",
+          text: "RESTORED",
+          capturedAtMs: capturedAt,
+        },
+      ]),
+    );
+    // MUTATION (live allocation): count up from the highest restored id again.
+    // The two captures below collide and the distinct-id count fails.
+    const next = await relaunch();
+    next.captureOrphanedDraft("ws-1", "a.md", "FIRST");
+    next.captureOrphanedDraft("ws-1", "a.md", "SECOND");
+
+    const live = draftsFor(next.useOrphanedDrafts, "ws-1", "a.md");
+    expect(live.map((d) => d.text)).toEqual(["RESTORED", "FIRST", "SECOND"]);
+    expect(live.every((d) => Number.isSafeInteger(d.id))).toBe(true);
+    expect(new Set(live.map((d) => d.id)).size).toBe(3);
+
+    // One confirmation retires one edit, here and after the restart.
+    next.dismissOrphanedDraft(
+      "ws-1",
+      "a.md",
+      live.find((d) => d.text === "FIRST")!.id,
+    );
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
+    ).toEqual(["RESTORED", "SECOND"]);
+    const after = await relaunch();
+    expect(
+      [
+        ...draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
+      ].sort(),
+    ).toEqual(["RESTORED", "SECOND"]);
+  });
+
   // One order, whichever surface asks. The store sorts oldest first, and a
   // rename that merges two paths must not answer differently before and after
   // a restart.
