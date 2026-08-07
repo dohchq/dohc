@@ -308,6 +308,39 @@ describe("blockIndexForLine", () => {
     ).toBe(1);
   });
 
+  it("reads a quoted fence by the contract of the quote it is in", () => {
+    // A backtick in the info string is the whole difference: the callout
+    // tokenizer opens a fence on it and stops absorbing, while an ordinary
+    // blockquote leaves it as text and goes on absorbing.
+    const bad = "> ```js`bad\n> body\nMatched\n\nAfter";
+    expect(blockIndexForLine(`> [!note]\n${bad}`, 4)).toBe(1);
+    expect(blockIndexForLine(`> a\n${bad}`, 4)).toBe(0);
+    // A clean info string opens a fence for either, and both stop at it.
+    const good = "> ```js\n> code\n> ```\nMatched\n\nAfter";
+    expect(blockIndexForLine(`> [!note]\n${good}`, 5)).toBe(1);
+    expect(blockIndexForLine(`> a\n${good}`, 5)).toBe(1);
+    // The restriction is a BACKTICK fence's; a tilde fence takes the same
+    // info string, so the two contracts agree there.
+    const tilde = "> ~~~js`ok\n> code\n> ~~~\nMatched\n\nAfter";
+    expect(blockIndexForLine(`> [!note]\n${tilde}`, 5)).toBe(1);
+    expect(blockIndexForLine(`> a\n${tilde}`, 5)).toBe(1);
+  });
+
+  it("forms a table only when the header and delimiter agree", () => {
+    // One column over two is prose, so the indented line under it is that
+    // paragraph's own continuation rather than a code block.
+    expect(blockIndexForLine("Intro\n--- | ---\n    matched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("Intro\n--- | ---\n\nAfter", 4)).toBe(1);
+    // A header needs no pipe of its own — one column over one is a table.
+    expect(blockIndexForLine("Intro\n| --- |\n    matched\n\nAfter", 3)).toBe(1);
+    // They must agree on the column count too.
+    expect(blockIndexForLine("A | B\n--- | --- | ---\n1 | 2\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("A | B | C\n--- | ---\n1 | 2\n\nAfter", 3)).toBe(0);
+    // When they do agree it is a table, and a table row is not prose.
+    expect(blockIndexForLine("A | B | C\n--- | --- | ---\n1 | 2\n\nAfter", 5)).toBe(1);
+    expect(blockIndexForLine("| A |\n| --- |\n| r |\n    matched\n\nAfter", 4)).toBe(1);
+  });
+
   it("measures continuation indent from the item's own marker", () => {
     // `- item` wants two columns; `-    item` wants five, so two is a new
     // block under the wider marker and the same two columns still work under
@@ -1037,6 +1070,55 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
       lands: [
         [1, "# H"],
         [4, "After"],
+      ],
+    },
+    {
+      name: "a callout opens a fence a plain quote leaves as text",
+      body: "> [!note]\n> ```js`bad\n> body\nMatched\n\nAfter",
+      lands: [
+        [4, "Matched"],
+        [6, "After"],
+      ],
+    },
+    {
+      name: "the same lines in a plain quote stay one node",
+      body: "> a\n> ```js`bad\n> body\nMatched\n\nAfter",
+      lands: [
+        [4, "Matched"],
+        [6, "After"],
+      ],
+    },
+    {
+      name: "one column over two columns forms no table",
+      body: "Intro\n--- | ---\n    matched\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "one column over one is a table, pipe in the header or not",
+      body: "Intro\n| --- |\n    matched\n\nAfter",
+      lands: [
+        [1, "Intro"],
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a header and delimiter that disagree on columns form no table",
+      body: "A | B\n--- | --- | ---\n1 | 2\n\nAfter",
+      lands: [
+        [3, "1 | 2"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "three columns over three is a table",
+      body: "A | B | C\n--- | --- | ---\n1 | 2\n\nAfter",
+      lands: [
+        [1, "A"],
+        [5, "After"],
       ],
     },
     {

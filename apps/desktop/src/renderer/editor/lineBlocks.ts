@@ -110,8 +110,21 @@ const DEFINITION_TITLE_RE = /^[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\))[ \t]*$/;
 const TABLE_DELIMITER_RE =
   /^[ \t]{0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
 
-function opensTable(next: string): boolean {
-  return next.includes("|") && TABLE_DELIMITER_RE.test(next);
+/** The cells a table row declares, ignoring the optional outer pipes. */
+function cellCount(text: string): number {
+  return text.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").length;
+}
+
+/** A header row and the delimiter under it only make a table when they AGREE
+ *  on the column count: `A | B` over `--- | --- | ---` is prose. That is the
+ *  whole rule — a header needs no pipe of its own, because `Intro` over
+ *  `| --- |` is a one-column table the same as `| A |` would be. */
+function opensTable(header: string, delimiter: string): boolean {
+  return (
+    delimiter.includes("|") &&
+    TABLE_DELIMITER_RE.test(delimiter) &&
+    cellCount(header) === cellCount(delimiter)
+  );
 }
 
 type Fence = { marker: string; length: number };
@@ -185,6 +198,18 @@ function fenceOpener(text: string): Fence | null {
   return { marker, length: match[1].length };
 }
 
+/** A fence opener INSIDE a quote. The callout tokenizer has its own opener
+ *  (extensions.ts calloutFenceOpener) and does not mind a backtick in the info
+ *  string, so ```` ```js`x ```` opens a fence there and stays literal text in
+ *  an ordinary blockquote. That one character decides whether the quote goes
+ *  on absorbing the unquoted line below it. */
+function quotedFenceOpener(inner: string, callout: boolean): Fence | null {
+  if (!callout) return fenceOpener(inner);
+  const match = FENCE_RE.exec(inner);
+  if (!match?.[1]) return null;
+  return { marker: match[1][0]!, length: match[1].length };
+}
+
 function closesFence(text: string, fence: Fence): boolean {
   const match = FENCE_RE.exec(text);
   return (
@@ -243,16 +268,20 @@ function blockStartLines(body: string): number[] {
     // A quoted line either keeps the quote's LAZY continuation alive or ends
     // it — and once it ends, an unquoted line is a new block while another
     // `>` line is still this one. What ends it was measured, not assumed: a
-    // quoted blank or a quoted fence for any quote, and for a CALLOUT every
-    // quoted block start (extensions.ts closes the continuable paragraph
-    // there). A plain quote absorbs those, which is why it needs the flag.
+    // quoted blank for any quote, and for a CALLOUT every quoted block start
+    // (extensions.ts closes the continuable paragraph there). A plain quote
+    // absorbs those, which is why it needs the flag.
+    //
+    // A fence ends it for either, but they do not agree on what a fence IS:
+    // the callout tokenizer opens one on an info string an ordinary
+    // blockquote leaves as text (quotedFenceOpener).
     if (openKind === "quote" && (open || quoteOpen) && QUOTE_RE.test(text)) {
       const inner = text.replace(QUOTE_PREFIX_RE, "");
       if (quoteFence) {
         if (closesFence(inner, quoteFence)) quoteFence = null;
         open = false;
       } else {
-        quoteFence = fenceOpener(inner);
+        quoteFence = quotedFenceOpener(inner, quoteCallout);
         const innerKind = blockKind(inner);
         open = !(
           quoteFence !== null ||
@@ -275,7 +304,9 @@ function blockStartLines(body: string): number[] {
       if (DEFINITION_TITLE_RE.test(lines[index + 1] ?? "")) index += 1;
       continue;
     }
-    const kind = opensTable(lines[index + 1] ?? "") ? "table" : blockKind(text);
+    const kind = opensTable(text, lines[index + 1] ?? "")
+      ? "table"
+      : blockKind(text);
     const marker = listMarker(text);
     const listOpen = openKind === "bullet" || openKind === "ordered";
     const opener = fenceOpener(text);
