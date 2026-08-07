@@ -930,7 +930,12 @@ function MarkdownView(props: {
   // engine editor reveals the block. Consuming it retires it, so a later
   // commit cannot replay the jump.
   const [jump, setJump] = useState<
-    { kind: "line"; line: number } | ({ kind: "block" } & BlockNavigationTarget) | null
+    | { kind: "line"; line: number }
+    | ({ kind: "block" } & BlockNavigationTarget)
+    // A frontmatter hit, whose landing is the top of the pane rather than any
+    // block. In the union so the three retire sites cover it too.
+    | { kind: "top" }
+    | null
   >(null);
   const jumpNonce = useRef(0);
   // The editor reports the jump it landed, and it goes away. Keyed by nonce so
@@ -1215,7 +1220,6 @@ function MarkdownView(props: {
   const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<
     number | null
   >(null);
-  const [pendingTopScroll, setPendingTopScroll] = useState(false);
   const headingTargetNonce = props.headingTarget?.nonce;
   useEffect(() => {
     if (!props.headingTarget || props.truncated) return;
@@ -1303,8 +1307,7 @@ function MarkdownView(props: {
       // real match off the top. Show the top of the document instead — after
       // the pane is visible, because `setShowSource` above only SCHEDULES the
       // unhide and a hidden element cannot be scrolled.
-      setJump(null);
-      setPendingTopScroll(true);
+      setJump({ kind: "top" });
     } else {
       // The line BECOMES the block, which is what retires it: a jump still
       // waiting on the lazy editor names the result before this one, and
@@ -1318,10 +1321,10 @@ function MarkdownView(props: {
   }, [jump, engineMode, props.body]);
   // The frontmatter jump's landing, once the pane it moves is on screen.
   useEffect(() => {
-    if (!pendingTopScroll || showSource) return;
+    if (jump?.kind !== "top" || showSource) return;
     engineDocPaneRef.current?.scrollTo({ top: 0 });
-    setPendingTopScroll(false);
-  }, [pendingTopScroll, showSource]);
+    setJump(null);
+  }, [jump, showSource]);
   useEffect(() => {
     if (!showSource || !engine.doc) {
       setSourceMarkdown(null);

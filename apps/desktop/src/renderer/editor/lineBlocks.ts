@@ -21,8 +21,10 @@
 //  - Some blocks RUN THROUGH a blank line, because the next line continues
 //    them: another item of the SAME list, content indented to that item's own
 //    content column, and the next chunk of an indented code block. A list's
-//    identity is its marker AND its kind, so either one changing starts a new
-//    list — except under a `.`-ordered list, which absorbs whatever list line
+//    identity is its marker, its kind, AND whether its items carry checkboxes
+//    — a checklist is a different node from a bullet list, and inverts this
+//    rule: a blank line SPLITS one. Any of the three changing starts a new
+//    list, except under a `.`-ordered list, which absorbs whatever list line
 //    follows it and takes a continuation at any indent. That leniency is the
 //    tokenizer's, measured; `1)` behaves like a bullet instead.
 //  - A quote absorbs an UNQUOTED line as a lazy continuation until something
@@ -60,6 +62,7 @@
 
 type BlockKind =
   | "bullet"
+  | "task"
   | "ordered"
   | "quote"
   | "heading"
@@ -69,10 +72,15 @@ type BlockKind =
   | "other";
 
 const HEADING_RE = /^[ \t]{0,3}#{1,6}(?:[ \t]|$)/;
+// A CHECKBOX item. The editor renders these as a taskList, a different node
+// from a bulletList with the OPPOSITE blank-line rule: a blank line SPLITS a
+// task list where it joins a bullet one. Bullet markers only — `1. [ ] a` is
+// an ordinary ordered list — and the box needs a space or the line end after
+// it, or `- [ ]a` is just text.
+const TASK_RE = /^[ \t]{0,3}[-+*][ \t]+\[[ xX]\](?:[ \t]|$)/;
 // The captured marker is the list's identity: changing it starts a NEW list.
 const BULLET_RE = /^[ \t]{0,3}([-+*])(?:[ \t]|$)/;
 const ORDERED_RE = /^[ \t]{0,3}\d{1,9}([.)])(?:[ \t]|$)/;
-const QUOTE_RE = /^[ \t]{0,3}>/;
 // A quoted LINE and the prefix stripped off it, mirroring extensions.ts
 // CALLOUT_LINE_RE and stripBlockquotePrefix EXACTLY: spaces before the `>`,
 // never a tab, and exactly one optional SPACE after it. `>\t# T` therefore
@@ -236,9 +244,14 @@ function blockKind(text: string): BlockKind {
   if (HEADING_RE.test(text)) return "heading";
   // Before the bullet: `- - -` is a break, not a one-item list.
   if (BREAK_RE.test(text)) return "break";
+  // Before the bullet: a checkbox item is a bulletList to the eye and a
+  // taskList to the editor, and they do not agree about blank lines.
+  if (TASK_RE.test(text)) return "task";
   if (BULLET_RE.test(text)) return "bullet";
   if (ORDERED_RE.test(text)) return "ordered";
-  if (QUOTE_RE.test(text)) return "quote";
+  // Same pattern the quoted-line branch uses: past the column gate above, a
+  // tab can no longer reach here, so spaces-only is the whole rule.
+  if (QUOTE_LINE_RE.test(text)) return "quote";
   return "other";
 }
 
@@ -378,7 +391,8 @@ export function blockIndexForLine(body: string, line: number): number {
       ? "table"
       : blockKind(text);
     const marker = listMarker(text);
-    const listOpen = openKind === "bullet" || openKind === "ordered";
+    const listOpen =
+      openKind === "bullet" || openKind === "task" || openKind === "ordered";
     const opener = fenceOpener(text);
     const mathClose = mathBlockEnd(lines, index);
     // A blank line does not end a block the next line continues: another item
@@ -388,9 +402,11 @@ export function blockIndexForLine(body: string, line: number): number {
     const indent = leadingColumns(text);
     const resumes =
       (listOpen &&
-        ((kind === openKind && marker === openMarker) || indent >= openIndent)) ||
-      (openKind === "code" && kind === "code") ||
-      (quoteOpen && kind === "quote");
+        // A TASK list is the exception: a blank line splits one, so a later
+        // item only resumes it by reaching the item's content column.
+        ((kind === openKind && kind !== "task" && marker === openMarker) ||
+          indent >= openIndent)) ||
+      (openKind === "code" && kind === "code");
     // Indented code ends where the indentation stops, blank line or not — the
     // same "ends at its own last line" shape a heading and a fence have. It
     // cannot START under an open paragraph: there an indented line is that
@@ -413,6 +429,7 @@ export function blockIndexForLine(body: string, line: number): number {
         (openKind === "other" || openKind === "table") &&
         (mathClose !== null ||
           kind === "bullet" ||
+          kind === "task" ||
           kind === "quote" ||
           kind === "table" ||
           (kind === "ordered" && INTERRUPTING_ORDERED_RE.test(text)))) ||
@@ -424,7 +441,7 @@ export function blockIndexForLine(body: string, line: number): number {
         listOpen &&
         openMarker !== "." &&
         (kind === "quote" ||
-          ((kind === "bullet" || kind === "ordered") &&
+          ((kind === "bullet" || kind === "task" || kind === "ordered") &&
             (kind !== openKind || marker !== openMarker)))) ||
       // An UNQUOTED line under a lazily-continuing quote. This is not the
       // quoted-body break set (round 7) and was measured apart from it: here
@@ -434,6 +451,7 @@ export function blockIndexForLine(body: string, line: number): number {
       (open &&
         openKind === "quote" &&
         (kind === "bullet" ||
+          kind === "task" ||
           HTML_BLOCK_RE.test(text) ||
           (kind === "ordered" &&
             (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
@@ -461,7 +479,7 @@ export function blockIndexForLine(body: string, line: number): number {
     // it sits inside the open item's content, and the outer item still governs
     // what continues the list.
     if (
-      (kind === "bullet" || kind === "ordered") &&
+      (kind === "bullet" || kind === "task" || kind === "ordered") &&
       (opens ||
         (listOpen &&
           kind === openKind &&

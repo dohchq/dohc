@@ -2003,6 +2003,58 @@ describe("engine markdown source view", () => {
   // reopen runs (useEngineDoc), which unmounts this editor. The instance that
   // replaces it has no memory of having applied anything, so a target still
   // held above lands a second time — on a document the reader did not search.
+  // The reopenKey guard covers a VERSION switch. It is not the only rebind:
+  // useEngineDoc keys its request on [enabled, workspaceId, path, reopenKey,
+  // retryKey], so flipping `readOnly` unbinds the Y.Doc and binds a fresh one
+  // with reopenKey untouched. Reporting the landing back is what stops the
+  // editor that mounts on the far side from applying the same jump again.
+  it("retires the target once applied, so a rebind cannot replay it", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."), {
+      timeout: 5_000,
+    });
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+    // readOnly flips `enabled`, which is part of the request key — the doc
+    // unbinds and the editor goes with it. reopenKey never moves.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        readOnly
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-editor")).toBeNull(),
+    );
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // MUTATION: make retireJump a no-op -> the target outlives the rebind and
+    // the fresh editor reveals it a second time.
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
   it("retires the target once applied, so a reopened editor cannot replay it", async () => {
     const scrollIntoView = stubScrollSpy("scrollIntoView");
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);

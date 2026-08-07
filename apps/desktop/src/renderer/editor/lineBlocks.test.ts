@@ -437,6 +437,45 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("1) item\n\n   para\n\nAfter", 3)).toBe(0);
   });
 
+  it("splits a CHECKLIST at a blank line, where a bullet list joins", () => {
+    // A checklist is a taskList, a different node with the opposite rule.
+    expect(blockIndexForLine("- [ ] a\n\n- [ ] b\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("- [ ] a\n\n- [ ] b\n\n- [ ] c\n\nAfter", 5)).toBe(2);
+    // A bullet list still joins across one.
+    expect(blockIndexForLine("- a\n\n- b\n\nAfter", 3)).toBe(0);
+    // With no blank line the checklist is one node, mixed states and all.
+    expect(blockIndexForLine("- [ ] a\n- [ ] b\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("- [ ] a\n- [x] b\n\nAfter", 2)).toBe(0);
+    // Content indented to the item's column still continues it.
+    expect(blockIndexForLine("- [ ] a\n\n  cont\n\nAfter", 3)).toBe(0);
+  });
+
+  it("treats a checkbox as part of a list's identity", () => {
+    // Checkbox and no checkbox are different lists, blank line or not.
+    expect(blockIndexForLine("- [ ] a\n- b\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("- a\n- [ ] b\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("- [ ] a\n\n- b\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("- a\n\n- [ ] b\n\nAfter", 3)).toBe(1);
+  });
+
+  it("reads a checkbox only where the tokenizer does", () => {
+    // Both cases, and the bullet markers. An ORDERED item is never a task.
+    for (const item of ["- [x]", "- [X]", "* [ ]", "+ [ ]"]) {
+      expect(blockIndexForLine(`${item} a\n\n${item} b\n\nAfter`, 3)).toBe(1);
+    }
+    expect(blockIndexForLine("1. [ ] a\n\n2. [ ] b\n\nAfter", 3)).toBe(0);
+    // The box needs a space or the line end after it, and only `x`/`X` in it.
+    expect(blockIndexForLine("- [ ]a\n\n- [ ]b\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("- [y] a\n\n- [y] b\n\nAfter", 3)).toBe(0);
+    // A checklist interrupts and is interrupted like the bullet list it
+    // resembles.
+    expect(blockIndexForLine("Intro\n- [ ] a\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("> intro\n- [ ] a\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("- [ ] a\n> q\n\nAfter", 2)).toBe(1);
+    // Nested under a bullet it is that bullet's content.
+    expect(blockIndexForLine("- a\n  - [ ] b\n\nAfter", 2)).toBe(0);
+  });
+
   it("starts a new list when the marker changes", () => {
     expect(blockIndexForLine("- one\n\n* two\n\nAfter", 3)).toBe(1);
     expect(blockIndexForLine("- one\n* two", 2)).toBe(1);
@@ -1490,6 +1529,49 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
       body: "Intro\n\n[docs]: <foo bar>\n\nAfter",
       lands: [
         [1, "Intro"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a blank line splits a checklist",
+      body: "- [ ] a\n\n- [ ] b\n\nAfter",
+      lands: [
+        [1, "a"],
+        [3, "b"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "and joins a bullet list",
+      body: "- a\n\n- b\n\nAfter",
+      lands: [
+        [3, "b"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a checkbox appearing mid-list starts a new one",
+      body: "- a\n- [ ] b\n\nAfter",
+      lands: [
+        [1, "a"],
+        [2, "b"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "and disappearing does too",
+      body: "- [ ] a\n- b\n\nAfter",
+      lands: [
+        [1, "a"],
+        [2, "b"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "an ordered item is never a checklist",
+      body: "1. [ ] a\n\n2. [ ] b\n\nAfter",
+      lands: [
+        [3, "b"],
         [5, "After"],
       ],
     },
