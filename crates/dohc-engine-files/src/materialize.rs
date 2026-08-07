@@ -2389,7 +2389,6 @@ mod tests {
         assert!(matches!(result, Err(MaterializeError::FileLocked)));
     }
 
-
     struct Scratch {
         root: ScratchDir,
     }

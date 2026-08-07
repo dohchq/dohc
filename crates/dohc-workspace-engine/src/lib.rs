@@ -11229,10 +11229,15 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if matches!(&error, RuntimeError::Relay(RelayError::ShareReadOnly)) {
         return wire(ErrorCode::InvalidParams, "share-read-only");
     }
-    // The only rejection whose message carries numbers. `wire` takes a static
-    // string, so the generic tail below would replace them with a placeholder.
+    // The rejections whose message carries numbers. `wire` takes a static
+    // string, so the generic tail below would replace them with a placeholder —
+    // and a size refusal that drops its limit and usage is the one an agent
+    // cannot act on (AGENTS.md: show agents the limits they hit).
     if let RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) = &error {
         return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
+    }
+    if let RuntimeError::Domain(domain @ DomainError::PayloadTooLarge { .. }) = &error {
+        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
     }
     // Same reason: this refusal names a constraint, a limit, a unit and an
     // observed size, and `wire` takes a static string.

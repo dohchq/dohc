@@ -1119,6 +1119,63 @@ fn text_blob_over_the_text_ceiling_is_refused_at_ingest() {
     assert_eq!(refused_rows, 0);
 }
 
+/// The store's text cap answers the sync path with a REFUSAL, not an abort.
+///
+/// The gap between the caps makes it reachable: `project` allows
+/// `MAX_PROJECTION_BYTES` (16 MiB) and an update may reach
+/// `MAX_YDOC_UPDATE_BYTES` (20 MiB), so a doc whose Markdown lands between
+/// `MAX_TEXT_BYTES` (10 MiB) and 16 MiB projects fine and is refused only by
+/// the store's own write.
+///
+/// The error CLASS decides durability, not just the wording: `refusal_reason`
+/// recognizes `InvalidInput` alone, so only that class is journaled and ACKed.
+/// Any other class returns `Err`, the coordinate is never ACKed, and the relay
+/// redelivers it forever with every later operation stuck behind it.
+///
+/// MUTATION: map `DomainError::PayloadTooLarge` to `SyncError::BlobTooLarge`
+/// in `map_domain_payload_error` and both halves fail — the apply answers
+/// `Err(BlobTooLarge)` and the ack stays at -1.
+#[test]
+fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+
+    let source = dohc_engine_collab::Ydoc::wire();
+    source.plaintext_insert(0, &"a".repeat(MAX_TEXT_BYTES + 1));
+    let base = source.encode_full_state();
+    assert!(
+        base.len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
+        "the premise is a doc UNDER the update cap, at {} bytes",
+        base.len()
+    );
+    let base_sha = engine.put_binary_blob(&base).expect("base blob");
+    let over_cap = envelope(
+        "over-cap-projection-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-over-cap-projection",
+            "path": "notes/over-cap-projection.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+
+    assert_invalid_refusal!(apply_ydoc_envelope(
+        &mut engine,
+        &over_cap,
+        &NoFaults,
+        &NoLiveLeases
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "over-cap-projection-peer").expect("ack"),
+        0,
+        "an unACKed coordinate is redelivered forever"
+    );
+}
+
 /// The relay pull checks the ceiling on the undecoded response, before it
 /// hashes the bytes and before it copies them into a `String`. The served
 /// bytes deliberately do NOT hash to the requested sha256, so the refusal can

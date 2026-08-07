@@ -59,10 +59,10 @@ const VERSIONED_TEXT_STORE_ERROR_CODES = [
   "invalid-path",
   "invalid-root",
   "invalid-version",
-  "invalid-text",
   "invalid-timestamp",
   "invalid-version-name",
   "invalid-workspace",
+  "payload-too-large",
   "persist-failed",
   "state-corrupt",
   "target-path-exists",
@@ -99,9 +99,15 @@ const DOMAIN_ERROR_CODES: ReadonlySet<string> = new Set(
  */
 function domainErrorFrom(error: unknown): VersionedTextStoreError | null {
   if (!(error instanceof DaemonRefusalError)) return null;
-  if (!DOMAIN_ERROR_CODES.has(error.message)) return null;
+  // A measured size refusal is the one whose message is NOT its code: the
+  // engine sends the constraint, the limit and the observed usage as a
+  // sentence, so the WIRE code names this refusal and the numbers survive as
+  // the message.
+  const code =
+    error.wireCode === "PAYLOAD_TOO_LARGE" ? "payload-too-large" : error.message;
+  if (!DOMAIN_ERROR_CODES.has(code)) return null;
   const translated = new VersionedTextStoreError(
-    error.message as VersionedTextStoreErrorCode,
+    code as VersionedTextStoreErrorCode,
     error.message,
   );
   // The wire code and retryability stay reachable; translation adds a domain

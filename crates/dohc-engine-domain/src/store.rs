@@ -3811,8 +3811,16 @@ pub fn validate_addressable_plaintext_path(path: &str) -> Result<String, DomainE
 
 fn validate_text(text: &str) -> Result<(), DomainError> {
     if text.len() > MAX_TEXT_BYTES {
-        return Err(DomainError::InvalidText {
-            reason: "text exceeds the size cap",
+        // Name the cap, not just the fact of it (#656). "text exceeds the
+        // size cap" told a caller nothing it could act on: which cap, how
+        // large, in what unit, and by how much it overshot were all missing.
+        // The sync side already reports this same limit as
+        // ("MAX_TEXT_BYTES", MAX_TEXT_BYTES) with observed bytes at its
+        // ingest boundary; the store's own write path was the outlier.
+        return Err(DomainError::PayloadTooLarge {
+            constraint: "MAX_TEXT_BYTES",
+            limit_bytes: MAX_TEXT_BYTES,
+            observed_bytes: text.len(),
         });
     }
     Ok(())

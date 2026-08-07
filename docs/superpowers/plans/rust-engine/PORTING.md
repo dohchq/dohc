@@ -167,12 +167,15 @@ of machine codes, and tests assert the codes:
   `conflict-not-found | conflict-stale-target | duplicate-id |
   file-too-large | file-not-found | fork-base-not-found |
   invalid-generated-id | invalid-input | invalid-metadata | invalid-object |
-  invalid-path | invalid-root | invalid-version | invalid-text |
+  invalid-path | invalid-root | invalid-version |
   invalid-timestamp | invalid-version-name | invalid-workspace |
-  persist-failed | state-corrupt | target-path-exists |
+  payload-too-large | persist-failed | state-corrupt | target-path-exists |
   version-name-conflict | version-not-found | workspace-mismatch |
-  write-lane-reentry` (`packages/workspace-contracts/src/engine.ts:38-62`,
-  class at `versionedTextStore.ts:121-129`).
+  write-lane-reentry` (`packages/workspace-contracts/src/engine.ts:67-97`,
+  class at `engine.ts:99-107`). `payload-too-large` carries the constraint,
+  the limit and the observed usage in its message; it replaced `invalid-text`
+  on this surface, which now answers only for the secret file size limit and
+  belongs to `SecretFileStoreErrorCode`.
 - `LinkedChatStoreError` — 19 codes incl. `channel-exists`,
   `read-state-revision-mismatch`, `state-corrupt`, `workspace-mismatch`
   (`engine.ts:1066-1085`).

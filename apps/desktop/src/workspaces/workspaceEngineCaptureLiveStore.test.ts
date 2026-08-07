@@ -316,6 +316,42 @@ describe("createCaptureLiveStores", () => {
     await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
   });
 
+  // Every other refusal names itself in the MESSAGE, so the store recognises
+  // it by a set lookup. A size refusal spends its message on the constraint,
+  // the limit and the observed usage instead, and would escape that lookup as
+  // a raw `DaemonRefusalError` — the store's contract promises a
+  // `VersionedTextStoreError`.
+  //
+  // MUTATION: drop the `PAYLOAD_TOO_LARGE` wire-code branch in
+  // `domainErrorFrom` and this fails on the name and the code.
+  it("translates a measured size refusal and keeps its measurements", async () => {
+    const message =
+      "payload exceeds MAX_TEXT_BYTES: limit 10485760 bytes, observed 10485761 bytes";
+    const client = clientFor(async () => {
+      throw {
+        wireError: { code: "PAYLOAD_TOO_LARGE", message, retry: "no" },
+      };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    await expect(
+      store.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "note.md",
+        text: "over cap",
+        metadata: { origin: "api" },
+      }),
+    ).rejects.toMatchObject({
+      name: "VersionedTextStoreError",
+      code: "payload-too-large",
+      message,
+    });
+  });
+
   it("retries transport failures for reads but not mutations", async () => {
     const optionsSeen: Array<EngineWorkspaceRunOptions | undefined> = [];
     const requests: Request[] = [];
