@@ -368,6 +368,21 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("Para\n\n\t~~~\ncode\n~~~\n\nAfter", 3)).toBe(1);
   });
 
+  it("closes a fence at three columns, and not at four", () => {
+    // The closer answers to the same column rule the opener does. Up to three
+    // columns ends the block; at four the line is the block's own text and
+    // the fence runs on to the end of the document.
+    for (const indent of ["", " ", "  ", "   "]) {
+      expect(blockIndexForLine(`Para\n\n\`\`\`\ncode\n${indent}\`\`\`\n\nAfter`, 7)).toBe(2);
+    }
+    for (const indent of ["    ", "\t", " \t", "   \t"]) {
+      expect(blockIndexForLine(`Para\n\n\`\`\`\ncode\n${indent}\`\`\`\n\nAfter`, 7)).toBe(1);
+    }
+    // A tab-indented closer is code, so the NEXT unindented one really ends it.
+    expect(blockIndexForLine("Para\n\n```\ncode\n\t```\nmore\n```\n\nAfter", 9)).toBe(2);
+    expect(blockIndexForLine("Para\n\n~~~\ncode\n\t~~~\n\nAfter", 7)).toBe(1);
+  });
+
   it("measures continuation indent from the item's own marker", () => {
     // `- item` wants two columns; `-    item` wants five, so two is a new
     // block under the wider marker and the same two columns still work under
@@ -1174,6 +1189,30 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
       name: "a tab-indented fence under a paragraph is that paragraph's text",
       body: "Intro\n\t```\ncode\nAfter",
       lands: [[4, "Intro"]],
+    },
+    {
+      name: "a three-column closer still ends the fence",
+      body: "Para\n\n```\ncode\n   ```\n\nAfter",
+      lands: [
+        [4, "code"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "a tab-indented closer is the code block's own text",
+      body: "Para\n\n```\ncode\n\t```\n\nAfter",
+      lands: [
+        [1, "Para"],
+        [7, "```"],
+      ],
+    },
+    {
+      name: "the next unindented closer is the one that ends it",
+      body: "Para\n\n```\ncode\n\t```\nmore\n```\n\nAfter",
+      lands: [
+        [6, "more"],
+        [9, "After"],
+      ],
     },
     {
       name: "three columns is not an indented code block",

@@ -221,6 +221,10 @@ function fenceOpener(text: string, allowBacktickInfo = false): Fence | null {
 }
 
 function closesFence(text: string, fence: Fence): boolean {
+  // A closer reaching four COLUMNS is the code block's own text, not its end
+  // — the same rule the opener has, and for the same reason: FENCE_RE counts
+  // a tab as one of three prefix characters. Three columns still closes.
+  if (leadingColumns(text) >= CODE_COLUMNS) return false;
   const match = FENCE_RE.exec(text);
   return (
     !!match?.[1] &&
