@@ -169,6 +169,15 @@ export function isEngineStoreBusyRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "engine-store-busy";
 }
 
+// The two refusals that clear on their own: a program outside dohc holding
+// the artifact, and dohc's own writers meeting inside SQLite. MEMBERSHIP of
+// that class lives here, at the protocol boundary, because three layers ask
+// the question — the settle ladder that re-arms, the journal write that must
+// be resent, and the session that must NOT be quarantined for one.
+export function isTransientEngineRefusal(error: unknown): boolean {
+  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error);
+}
+
 // Remote edits drained under this session's lease while this settle was in
 // flight, so the doc is BEHIND the durable lineage and the engine refuses
 // rather than materializing content this editor never saw

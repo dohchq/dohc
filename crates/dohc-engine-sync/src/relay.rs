@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
-use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex_sha256};
+use dohc_engine_storage::{
+    EngineStore, FaultInjector, FaultPoint, StorageError, TxnOutcome, hex_sha256,
+};
 use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
@@ -3072,6 +3074,17 @@ fn replay_share_write<T: RelayTransport>(
             reason: "share write names a blob reference that is not a sha256",
         });
     }
+    // The other question the OP answers about itself, asked here for the same
+    // reason: the store door's path rules are pure over the path, so nothing
+    // has to be fetched to answer them. Asked after the blob instead, every
+    // row naming an unusable path downloaded and hashed a body — up to the
+    // kind ceiling, once per row — to reach a refusal the path alone had
+    // already decided.
+    //
+    // This is the SAME door `write_text`/`write_binary` use below, not a
+    // restatement of its rules, so the two cannot drift; the mapping there
+    // remains as the authority for anything this cannot see.
+    dohc_engine_domain::validate_plaintext_storable_path(path).map_err(replayed_domain)?;
     let key = replay_id(share_id, envelope, "write", path);
     let request_id = format!("share-view:{key}");
     let already_applied = store
@@ -3318,6 +3331,9 @@ fn content_kind_name(value: Option<&serde_json::Value>) -> &'static str {
 }
 
 fn domain(error: DomainError) -> RelayError {
+    if matches!(error, DomainError::Storage(StorageError::FileLocked)) {
+        return RelayError::StoreBusy;
+    }
     RelayError::Local(error.code().to_owned())
 }
 
@@ -3452,6 +3468,12 @@ fn validate_identity_request(workspace: &str, epoch: &str, stream: &str) -> Resu
     crate::model::bounded(stream, "stream_identity must be non-empty and bounded").map_err(local)
 }
 
+// The busy store keeps its TYPE across this boundary. Both funnels answer it
+// the same way, so a relay operation refused for contention reaches the wire
+// as the retryable class no matter which taxonomy it came through (#658).
 fn local(error: SyncError) -> RelayError {
+    if matches!(error, SyncError::Storage(StorageError::FileLocked)) {
+        return RelayError::StoreBusy;
+    }
     RelayError::Local(error.code().to_owned())
 }

@@ -17854,7 +17854,7 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
                     },
                 )],
             )
-            .with_view_blobs([(refused_sha, refused), (later_sha, later)]),
+            .with_view_blobs([(refused_sha, refused), (later_sha.clone(), later)]),
         );
 
         let outcome = client
@@ -17885,6 +17885,21 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
                 .map(|snapshot| snapshot.text),
             Some("the update behind the unusable path".to_owned()),
             "MUTATION: the op behind {bad_path} never arrives"
+        );
+        // The blob was never requested. The store door's rules are pure over
+        // the path, so the refusal needs no bytes to reach — and asked after
+        // the fetch instead, every row naming an unusable path downloaded and
+        // hashed a body up to the kind ceiling to learn what the path already
+        // said.
+        assert_eq!(
+            *client
+                .transport()
+                .share_blob_calls
+                .lock()
+                .expect("share blob calls"),
+            [later_sha],
+            "MUTATION: move the path check back below `share_blob` and the \
+             refused path fetches its blob first"
         );
         // The refusal NAMES the constraint and the file it cost, because the
         // record is all the reader has once the cursor commits.
@@ -17920,9 +17935,20 @@ fn a_domain_failure_that_is_not_the_path_still_stops_the_pull() {
     use dohc_engine_domain::DomainError;
     use dohc_engine_storage::StorageError;
 
+    // TYPED across the replay route, so `store_busy` in the workspace-engine
+    // crate answers it the same way it answers every other route. Under
+    // `Local("file-locked")` it reached the wire as INTERNAL / retry "no",
+    // because that recognizer matches storage VARIANTS and a relay error
+    // carries none.
+    let busy = crate::relay::replayed_domain(DomainError::Storage(StorageError::FileLocked));
     assert_eq!(
-        crate::relay::replayed_domain(DomainError::Storage(StorageError::FileLocked)),
-        RelayError::Local("file-locked".to_owned()),
+        busy,
+        RelayError::StoreBusy,
+        "MUTATION: the busy store loses its type on the replay route"
+    );
+    assert_eq!(
+        busy.share_replay_refusal_code(),
+        None,
         "MUTATION: a busy store is skipped as if it were permanent"
     );
     assert_eq!(

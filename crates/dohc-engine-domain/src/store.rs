@@ -3797,7 +3797,7 @@ pub(crate) fn validate_path(path: &str) -> Result<(), DomainError> {
 
 /// Store-door guard for operations that introduce a plaintext alias. Only a
 /// tracked classification is eligible, and the returned key is canonical.
-fn validate_plaintext_storable_path(path: &str) -> Result<String, DomainError> {
+pub fn validate_plaintext_storable_path(path: &str) -> Result<String, DomainError> {
     use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 
     let (classification, normalized) = classify_engine_file_path_normalized(path);

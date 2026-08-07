@@ -6,6 +6,7 @@ import {
 } from "../daemon/engineClient";
 import {
   isDaemonReconnectError,
+  isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
 } from "../live/daemonLiveAdapter";
@@ -666,6 +667,13 @@ export class YdocAdapterSession {
           // workspace/session binding.
           if (isDaemonReconnectError(recoveryFailure)) throw recoveryFailure;
           if (isDaemonReconnectError(refusal)) throw refusal;
+          // Same reason as the reconnect passthrough above, for the other
+          // class a caller must be able to recognize: the classifier reads
+          // the THROWN value, and a transient refusal buried in a diagnostic
+          // wrapper reads as terminal. Recovery met the same busy engine the
+          // write did; report that, not a story about recovery.
+          if (isTransientEngineRefusal(recoveryFailure)) throw recoveryFailure;
+          if (isTransientEngineRefusal(refusal)) throw refusal;
           const refusalMessage =
             refusal instanceof Error ? refusal.message : String(refusal);
           const recoveryMessage =
@@ -680,7 +688,65 @@ export class YdocAdapterSession {
       }
     });
     const guardedOperation = operation.catch((error: unknown) => {
-      this.quarantine(error);
+      // Quarantine is for a session whose canonical state is no longer
+      // knowable — a partially applied update, a response that went missing.
+      // A busy engine refused the write CLEANLY and changed nothing, and the
+      // recovery above has already pulled this doc back to durable state, so
+      // the session is exactly as good as it was. Killing it for a condition
+      // that clears in milliseconds would turn a pause into a dead document
+      // (#658).
+      if (!isTransientEngineRefusal(error)) this.quarantine(error);
+      this.surfaceSessionError(error);
+      throw error;
+    });
+    this.recordChain = guardedOperation.then(
+      () => undefined,
+      () => undefined,
+    );
+    void guardedOperation.catch(() => undefined);
+    return guardedOperation;
+  }
+
+  /**
+   * Send the engine everything this document holds that its durable state
+   * does not, and answer whether anything needed sending.
+   *
+   * The resend for a journal write a transient refusal turned away. Replaying
+   * the refused update's BYTES cannot do it: `applyLocalUpdate` records what a
+   * Yjs transaction observes, and applying an update the doc already holds
+   * observes nothing — the engine would receive an empty delta and the settle
+   * behind it would commit a projection missing the user's text and report it
+   * saved.
+   *
+   * So the question is not "which bytes were refused" but "what is the engine
+   * missing", which durable state answers directly. That also makes one call
+   * enough however many updates were refused.
+   */
+  resendMissingState(
+    options?: ApplyLocalUpdateOptions,
+  ): Promise<boolean> {
+    const operation = this.recordChain.then(async () => {
+      this.assertOpen();
+      const durableUpdate = await this.requestResyncUpdate();
+      const durableDoc = new Y.Doc();
+      declareDohcRootSchema(durableDoc);
+      Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
+      // Take the durable state first, exactly as recovery does, so the delta
+      // below is measured against what the engine actually holds.
+      Y.applyUpdate(this.doc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
+      const missing = Y.encodeStateAsUpdate(
+        this.doc,
+        Y.encodeStateVector(durableDoc),
+      );
+      // The same empty-delta floor `recoverCanonicalState` uses: a two-byte
+      // encoding is "nothing to send", which is what a resend finds when the
+      // refused write had in fact committed and only its response was lost.
+      if (missing.byteLength <= 2) return false;
+      await this.requestRecordUpdate(missing, options);
+      return true;
+    });
+    const guardedOperation = operation.catch((error: unknown) => {
+      if (!isTransientEngineRefusal(error)) this.quarantine(error);
       this.surfaceSessionError(error);
       throw error;
     });

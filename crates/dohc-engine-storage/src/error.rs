@@ -167,16 +167,54 @@ impl StorageError {
         }
     }
 
+    /// Whether SQLite refused this operation because the database was BUSY,
+    /// rather than because anything is wrong with it.
+    ///
+    /// `SQLITE_BUSY` is another connection holding a lock this one needs;
+    /// `SQLITE_LOCKED` is the same conflict inside one connection. Both are
+    /// raised only after `ENGINE_SQLITE_BUSY_TIMEOUT_MS` of waiting, so
+    /// reaching here already means the store's own retry budget is spent —
+    /// which is exactly what [`StorageError::FileLocked`] describes.
+    ///
+    /// Recognized HERE because this is the last boundary that still holds the
+    /// typed `rusqlite::Error`. Above it the error is a boxed source and the
+    /// result code is unreadable, which is why every busy database used to
+    /// reach callers as `persist-failed` or `state-corrupt` — both terminal,
+    /// both wrong about a condition that clears by waiting (#658).
+    fn is_busy(source: &(dyn std::error::Error + 'static)) -> bool {
+        source
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            .is_some_and(|code| {
+                matches!(
+                    code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+            })
+    }
+
     /// Wrap an unexpected error as `state-corrupt` with the source attached —
     /// the catch-all conversion at the open/validate boundary.
+    ///
+    /// A busy database is not corruption, and calling it corruption is the
+    /// louder of the two mistakes: it sends a transient lock to the recovery
+    /// path that quarantines a store.
     pub(crate) fn corrupt(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        if Self::is_busy(&source) {
+            return StorageError::FileLocked;
+        }
         StorageError::StateCorrupt {
             source: Some(Box::new(source)),
         }
     }
 
     /// Wrap an unexpected error as `persist-failed` with the source attached.
+    ///
+    /// A busy database did not fail to persist; it has not tried yet.
     pub(crate) fn persist(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        if Self::is_busy(&source) {
+            return StorageError::FileLocked;
+        }
         StorageError::PersistFailed {
             source: Some(Box::new(source)),
         }

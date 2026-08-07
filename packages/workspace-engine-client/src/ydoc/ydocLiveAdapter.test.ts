@@ -22,7 +22,11 @@ import {
   openEngineYdocProviderSession,
   YdocReleasedWithSettleFailureError,
 } from "./ydocProviderSession";
-import { YDOC_EVENT, YDOC_METHOD } from "./ydocWireContract";
+import {
+  YDOC_EVENT,
+  YDOC_METHOD,
+  type YdocSettleResult,
+} from "./ydocWireContract";
 
 const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
@@ -876,6 +880,141 @@ describe("YdocLiveAdapter", () => {
 
     await busy.provider.close({ settle: false });
     await lockedFile.provider.close({ settle: false });
+  });
+
+  // A provider whose JOURNAL write is refused busy `refusals` times before the
+  // engine accepts anything. The engine is the real loopback, so a settle can
+  // only carry text the engine actually received — which makes "was it
+  // resent?" a fact about content rather than a call count.
+  //
+  // `refusals` counts recordUpdate attempts, and one edit costs TWO of them:
+  // the write, then `recoverCanonicalState`'s replay. So 2 is the smallest
+  // number that gets past the adapter's own recovery and reaches the ladder.
+  async function openAgainstABusyJournal(text: string, refusals: number) {
+    const engine = seedPlaintextEngine();
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      new Error("daemon response"),
+    );
+    let remaining = refusals;
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate && remaining > 0) {
+          remaining -= 1;
+          throw busy;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const settled: YdocSettleResult[] = [];
+    const scheduler = settleScheduler();
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      settleDebounceMs: 100,
+      onRemoteUpdate: () => undefined,
+      onSettleError: () => undefined,
+      onSettled: (result) => {
+        settled.push(result);
+      },
+      scheduleSettle: scheduler.schedule,
+    });
+    const update = plaintextUpdate(provider.initialUpdate, (body) => {
+      body.insert(0, text);
+    });
+    const journaled = provider.applyLocalUpdate(update);
+    return { provider, busy, settled, scheduler, journaled };
+  }
+
+  it("sends the engine the state a busy journal write left it missing", async () => {
+    // #658, codex P1. The journal write happens ONCE, at applyLocalUpdate, and
+    // its promise is what every later settle awaits. A busy refusal left that
+    // promise permanently rejected, so each ladder rung re-awaited the same
+    // dead chain and sent nothing.
+    //
+    // Replaying the refused BYTES is not the fix and is worse than the bug:
+    // `applyLocalUpdate` records what a Yjs transaction observes, and applying
+    // an update the doc already holds observes nothing — the engine would get
+    // an empty delta and the settle behind it would report a save of text the
+    // engine never received. The resend asks durable state what is missing.
+    const { provider, settled, scheduler, journaled } =
+      await openAgainstABusyJournal("typed while the store was busy", 2);
+
+    // The caller still hears the truth about its own update.
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+    expect(settled).toEqual([]);
+
+    // The ladder's rung: resend, then settle.
+    expect(scheduler.armed).toHaveLength(1);
+    scheduler.fire();
+    await drain();
+
+    expect(settled).toHaveLength(1);
+    // THE assertion a call count cannot make.
+    expect(settled[0]?.markdown).toContain("typed while the store was busy");
+
+    await provider.close({ settle: false });
+  });
+
+  it("keeps resending while the store stays busy, and never settles without the text", async () => {
+    // The poisoned-chain regression, and the ordering guard with it: no settle
+    // may commit while the engine is still missing the text.
+    // Three refusals: the write, its recovery replay, and rung one's resend.
+    // Rung two then finds the store free.
+    const { provider, settled, scheduler } = await openAgainstABusyJournal(
+      "typed against a stubborn store",
+      3,
+    );
+
+    expect(scheduler.armed).toHaveLength(1);
+    scheduler.fire();
+    await drain();
+    // Rung one resent and was refused again. Nothing settled behind it.
+    expect(settled).toEqual([]);
+
+    // The contention clears; the next rung resends and the settle carries it.
+    expect(scheduler.armed).toHaveLength(1);
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.markdown).toContain("typed against a stubborn store");
+
+    await provider.close({ settle: false });
+  });
+
+  it("keeps the session alive through a busy journal write", async () => {
+    // The session used to be QUARANTINED by a busy refusal: `enqueueRecordUpdate`
+    // quarantined on any failure of its record chain, so the first contention
+    // killed the document for good and every resend above would have been
+    // refused by a dead session. Quarantine is for a session whose canonical
+    // state is unknowable; a busy engine refused cleanly and changed nothing.
+    const { provider, settled, scheduler, journaled } =
+      await openAgainstABusyJournal("typed before the session died", 2);
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+
+    // THE proof: the session still takes edits.
+    const second = plaintextUpdate(provider.initialUpdate, (body) => {
+      body.insert(0, "typed after the refusal ");
+    });
+    await provider.applyLocalUpdate(second);
+
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    // Both edits reached the engine — the refused one via the resend, the
+    // later one on its own.
+    expect(settled[0]?.markdown).toContain("typed before the session died");
+    expect(settled[0]?.markdown).toContain("typed after the refusal");
+
+    await provider.close({ settle: false });
   });
 
   it("resets the ladder once a settle reaches disk, so the next lock starts over", async () => {

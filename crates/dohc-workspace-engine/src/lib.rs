@@ -11221,6 +11221,10 @@ fn store_busy(error: &RuntimeError) -> bool {
             | RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked))
             | RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked))
             | RuntimeError::Search(SearchError::Store(StorageError::FileLocked))
+            // The relay route carries it under its OWN type rather than a
+            // storage error, because `RelayError` is where a relay operation's
+            // local failures land. Same condition, same answer.
+            | RuntimeError::Relay(RelayError::StoreBusy)
     )
 }
 
@@ -11409,6 +11413,10 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::WorkspaceUnavailable | RelayError::Partitioned => {
             ErrorCode::WorkspaceUnavailable
         }
+        // Reached only by a caller that surfaces it without the `store_busy`
+        // recognizer above — which answers OVERLOADED for every route. This
+        // arm exists for exhaustiveness and names the backpressure honestly.
+        RelayError::StoreBusy => ErrorCode::Overloaded,
         RelayError::ServerInternal
         | RelayError::UnknownServerCode(_)
         | RelayError::HttpStatus(_)
@@ -11622,7 +11630,7 @@ mod tests {
     }
 
     /// A busy SQLite handle is transient wherever it appears, and it appears
-    /// under six wrappers. Answering it under one and standing down under the
+    /// under seven wrappers. Answering it under one and standing down under the
     /// next would leave the same condition retryable or terminal by accident
     /// of which layer noticed it first.
     ///
@@ -11645,6 +11653,11 @@ mod tests {
             RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked)),
             RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked)),
             RuntimeError::Search(SearchError::Store(StorageError::FileLocked)),
+            // The relay route's own type. `RelayError` carries a relay
+            // operation's local failures, so the busy store arrives typed
+            // rather than as a storage variant — and used to fall through to
+            // INTERNAL because this recognizer only read storage variants.
+            RuntimeError::Relay(RelayError::StoreBusy),
         ];
         for error in busy {
             let label = error.to_string();

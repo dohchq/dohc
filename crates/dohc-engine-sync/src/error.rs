@@ -293,6 +293,10 @@ impl RelayError {
             | RelayError::HttpStatus(_)
             | RelayError::Partitioned
             | RelayError::InvalidResponse
+            // TRANSIENT, and therefore never skipped: the op says nothing
+            // wrong, the store was simply busy. Advancing the cursor past it
+            // would drop content the next pull would have applied.
+            | RelayError::StoreBusy
             | RelayError::Local(_) => None,
         }
     }
@@ -405,6 +409,16 @@ pub enum RelayError {
     Partitioned,
     #[error("relay response failed validation")]
     InvalidResponse,
+    /// The engine's own database was busy while a relay operation used it.
+    ///
+    /// Typed rather than folded into `Local`, which carries a code STRING: the
+    /// busy store's one answer is decided on the storage variant everywhere
+    /// else (`store_busy` in the workspace-engine crate), and a route that
+    /// re-derived it from `Local("file-locked")` would be reading a code that
+    /// two different conditions produce. Keeping it typed is what makes the
+    /// relay route give the same answer as every other route (#658).
+    #[error("engine store is busy")]
+    StoreBusy,
     #[error("local sync state failed: {0}")]
     Local(String),
 }

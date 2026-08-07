@@ -2,6 +2,7 @@ import type * as Y from "yjs";
 import {
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isTransientEngineRefusal,
   isYdocSessionNotFoundRefusal,
 } from "../live/daemonLiveAdapter";
 import {
@@ -40,10 +41,15 @@ const STORE_BUSY_SETTLE_RETRY_CAP_MS = 1_000;
 // both answers here are yes, for two different busy things (#554, #658).
 // Every other settle failure answers no: a preimage that no longer matches, a
 // target turned read-only, an ACL that denies the replace.
+//
+// `isTransientEngineRefusal` owns MEMBERSHIP of the retryable class, in one
+// place at the protocol boundary. This owns only HOW LONG each member may be
+// waited on, so a class added there cannot silently acquire a ladder here — it
+// lands on the conservative ceiling instead.
 function settleRetryCapMs(error: unknown): number | null {
-  if (isFileLockedRefusal(error)) return LOCKED_SETTLE_RETRY_CAP_MS;
+  if (!isTransientEngineRefusal(error)) return null;
   if (isEngineStoreBusyRefusal(error)) return STORE_BUSY_SETTLE_RETRY_CAP_MS;
-  return null;
+  return LOCKED_SETTLE_RETRY_CAP_MS;
 }
 
 // A close whose pre-close settle failed but whose daemon release SUCCEEDED.
@@ -198,6 +204,13 @@ export async function openEngineYdocProviderSession(
     notifyError(options.onLocalEditError, error);
   }
 
+  // Whether a journal write was turned away by a transient refusal, leaving
+  // the engine without text this doc holds. It is a FLAG, not a queue of
+  // updates: the engine is missing a state, not a list of messages, and
+  // `resendMissingState` answers it from durable state in one call however
+  // many writes were refused.
+  let engineMissingLocalState = false;
+
   async function runSettle(summary?: string): Promise<YdocSettleResult> {
     // One identity per settle, echoed by whichever outcome this run produces.
     // Callers pair on it instead of on arrival order, which does NOT hold:
@@ -219,6 +232,14 @@ export async function openEngineYdocProviderSession(
     // forever with nothing logged.
     try {
       await journalChain;
+      // AFTER the chain, so writes already in flight keep their order, and
+      // BEFORE the settle, which must never commit a projection the engine is
+      // still missing text for. A refusal here aborts this settle exactly as a
+      // journal failure does, and the ladder tries again.
+      if (engineMissingLocalState) {
+        await session.resendMissingState();
+        engineMissingLocalState = false;
+      }
     } catch (error) {
       notifySettleError(error, token);
       throw error;
@@ -328,16 +349,25 @@ export async function openEngineYdocProviderSession(
         rememberLocalEditError(error);
         throw error;
       }
-      journalChain = journalChain
+      // The caller hears the truth about ITS update; the chain carries the
+      // ordering. They are separate promises because a transient refusal must
+      // reject one and not the other: a chain left rejected answers every
+      // later settle with the same stale failure, and nothing would ever send
+      // the engine the text it is complaining about (#658).
+      const journaled = journalChain
         .then(() => operation)
-        .then(() => undefined)
-        .catch((error: unknown) => {
-          rememberLocalEditError(error);
-          throw error;
-        });
+        .then(() => undefined);
+      journalChain = journaled.catch((error: unknown) => {
+        if (isTransientEngineRefusal(error)) {
+          engineMissingLocalState = true;
+          return;
+        }
+        rememberLocalEditError(error);
+        throw error;
+      });
       void journalChain.catch(() => undefined);
       requestSettle();
-      return journalChain;
+      return journaled;
     },
 
     async settleNow(settleOptions) {
