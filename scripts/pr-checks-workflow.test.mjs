@@ -753,8 +753,8 @@ test("the HEAD log is read from this checkout, never through git's fallback", ()
 });
 
 for (const detached of [false, true]) {
-  const state = detached ? "detached" : "attached";
-  test(`the refusal's recovery gives a ${state} HEAD a log, and that log sees a move`, () => {
+  const state = detached ? "a detached" : "an attached";
+  test(`the refusal's recovery gives ${state} HEAD a log, and that log sees a move`, () => {
     // Two things are only true if they are checked in BOTH states. A HEAD
     // rewritten with the value it already holds writes a reflog entry when
     // HEAD is symbolic and nothing at all when it is detached — so an
