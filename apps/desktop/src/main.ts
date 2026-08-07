@@ -8414,9 +8414,10 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
 
-  // Quit interception (#567 / #579 review, r10): set-aside drafts live only
-  // in renderer memory, and a quit is their one irreversible exit — the
-  // renderer must get to warn BEFORE any destructive teardown runs. This
+  // Quit interception (#567 / #579 review, r10): a set-aside draft storage
+  // could not keep (#600) lives only in renderer memory, and a quit is its
+  // one irreversible exit — the renderer must get to warn BEFORE any
+  // destructive teardown runs. It answers for those drafts alone. This
   // matters doubly for updates: electron-updater's quitAndInstall is
   // ONE-SHOT, so the decision has to come before it is ever called. The
   // renderer answers every ask promptly: resume (no drafts, or the user

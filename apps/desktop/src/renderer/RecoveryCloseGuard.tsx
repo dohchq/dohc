@@ -1,11 +1,7 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import {
-  orphanedDraftCount,
-  orphanedDraftIds,
-  useAllOrphanedDrafts,
-} from "./orphanedDrafts";
+import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
 
 type UnloadKind = "close" | "reload" | "update" | "quit";
@@ -60,7 +56,7 @@ export function requestGuardedReload(): void {
 // INSTEAD of the install, whose confirm makes the one and only call.
 // Returns null when the dialog took over — the caller's own flow ends there.
 export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult | null> {
-  if (orphanedDraftCount() === 0 || openRecoveryWarning === null) {
+  if (atRiskOrphanedDraftIds().length === 0 || openRecoveryWarning === null) {
     const result = await beginInstall();
     // Main's boundary re-check refuses the install when a reopen set an edit
     // aside after THIS renderer's own check (#579 review, r12). That refusal
@@ -69,7 +65,11 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult 
     // error and the drafts were never mentioned (#579 review, r18). The
     // dialog path already re-prompts; both paths reach the same state, so
     // both must say the same thing.
-    if (!result.accepted && orphanedDraftCount() > 0 && openRecoveryWarning !== null) {
+    if (
+      !result.accepted &&
+      atRiskOrphanedDraftIds().length > 0 &&
+      openRecoveryWarning !== null
+    ) {
       openRecoveryWarning({ kind: "update", resume: resumeInstall });
       return null;
     }
@@ -143,21 +143,21 @@ function beginInstall(): Promise<UpdateActionResult> {
 // milliseconds; this only bounds how long the drafts go unguarded.
 const BYPASS_REARM_MS = 10_000;
 
-// Set-aside drafts (#567) live in renderer memory only, so closing,
-// reloading, quitting, or restarting into an update destroys them — and an
-// irreversible change must be announced before it runs (product invariant).
-// Electron cancels a close SILENTLY on preventDefault, so the dialog below
-// is the announcement, and it carries the full recovery list: the warning
-// must offer the very actions it demands (#579 review, r5).
+// Set-aside drafts (#567) are persisted on capture and restored on launch
+// (#600), so most of them now survive closing, reloading, quitting, and
+// restarting into an update. What CANNOT be persisted still dies with the app
+// run — a secret-classified path never enters plaintext storage (#446), and a
+// storage refusal leaves the text in memory — and destroying that text is
+// irreversible, so it must be announced before it runs (product invariant).
+// Electron cancels a close SILENTLY on preventDefault, so the dialog below is
+// the announcement, and it carries the at-risk drafts with their own
+// Copy/Dismiss: the warning must offer the very actions it demands (#579
+// review, r5).
 //
 // This mounts ABOVE AppErrorBoundary (see main.tsx): a crash unmounts the
 // shell, and the crash screen's "Reload dohc" must not destroy the drafts
 // unannounced. The store already lives outside React, so this guard needs
 // nothing from the crashed tree.
-//
-// Persisting the drafts instead is a separate durability decision
-// (storage location, lifetime, secret-path handling), deliberately not
-// taken here (#579 review, r4).
 export function RecoveryCloseGuard(props: { children: ReactNode }) {
   const [closeWarning, setCloseWarning] = useState<{
     // What the user asked for — the confirm button resumes exactly it.
@@ -166,26 +166,30 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   } | null>(null);
   // LIVE, not a snapshot (#579 review, r10): the dialog embeds Copy/Dismiss,
   // so the count must follow every dismissal, and an emptied dialog has
-  // nothing left to warn about.
-  const liveDrafts = useAllOrphanedDrafts();
+  // nothing left to warn about. Only the drafts an exit would DESTROY belong
+  // here (#600) — a restored draft comes back on its own.
+  const allDrafts = useAllOrphanedDrafts();
+  const liveDrafts = useMemo(
+    () => allDrafts.filter((row) => !row.persisted),
+    [allDrafts],
+  );
   const liveCount = liveDrafts.length;
   const warningOpen = closeWarning !== null;
   useEffect(() => {
     if (warningOpen && liveCount === 0) setCloseWarning(null);
   }, [warningOpen, liveCount]);
-  const bypassCloseGuard = useRef(false);
   const bypassRearmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The drafts the warning LISTED when the user confirmed. An approval covers
   // exactly those (#579 review, r13 + r14) — never a draft a queued reopen
   // sets aside afterwards, which the user was never shown. Every gate below
-  // measures the LIVE store against this set instead of reading the bypass as
-  // "the user already decided", so a new draft stops the exit and comes back
-  // to the dialog with its text intact.
+  // measures the LIVE store against this set, so a new draft stops the exit
+  // and comes back to the dialog with its text intact. The approval IS the
+  // bypass: an empty set gates nothing, so there is no separate flag to keep
+  // in step with it.
   const approvedDraftIds = useRef<ReadonlySet<number>>(new Set());
   const hasUnapprovedDrafts = () =>
-    orphanedDraftIds().some((id) => !approvedDraftIds.current.has(id));
+    atRiskOrphanedDraftIds().some((id) => !approvedDraftIds.current.has(id));
   const rearmGuard = () => {
-    bypassCloseGuard.current = false;
     approvedDraftIds.current = new Set();
     if (bypassRearmTimer.current) {
       clearTimeout(bypassRearmTimer.current);
@@ -199,9 +203,9 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       const pending = pendingUnload;
       pendingUnload = null;
       if (!hasUnapprovedDrafts()) {
-        // One-shot (#579 review, r9): a bypass is consumed by the unload it
+        // One-shot (#579 review, r9): an approval is consumed by the unload it
         // permits — never a later, unrelated close.
-        if (bypassCloseGuard.current) rearmGuard();
+        rearmGuard();
         return;
       }
       // Past this line the store holds a draft the user never saw. The earlier
@@ -316,7 +320,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
               Copy {liveCount === 1 ? "it" : "them"} here to keep the text.
             </p>
             <div className="mt-3 max-h-60 overflow-y-auto">
-              <RecoveryList />
+              <RecoveryList rows={liveDrafts} showWorkspace />
             </div>
             <div className="mt-4 flex justify-end gap-2">
               <button
@@ -343,11 +347,11 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                       return Promise.resolve(true);
                     });
                   setCloseWarning(null);
-                  // The bypass is scoped to THIS attempt (#579 review, r9):
-                  // consumed by the unload it permits, restored on an
-                  // explicit failure signal, and restored by the fail-safe
-                  // timer when no signal exists — a resumed action that
-                  // never unloads must not leave a later close unguarded.
+                  // The approval is scoped to THIS attempt (#579 review, r9):
+                  // consumed by the unload it permits, cleared on an explicit
+                  // failure signal, and cleared by the fail-safe timer when no
+                  // signal exists — a resumed action that never unloads must
+                  // not leave a later close unguarded.
                   //
                   // It is scoped to THIS LIST too (#579 review, r13): the user
                   // approved losing the drafts the dialog just showed, and a
@@ -357,7 +361,6 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   approvedDraftIds.current = new Set(
                     liveDrafts.map((row) => row.draft.id),
                   );
-                  bypassCloseGuard.current = true;
                   if (bypassRearmTimer.current) {
                     clearTimeout(bypassRearmTimer.current);
                   }

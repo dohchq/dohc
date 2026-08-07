@@ -70,8 +70,18 @@ import {
   momentDiffTabPath,
   versionCompareTabPath,
 } from "./workbench/workbenchState";
-import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
+import {
+  captureOrphanedDraft,
+  resetOrphanedDrafts,
+  useAllOrphanedDrafts,
+} from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
+
+// The close dialog's list, standing on its own: the guard subscribes and hands
+// the rows down, so a test of the LIST needs the same one-line subscriber.
+function GlobalRecoveryList() {
+  return <RecoveryList rows={useAllOrphanedDrafts()} showWorkspace />;
+}
 
 const WORKSPACE: Workspace = {
   workspaceId: "ws-shell-test",
@@ -7728,7 +7738,7 @@ describe("set-aside draft recovery", () => {
     // The same global list the close dialog embeds.
     // MUTATION (label wiring): drop the shell's noteWorkspaceLabel effect —
     // the row falls back to the raw workspace id.
-    render(<RecoveryList />);
+    render(<GlobalRecoveryList />);
     expect(screen.getByTestId("recovery-list-workspace").textContent).toBe(
       "personal",
     );
@@ -7791,8 +7801,8 @@ describe("set-aside draft recovery", () => {
   // #579 review r18: a SUCCESSFUL switch announces before its selector
   // refresh, and announcing again after that refresh fails would bump the
   // version epoch a second time — the same-version reopen moves whatever the
-  // user typed in between into set-aside recovery, which is in-memory only
-  // and dies on the next reload.
+  // user typed in between into set-aside recovery — a notice the user then
+  // has to answer.
   //
   // What this test pins is the OUTCOME: one switch, one reopen. It does not
   // pin the `announced` guard that also enforces it — removing that guard
@@ -7913,36 +7923,61 @@ describe("set-aside draft recovery", () => {
     );
 
     // ...and with nothing left, the surface says so rather than implying a
-    // draft that is not there. This is the same state a reload, quit,
-    // update-restart or renderer crash leaves behind, because the store is
-    // in-memory by design.
+    // draft that is not there.
     expect(screen.getByTestId("notice-center").textContent).toContain(
       "All clear",
     );
   });
 
-  // #579 adversarial review: the store dies on reload, quit, update-restart
-  // and renderer crash. That is a deliberate scope decision (#600 owns
-  // persistence), which makes it honest ONLY if the surface offering recovery
-  // says so. Nothing pinned that sentence, so it could have been edited away
-  // and left the design silently lossy.
-  it("discloses that set-aside edits live only in this window", async () => {
+  // #600: the store no longer dies on reload, quit, update-restart or crash —
+  // a set-aside edit is written on capture and restored at launch. The #579
+  // lifetime disclosure ("they live only in this window") became false with
+  // it, and a false claim about durability is worse than none. The close
+  // warning is what names the drafts storage could not keep, at the moment
+  // that matters.
+  it("makes no claim that set-aside edits die with the window", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
     captureOrphanedDraft(WORKSPACE.workspaceId, "notes/a.md", "Kept!");
     renderShell(bridge);
     await screen.findByTestId("file-tree");
 
-    // MUTATION (lifetime disclosure): drop the second paragraph from
-    // NoticeCenter's set-aside section. Recovery then looks durable, and the
-    // next reload deletes the user's only copy without ever having said it
-    // could.
+    // MUTATION (stale disclosure): put the sentence back. The panel then
+    // tells the user an edit that survives the next launch is about to be
+    // lost.
     await user.click(await screen.findByTestId("notice-center-toggle"));
     const section = await screen.findByTestId("notice-set-aside-edits");
-    expect(section.textContent).toContain("They live only in this window");
+    expect(section.textContent).not.toContain("live only in this window");
     // ...and it names both ways out, so the warning offers what it demands.
     expect(section.textContent).toContain("Copy an edit to keep its text");
     expect(section.textContent).toContain("Dismiss deletes it for good");
+  });
+
+  // #600: dropping the blanket disclosure was right for the rows that now
+  // survive a quit, and it left the rows that still do NOT — a secret path
+  // plaintext storage refuses (#446), a write the quota refused — looking
+  // exactly like the durable ones. The lifetime moved onto the row.
+  it("marks the set-aside edits that still die with the window", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    captureOrphanedDraft(WORKSPACE.workspaceId, "notes/a.md", "Persisted");
+    captureOrphanedDraft(WORKSPACE.workspaceId, ".env", "API_KEY=shh");
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    // MUTATION (row lifetime): render the marker for every row, or for none.
+    // Either way the panel stops telling the two apart, and the user cannot
+    // see which edit the next quit destroys.
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    const marked = screen
+      .getAllByTestId("recovery-list-row")
+      .filter(
+        (row) => within(row).queryByTestId("recovery-list-window-only") !== null,
+      );
+    expect(marked).toHaveLength(1);
+    expect(marked[0].textContent).toContain(".env");
+    expect(marked[0].textContent).toContain("Only in this window");
   });
 
   // #579 review r4: a failed save-first flush aborts the switch, the

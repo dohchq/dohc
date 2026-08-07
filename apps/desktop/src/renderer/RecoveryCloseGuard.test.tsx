@@ -3,6 +3,7 @@ import {
   act,
   cleanup,
   render,
+  renderHook,
   screen,
   waitFor,
   within,
@@ -16,13 +17,30 @@ import {
   resetGuardedExits,
 } from "./RecoveryCloseGuard";
 import {
+  atRiskOrphanedDraftIds,
   captureOrphanedDraft,
   dismissOrphanedDraft,
   noteWorkspaceLabel,
-  orphanedDraftCount,
-  orphanedDraftIds,
   resetOrphanedDrafts,
+  useAllOrphanedDrafts,
 } from "./orphanedDrafts";
+import { ORPHANED_DRAFT_STORAGE_KEY } from "./orphanedDraftStorage";
+
+// What a previous app run left behind.
+function seedStoredDraft(): void {
+  localStorage.setItem(
+    ORPHANED_DRAFT_STORAGE_KEY,
+    JSON.stringify([
+      {
+        id: 7,
+        workspaceId: "ws-1",
+        path: "notes/a.md",
+        text: "Survived the quit",
+        capturedAtMs: Date.now(),
+      },
+    ]),
+  );
+}
 
 // The quit bridge is a REQUIRED contract (#579 review, r15): the guard calls
 // onQuitRequested / onRecoveryCheckRequested directly, so a stub that omits
@@ -40,22 +58,32 @@ function stubBridge(overrides: Record<string, unknown> = {}): void {
 }
 
 // Every test gets the full contract; overrides replace it where asserted on.
+//
+// Storage REFUSES every write here (#600). A persisted draft comes back on
+// the next launch and the guard rightly ignores it, so a suite about the
+// guard must produce the drafts persistence cannot save — which is exactly
+// what a full quota produces. The block below covers the drafts that CAN be
+// persisted, and the secret-path floor is pinned in orphanedDrafts.test.ts.
 beforeEach(() => {
   stubBridge();
+  vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    throw new Error("QuotaExceededError");
+  });
 });
 
 afterEach(() => {
   cleanup();
   resetGuardedExits();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   resetOrphanedDrafts();
 });
 
-// #567 / #579 review r4+r5: set-aside drafts live in renderer memory only,
-// so closing or reloading the window is the one irreversible exit. The guard
-// announces it first — and carries the full recovery list, so the warning
-// offers the very actions it demands.
+// #567 / #579 review r4+r5: a set-aside draft that storage cannot keep lives
+// in renderer memory only, so closing or reloading the window is the one
+// irreversible exit. The guard announces it first — and carries the recovery
+// list, so the warning offers the very actions it demands.
 describe("RecoveryCloseGuard", () => {
   it("warns before closing while set-aside edits exist, offers the list, and closes on 'Close anyway'", async () => {
     const user = userEvent.setup();
@@ -583,7 +611,7 @@ describe("RecoveryCloseGuard", () => {
     const user = userEvent.setup();
     const harness = confirmedRestartHarness();
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
-    const [approvedId] = orphanedDraftIds();
+    const [approvedId] = atRiskOrphanedDraftIds();
     render(
       <RecoveryCloseGuard>
         <div />
@@ -603,10 +631,10 @@ describe("RecoveryCloseGuard", () => {
     // that was approved.
     dismissOrphanedDraft("ws-1", "a.md", approvedId);
     captureOrphanedDraft("ws-1", "b.md", "Never shown");
-    expect(orphanedDraftCount()).toBe(1);
+    expect(atRiskOrphanedDraftIds()).toHaveLength(1);
 
     // MUTATION (stale bypass): answer `!bypassCloseGuard.current &&
-    // orphanedDraftCount() > 0`. The re-check reports clear and quitAndInstall
+    // atRiskOrphanedDraftIds().length > 0`. The re-check reports clear and
     // destroys the only copy of a draft that was in no warning.
     harness.askBoundaryCheck(1);
     await waitFor(() =>
@@ -957,14 +985,72 @@ describe("RecoveryCloseGuard", () => {
   });
 });
 
-// The wiring, not just the component: main.tsx must mount the guard ABOVE
-// AppErrorBoundary. A crashed DesktopRoot leaves the crash screen up, and
+// #600: what durable recovery changed about the guard. A draft that comes
+// back on the next launch is not destroyed by closing, so warning that it is
+// would be false — and the guard is now the last line only for the drafts
+// storage could not take.
+describe("RecoveryCloseGuard with working storage", () => {
+  beforeEach(() => {
+    // Undo the suite-wide refusal above; these tests need storage to work.
+    vi.restoreAllMocks();
+  });
+
+  it("lets a close through when every set-aside edit is persisted", async () => {
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <div data-testid="app-content" />
+      </RecoveryCloseGuard>,
+    );
+    // MUTATION (at-risk gate): make the guard measure every draft again. The
+    // close is blocked and the user is told their edit is lost, on every
+    // quit, about text that survives the quit.
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+    expect(atRiskOrphanedDraftIds()).toEqual([]);
+  });
+
+  it("warns about the drafts storage could not take, and lists only those", async () => {
+    captureOrphanedDraft("ws-1", "a.md", "Persisted");
+    // A secret-classified path never enters plaintext storage (#446), so this
+    // one still dies with the app run.
+    captureOrphanedDraft("ws-1", ".env", "API_KEY=shh");
+    render(
+      <RecoveryCloseGuard>
+        <div />
+      </RecoveryCloseGuard>,
+    );
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    await screen.findByTestId("recovery-close-warning");
+    // MUTATION (dialog list): hand <RecoveryList/> every row instead of
+    // `liveDrafts`. The warning then lists a draft it is not warning about.
+    const rows = screen.getAllByTestId("recovery-list-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain(".env");
+  });
+
+});
+
+// The wiring, not just the components: main.tsx must restore the stored
+// recoveries BEFORE the root renders (#600), and must mount the guard ABOVE
+// AppErrorBoundary — a crashed DesktopRoot leaves the crash screen up, and
 // the reload it offers must still be announced.
-// MUTATION (wiring): render `<AppErrorBoundary><DesktopRoot/></...>` alone
-// in main.tsx (the pre-r5 shape). No guard ever mounts and the beforeunload
-// below passes unprevented.
+// MUTATION (guard wiring): render `<AppErrorBoundary><DesktopRoot/></...>`
+// alone in main.tsx (the pre-r5 shape). No guard ever mounts and the
+// beforeunload below passes unprevented.
+// MUTATION (restore wiring): drop main.tsx's restoreOrphanedDrafts() call.
+// The relaunched app shows no notice and the text sits in storage nothing
+// reads.
 describe("main.tsx composition", () => {
-  it("keeps the close guard alive above a crashed root", async () => {
+  it("restores stored recoveries and keeps the close guard alive above a crashed root", async () => {
     vi.doMock("./DesktopRoot", () => ({
       DesktopRoot: (): never => {
         throw new Error("boom");
@@ -985,6 +1071,14 @@ describe("main.tsx composition", () => {
     const container = document.createElement("div");
     container.id = "root";
     document.body.appendChild(container);
+    // A stored recovery from the last run, seeded through REAL storage; the
+    // capture after it goes back to the suite's full quota, so it stays
+    // at-risk and the guard still has something to announce.
+    vi.restoreAllMocks();
+    seedStoredDraft();
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     const consoleError = vi
       .spyOn(console, "error")
@@ -1002,9 +1096,20 @@ describe("main.tsx composition", () => {
     });
     expect(event.defaultPrevented).toBe(true);
     await screen.findByTestId("recovery-close-warning");
-    expect(screen.getByTestId("recovery-list-row").textContent).toContain(
-      "a.md",
-    );
+    // The dialog names the at-risk draft, and ONLY it: importing main.tsx
+    // restored the stored one, which no exit can destroy.
+    const listed = screen.getAllByTestId("recovery-list-row");
+    expect(listed).toHaveLength(1);
+    expect(listed[0].textContent).toContain("a.md");
+    expect(
+      screen.getByTestId("recovery-close-warning").textContent,
+    ).not.toContain("notes/a.md");
+    // ...and the restored draft IS in the store, because main.tsx put it there.
+    const restored = renderHook(() => useAllOrphanedDrafts());
+    expect(
+      restored.result.current.map((row) => `${row.path}:${row.persisted}`),
+    ).toContain("notes/a.md:true");
+    restored.unmount();
     container.remove();
     vi.doUnmock("./DesktopRoot");
   });

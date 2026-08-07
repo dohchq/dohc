@@ -473,10 +473,9 @@ export function NoticeCenter(props: {
                       : `${recoveryRows.length} set-aside edits are waiting`}
                   </p>
                   <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
-                    They live only in this window. Copy an edit to keep its
-                    text. Dismiss deletes it for good.
+                    Copy an edit to keep its text. Dismiss deletes it for good.
                   </p>
-                  <RecoveryList workspaceId={props.workspaceId} />
+                  <RecoveryList rows={recoveryRows} />
                 </section>
               ) : null}
             <ul className="m-0 list-none p-0">

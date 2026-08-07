@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   dismissOrphanedDraft,
-  useAllOrphanedDrafts,
+  type OrphanedDraftRow,
 } from "./orphanedDrafts";
 
 // The path-independent recovery surface (#579 review, r5). The in-document
@@ -11,10 +11,12 @@ import {
 // notice offers — so any surface that names the drafts (the close-warning
 // dialog, the notice center) can also resolve them.
 //
-// `workspaceId` filters to one workspace (the notice center — another
-// workspace's paths must not leak across a switch, #579 review r6). The
-// close guard passes none: the whole renderer dies at once, so every
-// workspace's drafts are at stake there.
+// The caller supplies the rows, because each one already has them: the notice
+// center holds its workspace's drafts (another workspace's paths must not leak
+// across a switch, #579 review r6) and the close guard holds the at-risk ones
+// (a persisted draft comes back on the next launch, so listing it under "these
+// are lost" would be false, #600). `showWorkspace` goes with the guard's
+// cross-workspace list.
 //
 // The copy button repeats the quiet swap-and-restore rhythm of
 // FileInspector's CopySourceButton on purpose, WITHOUT importing it: this
@@ -95,16 +97,14 @@ export function DismissDraftControls(props: { onDismiss: () => void }) {
   );
 }
 
-export function RecoveryList(props: { workspaceId?: string }) {
-  const rows = useAllOrphanedDrafts();
-  const visible =
-    props.workspaceId === undefined
-      ? rows
-      : rows.filter((row) => row.workspaceId === props.workspaceId);
-  if (visible.length === 0) return null;
+export function RecoveryList(props: {
+  rows: readonly OrphanedDraftRow[];
+  showWorkspace?: boolean;
+}) {
+  if (props.rows.length === 0) return null;
   return (
     <ul data-testid="recovery-list" className="m-0 list-none p-0">
-      {visible.map((row) => (
+      {props.rows.map((row) => (
         <li
           key={`${row.workspaceId}:${row.path}:${row.draft.id}`}
           data-testid="recovery-list-row"
@@ -117,7 +117,7 @@ export function RecoveryList(props: { workspaceId?: string }) {
                 indistinguishable (#579 review, r7). The label is the name
                 the UI shows elsewhere (the shell registers it); scoped lists
                 need none. */}
-            {props.workspaceId === undefined ? (
+            {props.showWorkspace === true ? (
               <span
                 data-testid="recovery-list-workspace"
                 className="ml-2 font-mono text-[10px] text-subtle"
@@ -125,6 +125,22 @@ export function RecoveryList(props: { workspaceId?: string }) {
                 {row.workspaceLabel}
               </span>
             ) : null}
+            {/* Most rows survive a quit (#600), and one kind does not: a
+                secret-classified path never enters plaintext storage (#446),
+                and a refused write leaves the text in memory. The lifetime
+                belongs to the ROW, so the row carries it — a list that mixes
+                the two (the notice center) would otherwise show a lost edit
+                and a durable one as the same thing. No caller opts out: the
+                close dialog lists only these, and repeating the fact there
+                costs less than a flag a caller can set wrong. */}
+            {row.persisted ? null : (
+              <span
+                data-testid="recovery-list-window-only"
+                className="ml-2 text-[10px] text-warning"
+              >
+                Only in this window
+              </span>
+            )}
           </span>
           <div className="flex shrink-0 items-center gap-2">
             <CopyDraftButton text={row.draft.text} />

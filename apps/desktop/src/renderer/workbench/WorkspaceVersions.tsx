@@ -192,8 +192,8 @@ export function VersionMenu(props: {
       // that fails must not announce again (#579 review, r18). A second
       // announcement bumps the version epoch a second time, and that
       // same-version reopen moves a freshly typed edit into set-aside
-      // recovery — which is in-memory only and dies on the next reload — for
-      // a selector-refresh failure that changed nothing.
+      // recovery — a notice the user then has to answer — for a
+      // selector-refresh failure that changed nothing.
       let announced = false;
       setBusy("switch");
       setInlineError(null);
