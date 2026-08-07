@@ -6,6 +6,7 @@ import {
 } from "../daemon/engineClient";
 import {
   isDaemonReconnectError,
+  isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
 } from "../live/daemonLiveAdapter";
@@ -563,6 +564,10 @@ export class YdocAdapterSession {
   private activeLocalRecordCapture: LocalRecordCapture | null = null;
   // Contract: an observer-detected local hazard is reject-and-quarantine.
   // Structured text edits reject before a transaction and do not quarantine.
+  // Whether a transient refusal left the engine behind this document. Owned
+  // by the session because the session is what the engine refused, and read
+  // by close() to decide whether releasing would discard the only copy.
+  private engineMissingLocalState = false;
   private quarantinedError: YdocSessionQuarantinedError | null = null;
   private staleError: YdocResyncNeededError | null = null;
   private droppedWhileStale = false;
@@ -666,6 +671,13 @@ export class YdocAdapterSession {
           // workspace/session binding.
           if (isDaemonReconnectError(recoveryFailure)) throw recoveryFailure;
           if (isDaemonReconnectError(refusal)) throw refusal;
+          // Same reason as the reconnect passthrough above, for the other
+          // class a caller must be able to recognize: the classifier reads
+          // the THROWN value, and a transient refusal buried in a diagnostic
+          // wrapper reads as terminal. Recovery met the same busy engine the
+          // write did; report that, not a story about recovery.
+          if (isTransientEngineRefusal(recoveryFailure)) throw recoveryFailure;
+          if (isTransientEngineRefusal(refusal)) throw refusal;
           const refusalMessage =
             refusal instanceof Error ? refusal.message : String(refusal);
           const recoveryMessage =
@@ -679,17 +691,104 @@ export class YdocAdapterSession {
         }
       }
     });
-    const guardedOperation = operation.catch((error: unknown) => {
-      this.quarantine(error);
-      this.surfaceSessionError(error);
-      throw error;
-    });
-    this.recordChain = guardedOperation.then(
+    return this.trackRecordOperation(operation);
+  }
+
+  /**
+   * The policy every operation queued on the record chain answers to: what a
+   * failure means for the SESSION, and how the chain survives it.
+   *
+   * Quarantine is for a session whose canonical state is no longer knowable —
+   * a partially applied update, a response that went missing. A busy engine
+   * refused the write CLEANLY and changed nothing, and recovery has already
+   * pulled this doc back to durable state, so the session is exactly as good
+   * as it was. Killing it for a condition that clears in milliseconds would
+   * turn a pause into a dead document (#658).
+   *
+   * The chain is then neutralized either way, so one refusal cannot reject
+   * every operation queued behind it, and the rejection is claimed once here
+   * so a caller that ignores it does not trip an unhandled rejection.
+   */
+  private trackRecordOperation<T>(
+    operation: Promise<T>,
+    // Only a resend can clear the debt. An ordinary record carries the delta
+    // ONE transaction observed, so its success says nothing about an earlier
+    // update the engine still has not seen.
+    levelsTheEngine = false,
+  ): Promise<T> {
+    const guarded = operation.then(
+      (value) => {
+        if (levelsTheEngine) this.engineMissingLocalState = false;
+        return value;
+      },
+      (error: unknown) => {
+        // The engine refused this write cleanly, so it does NOT hold what
+        // this doc holds. Recorded HERE because this is the one place that
+        // sees both halves — the refusal and the resend that repairs it — and
+        // a caller tracking it separately can only ever be a stale copy.
+        if (isTransientEngineRefusal(error)) this.engineMissingLocalState = true;
+        else this.quarantine(error);
+        this.surfaceSessionError(error);
+        throw error;
+      },
+    );
+    this.recordChain = guarded.then(
       () => undefined,
       () => undefined,
     );
-    void guardedOperation.catch(() => undefined);
-    return guardedOperation;
+    void guarded.catch(() => undefined);
+    return guarded;
+  }
+
+  /**
+   * Send the engine everything this document holds that its durable state
+   * does not.
+   *
+   * The resend for a journal write a transient refusal turned away. Replaying
+   * the refused update's BYTES cannot do it: `applyLocalUpdate` records what a
+   * Yjs transaction observes, and applying an update the doc already holds
+   * observes nothing — the engine would receive an empty delta and the settle
+   * behind it would commit a projection missing the user's text and report it
+   * saved.
+   *
+   * So the question is not "which bytes were refused" but "what is the engine
+   * missing", which durable state answers directly. That also makes one call
+   * enough however many updates were refused.
+   */
+  /**
+   * Whether a transient refusal left the engine behind this document.
+   *
+   * Read by a teardown, which must not release a session holding text the
+   * engine never received — the doc is where that text lives.
+   */
+  get missingLocalState(): boolean {
+    return this.engineMissingLocalState;
+  }
+
+  resendMissingState(): Promise<void> {
+    // Cheap and exact: the debt is recorded where record operations are
+    // tracked, so a caller never has to know whether one is owed.
+    if (!this.engineMissingLocalState) return Promise.resolve();
+    const operation = this.recordChain.then(async () => {
+      this.assertOpen();
+      const durableUpdate = await this.requestResyncUpdate();
+      const durableDoc = new Y.Doc();
+      declareDohcRootSchema(durableDoc);
+      Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
+      // Take the durable state first, exactly as recovery does, so the delta
+      // below is measured against what the engine actually holds.
+      Y.applyUpdate(this.doc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
+      const missing = Y.encodeStateAsUpdate(
+        this.doc,
+        Y.encodeStateVector(durableDoc),
+      );
+      // The same empty-delta floor `recoverCanonicalState` uses: a two-byte
+      // encoding is "nothing to send", which is what a resend finds when the
+      // refused write had in fact committed and only its response was lost.
+      if (missing.byteLength <= 2) return;
+      await this.requestRecordUpdate(missing);
+    });
+    return this.trackRecordOperation(operation, true);
   }
 
   private async requestRecordUpdate(

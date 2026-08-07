@@ -1021,6 +1021,89 @@ describe("EngineWorkspaceSessions", () => {
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
     });
 
+    it("retries any method the daemon refuses with afterBackoff, once, after waiting", async () => {
+      // #658. The engine answers `afterBackoff` for a busy store on EVERY
+      // method, but only the open ladder and the Y.Doc surfaces collected on
+      // it — so a version or chat call reported the kebab-case wire message
+      // to the user for a condition that clears by itself. That is exactly
+      // the contract #595 round 14 refused to ship: a retry nobody performs.
+      //
+      // Safe for non-idempotent methods too, which is why it can live in the
+      // generic wrapper: a busy store is raised by `BEGIN IMMEDIATE` or by
+      // the commit, so nothing was applied and a second attempt cannot
+      // duplicate it.
+      //
+      // MUTATION: drop `retryAfterBackoff` from `retryable` -> one attempt
+      // and the refusal reaches the caller. Widen it back to
+      // `requiresBackoff(error)` -> the deadline case below is replayed too.
+      const workspace = await tempWorkspace("workspace-run-backoff");
+      const sleep = vi.fn(async () => undefined);
+      const client = new MockClient("handle-run-backoff");
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { sleep },
+      );
+
+      let attempts = 0;
+      const result = await sessions.run(workspace, async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff");
+        }
+        return "landed";
+      });
+
+      expect(result).toBe("landed");
+      expect(attempts).toBe(2);
+      // MUTATION: pass only `retryAfterTransport` as `backoff` -> the retry
+      // is immediate, which is not what `afterBackoff` asks for.
+      expect(sleep).toHaveBeenCalled();
+    });
+
+    it("does NOT retry a deadline, which shares the afterBackoff disposition", async () => {
+      // The boundary of the collection above, and the reason it names a CLASS
+      // rather than a disposition. `Retryability::AfterBackoff` carries
+      // DEADLINE_EXCEEDED as well as OVERLOADED
+      // (crates/dohc-engine-protocol/src/error.rs), and the two are not alike:
+      // a busy store never committed, while a deadline interrupts BETWEEN
+      // durable units and leaves work already committed durable. Replaying one
+      // is free; replaying the other is a second write.
+      //
+      // The protocol calls the disposition retryable because retryable
+      // MUTATIONS carry idempotency keys — a promise about the operation, not
+      // about this wrapper, which is handed arbitrary callbacks and cannot
+      // know. That is what `retryTransportErrors` exists to let callers say
+      // for themselves.
+      //
+      // MUTATION: restore `requiresBackoff(error)` in place of
+      // `isEngineStoreBusyRefusal(error)` -> attempts is 2 and every caller's
+      // possibly-committed first attempt is replayed for them.
+      const workspace = await tempWorkspace("workspace-run-deadline");
+      const sleep = vi.fn(async () => undefined);
+      const client = new MockClient("handle-run-deadline");
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        { sleep },
+      );
+
+      let attempts = 0;
+      const outcome = await sessions
+        .run(workspace, async () => {
+          attempts += 1;
+          throw daemonRefusal(
+            "DEADLINE_EXCEEDED",
+            "workspace operation exceeded its deadline",
+            "afterBackoff",
+          );
+        })
+        .catch((error: unknown) => error);
+
+      expect(attempts).toBe(1);
+      expect(outcome).toBeInstanceOf(DaemonRefusalError);
+      expect(String(outcome)).toContain("exceeded its deadline");
+      expect(sleep).not.toHaveBeenCalled();
+    });
+
     it("bounds an OPEN the daemon keeps refusing with afterBackoff", async () => {
       // Review round 8: `afterBackoff` is the daemon's own "retry, but wait" —
       // it raises it for DeadlineExceeded and Overloaded on any method,

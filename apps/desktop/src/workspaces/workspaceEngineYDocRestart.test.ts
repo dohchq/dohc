@@ -2416,6 +2416,9 @@ async function lockedRebindCapture(prefix: string) {
     // session's reconnect retry exhausted), and a remote update delivered
     // after a settle resolves.
     settleFailure: null as Error | null,
+    // #658: a JOURNAL write the engine refuses. The busy case is the one the
+    // provider retries by itself, so the wrapper must not rebind for it.
+    recordFailure: null as Error | null,
     emitUpdateAfterSettle: false,
     // #595 round 14: a peer update that lands while a session is RETAINED —
     // after its close unsubscribed and before the daemon accepted the
@@ -2486,8 +2489,14 @@ async function lockedRebindCapture(prefix: string) {
       head: "present" as const,
       lineage: "existing" as const,
       async applyLocalUpdate(update) {
+        // The provider's post-#658 contract for a transient journal refusal:
+        // it KEEPS the update (its own ladder resends it from durable state)
+        // and rejects so the caller hears the truth. Modelling the rejection
+        // without the keep would make the wrapper look safe for the wrong
+        // reason — there would be nothing left to lose.
         Y.applyUpdate(doc, update);
         state.journal.push(update);
+        if (state.recordFailure) throw state.recordFailure;
       },
       async settleNow() {
         state.settleCalls.push(gen);
@@ -2653,6 +2662,71 @@ async function openWithOneEdit(
   return { session, mirror };
 }
 
+function busyRefusal(): DaemonRefusalError {
+  return new DaemonRefusalError(
+    { code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" },
+    new Error("daemon response"),
+  );
+}
+
+it("absorbs a busy journal refusal instead of rebinding the generation", async () => {
+  // #658, codex P1 on the desktop tail. The provider now keeps a journal write
+  // the engine refused busy and re-arms its own ladder to resend it — and this
+  // boundary read that rejection as a broken generation and rebound, which
+  // CLOSES the provider and cancels the retry it just armed. If the
+  // replacement's replay met the same busy store, adoptGeneration marked the
+  // session dead with no timer behind it: the canonical Y.Doc lived in memory
+  // and the .md stayed stale until some unrelated edit.
+  //
+  // Three edits while the store stays busy is the spiral: under the old code
+  // each one rebound again.
+  //
+  // MUTATION: drop the `isTransientEngineCause` branch from the local-update
+  // catch -> the generation count climbs with every edit.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-busy-journal-");
+  const { session, mirror } = await openWithOneEdit(capture, "first edit ");
+  expect(state.generation).toBe(1);
+
+  state.recordFailure = busyRefusal();
+  typeInto(mirror, session, "second ");
+  typeInto(mirror, session, "third ");
+  typeInto(mirror, session, "fourth ");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  // THE assertion: no rebind, no reopen. The retry lives one layer down.
+  expect(state.generation).toBe(1);
+  expect(state.openAttempts).toBe(1);
+
+  // The contention clears and the session — never torn down — settles the
+  // text it was holding the whole time.
+  state.recordFailure = null;
+  await session.settleNow();
+  const settled = state.settledMarkdowns.at(-1) ?? "";
+  for (const text of ["first edit", "second", "third", "fourth"]) {
+    expect(settled).toContain(text);
+  }
+  await capture.stop();
+}, 20_000);
+
+it("still rebinds when a journal write fails for a cause nobody is retrying", async () => {
+  // The narrowness guard, and the reason this classifies instead of absorbing
+  // everything: only the transient class has a retry behind it. A generation
+  // that failed for any other reason still needs replacing, and swallowing
+  // that would strand the edit with nothing arranged to carry it.
+  //
+  // MUTATION: absorb every error at the local-update catch -> no replacement
+  // generation is ever opened.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-journal-terminal-");
+  const { session, mirror } = await openWithOneEdit(capture, "first edit ");
+  expect(state.generation).toBe(1);
+
+  state.recordFailure = new Error("persist-failed");
+  typeInto(mirror, session, "stranded ");
+  await expect.poll(() => state.generation, { timeout: 10_000 }).toBe(2);
+
+  await capture.stop();
+}, 20_000);
+
 it("re-arms a pending locked settle on the generation that replaces a dead one", async () => {
   // #595 codex P2: the locked retry ladder lives in the generation and dies
   // with it. The adoption must ask the replacement to settle when a locked
@@ -2775,6 +2849,65 @@ it("a close that fails for a non-lock cause is not retried by the capture layer"
   expect(state.generation).toBe(1);
   await capture.stop();
 }, 10_000);
+
+it("retries a close the engine refused because its own store was busy", async () => {
+  // #658, the close half of the same answer. A busy engine database clears by
+  // waiting exactly as a file lock does, so a teardown refused for it re-arms
+  // beside the lock. Left out of the ladder it read as a terminal failure:
+  // the entry stayed failing-close with the daemon still holding its lease,
+  // and nothing would run again until restart.
+  //
+  // MUTATION: narrow `isTransientCloseCause` back to `isFileLockedCause` and
+  // no second close is ever attempted.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-busy-close-");
+  const { session } = await openWithOneEdit(capture, "closing edit");
+
+  state.closeFailure = new DaemonRefusalError(
+    { code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" },
+    new Error("daemon response"),
+  );
+  await expect(session.close()).rejects.toThrow("engine-store-busy");
+  const closesAtFailure = state.closeCalls.length;
+
+  // The contention clears after the renderer has already given up. The
+  // capture entry outlives it and finishes the teardown by itself.
+  state.closeFailure = null;
+  await expect
+    .poll(() => state.closeCalls.length, { timeout: 15_000 })
+    .toBeGreaterThan(closesAtFailure);
+  await capture.stop();
+}, 20_000);
+
+it("pays a BUSY close debt too, which is what lets the chip say settling", async () => {
+  // The premise the close-state test rests on. `settling` is only honest at a
+  // close because something is still going to write the artifact — and for the
+  // busy class that something is this debt. Narrow the arming back to the file
+  // lock and every desktop suite stays green while the chip claims "saving"
+  // forever with nothing behind it, which is the surface-lies failure #554
+  // exists to remove.
+  //
+  // The shape is the replicated one: the release SUCCEEDS over a refused
+  // pre-close settle, so the entry and its per-entry ladder are gone and only
+  // a detached debt can finish the write.
+  //
+  // MUTATION: narrow the arming to `isFileLockedCause(error.cause)` -> nothing
+  // is armed, and `settledMarkdowns` stays empty forever.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-busy-debt-");
+  const { session } = await openWithOneEdit(capture, "busy replicated edit");
+
+  state.replicated = true;
+  state.closeSettleFailure = busyRefusal();
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The store frees; the detached debt reopens and settles by itself.
+  state.closeSettleFailure = null;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["busy replicated edit"]);
+  await capture.stop();
+}, 20_000);
 
 it("pays a locked close debt even when a replicated release succeeds", async () => {
   // #595 round 4: a replicated lineage compacts on release without the

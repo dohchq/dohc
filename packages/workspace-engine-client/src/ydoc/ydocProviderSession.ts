@@ -1,6 +1,7 @@
 import type * as Y from "yjs";
 import {
-  isFileLockedRefusal,
+  isEngineStoreBusyRefusal,
+  isTransientEngineRefusal,
   isYdocSessionNotFoundRefusal,
 } from "../live/daemonLiveAdapter";
 import {
@@ -24,6 +25,31 @@ const DEFAULT_SETTLE_DEBOUNCE_MS = 800;
 // from the settle debounce up to this cap, which bounds how long the on-disk
 // artifact stays stale after the lock releases.
 const LOCKED_SETTLE_RETRY_CAP_MS = 10_000;
+
+// The retry ceiling for a settle refused `engine-store-busy` (dohc's own
+// database was busy). An order of magnitude below the lock's, because the two
+// waits are for different things: a file lock is held by a program outside
+// dohc and can last as long as that program does, while SQLite contention is
+// dohc's own writers meeting and clears in milliseconds. Walking out to ten
+// seconds for it would hold the document unsettled far longer than the
+// condition it waits on lasts.
+const STORE_BUSY_SETTLE_RETRY_CAP_MS = 1_000;
+
+// How far this failure's retry ladder may walk out, or null when retrying
+// cannot help. ONE question decides it — is the condition transient? — and
+// both answers here are yes, for two different busy things (#554, #658).
+// Every other settle failure answers no: a preimage that no longer matches, a
+// target turned read-only, an ACL that denies the replace.
+//
+// `isTransientEngineRefusal` owns MEMBERSHIP of the retryable class, in one
+// place at the protocol boundary. This owns only HOW LONG each member may be
+// waited on, so a class added there cannot silently acquire a ladder here — it
+// lands on the conservative ceiling instead.
+function settleRetryCapMs(error: unknown): number | null {
+  if (!isTransientEngineRefusal(error)) return null;
+  if (isEngineStoreBusyRefusal(error)) return STORE_BUSY_SETTLE_RETRY_CAP_MS;
+  return LOCKED_SETTLE_RETRY_CAP_MS;
+}
 
 // A close whose pre-close settle failed but whose daemon release SUCCEEDED.
 // Callers must distinguish this from a failed release: the session and its
@@ -198,6 +224,11 @@ export async function openEngineYdocProviderSession(
     // forever with nothing logged.
     try {
       await journalChain;
+      // AFTER the chain, so writes already in flight keep their order, and
+      // BEFORE the settle, which must never commit a projection the engine is
+      // still missing text for. A refusal here aborts this settle exactly as a
+      // journal failure does, and the ladder tries again.
+      await session.resendMissingState();
     } catch (error) {
       notifySettleError(error, token);
       throw error;
@@ -215,8 +246,8 @@ export async function openEngineYdocProviderSession(
         );
         // onSettled is what lands the .md; its failure is a save failure too.
         await options.onSettled?.(result, token);
-        // Any settle that reached disk resets the lock-retry ladder.
-        lockedRetryMs = settleDebounceMs;
+        // Any settle that reached disk resets the retry ladder.
+        transientRetryMs = settleDebounceMs;
         return result;
       } catch (error) {
         notifySettleError(error, token);
@@ -230,24 +261,27 @@ export async function openEngineYdocProviderSession(
     return operation;
   }
 
-  // A settle refused `file-locked` retries on a doubling delay until the
-  // external handle releases (#554). Without this, the durable write job sat
-  // pending until an unrelated future edit triggered another settle, while
-  // the document read as saved-or-failed with the on-disk artifact stale. A
-  // newer armed settle (an edit during the backoff) owns the timer instead —
-  // an edit is the strongest retry trigger there is. Non-lock failures never
-  // retry: a stale-target refusal cannot be helped by trying again.
-  let lockedRetryMs = settleDebounceMs;
+  // A settle refused by a transient condition retries on a doubling delay
+  // until the condition clears (#554, #658). Without this, the work sat
+  // undone until an unrelated future edit triggered another settle, while the
+  // document read as saved-or-failed with the on-disk artifact stale. A newer
+  // armed settle (an edit during the backoff) owns the timer instead — an
+  // edit is the strongest retry trigger there is. A terminal refusal never
+  // retries: a stale target cannot be helped by trying again.
+  let transientRetryMs = settleDebounceMs;
 
-  function scheduleLockedRetry(error: unknown): void {
-    if (closed || cancelSettle !== null || !isFileLockedRefusal(error)) return;
-    const delay = lockedRetryMs;
-    lockedRetryMs = Math.min(lockedRetryMs * 2, LOCKED_SETTLE_RETRY_CAP_MS);
+  function scheduleTransientSettleRetry(error: unknown): void {
+    const capMs = settleRetryCapMs(error);
+    if (closed || cancelSettle !== null || capMs === null) return;
+    // The cap belongs to THIS failure, so a ladder that walked out behind a
+    // file lock cannot make the next busy-database wait ten seconds.
+    const delay = Math.min(transientRetryMs, capMs);
+    transientRetryMs = Math.min(delay * 2, capMs);
     cancelSettle = scheduleSettle(() => {
       cancelSettle = null;
       void runSettle().catch((retryError: unknown) => {
         notifyError(options.onSessionError, retryError);
-        scheduleLockedRetry(retryError);
+        scheduleTransientSettleRetry(retryError);
       });
     }, delay);
   }
@@ -258,7 +292,7 @@ export async function openEngineYdocProviderSession(
       cancelSettle = null;
       void runSettle().catch((error: unknown) => {
         notifyError(options.onSessionError, error);
-        scheduleLockedRetry(error);
+        scheduleTransientSettleRetry(error);
       });
     }, settleDebounceMs);
   }
@@ -304,16 +338,25 @@ export async function openEngineYdocProviderSession(
         rememberLocalEditError(error);
         throw error;
       }
-      journalChain = journalChain
+      // The caller hears the truth about ITS update; the chain carries the
+      // ordering. They are separate promises because a transient refusal must
+      // reject one and not the other: a chain left rejected answers every
+      // later settle with the same stale failure, and nothing would ever send
+      // the engine the text it is complaining about (#658).
+      const journaled = journalChain
         .then(() => operation)
-        .then(() => undefined)
-        .catch((error: unknown) => {
-          rememberLocalEditError(error);
-          throw error;
-        });
+        .then(() => undefined);
+      journalChain = journaled.catch((error: unknown) => {
+        // The SESSION records the debt — it is what the engine refused, and
+        // its `resendMissingState` is a no-op when none is owed — so nothing
+        // here has to keep a copy that could go stale.
+        if (isTransientEngineRefusal(error)) return;
+        rememberLocalEditError(error);
+        throw error;
+      });
       void journalChain.catch(() => undefined);
       requestSettle();
-      return journalChain;
+      return journaled;
     },
 
     async settleNow(settleOptions) {
@@ -324,13 +367,25 @@ export async function openEngineYdocProviderSession(
       // an explicit flush that hit the lock leaves the same durably pending
       // write as a debounced one.
       operation.catch((error: unknown) => {
-        scheduleLockedRetry(error);
+        scheduleTransientSettleRetry(error);
       });
       return operation;
     },
 
-    applyExternalMarkdownEdit(markdown) {
-      return session.applyExternalMarkdownEdit(markdown);
+    async applyExternalMarkdownEdit(markdown) {
+      // The adapter flushes its record chain before merging, so the engine
+      // merges against fully-recorded state rather than a stale doc. That
+      // flush cannot see what a TRANSIENT refusal left unsent: the chain is
+      // neutralized after one, so awaiting it succeeds while the engine is
+      // still missing this session's text — and the merge would then run
+      // against a document without it, reordering or dropping the user's
+      // edit inside the canonical Y.Doc.
+      //
+      // Send it first, exactly as a settle does, and for the same reason: no
+      // operation that reads durable state may run while durable state is
+      // known to be behind (#658).
+      await session.resendMissingState();
+      return await session.applyExternalMarkdownEdit(markdown);
     },
 
     async close(closeOptions) {
@@ -354,6 +409,31 @@ export async function openEngineYdocProviderSession(
         } catch (error) {
           preCloseError = error;
         }
+      }
+      // Hand over anything the engine is still missing, whatever `settle`
+      // says. `settle: false` declines the ARTIFACT; it does not decline the
+      // user's text, and a caller that skips the settle above (a version
+      // switch, a rename, the vacate before a delete) would otherwise release
+      // a session holding the only copy of it.
+      if (preCloseError === undefined) {
+        try {
+          await session.resendMissingState();
+        } catch (error) {
+          preCloseError = error;
+        }
+      }
+      // Releasing while the engine is STILL behind discards that only copy:
+      // the doc holding the text goes away with the release, and a caller
+      // that saw a clean "released, settle failed" would arm a retry that
+      // reopens, settles what the lineage holds, and reports a save of a
+      // document missing the edit.
+      //
+      // Only for a TRANSIENT failure, which is the one class the close ladder
+      // above retries. A terminal refusal cannot be waited out, so refusing
+      // the teardown for one would wedge the entry forever holding a lease
+      // nobody can release — worse than reporting the loss (#658).
+      if (session.missingLocalState && isTransientEngineRefusal(preCloseError)) {
+        throw preCloseError;
       }
       try {
         try {

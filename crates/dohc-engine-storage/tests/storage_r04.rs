@@ -648,3 +648,80 @@ fn job_and_canonical_state_commit_atomically() {
         "job rolled back"
     );
 }
+
+// ---------------------------------------------------------------------------
+// transient contention (#658)
+// ---------------------------------------------------------------------------
+
+/// REAL contention, not an injected variant: a second connection holds the
+/// write lock and the store's own transaction is refused.
+///
+/// `StorageError::FileLocked` had NO producer anywhere in the engine. Its
+/// doc-comment described a busy SQLite handle, `diagnostics` classified it
+/// `TransientLock`, and the whole taxonomy above it answered a condition
+/// nothing ever raised — every genuine `SQLITE_BUSY` went to
+/// `StorageError::persist` and reached callers as terminal `persist-failed`.
+///
+/// This test is the reachability proof, so it uses no fault injection and
+/// builds no error by hand: it makes SQLite say BUSY and reads what the store
+/// returns. The wait is the store's own `ENGINE_SQLITE_BUSY_TIMEOUT_MS`
+/// budget, which is what "the retry budget was exhausted" means.
+///
+/// MUTATION: drop the `is_busy` check from `StorageError::persist` -> this
+/// reports `persist-failed`, the answer that made the busy store terminal.
+#[test]
+fn a_genuinely_busy_database_is_reported_as_the_transient_lock() {
+    let scratch = Scratch::new("busy-contention");
+    let path = scratch.db_path();
+    let mut store = EngineStore::open(&path, 1_000).expect("open the engine store");
+
+    // A SECOND connection takes the write lock and keeps it.
+    let blocker = Connection::open(&path).expect("open a second connection");
+    blocker
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("the blocker takes the write lock");
+
+    // The store's own write now waits out its busy budget and is refused.
+    let refused = store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS r3_probe (id INTEGER)")
+                .map_err(StorageError::persist_public)
+        })
+        .expect_err("a held write lock must refuse this transaction");
+
+    assert!(
+        matches!(refused, StorageError::FileLocked),
+        "MUTATION: real SQLITE_BUSY is not the transient lock, it is {refused:?}"
+    );
+    assert_eq!(refused.code(), "file-locked");
+    // The store is INTACT, which is the half that makes it retryable: the
+    // same write succeeds once the blocker lets go.
+    blocker
+        .execute_batch("ROLLBACK")
+        .expect("the blocker releases the write lock");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS r3_probe (id INTEGER)")
+                .map_err(StorageError::persist_public)
+        })
+        .expect("the same write lands once the contention clears");
+}
+
+/// The narrowness guard. `is_busy` reads the SQLite result code, so an
+/// ordinary SQL failure must keep its terminal answer — otherwise every
+/// persist failure would advertise a retry that cannot help.
+///
+/// MUTATION: return `true` unconditionally from `is_busy` -> this reports
+/// `file-locked` for a plain syntax error.
+#[test]
+fn an_ordinary_sql_failure_is_still_terminal() {
+    let scratch = Scratch::new("busy-narrowness");
+    let mut store = EngineStore::open(&scratch.db_path(), 1_000).expect("open the engine store");
+    let refused = store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch("THIS IS NOT SQL")
+                .map_err(StorageError::persist_public)
+        })
+        .expect_err("a malformed statement must fail");
+    assert_eq!(refused.code(), "persist-failed");
+}

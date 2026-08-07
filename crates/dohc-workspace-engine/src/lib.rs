@@ -11198,6 +11198,42 @@ fn now_ms() -> Result<i64, WireError> {
         .map_err(|_| wire(ErrorCode::Internal, "system clock unavailable"))
 }
 
+/// The transient store lock, through every wrapper that carries it to this
+/// seam.
+///
+/// One condition, so one answer. Reading it as retryable under materialization
+/// and terminal under collaboration would make the same busy database mean two
+/// different things to the same caller, which is the defect this recognizer
+/// exists to remove.
+///
+/// Matched on the VARIANT for the reason the artifact lock above is: `code()`
+/// delegates through each wrapper, so "file-locked" alone cannot tell a busy
+/// database apart from a busy file.
+fn store_busy(error: &RuntimeError) -> bool {
+    use dohc_engine_storage::StorageError;
+    // The search index keeps the RAW rusqlite failure instead of wrapping it
+    // in the storage taxonomy, so it carries no `FileLocked` to match on and
+    // has to be asked directly.
+    if let RuntimeError::Search(SearchError::Storage(sqlite)) = error {
+        return StorageError::is_transient_lock(sqlite);
+    }
+    matches!(
+        error,
+        RuntimeError::Storage(StorageError::FileLocked)
+            | RuntimeError::Materialize(dohc_engine_files::MaterializeError::Storage(
+                StorageError::FileLocked
+            ))
+            | RuntimeError::Domain(DomainError::Storage(StorageError::FileLocked))
+            | RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked))
+            | RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked))
+            | RuntimeError::Search(SearchError::Store(StorageError::FileLocked))
+            // The relay route carries it under its OWN type rather than a
+            // storage error, because `RelayError` is where a relay operation's
+            // local failures land. Same condition, same answer.
+            | RuntimeError::Relay(RelayError::StoreBusy)
+    )
+}
+
 fn map_runtime(error: RuntimeError) -> WireError {
     // A materialization that exhausted its replace retries against a lock an
     // external program holds on the ARTIFACT. The settle committed and the
@@ -11210,14 +11246,23 @@ fn map_runtime(error: RuntimeError) -> WireError {
     // `MaterializeError::Storage`, so a busy SQLite handle answers
     // "file-locked" too — and the desktop would then tell the user another
     // program has their DOCUMENT open while it retried a database contention.
-    // Every other materialization failure — a busy engine database included —
-    // falls through to the Internal tail below. Only the artifact lock has a
-    // retry behind it, so only the artifact lock may say `afterBackoff`.
     if matches!(
         &error,
         RuntimeError::Materialize(dohc_engine_files::MaterializeError::FileLocked)
     ) {
         return wire(ErrorCode::Overloaded, "file-locked");
+    }
+    // The OTHER busy thing, and the same answer. `StorageError::FileLocked` is
+    // the store reporting itself intact and the operation retryable: writers
+    // met inside SQLite and the bounded retry budget ran out. Waiting fixes it.
+    //
+    // The Internal tail below called it "workspace operation failed", whose
+    // retry contract is `no`, so every caller stood down on a condition that
+    // clears by itself (#658). It carries its own message because the desktop
+    // must not read it as the user's file being held: nothing outside dohc is
+    // involved, and there is nothing for a person to do.
+    if store_busy(&error) {
+        return wire(ErrorCode::Overloaded, "engine-store-busy");
     }
     if matches!(
         &error,
@@ -11374,6 +11419,10 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::WorkspaceUnavailable | RelayError::Partitioned => {
             ErrorCode::WorkspaceUnavailable
         }
+        // Reached only by a caller that surfaces it without the `store_busy`
+        // recognizer above — which answers OVERLOADED for every route. This
+        // arm exists for exhaustiveness and names the backpressure honestly.
+        RelayError::StoreBusy => ErrorCode::Overloaded,
         RelayError::ServerInternal
         | RelayError::UnknownServerCode(_)
         | RelayError::HttpStatus(_)
@@ -11559,11 +11608,13 @@ mod tests {
     /// matching on the code alone reported a busy SQLite handle as an
     /// artifact lock. Matching the variant is what keeps them apart.
     ///
-    /// Round 14 narrowed the answer: the busy store keeps the prior terminal
-    /// mapping. Only `file-locked` may be `Overloaded`, because only
-    /// `file-locked` has a retry behind it — the desktop's ladder accepts
-    /// nothing else, so any other `afterBackoff` message advertises a retry
-    /// nobody performs.
+    /// Round 14 held the busy store terminal because nothing collected on the
+    /// retry it would have advertised. #658 built the collector — the Y.Doc
+    /// provider's settle ladder retries `engine-store-busy` — so the busy
+    /// store now carries the retry contract that has always been true of it,
+    /// under its OWN message. Two messages, because the two contentions need
+    /// different words: one names a program outside dohc holding the user's
+    /// file, and the other is dohc's own writers meeting inside SQLite.
     ///
     /// MUTATION: match on `materialize.code() == "file-locked"` again -> the
     /// storage case below reports "file-locked".
@@ -11580,10 +11631,63 @@ mod tests {
                 dohc_engine_storage::StorageError::FileLocked,
             ),
         ));
-        assert_ne!(store.message, "file-locked");
-        // Terminal, not a retry the caller cannot collect on.
-        assert_eq!(store.code, ErrorCode::Internal);
-        assert_eq!(store.message, "workspace operation failed");
+        assert_eq!(store.code, ErrorCode::Overloaded);
+        assert_eq!(store.message, "engine-store-busy");
+    }
+
+    /// A busy SQLite handle is transient wherever it appears, and it appears
+    /// under seven wrappers. Answering it under one and standing down under the
+    /// next would leave the same condition retryable or terminal by accident
+    /// of which layer noticed it first.
+    ///
+    /// The paired assertion is what keeps the recognizer narrow: a store error
+    /// that is NOT the transient lock keeps its terminal answer, so this does
+    /// not turn every storage failure into a retry.
+    ///
+    /// MUTATION: drop any arm from `store_busy` -> that wrapper reports
+    /// `Internal`. Widen an arm to `StorageError::_` -> the corrupt case
+    /// below reports `Overloaded`.
+    #[test]
+    fn a_busy_store_is_retryable_under_every_wrapper_that_carries_it() {
+        use dohc_engine_storage::StorageError;
+        let busy = [
+            RuntimeError::Storage(StorageError::FileLocked),
+            RuntimeError::Materialize(dohc_engine_files::MaterializeError::Storage(
+                StorageError::FileLocked,
+            )),
+            RuntimeError::Domain(DomainError::Storage(StorageError::FileLocked)),
+            RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked)),
+            RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked)),
+            RuntimeError::Search(SearchError::Store(StorageError::FileLocked)),
+            // The search index's OTHER carrier: a raw rusqlite failure that
+            // never passed through this taxonomy, so it has no variant to
+            // match and is asked about its result code directly.
+            RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(5), // SQLITE_BUSY
+                Some("database is locked".to_owned()),
+            ))),
+            // The relay route's own type. `RelayError` carries a relay
+            // operation's local failures, so the busy store arrives typed
+            // rather than as a storage variant — and used to fall through to
+            // INTERNAL because this recognizer only read storage variants.
+            RuntimeError::Relay(RelayError::StoreBusy),
+        ];
+        for error in busy {
+            let label = error.to_string();
+            let wire = map_runtime(error);
+            assert_eq!(wire.code, ErrorCode::Overloaded, "{label}");
+            assert_eq!(wire.message, "engine-store-busy", "{label}");
+            assert_eq!(
+                wire.retry,
+                dohc_engine_protocol::Retryability::AfterBackoff,
+                "{label}"
+            );
+        }
+        let corrupt = map_runtime(RuntimeError::Storage(StorageError::StateCorrupt {
+            source: None,
+        }));
+        assert_eq!(corrupt.code, ErrorCode::Internal);
+        assert_ne!(corrupt.message, "engine-store-busy");
     }
 
     #[test]

@@ -242,9 +242,10 @@ impl RelayError {
             // It is also the one permanent class with a person who can act, so
             // it carries its own code rather than the generic one.
             RelayError::ShareBlobOverCeiling { .. } => Some(SHARE_BLOB_OVER_CEILING_CODE),
-            // PERMANENT. The op describes its own content wrongly. No blob the
-            // relay could serve makes it replayable, and nobody can repair it,
-            // so it keeps the generic code.
+            // PERMANENT. The op describes its own content wrongly, or names a
+            // path this recipient's store door will never accept. No blob the
+            // relay could serve makes either replayable, and nobody can repair
+            // it, so it keeps the generic code.
             RelayError::ShareOpInvalid { .. } => Some(GENERIC_REPLAY_REFUSAL_CODE),
             // REPAIRABLE. The relay served a body that is not the one this op
             // named. The op is fine; the relay's copy is wrong. Fix the blob
@@ -292,6 +293,10 @@ impl RelayError {
             | RelayError::HttpStatus(_)
             | RelayError::Partitioned
             | RelayError::InvalidResponse
+            // TRANSIENT, and therefore never skipped: the op says nothing
+            // wrong, the store was simply busy. Advancing the cursor past it
+            // would drop content the next pull would have applied.
+            | RelayError::StoreBusy
             | RelayError::Local(_) => None,
         }
     }
@@ -340,9 +345,10 @@ pub enum RelayError {
         limit_bytes: usize,
         observed_bytes: usize,
     },
-    /// A served share op that describes its own content wrongly: a blob
-    /// reference that is not a sha256, or a body that is authentically the
-    /// one the op named and still not the kind the op claimed.
+    /// A served share op this recipient can never replay: a blob reference
+    /// that is not a sha256, a body that is authentically the one the op
+    /// named and still not the kind the op claimed, or a path the store door
+    /// refuses.
     ///
     /// Deliberately NOT `BlobInvalid`. That one means the relay served a body
     /// which is not the one the op asked for — repairable at the relay, and
@@ -403,6 +409,16 @@ pub enum RelayError {
     Partitioned,
     #[error("relay response failed validation")]
     InvalidResponse,
+    /// The engine's own database was busy while a relay operation used it.
+    ///
+    /// Typed rather than folded into `Local`, which carries a code STRING: the
+    /// busy store's one answer is decided on the storage variant everywhere
+    /// else (`store_busy` in the workspace-engine crate), and a route that
+    /// re-derived it from `Local("file-locked")` would be reading a code that
+    /// two different conditions produce. Keeping it typed is what makes the
+    /// relay route give the same answer as every other route (#658).
+    #[error("engine store is busy")]
+    StoreBusy,
     #[error("local sync state failed: {0}")]
     Local(String),
 }

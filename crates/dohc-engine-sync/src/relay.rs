@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
-use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex_sha256};
+use dohc_engine_storage::{
+    EngineStore, FaultInjector, FaultPoint, StorageError, TxnOutcome, hex_sha256,
+};
 use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
@@ -3072,6 +3074,22 @@ fn replay_share_write<T: RelayTransport>(
             reason: "share write names a blob reference that is not a sha256",
         });
     }
+    // The other question the OP answers about itself, asked here for the same
+    // reason: the store door's path rules are pure over the path, so nothing
+    // has to be fetched to answer them. Asked after the blob instead, every
+    // row naming an unusable path downloaded and hashed a body — up to the
+    // kind ceiling, once per row — to reach a refusal the path alone had
+    // already decided.
+    //
+    // The SAME door `write_text`/`write_binary` open with, not a restatement
+    // of its rules, so the two cannot drift — and this is the ONLY place the
+    // path class has to be classified. Everything that reaches replay has
+    // already passed `classify_share_path`, whose grammar admits no `%`, `\`,
+    // `.` or `..` segment, so normalization is the identity on it and the
+    // second `validate_path` inside `write_binary_file_in_tx` can no longer
+    // find anything this call did not. The writes below therefore keep the
+    // plain `domain` mapping.
+    dohc_engine_domain::validate_plaintext_storable_path(path).map_err(replayed_domain)?;
     let key = replay_id(share_id, envelope, "write", path);
     let request_id = format!("share-view:{key}");
     let already_applied = store
@@ -3318,7 +3336,39 @@ fn content_kind_name(value: Option<&serde_json::Value>) -> &'static str {
 }
 
 fn domain(error: DomainError) -> RelayError {
+    if matches!(error, DomainError::Storage(StorageError::FileLocked)) {
+        return RelayError::StoreBusy;
+    }
     RelayError::Local(error.code().to_owned())
+}
+
+/// A domain failure a share-view REPLAY met, answered by the one question
+/// `share_replay_refusal_code` asks: can this op ever succeed?
+///
+/// PERMANENT for an invalid path. The path is fixed in the served op and the
+/// store door's rules are pure over it, so asking again returns the same
+/// refusal forever. Under the generic `domain` mapping it became
+/// `Local("invalid-path")`, which aborts the pull — the cursor never commits
+/// and every op behind the bad path never arrives (#571's failure mode, on a
+/// class that cannot be repaired).
+///
+/// Only a diverging relay produces one: the granter's own capture writes
+/// through this same door, so a path it refuses here was never storable
+/// there either. Nobody can act on it, which is why it takes the generic
+/// refusal code rather than one that would send the reader to the granter.
+///
+/// The verdict is NOT remembered in `blob_refusals`. That map is keyed by the
+/// bytes and the kind claimed for them, and this refusal belongs to the PATH:
+/// the same blob at a storable path must still apply.
+///
+/// Every other domain failure keeps the abort. A busy store or a corrupt
+/// read says nothing about the op, and skipping past it would drop content
+/// this recipient can still receive.
+pub(crate) fn replayed_domain(error: DomainError) -> RelayError {
+    match error {
+        DomainError::InvalidPath { reason } => RelayError::ShareOpInvalid { reason },
+        other => domain(other),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3423,6 +3473,12 @@ fn validate_identity_request(workspace: &str, epoch: &str, stream: &str) -> Resu
     crate::model::bounded(stream, "stream_identity must be non-empty and bounded").map_err(local)
 }
 
+// The busy store keeps its TYPE across this boundary. Both funnels answer it
+// the same way, so a relay operation refused for contention reaches the wire
+// as the retryable class no matter which taxonomy it came through (#658).
 fn local(error: SyncError) -> RelayError {
+    if matches!(error, SyncError::Storage(StorageError::FileLocked)) {
+        return RelayError::StoreBusy;
+    }
     RelayError::Local(error.code().to_owned())
 }

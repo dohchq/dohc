@@ -22,7 +22,11 @@ import {
   openEngineYdocProviderSession,
   YdocReleasedWithSettleFailureError,
 } from "./ydocProviderSession";
-import { YDOC_EVENT, YDOC_METHOD } from "./ydocWireContract";
+import {
+  YDOC_EVENT,
+  YDOC_METHOD,
+  type YdocSettleResult,
+} from "./ydocWireContract";
 
 const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
@@ -709,25 +713,36 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
-  // A provider whose settle is refused `file-locked` until the test releases
-  // it, with the settle scheduler captured so the ladder can be driven a rung
-  // at a time. Shared by the two tests below; each drives it differently,
+  // A provider whose settle is refused by a transient blocker until the test
+  // clears it, with the settle scheduler captured so the ladder can be driven
+  // a rung at a time. Shared by the tests below; each drives it differently,
   // because a debounced settle and an explicit flush are different behaviors.
-  async function openAgainstALockedFile(
+  //
+  // The blocker is a parameter because the two answers must come from the
+  // SAME fixture: a copy of it per blocker is where one of the two ladders
+  // quietly stops being exercised.
+  async function openAgainstABlockedSettle(
     text: string,
-    options?: { settleDebounceMs?: number },
+    options?: {
+      settleDebounceMs?: number;
+      blocker?: "file-locked" | "engine-store-busy";
+    },
   ) {
     const engine = seedPlaintextEngine();
-    const lock = { held: true };
-    const lockedRefusal = new DaemonRefusalError(
-      { code: "OVERLOADED", message: "file-locked", retry: "afterBackoff" },
+    const blocked = { held: true };
+    const refusal = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: options?.blocker ?? "file-locked",
+        retry: "afterBackoff",
+      },
       new Error("daemon response"),
     );
     const transport: EngineTransport = {
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
-        if (request.method === YDOC_METHOD.settle && lock.held) {
-          throw lockedRefusal;
+        if (request.method === YDOC_METHOD.settle && blocked.held) {
+          throw refusal;
         }
         return engine.sendRequest(request);
       },
@@ -762,8 +777,8 @@ describe("YdocLiveAdapter", () => {
     return {
       engine,
       provider,
-      lock,
-      lockedRefusal,
+      blocked,
+      refusal,
       settleErrors,
       settled,
       scheduler,
@@ -776,8 +791,8 @@ describe("YdocLiveAdapter", () => {
     // in the engine — the ONLY missing piece is a later attempt. The provider
     // re-arms itself on a doubling delay, so the save lands when the external
     // handle releases instead of waiting for an unrelated future edit.
-    const { provider, lock, lockedRefusal, settleErrors, settled, delays, scheduler } =
-      await openAgainstALockedFile("typed against a locked file", {
+    const { provider, blocked, refusal, settleErrors, settled, delays, scheduler } =
+      await openAgainstABlockedSettle("typed against a locked file", {
         settleDebounceMs: 100,
       });
 
@@ -789,11 +804,11 @@ describe("YdocLiveAdapter", () => {
       scheduler.fire();
       await drain();
     }
-    expect(settleErrors).toEqual([lockedRefusal, lockedRefusal, lockedRefusal]);
+    expect(settleErrors).toEqual([refusal, refusal, refusal]);
     expect(delays).toEqual([100, 100, 200, 400]);
 
     // The lock releases; the pending retry lands the write by itself.
-    lock.held = false;
+    blocked.held = false;
     scheduler.fire();
     await drain();
     expect(settled).toHaveLength(1);
@@ -803,12 +818,411 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
+  it("retries an engine-store-busy settle until the store frees, then saves", async () => {
+    // #658: a busy SQLite handle is dohc's OWN writers meeting, and the store
+    // reports itself intact and the operation retryable. It used to reach the
+    // caller as INTERNAL / retry "no", so the settle stood down on a condition
+    // that clears by waiting and the user's edits reached the file only on
+    // some unrelated later settle. The ladder now re-arms on it beside the
+    // file lock.
+    const { provider, blocked, refusal, settleErrors, settled, delays, scheduler } =
+      await openAgainstABlockedSettle("typed while the store was busy", {
+        settleDebounceMs: 100,
+        blocker: "engine-store-busy",
+      });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(scheduler.armed).toHaveLength(1);
+      scheduler.fire();
+      await drain();
+    }
+    // Every failure re-armed the next attempt and none went quiet.
+    expect(settleErrors).toEqual([refusal, refusal, refusal]);
+    expect(settled).toEqual([]);
+
+    // The contention clears; the pending retry lands the write by itself.
+    blocked.held = false;
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    expect(scheduler.armed).toHaveLength(0);
+    // The rungs are the busy store's, capped at 1s rather than the lock's 10s.
+    expect(delays).toEqual([100, 100, 200, 400]);
+
+    await provider.close({ settle: false });
+  });
+
+  it("caps the busy-store ladder far below the file lock's", async () => {
+    // The two waits are for different things. A file lock is held by a
+    // program outside dohc and can last as long as that program does; SQLite
+    // contention is dohc's own and clears in milliseconds. One shared cap
+    // would either hold a document unsettled for ten seconds over a
+    // millisecond of contention, or retry a locked file too eagerly to be
+    // worth bounding.
+    const busy = await openAgainstABlockedSettle("typed while the store was busy", {
+      settleDebounceMs: 4000,
+      blocker: "engine-store-busy",
+    });
+    const lockedFile = await openAgainstABlockedSettle("typed against a lock", {
+      settleDebounceMs: 4000,
+    });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      busy.scheduler.fire();
+      await drain();
+      lockedFile.scheduler.fire();
+      await drain();
+    }
+    // Both ladders start at the debounce the caller asked for and are then
+    // held down to their OWN ceiling.
+    expect(busy.delays).toEqual([4000, 1000, 1000, 1000]);
+    expect(lockedFile.delays).toEqual([4000, 4000, 8000, 10_000]);
+
+    await busy.provider.close({ settle: false });
+    await lockedFile.provider.close({ settle: false });
+  });
+
+  // A provider whose JOURNAL write is refused busy `refusals` times before the
+  // engine accepts anything. The engine is the real loopback, so a settle can
+  // only carry text the engine actually received — which makes "was it
+  // resent?" a fact about content rather than a call count.
+  //
+  // `refusals` counts recordUpdate attempts, and one edit costs TWO of them:
+  // the write, then `recoverCanonicalState`'s replay. So 2 is the smallest
+  // number that gets past the adapter's own recovery and reaches the ladder.
+  async function openAgainstABusyJournal(text: string, refusals: number) {
+    const engine = seedPlaintextEngine();
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      new Error("daemon response"),
+    );
+    let remaining = refusals;
+    const methods: string[] = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        methods.push(request.method);
+        if (request.method === YDOC_METHOD.recordUpdate && remaining > 0) {
+          remaining -= 1;
+          throw busy;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const settled: YdocSettleResult[] = [];
+    const scheduler = settleScheduler();
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      settleDebounceMs: 100,
+      onRemoteUpdate: () => undefined,
+      onSettleError: () => undefined,
+      onSettled: (result) => {
+        settled.push(result);
+      },
+      scheduleSettle: scheduler.schedule,
+    });
+    const update = plaintextUpdate(provider.initialUpdate, (body) => {
+      body.insert(0, text);
+    });
+    const journaled = provider.applyLocalUpdate(update);
+    return { provider, busy, settled, scheduler, journaled, methods };
+  }
+
+  it("sends the engine the state a busy journal write left it missing", async () => {
+    // #658, codex P1. The journal write happens ONCE, at applyLocalUpdate, and
+    // its promise is what every later settle awaits. A busy refusal left that
+    // promise permanently rejected, so each ladder rung re-awaited the same
+    // dead chain and sent nothing.
+    //
+    // Replaying the refused BYTES is not the fix and is worse than the bug:
+    // `applyLocalUpdate` records what a Yjs transaction observes, and applying
+    // an update the doc already holds observes nothing — the engine would get
+    // an empty delta and the settle behind it would report a save of text the
+    // engine never received. The resend asks durable state what is missing.
+    const { provider, settled, scheduler, journaled } =
+      await openAgainstABusyJournal("typed while the store was busy", 2);
+
+    // The caller still hears the truth about its own update.
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+    expect(settled).toEqual([]);
+
+    // The ladder's rung: resend, then settle.
+    expect(scheduler.armed).toHaveLength(1);
+    scheduler.fire();
+    await drain();
+
+    expect(settled).toHaveLength(1);
+    // THE assertion a call count cannot make.
+    expect(settled[0]?.markdown).toContain("typed while the store was busy");
+
+    await provider.close({ settle: false });
+  });
+
+  it("keeps resending while the store stays busy, and never settles without the text", async () => {
+    // The poisoned-chain regression, and the ordering guard with it: no settle
+    // may commit while the engine is still missing the text.
+    // Three refusals: the write, its recovery replay, and rung one's resend.
+    // Rung two then finds the store free.
+    const { provider, settled, scheduler } = await openAgainstABusyJournal(
+      "typed against a stubborn store",
+      3,
+    );
+
+    expect(scheduler.armed).toHaveLength(1);
+    scheduler.fire();
+    await drain();
+    // Rung one resent and was refused again. Nothing settled behind it.
+    expect(settled).toEqual([]);
+
+    // The contention clears; the next rung resends and the settle carries it.
+    expect(scheduler.armed).toHaveLength(1);
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.markdown).toContain("typed against a stubborn store");
+
+    await provider.close({ settle: false });
+  });
+
+  it("sends the missing state before an external edit merges against durable state", async () => {
+    // #658, codex P1. `applyExternalMarkdownEdit` flushes the adapter's record
+    // chain first, so the engine merges the external body against fully
+    // recorded state. That flush cannot see what a transient refusal left
+    // unsent: the chain is NEUTRALIZED after one, so awaiting it succeeds
+    // while the engine is still missing this session's text — and the merge
+    // then runs against a document without it.
+    //
+    // MUTATION: delete the `resendMissingLocalState()` call from
+    // `applyExternalMarkdownEdit` -> the merge sees a lineage without
+    // "typed before the merge" and the local edit is reordered out.
+    const { provider, methods, journaled } = await openAgainstABusyJournal(
+      "typed before the merge ",
+      2,
+    );
+    // Settle the refusal BEFORE clearing the log: the journal write is still
+    // in flight otherwise, and its own recovery attempt would land in the
+    // window this test measures.
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+    methods.length = 0;
+
+    // The external editor's full body, which the engine merges against
+    // whatever the lineage holds.
+    const merged = await provider.applyExternalMarkdownEdit(
+      "written outside dohc",
+    );
+    expect(merged.kind).toBe("merged");
+
+    // THE assertion, and it has to be about ORDER at the transport: a settle
+    // afterwards would resend the missing state itself and hide the defect.
+    // The engine must have received the local text BEFORE it was asked to
+    // merge anything against the lineage.
+    const resendAt = methods.indexOf(YDOC_METHOD.recordUpdate);
+    const mergeAt = methods.indexOf(YDOC_METHOD.applyExternalMarkdownEdit);
+    expect(mergeAt).toBeGreaterThanOrEqual(0);
+    expect(resendAt).toBeGreaterThanOrEqual(0);
+    expect(resendAt).toBeLessThan(mergeAt);
+
+    await provider.close({ settle: false });
+  });
+
+  it("refuses to release a session still holding text the engine never got", async () => {
+    // #658, codex P1. The pre-close settle is the LAST chance to hand the
+    // engine text a transient refusal left unsent, and the doc holding that
+    // text goes away with the release. Releasing anyway produced the one
+    // outcome nothing downstream can repair: the caller sees a clean
+    // "released, settle failed", arms a retry that reopens and settles what
+    // the lineage holds, and reports a save of a document missing the edit.
+    //
+    // So the teardown is REFUSED while local state is unsent, and the close
+    // ladder above retries the whole thing.
+    //
+    // MUTATION: drop the `engineMissingLocalState` guard before the release
+    // in `close` -> this rejects with YdocReleasedWithSettleFailureError, the
+    // shape that says the session is gone and only the settle failed.
+    const { provider, journaled } = await openAgainstABusyJournal(
+      "typed and never sent",
+      // The write, its recovery replay, and every resend the close attempts.
+      99,
+    );
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+
+    const closeFailure = await provider
+      .close()
+      .then(() => null)
+      .catch((error: unknown) => error);
+
+    expect(closeFailure).not.toBeNull();
+    // NOT the released-with-failed-settle shape: the session is still here.
+    expect(closeFailure).not.toBeInstanceOf(YdocReleasedWithSettleFailureError);
+    expect(String(closeFailure)).toContain("engine-store-busy");
+  });
+
+  it("releases once the resend lands, so a close is not blocked for good", async () => {
+    // The other half: the refusal above is a WAIT, not a wedge. Once the
+    // store frees, the same close hands over the text and completes.
+    const { provider, journaled } = await openAgainstABusyJournal(
+      "typed and eventually sent",
+      2,
+    );
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+
+    // The store is free by now, so the pre-close settle resends and settles.
+    await provider.close();
+  });
+
+  it("refuses a settle:false release too, which is the path a vacate takes", async () => {
+    // THE substitution-review sequence. A busy journal is absorbed (no
+    // rebind), the user's close leaves the entry failing-close with a retry
+    // armed, and a rename or version switch inside that window calls
+    // `settleAndCloseLiveYDocSessions` — which closes a failing-close entry
+    // with `settle: false`.
+    //
+    // The guard used to hang off the pre-close settle's failure, and
+    // `settle: false` runs no settle, so it was skipped entirely: the session
+    // released, the canonical doc was discarded, and the edit was gone.
+    // `settle: false` declines the ARTIFACT, never the user's text.
+    //
+    // MUTATION: gate the release refusal on the pre-close settle again (or
+    // resend only when `settle !== false`) -> this close resolves and the
+    // text is lost.
+    const { provider, journaled } = await openAgainstABusyJournal(
+      "typed and never sent",
+      99,
+    );
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+
+    const outcome = await provider
+      .close({ settle: false })
+      .then(() => null)
+      .catch((error: unknown) => error);
+
+    expect(outcome).not.toBeNull();
+    expect(String(outcome)).toContain("engine-store-busy");
+  });
+
+  it("releases a terminal pre-close failure instead of wedging on it", async () => {
+    // The narrowness guard for the refusal above. Only a TRANSIENT failure is
+    // worth holding the session for, because only that class is retried. A
+    // terminal one cannot be waited out, so refusing the teardown would strand
+    // the entry forever holding a daemon lease nobody can release — worse than
+    // reporting the loss.
+    //
+    // MUTATION: drop `isTransientEngineRefusal` from the release guard -> this
+    // close never completes its release, and the lease leaks.
+    const engine = seedPlaintextEngine();
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      new Error("daemon response"),
+    );
+    const terminal = new DaemonRefusalError(
+      { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+      new Error("daemon response"),
+    );
+    // The journal is refused busy (leaving state unsent); every LATER record
+    // is refused terminally, so the close's resend cannot be waited out.
+    let records = 0;
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          records += 1;
+          throw records <= 2 ? busy : terminal;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleError: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+    await provider
+      .applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (body) => {
+          body.insert(0, "typed against a terminal engine");
+        }),
+      )
+      .catch(() => undefined);
+
+    // The release COMPLETES and reports, rather than holding the session.
+    const outcome = await provider
+      .close()
+      .then(() => null)
+      .catch((error: unknown) => error);
+    expect(outcome).toBeInstanceOf(YdocReleasedWithSettleFailureError);
+  });
+
+  it("releases an orphan that is holding nothing of the user's", async () => {
+    // The wedge guard the fold could have introduced: a doc that never took a
+    // local edit owes no debt, so nothing may hold up its teardown. Orphans
+    // are closed exactly this way (`settle: false, settleOnRefusal: false`).
+    const engine = seedPlaintextEngine();
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      sendRequest: (request) => engine.sendRequest(request),
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+    await provider.close({ settle: false, settleOnRefusal: false });
+  });
+
+  it("keeps the session alive through a busy journal write", async () => {
+    // The session used to be QUARANTINED by a busy refusal: `enqueueRecordUpdate`
+    // quarantined on any failure of its record chain, so the first contention
+    // killed the document for good and every resend above would have been
+    // refused by a dead session. Quarantine is for a session whose canonical
+    // state is unknowable; a busy engine refused cleanly and changed nothing.
+    const { provider, settled, scheduler, journaled } =
+      await openAgainstABusyJournal("typed before the session died", 2);
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+
+    // THE proof: the session still takes edits.
+    const second = plaintextUpdate(provider.initialUpdate, (body) => {
+      body.insert(0, "typed after the refusal ");
+    });
+    await provider.applyLocalUpdate(second);
+
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    // Both edits reached the engine — the refused one via the resend, the
+    // later one on its own.
+    expect(settled[0]?.markdown).toContain("typed before the session died");
+    expect(settled[0]?.markdown).toContain("typed after the refusal");
+
+    await provider.close({ settle: false });
+  });
+
   it("resets the ladder once a settle reaches disk, so the next lock starts over", async () => {
     // The reset is what keeps a document that is locked twice in a session
     // from inheriting the first lock's grown delay — the second lock must be
     // retried as promptly as the first, not minutes later.
-    const { provider, lock, settled, delays, scheduler } =
-      await openAgainstALockedFile("typed against a locked file", {
+    const { provider, blocked, settled, delays, scheduler } =
+      await openAgainstABlockedSettle("typed against a locked file", {
         settleDebounceMs: 100,
       });
 
@@ -820,13 +1234,13 @@ describe("YdocLiveAdapter", () => {
     expect(delays).toEqual([100, 100, 200]);
 
     // The lock releases and the pending retry lands the write.
-    lock.held = false;
+    blocked.held = false;
     scheduler.fire();
     await drain();
     expect(settled).toHaveLength(1);
 
     // A LATER lock: the next failure must re-arm at the debounce, not at 400.
-    lock.held = true;
+    blocked.held = true;
     await provider.applyLocalUpdate(
       plaintextUpdate(provider.initialUpdate, (body) => {
         body.insert(0, "typed again");
@@ -843,7 +1257,7 @@ describe("YdocLiveAdapter", () => {
     // The cap bounds how long the on-disk artifact stays stale after the lock
     // releases. Without it the delay doubles without limit and a file locked
     // for an afternoon is retried hours after the handle is gone.
-    const { provider, delays, scheduler } = await openAgainstALockedFile(
+    const { provider, delays, scheduler } = await openAgainstABlockedSettle(
       "typed against a long-held lock",
       { settleDebounceMs: 4000 },
     );
@@ -858,7 +1272,7 @@ describe("YdocLiveAdapter", () => {
   });
 
   it("starts the ladder at the DEFAULT debounce when the caller sets none", async () => {
-    const { provider, delays, scheduler } = await openAgainstALockedFile(
+    const { provider, delays, scheduler } = await openAgainstABlockedSettle(
       "typed with the default debounce",
     );
 
@@ -873,7 +1287,7 @@ describe("YdocLiveAdapter", () => {
     // An edit is the strongest retry trigger there is, so the settle it arms
     // supersedes the ladder's. Arming a second timer alongside it would leave
     // the edit's timer orphaned and settle the document twice.
-    const { provider, delays, scheduler } = await openAgainstALockedFile(
+    const { provider, delays, scheduler } = await openAgainstABlockedSettle(
       "typed against a locked file",
       { settleDebounceMs: 100 },
     );
@@ -898,18 +1312,18 @@ describe("YdocLiveAdapter", () => {
     // settleNow rejects to its caller — a delete or merge must fail loudly —
     // but the write it left pending is the same one, so the background retry
     // is armed as well.
-    const { provider, lock, lockedRefusal, settled, scheduler } =
-      await openAgainstALockedFile("flushed against a locked file", {
+    const { provider, blocked, refusal, settled, scheduler } =
+      await openAgainstABlockedSettle("flushed against a locked file", {
         settleDebounceMs: 100,
       });
 
-    await expect(provider.settleNow()).rejects.toBe(lockedRefusal);
+    await expect(provider.settleNow()).rejects.toBe(refusal);
     await drain();
     // The debounced settle the edit armed was superseded by the explicit
     // flush, so the one armed timer is the flush's own retry.
     expect(scheduler.armed.map((entry) => entry.ms)).toEqual([100]);
 
-    lock.held = false;
+    blocked.held = false;
     scheduler.fire();
     await drain();
     expect(settled).toHaveLength(1);
