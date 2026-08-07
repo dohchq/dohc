@@ -1,6 +1,7 @@
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
+  isEngineStoreBusyRefusal,
   isYdocSessionBusyRefusal,
   WorkspaceDaemonRequester,
 } from "../live/daemonLiveAdapter";
@@ -408,19 +409,27 @@ export class EngineWorkspaceSessions {
           ) {
             entry.binding = null;
           }
-          // The daemon's own "retry, but wait first", collected for EVERY
-          // method rather than for `workspace.open` alone. The engine answers
-          // `afterBackoff` for a busy store on any call, and a contract only
-          // three surfaces collected on left the rest reporting a kebab-case
-          // wire message to the user for a condition that clears by itself
-          // (#658, and #595 round 14's rule about advertising retries nobody
-          // performs).
+          // The busy store, collected for EVERY method rather than for
+          // `workspace.open` alone. The engine answers it on any call, and a
+          // contract only three surfaces collected on left the rest reporting
+          // a kebab-case wire message to the user for a condition that clears
+          // by itself (#658, and #595 round 14's rule about advertising
+          // retries nobody performs).
           //
-          // Safe for every method, including the non-idempotent ones: a busy
-          // store is raised by `BEGIN IMMEDIATE` or by the commit, so the
-          // transaction did NOT commit and a second attempt cannot apply
-          // anything twice.
-          const retryAfterBackoff = requiresBackoff(error);
+          // Safe for every method, including the non-idempotent ones, and
+          // ONLY for this class: a busy store is raised by `BEGIN IMMEDIATE`
+          // or by the commit, so the transaction did not commit and a second
+          // attempt cannot apply anything twice.
+          //
+          // Deliberately NOT the whole `afterBackoff` disposition, which also
+          // carries DEADLINE_EXCEEDED. A deadline interrupts BETWEEN durable
+          // units and leaves work already committed durable
+          // (`dohc-engine-runtime` actor), so replaying it is a second write —
+          // exactly what the `retryTransportErrors` opt-in above exists to
+          // keep callers in charge of. The protocol calls that disposition
+          // retryable because retryable MUTATIONS carry idempotency keys, and
+          // this wrapper cannot know whether the operation it was handed does.
+          const retryAfterBackoff = isEngineStoreBusyRefusal(error);
           const retryable =
             retryAfterReconnect || retryAfterTransport || retryAfterBackoff;
           this.noteBudgetAttempt(error);

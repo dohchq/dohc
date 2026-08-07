@@ -2878,6 +2878,37 @@ it("retries a close the engine refused because its own store was busy", async ()
   await capture.stop();
 }, 20_000);
 
+it("pays a BUSY close debt too, which is what lets the chip say settling", async () => {
+  // The premise the close-state test rests on. `settling` is only honest at a
+  // close because something is still going to write the artifact — and for the
+  // busy class that something is this debt. Narrow the arming back to the file
+  // lock and every desktop suite stays green while the chip claims "saving"
+  // forever with nothing behind it, which is the surface-lies failure #554
+  // exists to remove.
+  //
+  // The shape is the replicated one: the release SUCCEEDS over a refused
+  // pre-close settle, so the entry and its per-entry ladder are gone and only
+  // a detached debt can finish the write.
+  //
+  // MUTATION: narrow the arming to `isFileLockedCause(error.cause)` -> nothing
+  // is armed, and `settledMarkdowns` stays empty forever.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-busy-debt-");
+  const { session } = await openWithOneEdit(capture, "busy replicated edit");
+
+  state.replicated = true;
+  state.closeSettleFailure = busyRefusal();
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The store frees; the detached debt reopens and settles by itself.
+  state.closeSettleFailure = null;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["busy replicated edit"]);
+  await capture.stop();
+}, 20_000);
+
 it("pays a locked close debt even when a replicated release succeeds", async () => {
   // #595 round 4: a replicated lineage compacts on release without the
   // local-only pending-job guard, so the close RELEASES over the locked
