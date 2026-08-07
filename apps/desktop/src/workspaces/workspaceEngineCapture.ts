@@ -50,6 +50,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   MAX_HISTORY_TEXT_SNAPSHOT_BYTES,
   type ActiveAgentRun,
@@ -1194,28 +1195,57 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       throw error;
     }
   }
+  //   4. the path's REAL location must not be an area dohc reserves. Steps 1-3
+  //      prove the write stays INSIDE the root; they cannot prove it stays OUT
+  //      of `.dohc`. A symlinked ancestor (`notes -> .dohc`) resolves inside
+  //      the root and passes all three, so engine-owned text would land on the
+  //      workspace's own control plane. `assertEngineWritablePath` refuses that
+  //      spelling; this refuses it wherever the path leads.
+  //      Resolved as an ENTRY in every case: this writer never follows a leaf
+  //      link — step 3 refuses one, and rm removes one as a link — so only the
+  //      parent chain decides. It runs BEFORE mkdir, so a reserved ancestor
+  //      cannot have directories created through it either.
+  //      It answers with the resolution it judged, and every step after it
+  //      works on THAT path. Re-walking the spelling would let an ancestor
+  //      alias swapped after the check redirect the mkdir, the checks, and the
+  //      write to somewhere no rule was applied.
+  async function assertResolvedArea(absolutePath: string, label: string): Promise<string> {
+    const { resolvedAbsolute } = await assertResolvedWorkspacePath({
+      rootPath,
+      absolutePath,
+      spelled: absolutePath,
+      label,
+      access: "entry",
+    });
+    return resolvedAbsolute;
+  }
+  // Text and bytes take the SAME four checks in the same order, so they take
+  // one path through them. writeFile defaults a string to UTF-8 and ignores
+  // the encoding for a Uint8Array, so one call serves both. Two copies of a
+  // security sequence can drift; one cannot.
+  async function writeEngineFile(
+    absolutePath: string,
+    data: string | Uint8Array,
+  ): Promise<void> {
+    await assertContainedNearestAncestor(dirname(absolutePath));
+    // Entry mode, so this is the resolved parent chain plus the held-back
+    // name: the directories are canonical and only the leaf is still spelling.
+    const target = await assertResolvedArea(absolutePath, "Engine write path");
+    const dir = dirname(target);
+    await mkdir(dir, { recursive: true });
+    await assertContainedDir(dir);
+    await assertLeafNotSymlink(target);
+    await writeFile(target, data);
+  }
   return {
-    async writeTextFile(absolutePath, text) {
-      const dir = dirname(absolutePath);
-      await assertContainedNearestAncestor(dir);
-      await mkdir(dir, { recursive: true });
-      await assertContainedDir(dir);
-      await assertLeafNotSymlink(absolutePath);
-      await writeFile(absolutePath, text, "utf8");
-    },
-    async writeBinaryFile(absolutePath, bytes) {
-      const dir = dirname(absolutePath);
-      await assertContainedNearestAncestor(dir);
-      await mkdir(dir, { recursive: true });
-      await assertContainedDir(dir);
-      await assertLeafNotSymlink(absolutePath);
-      await writeFile(absolutePath, bytes);
-    },
+    writeTextFile: writeEngineFile,
+    writeBinaryFile: writeEngineFile,
     async deletePath(absolutePath) {
       await assertContainedDir(dirname(absolutePath));
+      const target = await assertResolvedArea(absolutePath, "Engine delete path");
       // rm on a symlink removes the link itself, never the target, so a
       // symlink leaf needs no extra handling here.
-      await rm(absolutePath, { force: true });
+      await rm(target, { force: true });
     },
   };
 }

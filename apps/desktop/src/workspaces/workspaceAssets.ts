@@ -7,6 +7,7 @@ import { mkdir, open, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, sep } from "node:path";
 import { join } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 // Media types served to the renderer for binary assets. Kept small and
 // explicit — only types a view actually renders (image/audio src, pdf);
@@ -63,12 +64,24 @@ export async function resolveWorkspaceFile(
   if (!validated.ok) {
     throw new Error(`Invalid asset path (${validated.reason}): ${relativePath}`);
   }
-  const realRoot = await realpath(rootPath);
-  const realTarget = await realpath(join(rootPath, validated.normalized));
-  if (!isInside(realRoot, realTarget)) {
-    throw new Error(`Asset path escapes workspace: ${relativePath}`);
-  }
-  return { realTarget, normalized: validated.normalized };
+  // This resolver FOLLOWS the path (it hands back a path every caller then
+  // opens), so an in-workspace alias reads or writes whatever it points at.
+  // The reservation is therefore decided on where the path lands, and the
+  // caller receives THAT resolution — resolving the spelling a second time
+  // would hand back a target no rule was applied to.
+  const { resolvedAbsolute } = await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: "Asset path",
+    access,
+  });
+  // Every caller needs a file that is already there: the OS opener is handed
+  // one, the editor's save renames onto one, and the database paths open one.
+  // The walk answers for a target that does not exist yet, so the existence
+  // proof is made here, on the canonical path.
+  await stat(resolvedAbsolute);
+  return { realTarget: resolvedAbsolute, normalized: validated.normalized };
 }
 
 // Media views buffer the whole file into the privileged main process before
@@ -150,9 +163,27 @@ async function writeContainedFile(
   if (!validated.ok) {
     throw new Error(`Invalid ${kind} path (${validated.reason}): ${relativePath}`);
   }
+  // The commit mode decides the semantics, because the two modes treat the
+  // leaf differently. The ordinary path renames over it, which replaces the
+  // entry and never follows -- so a tampered leaf is the thing being repaired,
+  // and refusing it would fail the restore on the very file it fixes.
+  //
+  // `wx` does NOT refuse every existing entry: on a DANGLING link it follows
+  // the link and creates its target (measured, not assumed). So the exclusive
+  // path must judge the leaf, and a planted `note.md -> .dohc/x` is refused
+  // rather than followed. A live link there still answers EEXIST.
+  const { resolvedAbsolute: absolute } = await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: `${label} path`,
+    access: exclusive ? "write" : "entry",
+  });
   const realRoot = await realpath(rootPath);
   assertWriteNotAborted(signal);
-  const absolute = join(rootPath, validated.normalized);
+  // Everything below works on the resolution the guard judged: the mkdir, the
+  // staging file, and the commit. Rebuilding the path from the spelling would
+  // let an ancestor alias swapped after the check redirect all three.
   const parent = dirname(absolute);
   if (!isInside(realRoot, await existingAncestor(parent))) {
     throw new Error(`${label} path escapes workspace: ${relativePath}`);

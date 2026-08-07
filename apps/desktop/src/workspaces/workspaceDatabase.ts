@@ -13,6 +13,7 @@ import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { resolveWorkspaceFile } from "./workspaceAssets";
 import { existingAncestor } from "./workspaceFiles";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 // node:sqlite is a Node built-in (no native addon, no electron-rebuild). It is
 // loaded via createRequire so the bundler leaves it as a runtime require and it
@@ -286,7 +287,21 @@ async function writeWorkspaceBytes(
   if (!validated.ok) {
     throw new Error(`Invalid database path (${validated.reason}): ${relativePath}`);
   }
-  const absolute = join(rootPath, validated.normalized);
+  // "entry" for the same reason writeContainedFile uses it: `link()` refuses
+  // an existing entry rather than writing through it, so this never follows
+  // the leaf. A link squatting the path then reports "already exists", which
+  // is what it is, instead of a symlink refusal from a rule that does not
+  // apply. The parent chain still decides the reserved rule.
+  //
+  // The mkdir, the staging file, and the link all run on the resolution this
+  // judged, not on the spelling it was asked about.
+  const { resolvedAbsolute: absolute } = await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: "Database path",
+    access: "entry",
+  });
   const realRoot = await realpath(rootPath);
   if (!isInside(realRoot, await existingAncestor(dirname(absolute)))) {
     throw new Error(`Invalid database path (escapes workspace): ${relativePath}`);

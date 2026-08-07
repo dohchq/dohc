@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { isValidShareVersionId } from "@dohc/security-contract/share-selector";
 import {
   ShareUnavailableError,
@@ -142,12 +143,38 @@ export async function materializeSharedViewPaths(
   const main = await store.ensureMainVersion({ workspaceId });
   for (const change of changedPaths) {
     const target = containedTarget(rootDir, change.path);
+    // A mount keeps its own engine store at <mount>/.dohc. Containment cannot
+    // see that: an alias planted inside the projection (`docs -> .dohc`)
+    // resolves inside the mount and would let relay-controlled bytes rewrite
+    // the store that decides what the projection holds. The rule runs against
+    // the MOUNT root, which is what `.dohc` means here.
+    //
+    // "entry" for BOTH operations, because neither follows the leaf: a delete
+    // is `rm`, and a write removes the target and recreates it with `wx`. So
+    // the leaf is never a path this code reads or writes through, and a
+    // tampered one is the thing being repaired. Following it here would refuse
+    // a projected file someone replaced with a dangling, escaping, or
+    // reserved-target link, and the refresh would throw before it commits its
+    // cursor -- wedging every later replay on the same path instead of
+    // healing it. The PARENT chain still resolves in full, so an alias into a
+    // reserved area is still refused.
+    //
+    // The prepare, the removal, and the write all run on the resolution this
+    // judged. Reusing the spelling would let a directory alias planted after
+    // the check take the relay's bytes somewhere the rule never saw.
+    const { resolvedAbsolute: resolvedTarget } = await assertResolvedWorkspacePath({
+      rootPath: rootDir,
+      absolutePath: target,
+      spelled: change.path,
+      label: "Shared view path",
+      access: "entry",
+    });
     if (change.operation === "delete") {
       // Deletes get the same REAL-parent containment as writes: a planted
       // directory symlink must not route the unlink outside the root. The
       // final component is safe either way — rm without `recursive`
       // removes a link as a link, never through it.
-      const realParent = await realpath(dirname(target)).catch(() => null);
+      const realParent = await realpath(dirname(resolvedTarget)).catch(() => null);
       if (realParent === null) continue; // parent gone — nothing to delete
       if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
         throw new Error(`Shared view parent escapes the workspace: ${target}`);
@@ -155,7 +182,7 @@ export async function materializeSharedViewPaths(
       // recursive: a locally tampered DIRECTORY at the target must not
       // wedge the refresh with EISDIR. Node's rm removes a symlink as a
       // link either way — it never recurses through one.
-      await rm(target, { recursive: true, force: true });
+      await rm(resolvedTarget, { recursive: true, force: true });
       continue;
     }
     // Read the content BEFORE touching the projection. `preparedTarget`
@@ -176,10 +203,10 @@ export async function materializeSharedViewPaths(
               path: change.path,
             })
           )?.text ?? null;
-    await preparedTarget(target);
+    await preparedTarget(resolvedTarget);
     if (content === null) continue;
     await writeFile(
-      target,
+      resolvedTarget,
       content,
       typeof content === "string" ? { encoding: "utf8", flag: "wx" } : { flag: "wx" },
     );

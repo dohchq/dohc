@@ -1,11 +1,12 @@
 import { hasIgnoredSegment } from "@dohc/workspace-core";
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
-import { access, readFile, realpath, stat } from "node:fs/promises";
+import { access, open, realpath, stat } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { extname, isAbsolute, join, relative, sep } from "node:path";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { isLoopbackHostname } from "../security/loopback";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 export interface SiteLogEntry {
   stream: "stdout" | "stderr" | "system";
@@ -72,6 +73,13 @@ const MIME_TYPES: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 
+// Read-only, and do not follow a final-component symlink where the platform
+// can say so. O_NOFOLLOW is POSIX-only: on win32 `fs.constants.O_NOFOLLOW` is
+// undefined, and `O_RDONLY | undefined` silently yields 0 rather than failing
+// loudly, so `?? 0` keeps the intent explicit. Windows therefore keeps the
+// residual named at the read site.
+const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+
 function isInside(parent: string, child: string): boolean {
   if (child === parent) return true;
   const rel = relative(parent, child);
@@ -89,12 +97,23 @@ async function resolveContainedDir(rootPath: string, relativePath: string): Prom
   if (parts.some((part) => part === "." || part === "..")) {
     throw new Error(`Site path contains traversal: ${relativePath}`);
   }
-  const realRoot = await realpath(rootPath);
   const absolute = join(rootPath, ...parts);
-  const realSite = await realpath(absolute);
-  if (!isInside(realRoot, realSite)) {
-    throw new Error(`Site path escapes the workspace: ${relativePath}`);
-  }
+  // A site root is a directory dohc serves, spawns a dev server in, and builds
+  // from. `app -> .dohc` spells an ordinary folder and makes all three run on
+  // the workspace's control plane, so the reserved rule decides on where the
+  // root really is. This is also the only guard the spelled path gets: a site
+  // root named `.dohc` outright is refused by the same test.
+  //
+  // The served root, the dev server's cwd, and the build's cwd are all the
+  // path this judged. Resolving a second time would run them somewhere the
+  // reserved rule never saw.
+  const { resolvedAbsolute: realSite } = await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: absolute,
+    spelled: relativePath,
+    label: "Site path",
+    access: "read",
+  });
   const info = await stat(realSite);
   if (!info.isDirectory()) throw new Error(`Site path is not a directory: ${relativePath}`);
   return realSite;
@@ -175,24 +194,76 @@ export async function startStaticSitePreview(
         return;
       }
       const target = join(root, relativePath);
-      const realTarget = await realpath(target);
+      // The check above read the request path as SPELLED. A directory alias
+      // inside the site (`assets -> ../.dohc`) still spells an ordinary folder,
+      // and this server would hand its bytes to the preview over HTTP. The
+      // reservation is decided against the WORKSPACE root, because that is what
+      // `.dohc` is relative to — the site root may be any folder below it.
+      //
+      // The stat and the read below use the resolution this JUDGED. Resolving
+      // the request's spelling a second time would let an alias swapped
+      // between the two serve bytes no rule was applied to.
+      let realTarget: string;
+      try {
+        realTarget = (
+          await assertResolvedWorkspacePath({
+            rootPath: workspaceRoot,
+            absolutePath: target,
+            spelled: relativePath,
+            label: "Site request path",
+            access: "read",
+          })
+        ).resolvedAbsolute;
+      } catch {
+        response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+        response.end("Forbidden");
+        return;
+      }
       if (!isInside(root, realTarget)) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");
         return;
       }
-      const entryInfo = await stat(realTarget);
-      if (!entryInfo.isFile()) {
-        response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-        response.end("Not found");
-        return;
+      // ONE open, and everything after it comes from that handle. The fd is
+      // bound to the object open() found, so the file that is checked is the
+      // file that is read — a stat followed by a separate read let the name be
+      // swapped in between and served bytes nothing had checked.
+      //
+      // RESIDUAL, stated rather than papered over: this narrows the window to
+      // the single open() call, it does not close it.
+      //
+      // The LEAF: on POSIX O_NOFOLLOW makes the open refuse a leaf swapped for
+      // a symlink. On win32 Node exposes no O_NOFOLLOW and no fd->path
+      // affordance, so a leaf swapped between the guard and this open is still
+      // followed.
+      //
+      // The ANCESTORS: O_NOFOLLOW never covered those on any platform. Binding
+      // each traversed component needs openat-style dirfd traversal, and Node's
+      // fs does not expose it -- no openat, no relative open on FileHandle, Dir
+      // hands out no fd, and O_DIRECTORY/O_PATH are undefined here. So a
+      // directory component swapped mid-traversal is followed everywhere.
+      //
+      // Both are left as residuals on purpose. Closing them needs an API Node
+      // does not offer; an identity compare here would only be another
+      // checkable proxy with its own window.
+      const handle = await open(realTarget, READ_NO_FOLLOW);
+      try {
+        const entryInfo = await handle.stat();
+        if (!entryInfo.isFile()) {
+          response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+          response.end("Not found");
+          return;
+        }
+        const body = await handle.readFile();
+        response.writeHead(200, {
+          "cache-control": "no-store",
+          "content-type": mimeType(realTarget),
+          "x-content-type-options": "nosniff",
+        });
+        response.end(body);
+      } finally {
+        await handle.close();
       }
-      response.writeHead(200, {
-        "cache-control": "no-store",
-        "content-type": mimeType(realTarget),
-        "x-content-type-options": "nosniff",
-      });
-      response.end(await readFile(realTarget));
     } catch {
       response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
       response.end("Not found");

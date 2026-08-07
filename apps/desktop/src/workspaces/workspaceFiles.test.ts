@@ -70,7 +70,7 @@ describe("createFile", () => {
   it("refuses to write through a symlinked directory that escapes the workspace", async () => {
     const outside = await createTestScratch("dohc-outside-");
     await symlink(outside, join(root, "link"), "dir");
-    await expect(createFile(root, "link/evil.md")).rejects.toThrow(/escapes workspace/);
+    await expect(createFile(root, "link/evil.md")).rejects.toThrow(/escapes the workspace/);
     expect(existsSync(join(outside, "evil.md"))).toBe(false);
   });
 });
@@ -214,7 +214,7 @@ describe("createFolder", () => {
   it("refuses to create through a symlinked ancestor that escapes the workspace", async () => {
     const outside = await createTestScratch("dohc-outside-");
     await symlink(outside, join(root, "link"), "dir");
-    await expect(createFolder(root, "link/evil")).rejects.toThrow(/escapes workspace/);
+    await expect(createFolder(root, "link/evil")).rejects.toThrow(/escapes the workspace/);
     expect(existsSync(join(outside, "evil"))).toBe(false);
   });
 });
@@ -319,12 +319,12 @@ describe("movePath", () => {
     // Source under a symlinked dir: the parent's realpath escapes the root.
     await symlink(outside, join(root, "linkdir"), "dir");
     await expect(movePath(root, "linkdir/real.md", "stolen.md")).rejects.toThrow(
-      /escapes workspace/,
+      /escapes the workspace/,
     );
     // Destination under a symlinked dir: existingAncestor escapes the root.
     await writeFile(join(root, "mine.md"), "");
     await expect(movePath(root, "mine.md", "linkdir/mine.md")).rejects.toThrow(
-      /escapes workspace/,
+      /escapes the workspace/,
     );
     expect(existsSync(join(outside, "mine.md"))).toBe(false);
   });
@@ -433,7 +433,7 @@ describe("deletePath", () => {
     await writeFile(join(outside, "victim.md"), "keep");
     await symlink(outside, join(root, "linkdir"), "dir");
     await expect(deletePath(root, "linkdir/victim.md", rejectingTrash)).rejects.toThrow(
-      /escapes workspace/,
+      /escapes the workspace/,
     );
     expect(await readFile(join(outside, "victim.md"), "utf8")).toBe("keep");
   });
@@ -514,7 +514,7 @@ describe("collectZipEntries", () => {
     const outside = await createTestScratch("dohc-outside-");
     await symlink(outside, join(root, "linkdir"), "dir");
     await expect(collectZipEntries(root, "linkdir")).rejects.toThrow(
-      /escapes workspace/,
+      /escapes the workspace/,
     );
   });
 
