@@ -50,19 +50,33 @@ const cfgBlock = [
 ].join("\n");
 
 /**
- * A PATH whose `cargo` and `node` return at once. `writes` is a path the stub
- * creates the first time it runs — a tree change made by something other than
- * the gate, while the gate is between two readings.
+ * A PATH whose `cargo` and `node` return at once.
+ *
+ * `writes` is a path the stub creates the first time it runs — a tree change
+ * made by something other than the gate, while the gate is between two
+ * readings. `movesHead` updates HEAD to the commit it already points at, which
+ * is the trace a `git checkout` away and back leaves and nothing else: a HEAD
+ * reflog entry, with the commit, the worktree, and the index untouched.
+ *
+ * Both run through a helper script driven by `process.execPath` and an
+ * absolute path, because `node` on PATH is one of the stubs.
  */
-function stubToolchain(writes) {
+function stubToolchain({ writes, movesHead } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dohc-gate-stub-"));
   const cfgPath = join(dir, "cfg.txt");
   writeFileSync(cfgPath, `${cfgBlock}\n`);
+
+  const probePath = join(dir, "move-head.mjs");
+  if (movesHead) writeFileSync(probePath, headProbe);
+  const probe = movesHead
+    ? `"${process.execPath}" "${probePath}" "${join(dir, "moved.marker")}" "${repoRoot}"`
+    : "";
 
   const touch = writes ? writes.replaceAll("\\", "/") : "";
   const sh = [
     "#!/bin/sh",
     touch ? `[ -f "${touch}" ] || echo gate-stub > "${touch}"` : "",
+    probe.replaceAll("\\", "/"),
     `cat "${cfgPath.replaceAll("\\", "/")}"`,
     "exit 0",
     "",
@@ -70,6 +84,7 @@ function stubToolchain(writes) {
   const cmd = [
     "@echo off",
     touch ? `if not exist "${writes}" echo gate-stub > "${writes}"` : "",
+    probe,
     `type "${cfgPath}"`,
     "exit /b 0",
     "",
@@ -82,6 +97,22 @@ function stubToolchain(writes) {
   }
   return dir;
 }
+
+// Runs once per stub, from inside a gate step. `update-ref` to the commit HEAD
+// already names writes one HEAD reflog entry and changes nothing else, so the
+// readings on both sides of the step agree about the commit and the worktree,
+// exactly as they would around a checkout that was undone. The entry stays in
+// this checkout's reflog afterwards, which is what a reflog is for.
+const headProbe = `import { spawnSync } from "node:child_process";
+import { existsSync, writeFileSync } from "node:fs";
+const [marker, repoRoot] = process.argv.slice(2);
+if (existsSync(marker)) process.exit(0);
+writeFileSync(marker, "moved\\n");
+const git = (...args) =>
+  spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" });
+const head = git("rev-parse", "HEAD").stdout.trim();
+git("update-ref", "-m", "rust-gate-artifact test probe", "HEAD", head);
+`;
 
 /**
  * Where the stub writes, to make the tree change this test is about. It has to
@@ -143,7 +174,7 @@ function runGate(stubDir) {
 }
 
 test("the gate stamps the tree it read, at every step boundary", () => {
-  const stub = stubToolchain(null);
+  const stub = stubToolchain();
   try {
     const run = runGate(stub);
 
@@ -194,7 +225,7 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
   // verdict for the current HEAD. A check that can be silently disabled is
   // the failure this PR exists to make impossible, so this runs the real CLI
   // and stubs `git` on PATH rather than injecting a resolver.
-  const stub = stubToolchain(null);
+  const stub = stubToolchain();
   const log = join(mkdtempSync(join(tmpdir(), "dohc-verdict-")), "gate.log");
   try {
     // A real evidence line, from the real producer, stamped with this
@@ -295,7 +326,7 @@ test("a tree changed under the gate is refused, and never stamped", () => {
   // here waits or sleeps: the change is made by the step itself, so it is
   // always between the opening reading and the next one.
   const probe = claim(probePath());
-  const stub = stubToolchain(probe);
+  const stub = stubToolchain({ writes: probe });
   try {
     const run = runGate(stub);
     assert.equal(existsSync(probe), true, "the stub must have changed the tree");
@@ -318,6 +349,28 @@ test("a tree changed under the gate is refused, and never stamped", () => {
     assert.notEqual(run.code, 0);
   } finally {
     rmSync(probe, { force: true });
+    rmSync(stub, { recursive: true, force: true });
+  }
+});
+
+test("a HEAD moved and returned inside one step is refused", () => {
+  // The case a boundary reading cannot reach on its own: HEAD is updated while
+  // the step runs, and reads the same commit on both sides of it. `git status`
+  // is identical too, so the only witness is the HEAD reflog the gate now
+  // reads — and this run makes the same entry a checkout away and back would.
+  const stub = stubToolchain({ movesHead: true });
+  try {
+    const run = runGate(stub);
+
+    assert.match(run.summary, /FAIL tree provenance/);
+    assert.match(run.summary, /HEAD was updated 1 time during `native target`/);
+
+    // The stamp is the judgement's, and the verdict is the run's.
+    assert.match(run.summary, /^== summary ==\r?\n {2}tree UNATTRIBUTABLE\r?\n/);
+    assert.match(run.evidence, / head UNATTRIBUTABLE\)/);
+    assert.match(run.evidence, /\| FAIL \|/);
+    assert.notEqual(run.code, 0);
+  } finally {
     rmSync(stub, { recursive: true, force: true });
   }
 });

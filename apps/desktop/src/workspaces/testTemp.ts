@@ -25,6 +25,16 @@ const MAX_RUN_AGE_MS = 48 * 60 * 60 * 1_000;
 // replaces already used: `100ms * attempt` over 8 attempts.
 const WINDOWS_CLEANUP_ATTEMPTS = 8;
 const WINDOWS_CLEANUP_DELAY_MS = 100;
+// The shape a run root's name has: a component, the id of the process that
+// made it, and a 16-digit hex nonce — `process-4821-3f9a1c0d5e2b7648`, or
+// `rust-gate-1180-...` from the gate that hands one down. The sweep's next act
+// is a recursive delete, so it removes only names carrying this shape. An aged
+// directory somebody else left in the shared parent is not this sweep's to
+// remove. The Rust twin's `is_run_root_name` reads the same way.
+//
+// A root named by `DOHC_TEST_SCRATCH_RUN` is whatever the caller named it, so
+// it is not run-shaped and is never swept. Whoever named that root owns it.
+const RUN_ROOT_NAME = /^.+-\d+-[0-9a-f]{16}$/u;
 
 const testScratch = new Set<string>();
 const suiteScratch = new Set<string>();
@@ -133,7 +143,7 @@ export async function sweepScratchParent(
   }
   for (const name of names) {
     const path = join(parent, name);
-    if (path === currentRun) continue;
+    if (path === currentRun || !RUN_ROOT_NAME.test(name)) continue;
     let metadata;
     try {
       // `lstat` for the same reason `isIdleSince` uses it, and for one more: a
@@ -172,6 +182,8 @@ function scratchRunId(): string {
     }
     return configured;
   }
+  // The shape `RUN_ROOT_NAME` describes, and the only run root name this
+  // module invents. Change one and the sweep stops reclaiming the other.
   processRunId ??= `process-${process.pid}-${randomBytes(8).toString("hex")}`;
   return processRunId;
 }

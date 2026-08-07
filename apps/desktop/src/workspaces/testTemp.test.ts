@@ -38,9 +38,9 @@ describe("test scratch", () => {
   it("sweeps aged runs without removing recent or current runs", async () => {
     const harness = await createTestScratch("sweep-test-");
     const parent = join(harness, "runs");
-    const old = join(parent, "old-run");
-    const live = join(parent, "live-run");
-    const current = join(parent, "current-run");
+    const old = join(parent, "old-run-4821-0000000000000001");
+    const live = join(parent, "live-run-4821-0000000000000002");
+    const current = join(parent, "current-run-4821-0000000000000003");
     await Promise.all([
       mkdir(old, { recursive: true }),
       mkdir(live, { recursive: true }),
@@ -80,7 +80,7 @@ describe("test scratch", () => {
   it("does not follow a link out of an abandoned run", async () => {
     const harness = await createTestScratch("linked-activity-");
     const parent = join(harness, "runs");
-    const abandoned = join(parent, "killed-run");
+    const abandoned = join(parent, "killed-run-4821-00000000000000dd");
     const outside = join(harness, "someone-elses-workspace");
     await mkdir(abandoned, { recursive: true });
     await mkdir(outside, { recursive: true });
@@ -94,7 +94,7 @@ describe("test scratch", () => {
     await lutimes(link, when, when);
     await age(abandoned, nowMs, 49);
 
-    await sweepScratchParent(parent, join(parent, "current-run"), nowMs);
+    await sweepScratchParent(parent, join(parent, "current-run-4821-0000000000000003"), nowMs);
 
     expect(
       await pathExists(abandoned),
@@ -134,7 +134,7 @@ describe("test scratch", () => {
   it("keeps a run whose only recent write is deep inside it", async () => {
     const harness = await createTestScratch("deep-activity-");
     const parent = join(harness, "runs");
-    const soak = join(parent, "live-soak");
+    const soak = join(parent, "live-soak-4821-00000000000000aa");
     const engine = join(soak, "workspace", ".dohc", "engine");
     await mkdir(engine, { recursive: true });
     await writeFile(join(engine, "engine.db"), "live");
@@ -146,11 +146,44 @@ describe("test scratch", () => {
     await age(join(soak, "workspace"), nowMs, 49);
     await age(soak, nowMs, 49);
 
-    await sweepScratchParent(parent, join(parent, "current-run"), nowMs);
+    await sweepScratchParent(parent, join(parent, "current-run-4821-0000000000000003"), nowMs);
 
     expect(
       await pathExists(soak),
       "a run with recent work deep inside is live and must survive",
     ).toBe(true);
+  });
+
+  // The parent this sweep walks is a shared directory in the platform temp
+  // dir, and anything can land in it. Age says nothing about who made a
+  // directory, and what follows the decision is a recursive delete — so only
+  // names carrying the run shape are swept. The Rust twin holds the same line
+  // in `sweep_refuses_an_aged_directory_that_is_not_run_shaped`.
+  it("removes an aged run root, and never an aged directory of somebody else's", async () => {
+    const harness = await createTestScratch("shape-guard-");
+    const parent = join(harness, "runs");
+    const mine = join(parent, "process-4821-0f3a1c0d5e2b7648");
+    const theirs = join(parent, "notes-from-a-conference");
+    await mkdir(mine, { recursive: true });
+    await mkdir(theirs, { recursive: true });
+    const theirFile = join(theirs, "do-not-delete.md");
+    await writeFile(theirFile, "a year of work");
+
+    const nowMs = Date.now();
+    await age(theirFile, nowMs, 49);
+    await age(theirs, nowMs, 49);
+    await age(mine, nowMs, 49);
+
+    await sweepScratchParent(parent, join(parent, "process-5678-0000000000000000"), nowMs);
+
+    expect(
+      await pathExists(theirFile),
+      "an aged directory that is not run-shaped is not this sweep's to remove",
+    ).toBe(true);
+    // And the guard did not just turn the sweep off.
+    expect(
+      await pathExists(mine),
+      "an aged run-shaped root must still be swept",
+    ).toBe(false);
   });
 });

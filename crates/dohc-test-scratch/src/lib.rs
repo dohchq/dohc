@@ -12,6 +12,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 const SCRATCH_PARENT: &str = "dohc-test-scratch";
+/// The nonce every run root's name ends in: `{:016x}` here, and
+/// `randomBytes(8).toString("hex")` in the JS twin and in the Rust gate that
+/// hands a root down (`tools/rust-engine-program/run-rust-checks.mjs`).
+const RUN_NONCE_HEX: usize = 16;
 /// How long a run root must be untouched before the sweep may remove it.
 ///
 /// This is a limit that destroys work, so it is set past the longest run this
@@ -202,6 +206,36 @@ fn managed_parent(current_run: &Path) -> Option<&Path> {
         .filter(|parent| parent.file_name() == Some(OsStr::new(SCRATCH_PARENT)))
 }
 
+/// Whether a name has the shape this crate gives a run root.
+///
+/// Every run root created here ends in the id of the process that made it and a
+/// 16-digit hex nonce: `process-4821-3f9a1c0d5e2b7648`, and
+/// `rust-gate-1180-...` from the gate that hands one down. The sweep's next act
+/// is a recursive delete, so it removes only what carries that shape. An aged
+/// directory somebody dropped in the managed parent is not this crate's to
+/// delete, and neither is a parent a custom `DOHC_TEST_SCRATCH_ROOT` points
+/// into.
+///
+/// A root named by `DOHC_TEST_SCRATCH_RUN` is whatever the caller named it, so
+/// it is not run-shaped and is never swept. Whoever named that root owns it.
+fn is_run_root_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    // From the right: the component may hold hyphens of its own (`rust-gate`).
+    let Some((rest, nonce)) = name.rsplit_once('-') else {
+        return false;
+    };
+    let Some((component, process)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    nonce.len() == RUN_NONCE_HEX
+        && nonce.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+        && !process.is_empty()
+        && process.chars().all(|c| c.is_ascii_digit())
+        && !component.is_empty()
+}
+
 fn sweep_old_runs(parent: &Path, current_run: &Path, now: SystemTime) -> io::Result<()> {
     let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
@@ -211,7 +245,10 @@ fn sweep_old_runs(parent: &Path, current_run: &Path, now: SystemTime) -> io::Res
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path == current_run || !entry.file_type()?.is_dir() {
+        if path == current_run
+            || !entry.file_type()?.is_dir()
+            || !is_run_root_name(&entry.file_name())
+        {
             continue;
         }
         if !is_idle_since(&path, now, MAX_RUN_AGE) {
@@ -402,7 +439,7 @@ mod tests {
     fn sweep_keeps_a_run_whose_only_recent_write_is_deep_inside() {
         let harness = ScratchDir::new_named("deep-activity").expect("scratch");
         let parent = harness.join("runs");
-        let live = parent.join("live-soak");
+        let live = parent.join("live-soak-4821-00000000000000aa");
         let deep = live.join("workspace").join(".dohc").join("engine");
         fs::create_dir_all(&deep).expect("deep tree");
         fs::write(deep.join("engine.db"), b"live").expect("recent deep write");
@@ -432,7 +469,9 @@ mod tests {
         let harness = ScratchDir::new_named("outside-root").expect("scratch");
         let outside = harness.join("a-developers-own-directory");
         let run_root = outside.join("my-scratch");
-        let victim = outside.join("important-project");
+        // Run-shaped on purpose: only the managed-parent guard may save it, so
+        // the name-shape guard cannot answer this test for the wrong reason.
+        let victim = outside.join("important-project-4821-00000000000000cc");
         let victim_file = victim.join("do-not-delete.txt");
         fs::create_dir_all(&run_root).expect("handed-down root");
         fs::create_dir_all(&victim).expect("victim");
@@ -484,7 +523,7 @@ mod tests {
     fn sweep_keeps_a_run_whose_mtime_is_in_the_future() {
         let harness = ScratchDir::new_named("future-mtime").expect("scratch");
         let parent = harness.join("runs");
-        let live = parent.join("run-from-the-future");
+        let live = parent.join("future-run-4821-00000000000000bb");
         fs::create_dir_all(&live).expect("run root");
         let file = live.join("engine.db");
         fs::write(&file, b"written after the clock moved back").expect("write");
@@ -511,9 +550,9 @@ mod tests {
     fn sweep_removes_only_aged_inactive_runs() {
         let harness = ScratchDir::new_named("sweep-test").expect("scratch");
         let parent = harness.join("runs");
-        let old = parent.join("old-run");
-        let live = parent.join("live-run");
-        let current = parent.join("current-run");
+        let old = parent.join("old-run-4821-0000000000000001");
+        let live = parent.join("live-run-4821-0000000000000002");
+        let current = parent.join("current-run-4821-0000000000000003");
         fs::create_dir_all(&old).expect("old run");
         fs::create_dir_all(&live).expect("live run");
         fs::create_dir_all(&current).expect("current run");
@@ -527,5 +566,77 @@ mod tests {
         assert!(!old.exists(), "the sweep must remove an aged run");
         assert!(live.exists(), "the sweep must keep a recent run");
         assert!(current.exists(), "the sweep must keep the current run");
+    }
+
+    /// The managed parent is a shared directory in `%TEMP%`, and anything can
+    /// land in it: a person's own folder, an unpacked archive, another tool's
+    /// cache. Age says nothing about who made a directory, and what follows a
+    /// sweep decision is a recursive delete — so the sweep removes only names
+    /// carrying this crate's run shape.
+    #[test]
+    fn sweep_refuses_an_aged_directory_that_is_not_run_shaped() {
+        let harness = ScratchDir::new_named("shape-guard").expect("scratch");
+        let parent = harness.join(SCRATCH_PARENT);
+        let mine = parent.join("process-4821-0f3a1c0d5e2b7648");
+        let theirs = parent.join("notes-from-a-conference");
+        let their_file = theirs.join("do-not-delete.md");
+        fs::create_dir_all(&mine).expect("a run this crate made");
+        fs::create_dir_all(&theirs).expect("somebody else's directory");
+        fs::write(&their_file, b"a year of work").expect("their file");
+
+        let now = SystemTime::now();
+        let stale = FileTime::from_system_time(now - MAX_RUN_AGE - Duration::from_secs(60));
+        set_file_mtime(&their_file, stale).expect("age their file");
+        set_file_mtime(&theirs, stale).expect("age their directory");
+        set_file_mtime(&mine, stale).expect("age the run");
+
+        sweep_managed_parent(&parent.join("process-5678-0000000000000000"), now);
+
+        assert!(
+            their_file.exists(),
+            "an aged directory that is not run-shaped is not this crate's to remove"
+        );
+        // And the guard did not just turn the sweep off.
+        assert!(!mine.exists(), "an aged run-shaped root must still be swept");
+    }
+
+    /// The guard is only as good as its agreement with the names this crate and
+    /// its callers actually create. A producer that drifts out of the shape
+    /// would leak every run it makes, silently, so both producers are checked
+    /// against the predicate rather than described in a comment.
+    #[test]
+    fn every_run_root_this_repo_creates_is_run_shaped() {
+        let temp = Path::new(if cfg!(windows) { r"C:\temp" } else { "/tmp" });
+        let derived = resolve_run_root(None, None, temp).expect("a derived run root");
+        let name = derived.file_name().expect("the run root is named");
+        assert!(
+            is_run_root_name(name),
+            "this crate's own run root is not run-shaped: {name:?}"
+        );
+
+        // What `run-rust-checks.mjs` hands down:
+        // `rust-gate-${process.pid}-${randomBytes(8).toString("hex")}`.
+        assert!(is_run_root_name(OsStr::new("rust-gate-1180-3c2e9a1b7d4f0e65")));
+
+        for refused in [
+            "notes-from-a-conference",
+            "process-4821",
+            "process-4821-",
+            "-4821-0f3a1c0d5e2b7648",
+            "process--0f3a1c0d5e2b7648",
+            // A short nonce, an over-long one, and a non-hex one: each is a
+            // name something else made that happens to read like a run.
+            "process-4821-0f3a1c0d",
+            "process-4821-0f3a1c0d5e2b76489",
+            "process-4821-0F3A1C0D5E2B7648",
+            "process-4821-zzzzzzzzzzzzzzzz",
+            // The process id is a number, not any component.
+            "process-main-0f3a1c0d5e2b7648",
+        ] {
+            assert!(
+                !is_run_root_name(OsStr::new(refused)),
+                "{refused:?} is not a name this crate creates, so the sweep must refuse it"
+            );
+        }
     }
 }

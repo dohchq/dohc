@@ -12,12 +12,22 @@
 // narrows the unobserved window to one step and names the step that straddled
 // a change, which is what a reader needs in order to know what to re-run.
 //
-// It does NOT make the tree watched. Nothing observes the interval between
-// two readings, so the stamp reports how many readings agreed rather than
-// claiming the run was clean throughout. A weaker true claim beats a stronger
-// unverifiable one. That residual — a change made and undone inside one step,
-// which no sample rate removes — is tracked in #644, with what closing it
-// would cost.
+// Sampling alone cannot see a change made and undone INSIDE one step, and no
+// sample rate removes that — between any two readings there is an interval
+// nothing observes. For the founding case, git removes it instead: every HEAD
+// move is written to the HEAD reflog, so a run that checks out another commit
+// and restores it leaves two entries behind while `git rev-parse HEAD` reads
+// identical at both ends. A reading carries that log, and a step whose
+// bracketing readings agree on the commit but disagree on the reflog is
+// refused. The observation is exact and needs no watcher: the record is
+// already there when the step returns.
+//
+// What is left is a worktree edit made and undone inside one step, with no
+// HEAD move. Git keeps no record of that, and removing it needs isolation —
+// a checkout nothing else can reach — not a faster sample rate. The stamp
+// reports how many readings agreed for that reason, rather than claiming the
+// run was clean throughout. A weaker true claim beats a stronger unverifiable
+// one.
 //
 // The classifier is pure so it can be tested without a repository: the gate
 // reads the tree state, this decides what those states prove.
@@ -48,6 +58,40 @@ function changedEntries(before, after) {
   ];
 }
 
+/**
+ * Why the HEAD reflog is not the same in two readings, or null when it is.
+ *
+ * The log is newest first, so a run that only moved HEAD forward leaves the
+ * earlier reading as the tail of the later one. Anything else — a shorter log,
+ * or one whose tail no longer matches — is a rewritten record, and a rewritten
+ * record cannot say what HEAD did.
+ */
+function reflogDrift(before, after, during) {
+  const gained = after.reflog.length - before.reflog.length;
+  const appended =
+    gained >= 0 &&
+    after.reflog
+      .slice(gained)
+      .every((entry, at) => entry === before.reflog[at]);
+  if (appended && gained === 0) return null;
+  const at = short(before.head);
+  if (!appended) {
+    return (
+      `the HEAD reflog was rewritten during \`${during}\` at ${at}: ` +
+      `${before.reflog.length} entries then ${after.reflog.length}, and the ` +
+      "later reading does not extend the earlier one; this run cannot say " +
+      "what HEAD did inside that step"
+    );
+  }
+  const visited = [...new Set(after.reflog.slice(0, gained).map(short))];
+  return (
+    `HEAD was updated ${gained} ${gained === 1 ? "time" : "times"} during ` +
+    `\`${during}\` and read ${at} at both ends (${nameSome(visited)}); the ` +
+    "readings around that step agree about a commit the step did not hold " +
+    "throughout"
+  );
+}
+
 function nameSome(entries) {
   const named = entries.slice(0, 3).join(", ");
   const rest = entries.length - 3;
@@ -71,11 +115,16 @@ function nameSome(entries) {
  * forbids it just gets removed. It is recorded instead, so the reader knows
  * the commit does not describe everything that ran.
  *
+ * A HEAD that moved and RETURNED inside one step is refused too. The two
+ * readings around that step name the same commit, so only git's own record
+ * shows it: the HEAD reflog gained entries while the commit stayed put.
+ *
  * Three limits, and none is assumed away.
  *
- * Nothing observes the tree BETWEEN two readings, so a change made and undone
- * inside one step is invisible (#644); that is why the stamp reports how many
- * readings agreed rather than saying the run was clean throughout.
+ * Nothing observes the tree BETWEEN two readings, so a worktree edit made and
+ * undone inside one step, with no HEAD move, is invisible; that is why the
+ * stamp reports how many readings agreed rather than saying the run was clean
+ * throughout. Removing it needs a checkout nothing else can reach.
  *
  * A reading is a list of paths and their status codes, not their contents, so
  * a second edit to a path that was already dirty leaves the reading
@@ -113,6 +162,23 @@ export function classifyTreeProvenance(readings) {
         "the tree changed under it",
     );
   }
+  if (readings.some((reading) => !reading.state.reflog)) {
+    return unattributable(
+      "git could not read the HEAD reflog; this run cannot say whether HEAD " +
+        "moved and returned inside a step",
+    );
+  }
+  // An empty reflog beside a HEAD that resolves means this repository keeps no
+  // record of HEAD moves — `core.logAllRefUpdates` is off, or `.git/logs/HEAD`
+  // was removed. The check below would then read the same on every run, which
+  // is the shape of a check that is switched off rather than passing.
+  if (readings.some((reading) => reading.state.reflog.length === 0)) {
+    return unattributable(
+      "this repository keeps no HEAD reflog, so a HEAD that moved and " +
+        "returned inside one step would leave no trace; turn the record on " +
+        "with `git config core.logAllRefUpdates true`",
+    );
+  }
 
   for (let at = 1; at < readings.length; at += 1) {
     const before = readings[at - 1].state;
@@ -125,6 +191,8 @@ export function classifyTreeProvenance(readings) {
           "two commits",
       );
     }
+    const returned = reflogDrift(before, after, during);
+    if (returned) return unattributable(returned);
     const changed = changedEntries(before.dirty, after.dirty);
     if (changed.length > 0) {
       return unattributable(
@@ -147,7 +215,7 @@ export function classifyTreeProvenance(readings) {
  * empty one are not the same claim.
  */
 export function formatTreeState(state) {
-  if (!state?.head || !state.dirty) return UNATTRIBUTABLE;
+  if (!state?.head || !state.dirty || !state.reflog) return UNATTRIBUTABLE;
   const dirt = state.dirty.length ? `dirty(${state.dirty.length})` : "clean";
   return `${short(state.head)} ${dirt}`;
 }
@@ -164,26 +232,35 @@ export function formatTreeStamp(state, reads) {
 }
 
 /**
- * Read `git rev-parse HEAD` and the porcelain status through `capture`, which
- * takes a command and returns its stdout, or null when it could not run. A
- * repo that cannot answer leaves `head` or `dirty` null, which fails the
- * provenance row: unattributable evidence is the condition this exists to
+ * Read `git rev-parse HEAD`, the porcelain status, and the HEAD reflog through
+ * `capture`, which takes a command and returns its stdout, or null when it
+ * could not run. A repo that cannot answer leaves a field null, which fails
+ * the provenance row: unattributable evidence is the condition this exists to
  * name.
  */
 export function readTreeState(capture) {
   const head = capture("git rev-parse HEAD");
-  if (head === null) return { head: null, dirty: null };
+  if (head === null) return { head: null, dirty: null, reflog: null };
   // `--untracked-files=all`, because the default collapses an untracked
   // directory into one entry: `?? crates/newthing/` stays that one string
   // while any number of files inside it are written, edited, or deleted under
   // the run. It also makes the recorded count a count of paths rather than of
   // entries, so `dirty(1)` cannot stand for five hundred files.
   const status = capture("git status --porcelain --untracked-files=all");
+  // One line per HEAD reflog entry, newest first, each the commit HEAD pointed
+  // at after that move. A checkout away and back reads identical through
+  // `rev-parse` and adds two lines here, which is the only trace it leaves.
+  const reflog = capture("git reflog show --format=%H HEAD");
   return {
     head: head.trim(),
-    dirty:
-      status === null
-        ? null
-        : status.split(/\r?\n/).filter((line) => line.trim() !== ""),
+    dirty: lines(status),
+    reflog: lines(reflog),
   };
+}
+
+/** A command's stdout as non-blank lines, or null when it did not answer. */
+function lines(stdout) {
+  return stdout === null
+    ? null
+    : stdout.split(/\r?\n/).filter((line) => line.trim() !== "");
 }
