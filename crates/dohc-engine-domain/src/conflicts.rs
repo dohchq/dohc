@@ -6,8 +6,8 @@ use crate::records::{
 };
 use crate::store::{
     VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, moment_exists,
-    next_moment_order, record_request, validate_delete_input, validate_moment_id, validate_path,
-    validate_write_input, version_is_active, write_text_in_tx,
+    next_moment_order, record_request, validate_delete_input, validate_identifier,
+    validate_moment_id, validate_path, validate_write_input, version_is_active, write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -548,6 +548,14 @@ pub fn insert_text_conflict_if_absent(
             observed_bytes,
         });
     }
+    // NOT ALSO `MAX_IDENTIFIER_BYTES` (#654). A conflict row's identifiers are
+    // already bounded here, by a rule derived from what the listing can serve
+    // rather than from what a caller mints: the budget above counts the
+    // conflict id at BOTH copies the page emits, so an id the page could not
+    // carry twice is refused. Adding the write path's tighter bound on top
+    // would refuse rows this one measured as serveable, and the identifier a
+    // resolution actually spends is the request's, not the row's.
+    //
     // Validate sides BEFORE the duplicate-id shortcut: an invalid or
     // unhydrated binary side must fail closed even when it reuses an existing
     // conflict id, or a replicated open would be acked without ever passing
@@ -767,6 +775,13 @@ impl VersionedTextStore<'_> {
     where
         F: FnOnce(&Transaction<'_>, &ResolveTextConflictResult) -> Result<(), DomainError>,
     {
+        // Non-empty only. What this request contributes to its own answer is
+        // bounded by the reservation the caller passes in
+        // `conflict_answer_budget_bytes`, measured against the frame that has
+        // to carry the answer; the write and delete branches that actually
+        // spend `object_id` and the moment ids run them through
+        // `validate_write_input` / `validate_delete_input`, which is where the
+        // engine-wide identifier bound lives (#654).
         validate_path_like_id(&input.workspace_id, "workspace_id")?;
         validate_path_like_id(&input.conflict_id, "conflict_id")?;
         let (resolution_kind, merged_text) = match &input.resolution {
@@ -1182,9 +1197,9 @@ pub fn write_binary_file_in_tx(
             reason: "binary file path is not a normalized tracked path",
         });
     }
-    validate_path_like_id(&input.workspace_id, "workspace id must not be empty")?;
-    validate_path_like_id(&input.version_id, "version id must not be empty")?;
-    validate_path_like_id(&input.object_id, "object id must not be empty")?;
+    validate_identifier(&input.workspace_id, "workspace_id")?;
+    validate_identifier(&input.version_id, "version_id")?;
+    validate_identifier(&input.object_id, "object_id")?;
     validate_moment_id(&input.moment_id)?;
     if !has_binary_blob(tx, &input.binary_sha256)? {
         return Err(DomainError::InvalidInput {

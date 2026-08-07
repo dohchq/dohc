@@ -1179,7 +1179,7 @@ enum Command {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<AppendOutcome, RuntimeError>>,
+        reply: oneshot::Sender<Result<YdocAppend, RuntimeError>>,
     },
     YdocSettle {
         root_dir: PathBuf,
@@ -3319,7 +3319,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<AppendOutcome, RuntimeError> {
+    ) -> Result<YdocAppend, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::YdocRecordUpdate {
@@ -9001,7 +9001,7 @@ fn ydoc_record_update_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<AppendOutcome, RuntimeError> {
+) -> Result<YdocAppend, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -9009,6 +9009,10 @@ fn ydoc_record_update_on_store(
     // must not strand a bare file_objects row for the deterministic object
     // id (which regular writes then treat as already existing).
     Ydoc::validate_update(update)?;
+    // The origination decision is made inside the append transaction and read
+    // after it commits, so a decline reported to the caller is one that
+    // actually survived the commit.
+    let mut sharing_declined: Option<SharingDeclined> = None;
     // A replicated, base-claimed lineage journals the ydoc.update DELTA in
     // the SAME transaction as the append (blob-before-log holds; TS parity:
     // ydocEngineDriver journals inside the recordUpdate write). Local-only
@@ -9033,13 +9037,21 @@ fn ydoc_record_update_on_store(
         request_id.as_deref(),
         faults,
         now_ms,
-        move |tx, outcome| {
+        |tx, outcome| {
             // Origination is asked FIRST and owns the base-once decision: it
-            // returns a sha only for a lineage that has no base yet. The base
-            // is a full state, so it already carries this append and every row
-            // the lineage held before it — a delta beside it would be
-            // redundant. Everything else journals its delta.
-            if let Some(base_sha) = ydoc_originate_base_in_tx(tx, &journal_key, now_ms)? {
+            // originates only a lineage that has no base yet. The base is a
+            // full state, so it already carries this append and every row the
+            // lineage held before it — a delta beside it would be redundant.
+            // Everything else journals its delta.
+            let base_sha = match ydoc_originate_base_in_tx(tx, &journal_key, now_ms)? {
+                BaseOrigination::Originated { base_snapshot_sha } => Some(base_snapshot_sha),
+                BaseOrigination::Declined(reason) => {
+                    sharing_declined = Some(reason);
+                    None
+                }
+                BaseOrigination::NothingToDo => None,
+            };
+            if let Some(base_sha) = base_sha {
                 dohc_engine_sync::journal_local_op_in_tx(
                     tx,
                     &journal_key.workspace_id,
@@ -9087,14 +9099,62 @@ fn ydoc_record_update_on_store(
             Ok(())
         },
     )? {
-        TxnOutcome::Committed(outcome) => Ok(outcome),
+        TxnOutcome::Committed(outcome) => Ok(YdocAppend {
+            outcome,
+            sharing_declined,
+        }),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }
 
+/// One recorded Y.Doc append, and what its origination attempt decided.
+///
+/// The append itself is [`AppendOutcome`]. `sharing_declined` is `Some` only
+/// when this edit COULD have originated the lineage and did not — the edit
+/// committed either way. The four ordinary reasons a lineage does not
+/// originate stay silent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YdocAppend {
+    pub outcome: AppendOutcome,
+    pub sharing_declined: Option<SharingDeclined>,
+}
+
+/// Why a lineage that could otherwise share does not: it is too large to
+/// encode as a base. Names the constraint, the configured limit, the unit and
+/// the observed size, because the caller cannot act on "it did not happen".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharingDeclined {
+    pub constraint: &'static str,
+    pub limit_bytes: usize,
+    pub observed_bytes: usize,
+}
+
+impl std::fmt::Display for SharingDeclined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "document too large to share: {} allows {} bytes, observed {} bytes of encoded base \
+             state. The edit is saved and markdown stays this document's artifact.",
+            self.constraint, self.limit_bytes, self.observed_bytes
+        )
+    }
+}
+
+/// What an origination attempt decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BaseOrigination {
+    /// The lineage originated. Journal this base.
+    Originated { base_snapshot_sha: String },
+    /// Nothing to originate, and nothing to report: no marker, a base already
+    /// claimed, a workspace that does not replicate, or a dependency a later
+    /// append will resolve. All four are ordinary and stay silent.
+    NothingToDo,
+    /// The lineage could have originated and did not. The edit still commits.
+    Declined(SharingDeclined),
+}
+
 /// Claim the base that ORIGINATES `key`'s replicated lineage, inside the
-/// append transaction that triggered it. Returns the base blob sha to journal,
-/// or `None` when this lineage must not originate.
+/// append transaction that triggered it.
 ///
 /// Encoding inside the claim transaction is what makes the claim race-free.
 /// SQLite serializes writers, so no append can land between the encode and the
@@ -9106,13 +9166,13 @@ fn ydoc_originate_base_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     now_ms: i64,
-) -> Result<Option<String>, dohc_engine_collab::CollabError> {
+) -> Result<BaseOrigination, dohc_engine_collab::CollabError> {
     let Some(marker) = dohc_engine_collab::read_marker_in_tx(tx, key)? else {
-        return Ok(None);
+        return Ok(BaseOrigination::NothingToDo);
     };
     // Base-once. A claimed lineage journals deltas, never a second base.
     if marker.base_claimed {
-        return Ok(None);
+        return Ok(BaseOrigination::NothingToDo);
     }
     // This workspace does not replicate with a relay, so nothing here has a
     // peer: the lineage stays local-only, keeps markdown as its artifact, and
@@ -9126,12 +9186,12 @@ fn ydoc_originate_base_in_tx(
             reason: format!("relay replication probe failed: {error}"),
         },
     )? {
-        return Ok(None);
+        return Ok(BaseOrigination::NothingToDo);
     }
     let Some(encoded) = dohc_engine_collab::encode_origination_base_in_tx(tx, key)? else {
         // An unresolved dependency: a full-state encode would drop the pending
         // row. A later append retries once the predecessor lands.
-        return Ok(None);
+        return Ok(BaseOrigination::NothingToDo);
     };
     // `claim_base_in_tx` measures the base against MAX_YDOC_UPDATE_BYTES, a cap
     // written for ONE update. A base is a full state, so a lineage that grew
@@ -9142,8 +9202,16 @@ fn ydoc_originate_base_in_tx(
     // Decline to originate instead. The edit commits, the lineage stays
     // local-only, and markdown remains its artifact. #549 owns the measured
     // base-specific bound that replaces this check.
+    //
+    // The decline is REPORTED, not silent (#632): it is the one branch here a
+    // user could act on, and it is indistinguishable from the four benign ones
+    // unless it says so.
     if encoded.base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
-        return Ok(None);
+        return Ok(BaseOrigination::Declined(SharingDeclined {
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
+            observed_bytes: encoded.base.len(),
+        }));
     }
     // The marker's OWN kind, never the caller's: the kind belongs to the
     // lineage, and `claim_base_in_tx` upserts whatever it is handed. The append
@@ -9159,12 +9227,12 @@ fn ydoc_originate_base_in_tx(
         now_ms,
     )? {
         dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha } => {
-            Ok(Some(base_snapshot_sha))
+            Ok(BaseOrigination::Originated { base_snapshot_sha })
         }
         // Unreachable: `base_claimed` was false in this same transaction and
         // no other writer can interleave. Harmless if it ever is — the lineage
         // has its base, and base-once forbids a second.
-        dohc_engine_collab::ClaimOutcome::Resumed => Ok(None),
+        dohc_engine_collab::ClaimOutcome::Resumed => Ok(BaseOrigination::NothingToDo),
     }
 }
 

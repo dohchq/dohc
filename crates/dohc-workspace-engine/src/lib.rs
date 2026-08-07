@@ -7306,6 +7306,17 @@ impl EngineService {
                     }
                 })?
         };
+        // A lineage that could have started sharing and did not is the one
+        // origination outcome a person can act on, so it does not pass in
+        // silence (#632). The wire result reports the append; stderr keeps the
+        // server-side trail, the same split the post-commit materialize path
+        // uses. The per-document sharing surface that will show this to the
+        // user arrives with #356 — until a workspace can replicate at all,
+        // there is nothing for it to sit beside.
+        if let Some(declined) = &outcome.sharing_declined {
+            eprintln!("engine: {declined}");
+        }
+        let outcome = outcome.outcome;
         serde_json::to_value(YdocRecordUpdateResult {
             seq: outcome.seq,
             deduped: outcome.deduped,
@@ -11232,21 +11243,24 @@ fn map_runtime(error: RuntimeError) -> WireError {
     // The rejections whose message carries numbers. `wire` takes a static
     // string, so the generic tail below would replace them with a placeholder —
     // and a size refusal that drops its limit and usage is the one an agent
-    // cannot act on (AGENTS.md: show agents the limits they hit).
-    if let RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) = &error {
-        return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
-    }
-    if let RuntimeError::Domain(domain @ DomainError::PayloadTooLarge { .. }) = &error {
-        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
-    }
-    // Same reason: this refusal names a constraint, a limit, a unit and an
-    // observed size, and `wire` takes a static string.
-    if let RuntimeError::Domain(domain @ DomainError::ConflictMetadataTooLarge { .. }) = &error {
-        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
-    }
-    if let RuntimeError::Domain(domain @ DomainError::ConflictResolveAnswerTooLarge { .. }) = &error
-    {
-        return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
+    // cannot act on (AGENTS.md: show agents the limits they hit). Each of these
+    // names a constraint, a limit, a unit and an observed size (the identifier
+    // one also names the field, #654). One code for all of them —
+    // `PayloadTooLarge` means "what you sent is past a size limit", whichever
+    // part of it was.
+    match &error {
+        RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) => {
+            return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
+        }
+        RuntimeError::Domain(
+            domain @ (DomainError::PayloadTooLarge { .. }
+            | DomainError::ConflictMetadataTooLarge { .. }
+            | DomainError::ConflictResolveAnswerTooLarge { .. }
+            | DomainError::IdentifierTooLong { .. }),
+        ) => {
+            return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
+        }
+        _ => {}
     }
     if let RuntimeError::Domain(domain) = &error {
         let message = match domain {

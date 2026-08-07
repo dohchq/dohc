@@ -108,6 +108,22 @@ pub enum DomainError {
         observed_bytes: usize,
     },
 
+    /// An identifier a caller minted passed the engine-wide length bound.
+    /// Every such identifier is echoed by the answer that reports the write —
+    /// an object id rides a write answer three times — so an unbounded one
+    /// turns a request that fits its frame into a response that cannot.
+    /// Carries the numbers because a caller that cannot see them cannot tell a
+    /// one-byte overrun from a megabyte of junk.
+    #[error(
+        "identifier {field} exceeds MAX_IDENTIFIER_BYTES: limit {limit_bytes} bytes, \
+         observed {observed_bytes} bytes"
+    )]
+    IdentifierTooLong {
+        field: &'static str,
+        limit_bytes: usize,
+        observed_bytes: usize,
+    },
+
     /// The path failed validation (empty, or a reserved/secret path).
     #[error("invalid path: {reason}")]
     InvalidPath { reason: &'static str },
@@ -210,6 +226,7 @@ impl DomainError {
             DomainError::ConflictStaleTarget => "conflict-stale-target",
             DomainError::InvalidText { .. } => "invalid-text",
             DomainError::PayloadTooLarge { .. } => "payload-too-large",
+            DomainError::IdentifierTooLong { .. } => "identifier-too-long",
             DomainError::InvalidPath { .. } => "invalid-path",
             DomainError::NotSecretPath => "not-secret-path",
             DomainError::InvalidInput { .. } => "invalid-input",
