@@ -14,9 +14,15 @@
 //    only — a quote or a list. An ordered list interrupts only when it counts
 //    from 1, because `2.` under a paragraph is that paragraph's own text.
 //  - Some blocks RUN THROUGH a blank line, because the next line continues
-//    them: another item of the same list, content indented into that item,
-//    and the next chunk of an indented code block.
-//  - A fence's contents are inert. Blank lines and `#` inside one are code.
+//    them: another item of the SAME list (a changed marker is a new list),
+//    content indented into that item, and the next chunk of an indented code
+//    block. A quoted blank ends a quote's lazy continuation the same way,
+//    without ending the quote.
+//  - A fence's contents are inert, and so are a `$$…$$` block's. Blank lines
+//    and `#` inside either are that block's own text.
+//  - A link reference definition renders NO node, so it starts no block. A
+//    hit on one lands on the block above it, as any other gap does — there is
+//    nothing of its own to show the reader.
 //
 // That is the top-level shape of an ordinary document, not of every document
 // CommonMark can express — a jump can land a block off. It still shows the
@@ -47,9 +53,12 @@ type BlockKind =
   | "other";
 
 const HEADING_RE = /^[ \t]{0,3}#{1,6}(?:[ \t]|$)/;
-const BULLET_RE = /^[ \t]{0,3}[-+*](?:[ \t]|$)/;
-const ORDERED_RE = /^[ \t]{0,3}\d{1,9}[.)](?:[ \t]|$)/;
+// The captured marker is the list's identity: changing it starts a NEW list.
+const BULLET_RE = /^[ \t]{0,3}([-+*])(?:[ \t]|$)/;
+const ORDERED_RE = /^[ \t]{0,3}\d{1,9}([.)])(?:[ \t]|$)/;
 const QUOTE_RE = /^[ \t]{0,3}>/;
+// A `>`-only line ends the quote's LAZY continuation without ending the quote.
+const QUOTED_BLANK_RE = /^[ \t]{0,3}>[ \t]*$/;
 const FENCE_RE = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/;
 // A run of `=` or `-` under a paragraph is that paragraph's setext underline.
 const SETEXT_RE = /^[ \t]{0,3}(?:=+|-+)[ \t]*$/;
@@ -66,8 +75,33 @@ const BREAK_RE = /^[ \t]{0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}
 // A list can interrupt a paragraph, but an ORDERED one only when it counts
 // from 1: `2.` under a paragraph is that paragraph's own text.
 const INTERRUPTING_ORDERED_RE = /^[ \t]{0,3}1[.)](?:[ \t]|$)/;
+// `[label]: destination "title"` renders NO node — it is metadata the links
+// resolve through (editor/extensions.ts leaves it to the tokenizer). A label
+// and a destination are both required; four columns makes it code instead.
+const DEFINITION_RE = /^[ \t]{0,3}\[[^\]]+\]:[ \t]*\S/;
+// A definition's title may sit alone on the next line, indented.
+const DEFINITION_TITLE_RE = /^[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\))[ \t]*$/;
 
 type Fence = { marker: string; length: number };
+
+/** The line index where a standalone `$$…$$` block ends, or null when the
+ *  line does not open one. `editor/extensions.ts` anchors the opener at
+ *  column 0 and needs the FIRST `$$` after it to end a line — anything else
+ *  is literal text, so an unclosed `$$` is not math and claims nothing. */
+function mathBlockEnd(lines: string[], start: number): number | null {
+  if (!(lines[start] ?? "").startsWith("$$")) return null;
+  for (let index = start; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const closing = line.indexOf("$$", index === start ? 2 : 0);
+    if (closing === -1) continue;
+    return closing + 2 === line.length ? index : null;
+  }
+  return null;
+}
+
+function listMarker(text: string): string {
+  return (BULLET_RE.exec(text)?.[1] ?? ORDERED_RE.exec(text)?.[1]) ?? "";
+}
 
 function blockKind(text: string): BlockKind {
   if (HEADING_RE.test(text)) return "heading";
@@ -105,10 +139,21 @@ function blockStartLines(body: string): number[] {
   const starts: number[] = [];
   let open = false;
   let openKind: BlockKind = "other";
+  let openMarker = "";
+  let quoteOpen = false;
   let fence: Fence | null = null;
+  let mathUntil: number | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
     const text = lines[index] ?? "";
+    if (mathUntil !== null) {
+      // One atomic node, blank lines and all, ending at its closing `$$`.
+      if (index >= mathUntil) {
+        mathUntil = null;
+        open = false;
+      }
+      continue;
+    }
     if (fence) {
       // A fenced block ends AT its closing fence, the way a heading ends at
       // its own line: the next line opens its own block, blank line or not.
@@ -120,6 +165,7 @@ function blockStartLines(body: string): number[] {
     }
     if (text.trim() === "") {
       open = false;
+      quoteOpen = false;
       continue;
     }
     // A setext underline makes the OPEN paragraph a heading and ends it — the
@@ -129,16 +175,34 @@ function blockStartLines(body: string): number[] {
       open = false;
       continue;
     }
+    // A quoted blank ends the quote's lazy continuation: the next unquoted
+    // line is a new block, while the next `>` line is still this one.
+    if (openKind === "quote" && QUOTED_BLANK_RE.test(text)) {
+      open = false;
+      quoteOpen = true;
+      continue;
+    }
+    // A definition renders nothing, so it starts no block. Under an OPEN
+    // paragraph it is not a definition at all, just that paragraph's text.
+    if (!open && DEFINITION_RE.test(text)) {
+      if (DEFINITION_TITLE_RE.test(lines[index + 1] ?? "")) index += 1;
+      continue;
+    }
     const kind = blockKind(text);
+    const marker = listMarker(text);
     const listOpen = openKind === "bullet" || openKind === "ordered";
     const opener = fenceOpener(text);
+    const mathClose = mathBlockEnd(lines, index);
     // A blank line does not end a block the next line continues: another item
     // of the same list, content indented into that item, or the next chunk of
     // an indented code block. A fence indented into a list item is one of
     // those continuations, which is why this is read before the starts below.
     const resumes =
-      (listOpen && (kind === openKind || CONTINUATION_RE.test(text))) ||
-      (openKind === "code" && kind === "code");
+      (listOpen &&
+        ((kind === openKind && marker === openMarker) ||
+          CONTINUATION_RE.test(text))) ||
+      (openKind === "code" && kind === "code") ||
+      (quoteOpen && kind === "quote");
     // Indented code ends where the indentation stops, blank line or not — the
     // same "ends at its own last line" shape a heading and a fence have. It
     // cannot START under an open paragraph: there an indented line is that
@@ -149,21 +213,31 @@ function blockStartLines(body: string): number[] {
     // is that block's own next line, not a new one.
     const interrupts =
       !!opener ||
+      mathClose !== null ||
       kind === "break" ||
       leavesCode ||
       (open &&
         openKind === "other" &&
         (kind === "bullet" ||
           kind === "quote" ||
-          (kind === "ordered" && INTERRUPTING_ORDERED_RE.test(text))));
+          (kind === "ordered" && INTERRUPTING_ORDERED_RE.test(text)))) ||
+      // A bullet whose marker changes starts a new list on the spot.
+      (open && openKind === "bullet" && kind === "bullet" && marker !== openMarker);
     if (kind === "heading" || ((interrupts || !open) && !resumes)) {
       starts.push(index + 1);
       openKind = kind;
+      openMarker = marker;
+      quoteOpen = false;
     }
     // An ATX heading and a thematic break are one line each. The next line
     // opens its own block, blank line or not — `# Plan\nBody` is two nodes.
     open = kind !== "heading" && kind !== "break";
     fence = opener;
+    // A `$$…$$` block spanning lines swallows them; a one-line one ends here.
+    if (mathClose !== null) {
+      if (mathClose > index) mathUntil = mathClose;
+      else open = false;
+    }
   }
   return starts;
 }

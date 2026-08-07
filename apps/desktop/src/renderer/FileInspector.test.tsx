@@ -1803,6 +1803,67 @@ describe("engine markdown source view", () => {
     expect(flashedBlockText()).toBeUndefined();
   });
 
+  // codex round 5 on b65c469f. The window BEFORE the line is even mapped. An
+  // engine document that is still opening has nothing to map against (#533),
+  // so the line waits — and the round-2 guard retired only the mapped target.
+  // A version switch arriving in that window left the line to be mapped
+  // against the body of a version the reader never searched.
+  it("drops a jump waiting on the engine open when the version switches", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    let releaseOpen = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseOpen = () => resolve();
+    });
+    let opens = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
+        opens += 1;
+        // The first open never answers until the switch has happened.
+        if (opens === 1) await held;
+        return bridgeMock.openEngineYDocSession(payload);
+      }),
+    });
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(opens).toBe(1));
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    releaseOpen();
+    await waitFor(() => expect(opens).toBe(2));
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // MUTATION: clear only blockTarget on the reopen -> the line survives, the
+    // new session binds, and the jump lands on the version nobody searched.
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(flashedBlockText()).toBeUndefined();
+  });
+
   // codex on 76298ccd. A version switch drops the bound Y.Doc while the
   // reopen runs (useEngineDoc), which unmounts this editor. The instance that
   // replaces it has no memory of having applied anything, so a target still

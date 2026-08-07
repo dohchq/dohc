@@ -206,6 +206,71 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine(body, 5)).toBe(1);
   });
 
+  it("gives a display-math block one block, blank lines included", () => {
+    // 1 "$$"  2 "x = 1"  3 ""  4 "y = 2"  5 "$$"  6 ""  7 "After" — the
+    // editor renders ONE atomic mathBlock, so the inner blank starts nothing.
+    const body = "$$\nx = 1\n\ny = 2\n$$\n\nAfter";
+    expect(blockIndexForLine(body, 4)).toBe(0);
+    expect(blockIndexForLine(body, 7)).toBe(1);
+    // A one-line block interrupts a paragraph and ends on its own line.
+    expect(blockIndexForLine("Intro\n$$x$$\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("Intro\n$$x$$\nAfter", 3)).toBe(2);
+    expect(blockIndexForLine("$$a$$\n$$b$$\nAfter", 3)).toBe(2);
+  });
+
+  it("only reads math where the tokenizer does", () => {
+    // Indented, trailing text after the closer, and unclosed all stay text.
+    expect(blockIndexForLine("Intro\n\n  $$x$$\n\nAfter", 5)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n$$x$$ trailing\n\nAfter", 5)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n$$x\n\nAfter", 5)).toBe(2);
+  });
+
+  it("ends a quote's lazy continuation at a quoted blank", () => {
+    // 1 "> a"  2 ">"  3 "Matched" — the `>`-only line stops the quote from
+    // swallowing line 3, which the editor renders as its own paragraph.
+    expect(blockIndexForLine("> a\n>\nMatched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("> a\n> \nMatched\n\nAfter", 3)).toBe(1);
+    // Without one, an unquoted line still continues the quote.
+    expect(blockIndexForLine("> a\nMatched\n\nAfter", 2)).toBe(0);
+    // And the quote itself survives its own blank: `> b` is the same block.
+    expect(blockIndexForLine("> a\n>\n> b\n\nAfter", 3)).toBe(0);
+    // An UNQUOTED blank still splits one quote into two.
+    expect(blockIndexForLine("> one\n\n> two\n\nAfter", 3)).toBe(1);
+  });
+
+  it("starts a new list when the marker changes", () => {
+    expect(blockIndexForLine("- one\n\n* two\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("- one\n* two", 2)).toBe(1);
+    expect(blockIndexForLine("- one\n+ two", 2)).toBe(1);
+    expect(blockIndexForLine("- a\n\n* b\n\n- c\n\nAfter", 5)).toBe(2);
+    // An ordered list's delimiter counts the same way across a blank line.
+    expect(blockIndexForLine("1. a\n\n2) b\n\nAfter", 3)).toBe(1);
+    // The same marker still resumes, and an indented one is a nested list.
+    expect(blockIndexForLine("- one\n\n- two\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("1. a\n\n2. b\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("- a\n\n  * b\n\nAfter", 3)).toBe(0);
+  });
+
+  it("counts no block for a link reference definition", () => {
+    // The definition renders nothing, so it must not shift what follows.
+    const body = "Intro\n\n[docs]: https://e.com\n\nAfter";
+    expect(blockIndexForLine(body, 5)).toBe(1);
+    // A hit ON the definition lands on the block above it, as any gap does.
+    expect(blockIndexForLine(body, 3)).toBe(0);
+    // Titles, on the line or under it, are part of the same invisible block.
+    expect(blockIndexForLine('Intro\n\n[a]: https://a.com "T"\n\nAfter', 5)).toBe(1);
+    expect(blockIndexForLine('Intro\n\n[a]: https://a.com\n  "T"\n\nAfter', 6)).toBe(1);
+  });
+
+  it("only drops a definition where the tokenizer resolves one", () => {
+    // No label, no destination, and four columns of indent are all content.
+    expect(blockIndexForLine("Intro\n\n[]: https://a.com\n\nAfter", 5)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n[a]:\n\nAfter", 5)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n    [a]: https://a.com\n\nAfter", 5)).toBe(2);
+    // Inside an OPEN paragraph it is that paragraph's own text, not metadata.
+    expect(blockIndexForLine("Intro\n[a]: https://a.com\n\nAfter", 4)).toBe(1);
+  });
+
   it("reads CRLF documents with the same line numbers", () => {
     const body = "First\r\n\r\nSecond\r\n\r\nThird";
     expect(blockIndexForLine(body, 5)).toBe(2);
@@ -222,7 +287,11 @@ function editorBlocks(body: string): string[] {
     getDohcProseMirrorSchema(),
   );
   const texts: string[] = [];
-  root.forEach((node) => texts.push(node.textContent));
+  // An ATOM (display math) carries no text children — what it shows the
+  // reader is its `tex` attribute, so read that when there is no text.
+  root.forEach((node) =>
+    texts.push(node.textContent || String(node.attrs?.tex ?? "")),
+  );
   return texts;
 }
 
@@ -539,6 +608,128 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
         [1, "Intro"],
         [3, "b"],
         [5, "After"],
+      ],
+    },
+    {
+      name: "a display-math block is one node across its blank lines",
+      body: "$$\nx = 1\n\ny = 2\n$$\n\nAfter",
+      lands: [
+        [4, "y = 2"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "a one-line math block interrupts a paragraph",
+      body: "Intro\n$$x$$\nAfter",
+      lands: [
+        [1, "Intro"],
+        [2, "x"],
+        [3, "After"],
+      ],
+    },
+    {
+      name: "an indented $$ is not math",
+      body: "Intro\n\n  $$x$$\n\nAfter",
+      lands: [
+        [3, "$$x$$"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "an unclosed $$ is not math",
+      body: "Intro\n\n$$x\n\nAfter",
+      lands: [
+        [3, "$$x"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a quoted blank ends the quote's lazy continuation",
+      body: "> a\n>\nMatched\n\nAfter",
+      lands: [
+        [1, "a"],
+        [3, "Matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a callout's quoted blank does the same",
+      body: "> [!note]\n>\nMatched\n\nAfter",
+      lands: [
+        [3, "Matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a quote survives its own quoted blank",
+      body: "> a\n>\n> b\n\nAfter",
+      lands: [
+        [3, "b"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a bullet marker change starts a new list",
+      body: "- one\n\n* two\n\nAfter",
+      lands: [
+        [1, "one"],
+        [3, "two"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a bullet marker change needs no blank line",
+      body: "- one\n* two",
+      lands: [
+        [1, "one"],
+        [2, "two"],
+      ],
+    },
+    {
+      name: "an ordered delimiter change starts a new list",
+      body: "1. a\n\n2) b\n\nAfter",
+      lands: [
+        [1, "a"],
+        [3, "b"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "three lists, two marker changes",
+      body: "- a\n\n* b\n\n- c\n\nAfter",
+      lands: [
+        [3, "b"],
+        [5, "c"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "a link reference definition renders no node",
+      body: "Intro\n\n[docs]: https://e.com\n\nAfter",
+      lands: [
+        [1, "Intro"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a definition's title line goes with it",
+      body: 'Intro\n\n[a]: https://a.com\n  "T"\n\nAfter',
+      lands: [
+        [1, "Intro"],
+        [6, "After"],
+      ],
+    },
+    {
+      name: "a trailing cluster of definitions renders nothing",
+      body: "Text\n\n[a]: https://a.com\n[b]: https://b.com",
+      lands: [[1, "Text"]],
+    },
+    {
+      name: "a definition inside a paragraph is that paragraph's text",
+      body: "Intro\n[a]: https://a.com\n\nAfter",
+      lands: [
+        [2, "https://a.com"],
+        [4, "After"],
       ],
     },
     {

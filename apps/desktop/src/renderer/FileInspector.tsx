@@ -926,14 +926,17 @@ function MarkdownView(props: {
   const retireBlockTarget = useCallback((nonce: number) => {
     setBlockTarget((current) => (current?.nonce === nonce ? null : current));
   }, []);
-  // A version switch retires a jump the editor has not landed yet. Reporting
-  // back covers the applied one; this covers the window before that, where the
+  // A version switch retires a jump that has not landed yet. Reporting back
+  // covers the applied one; this covers everything before that, where the
   // reopen unbinds the Y.Doc and the editor that remounts on the new version
-  // would land an index mapped against the version the reader left.
-  const blockTargetReopenKey = useRef(props.reopenKey);
-  if (props.reopenKey !== blockTargetReopenKey.current) {
-    blockTargetReopenKey.current = props.reopenKey;
+  // would land a line the reader numbered against the version they left.
+  // BOTH states go: the line still waiting to be mapped (a document still
+  // opening has nothing to map against yet, #533) and the mapped block index.
+  const jumpReopenKey = useRef(props.reopenKey);
+  if (props.reopenKey !== jumpReopenKey.current) {
+    jumpReopenKey.current = props.reopenKey;
     if (blockTarget) setBlockTarget(null);
+    if (pendingScrollLine !== null) setPendingScrollLine(null);
   }
   const scrollTargetNonce = props.scrollTarget?.nonce;
   useEffect(() => {
