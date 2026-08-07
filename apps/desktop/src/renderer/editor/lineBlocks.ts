@@ -26,14 +26,18 @@
 //    follows it and takes a continuation at any indent. That leniency is the
 //    tokenizer's, measured; `1)` behaves like a bullet instead.
 //  - A quote absorbs an UNQUOTED line as a lazy continuation until something
-//    inside it ends that: a quoted blank or a quoted fence for any quote, and
-//    for a callout every quoted block start. The quote itself survives — the
-//    next `>` line is still the same node.
+//    ends that. Inside it: a quoted blank or a quoted fence for any quote, and
+//    for a callout every quoted block start. On the unquoted line itself: a
+//    list marker or raw HTML, where again a callout breaks on any ordered
+//    number and a plain quote wants one that counts from 1. Those two sets
+//    were measured apart and do not match. The quote itself survives either —
+//    the next `>` line is still the same node.
 //  - A fence's contents are inert, and so are a `$$…$$` block's. Blank lines
 //    and `#` inside either are that block's own text.
-//  - A link reference definition renders NO node, so it starts no block. A
-//    hit on one lands on the block above it, as any other gap does — there is
-//    nothing of its own to show the reader.
+//  - A link reference definition renders NO node, so it starts no block —
+//    label, the destination under it if it is not on the label's own line,
+//    and a title under that. A hit on one lands on the block above it, as any
+//    other gap does; there is nothing of its own to show the reader.
 //
 // That is the top-level shape of an ordinary document, not of every document
 // CommonMark can express — a jump can land a block off. It still shows the
@@ -98,10 +102,10 @@ const BREAK_RE = /^[ \t]{0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}
 // from 1: `2.` under a paragraph is that paragraph's own text.
 const INTERRUPTING_ORDERED_RE = /^[ \t]{0,3}1[.)](?:[ \t]|$)/;
 // `[label]: destination "title"` renders NO node — it is metadata the links
-// resolve through (editor/extensions.ts leaves it to the tokenizer). A label
-// and a destination are both required; four columns makes it code instead.
-const DEFINITION_RE = /^[ \t]{0,3}\[[^\]]+\]:[ \t]*\S/;
-// A definition's title may sit alone on the next line, indented.
+// resolve through (editor/extensions.ts leaves it to the tokenizer). Four
+// columns makes it code instead.
+const DEFINITION_LABEL_RE = /^[ \t]{0,3}\[[^\]]+\]:[ \t]*/;
+// A definition's title may sit alone on its own line, indented.
 const DEFINITION_TITLE_RE = /^[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\))[ \t]*$/;
 // A table's DELIMITER row is what tells its header row apart from an ordinary
 // paragraph, so the header is only a header when this follows it. Leading and
@@ -153,6 +157,23 @@ function mathBlockEnd(lines: string[], start: number): number | null {
     return closing + 2 === line.length ? index : null;
   }
   return null;
+}
+
+/** The LAST line of a link reference definition starting at `start`, or null
+ *  when there is none. The destination may sit on the line under the label
+ *  and the title under that; the whole run renders no node. A label with
+ *  nothing under it is ordinary text. */
+function definitionEnd(lines: string[], start: number): number | null {
+  const line = lines[start] ?? "";
+  const label = DEFINITION_LABEL_RE.exec(line);
+  if (!label) return null;
+  let last = start;
+  if (!/\S/.test(line.slice(label[0].length))) {
+    if ((lines[start + 1] ?? "").trim() === "") return null;
+    last = start + 1;
+  }
+  if (DEFINITION_TITLE_RE.test(lines[last + 1] ?? "")) last += 1;
+  return last;
 }
 
 function listMarker(text: string): string {
@@ -279,7 +300,13 @@ export function blockIndexForLine(body: string, line: number): number {
     // A setext underline makes the OPEN paragraph a heading and ends it — the
     // same one-line shape an ATX heading has, so `Title\n===\nBody` is two
     // nodes. Read before the kinds below, because a lone `-` is also a bullet.
-    if (open && openKind === "other" && SETEXT_RE.test(text)) {
+    // Four COLUMNS in it underlines nothing: the paragraph just continues.
+    if (
+      open &&
+      openKind === "other" &&
+      leadingColumns(text) < CODE_COLUMNS &&
+      SETEXT_RE.test(text)
+    ) {
       open = false;
       continue;
     }
@@ -318,8 +345,9 @@ export function blockIndexForLine(body: string, line: number): number {
     }
     // A definition renders nothing, so it starts no block. Under an OPEN
     // paragraph it is not a definition at all, just that paragraph's text.
-    if (!open && DEFINITION_RE.test(text)) {
-      if (DEFINITION_TITLE_RE.test(lines[index + 1] ?? "")) index += 1;
+    const definition = open ? null : definitionEnd(lines, index);
+    if (definition !== null) {
+      index = definition;
       continue;
     }
     const kind = opensTable(text, lines[index + 1] ?? "")
@@ -374,6 +402,17 @@ export function blockIndexForLine(body: string, line: number): number {
         (kind === "quote" ||
           ((kind === "bullet" || kind === "ordered") &&
             (kind !== openKind || marker !== openMarker)))) ||
+      // An UNQUOTED line under a lazily-continuing quote. This is not the
+      // quoted-body break set (round 7) and was measured apart from it: here
+      // the two kinds agree except on an ordered list, where a callout breaks
+      // on any number and a plain quote wants one that counts from 1. Display
+      // math and indented code are absorbed by both.
+      (open &&
+        openKind === "quote" &&
+        (kind === "bullet" ||
+          HTML_BLOCK_RE.test(text) ||
+          (kind === "ordered" &&
+            (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
       // Indented, but not far enough to reach the open item's content. Column
       // zero would be a lazy continuation of it; this is neither.
       (open && listOpen && indent > 0 && indent < openIndent);

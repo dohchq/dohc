@@ -461,6 +461,49 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine('Intro\n\n[a]: https://a.com\n  "T"\n\nAfter', 6)).toBe(1);
   });
 
+  it("takes a definition whose destination sits on the next line", () => {
+    // `[docs]:` then the destination under it renders no node either, so the
+    // pair must not shift what follows.
+    expect(blockIndexForLine("Intro\n\n[docs]:\n  https://e.com\n\nAfter", 6)).toBe(1);
+    expect(blockIndexForLine("Intro\n\n[docs]:\nhttps://e.com\n\nAfter", 6)).toBe(1);
+    // And a title under THAT is still the same invisible run.
+    expect(
+      blockIndexForLine('Intro\n\n[docs]:\n  https://e.com\n  "T"\n\nAfter', 7),
+    ).toBe(1);
+    // A bare label with nothing under it is ordinary text.
+    expect(blockIndexForLine("Intro\n\n[docs]:\n\nAfter", 5)).toBe(2);
+  });
+
+  it("ends a quote's lazy continuation at an unquoted block marker", () => {
+    // The reverse of a list being ended BY a quote: an unquoted list marker
+    // under a lazily-continuing quote starts its own block.
+    expect(blockIndexForLine("> intro\n- matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("> intro\n* matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("> intro\n1. matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("> intro\n<div>\n\nAfter", 2)).toBe(1);
+    // Measured apart from the quoted-body break set: a CALLOUT breaks on any
+    // ordered number, a plain quote only on one that counts from 1.
+    expect(blockIndexForLine("> intro\n2. matched\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("> [!note]\n2. matched\n\nAfter", 2)).toBe(1);
+    // A callout header followed straight by a marker ends there too.
+    expect(blockIndexForLine("> [!note]\n- matched\n\nAfter", 2)).toBe(1);
+    // Both absorb display math, indented code and plain text.
+    expect(blockIndexForLine("> intro\n$$x$$\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("> [!note]\n$$x$$\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("> intro\n    code\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("> intro\nmore text\n\nAfter", 2)).toBe(0);
+  });
+
+  it("does not underline a paragraph from four columns in", () => {
+    // `\t===` reaches column four, so it is the paragraph's own text and the
+    // paragraph runs on. Three columns still underlines.
+    expect(blockIndexForLine("Title\n\t===\nBody", 3)).toBe(0);
+    expect(blockIndexForLine("Title\n\t---\nBody", 3)).toBe(0);
+    expect(blockIndexForLine("Title\n \t===\nBody", 3)).toBe(0);
+    expect(blockIndexForLine("Title\n   ===\nBody", 3)).toBe(1);
+    expect(blockIndexForLine("Title\n===\nBody", 3)).toBe(1);
+  });
+
   it("only drops a definition where the tokenizer resolves one", () => {
     // No label, no destination, and four columns of indent are all content.
     expect(blockIndexForLine("Intro\n\n[]: https://a.com\n\nAfter", 5)).toBe(2);
@@ -1282,6 +1325,62 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
         [2, "item"],
         [4, "After"],
       ],
+    },
+    {
+      name: "a definition's destination may sit on the next line",
+      body: "Intro\n\n[docs]:\n  https://e.com\n\nAfter",
+      lands: [
+        [1, "Intro"],
+        [6, "After"],
+      ],
+    },
+    {
+      name: "a bare label with nothing under it is ordinary text",
+      body: "Intro\n\n[docs]:\n\nAfter",
+      lands: [
+        [3, "[docs]:"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "an unquoted list marker ends a quote's lazy continuation",
+      body: "> intro\n- matched\n\nAfter",
+      lands: [
+        [1, "intro"],
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "a callout header followed straight by a marker ends there",
+      body: "> [!note]\n- matched\n\nAfter",
+      lands: [
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "a plain quote absorbs an ordered list that does not count from 1",
+      // Line 2 lands INSIDE the quote, whose text is "intro" and "matched"
+      // run together — the count above is what says it was not split out.
+      body: "> intro\n2. matched\n\nAfter",
+      lands: [
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "a callout breaks on that same line",
+      body: "> [!note]\n2. matched\n\nAfter",
+      lands: [
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "a tab-indented underline underlines nothing",
+      body: "Title\n\t===\nBody",
+      lands: [[3, "Title"]],
     },
     {
       name: "three columns is not an indented code block",
