@@ -2941,7 +2941,7 @@ it("a rename drains the detached locked debt before touching disk", async () => 
   // through a detached reopen, not left targeting a dead path.
   expect(state.settledMarkdowns).toEqual(["renamed edit"]);
   expect(state.generation).toBe(2);
-  await finish(true).catch(() => undefined);
+  await finish(true);
   await capture.stop();
 }, 20_000);
 
@@ -3217,7 +3217,7 @@ it("a directory move drains a detached debt under its prefix", async () => {
   const finish = await capture.beginFileRename("dir", "moved");
   // The descendant's debt was paid BEFORE the move proceeded.
   expect(state.settledMarkdowns).toEqual(["moved edit"]);
-  await finish(true).catch(() => undefined);
+  await finish(true);
   await capture.stop();
 }, 20_000);
 
@@ -3387,37 +3387,7 @@ it("a delete window that closes hands the debt back instead of stranding it", as
   // The very next drain lands it — no timer, no backoff, nothing stranded.
   const finish = await capture.beginFileRename("note.md", "renamed.md");
   expect(state.settledMarkdowns).toEqual(["survives the window"]);
-  await finish(true).catch(() => undefined);
-  await capture.stop();
-}, 20_000);
-
-it("a move window that closes hands the debt back, on the engine-rename finisher", async () => {
-  // A disk move can fail for the same reason the write did, so the move seam
-  // owes the same release the delete seam does — and it owes it from BOTH its
-  // finishers. This is the engine-rename one.
-  //
-  // MUTATION: drop `closeRemovalWindow()` from the engine-rename finisher ->
-  // the second rename refuses instead of settling.
-  const { capture, state, rootPath } = await lockedRebindCapture(
-    "dohc-ydoc-move-window-release-",
-  );
-  await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
-
-  const finishMove = await capture.beginFileRename("note.md", "moved.md");
-  const { session } = await openWithOneEdit(capture, "survives a failed move");
-  state.locked = true;
-  state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
-  state.locked = false;
-
-  // The disk move FAILED. The path is still there and still owes its write.
-  await finishMove(false);
-
-  const finish = await capture.beginFileRename("note.md", "renamed.md");
-  expect(state.settledMarkdowns).toEqual(["survives a failed move"]);
-  await finish(true).catch(() => undefined);
+  await finish(true);
   await capture.stop();
 }, 20_000);
 
@@ -3433,9 +3403,15 @@ it("a failed move holds its window across the rollback, not just up to it", asyn
   // ladder's payment queues behind it, and the finisher's rollback queues
   // behind the payment. Releasing the gate runs payment-then-rollback.
   //
-  // MUTATION: close the window before the rollback is enqueued -> the payment
-  // runs in the gap and `settledMarkdowns` already holds "written in the
-  // rollback gap" when the finisher resolves.
+  // TWO MUTATIONS, one per assertion, because this test owns both halves of
+  // the engine finisher's failure path:
+  //   - close the window before the rollback is enqueued -> the payment runs
+  //     in the gap and `settledMarkdowns` already holds the edit when the
+  //     finisher resolves.
+  //   - never close it -> the debt never discharges and the second assertion
+  //     times out. (This is why the separate engine-finisher release test was
+  //     dropped: verified subsumed, by running that mutation against this test
+  //     alone.)
   const { capture, state, rootPath } = await lockedRebindCapture(
     "dohc-ydoc-move-rollback-gap-",
   );
@@ -3522,7 +3498,7 @@ it("a move window that closes hands the debt back, on the no-op finisher", async
   // first one would have.
   const finish = await capture.beginFileRename("dir", "moved");
   expect(state.settledMarkdowns).toEqual(["survives a failed folder move"]);
-  await finish(true).catch(() => undefined);
+  await finish(true);
   await capture.stop();
 }, 20_000);
 

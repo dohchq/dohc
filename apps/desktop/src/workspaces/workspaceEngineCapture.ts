@@ -3981,18 +3981,17 @@ export function createWorkspaceEngineCapture(
       // (the path is still there and still owes its write).
       const match = (p: string) =>
         p === pathOrPrefix || p.startsWith(`${pathOrPrefix}/`);
-      // Held from the drain until the finisher reports the outcome, so a debt
-      // registered inside the window cannot settle the path mid-delete (#663).
-      // Nothing after the open can throw, so the finisher is the only closer
-      // this seam needs.
-      let closeRemovalWindow: () => void = () => undefined;
       return enqueueResult("close live session for destructive op", async () => {
         await settleAndCloseLiveYDocSessions(
           match,
           "Saved latest edits before removing the file",
         );
         const suspended = suspendDetachedDebts(match);
-        closeRemovalWindow = openRemovalWindow({
+        // Held from here until the finisher reports the outcome, so a debt
+        // registered inside the window cannot settle the path mid-delete
+        // (#663). Nothing after this line can throw, so the finisher is the
+        // only closer this seam needs.
+        const closeRemovalWindow = openRemovalWindow({
           match,
           inProgress: `dohc is still deleting ${pathOrPrefix}.`,
         });
@@ -5356,12 +5355,14 @@ export function createWorkspaceEngineCapture(
           inProgress: `dohc is still moving ${fromPath}.`,
         });
         const policy = await readPolicyForTask();
-        // Every path out of this method must fence the move, not just the
-        // engine-rename one: the disk move happens either way.
-        // Closed LAST, like every other finisher: the window may only end once
-        // the outcome is fully recorded. Nothing is appended to the chain here
-        // — no engine rename ran, so there is nothing to roll back.
-        const noop: WorkspaceEngineRenameFinisher = async (ok: boolean) => {
+        // THE OUTCOME, then the window — the one rule every finisher here
+        // follows. It serves both moves that leave nothing to undo: the ones
+        // the engine rename declined (folders, binary, untracked — the disk
+        // move still happens, so they still need the fence) and the ones that
+        // succeeded.
+        const finishWithoutRollback: WorkspaceEngineRenameFinisher = async (
+          ok: boolean,
+        ) => {
           if (ok) cancelDebtsRegisteredDuringTheMove();
           closeRemovalWindow();
         };
@@ -5372,14 +5373,16 @@ export function createWorkspaceEngineCapture(
           !policyTracksPath(fromPath, policy) ||
           !policyTracksPath(toPath, policy)
         ) {
-          return noop;
+          return finishWithoutRollback;
         }
         const toCheck = validateUserWritePath(toPath);
-        if (!toCheck.ok || toCheck.normalized !== toPath) return noop;
+        if (!toCheck.ok || toCheck.normalized !== toPath) {
+          return finishWithoutRollback;
+        }
         const engine = await engineStore();
         const versionId = await activeVersionIdOf(engine);
         const disk = await readDiskTextState(rootPath, fromPath);
-        if (disk.kind !== "text") return noop;
+        if (disk.kind !== "text") return finishWithoutRollback;
         try {
           // Sync the latest disk content first so the rename moment carries
           // exactly what moves on disk.
@@ -5402,18 +5405,16 @@ export function createWorkspaceEngineCapture(
           // destination already tracked) must never block the disk rename —
           // the watcher's plain capture takes over.
           onError(`prepare rename of ${fromPath}`, error);
-          return noop;
+          return finishWithoutRollback;
         }
         const cancel = registerExpectedEngineEvents([
           { path: fromPath, operation: "delete" },
           { path: toPath, operation: "write", sha256: disk.sha256 },
         ]);
         return async (ok: boolean) => {
-          if (ok) {
-            cancelDebtsRegisteredDuringTheMove();
-            closeRemovalWindow();
-            return;
-          }
+          // A move that landed has nothing to undo, so it ends exactly like
+          // one the engine never recorded.
+          if (ok) return finishWithoutRollback(true);
           cancel();
           // The disk move failed after the engine recorded the rename: rename
           // back so engine state keeps mirroring the folder. Forward history —
