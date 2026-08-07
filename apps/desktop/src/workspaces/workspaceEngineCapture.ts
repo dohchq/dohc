@@ -33,6 +33,7 @@ import {
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
   YdocReleasedWithSettleFailureError,
@@ -647,12 +648,18 @@ function isEngineStoreBusyCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isEngineStoreBusyRefusal);
 }
 
-// A teardown blocked by something that clears on its own. The close ladder
-// re-arms on either — the same answer #679 gave for the capture ladder — and
-// the two are named apart everywhere the answer differs: only the file lock
-// leaves a durably pending write for the detached debt registry to pay.
-function isTransientCloseCause(error: unknown): boolean {
-  return isFileLockedCause(error) || isEngineStoreBusyCause(error);
+// Blocked by something that clears on its own — a program outside dohc
+// holding the artifact, or dohc's own writers meeting inside SQLite. The same
+// answer #679 gave for the capture ladder, and deliberately the same SET the
+// provider's own settle ladder re-arms on (`isTransientEngineRefusal`): every
+// reader of this predicate is deciding whether something ELSE is already
+// retrying. Narrower than the provider's set and this cancels a live retry;
+// wider and a failure nobody retries goes quiet.
+//
+// The two classes are still named apart wherever the answer differs: only the
+// file lock leaves a durably pending write for the detached debt registry.
+function isTransientEngineCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, isTransientEngineRefusal);
 }
 
 /**
@@ -1963,6 +1970,23 @@ export function createWorkspaceEngineCapture(
             // once-guard makes announcing there a no-op when the failure was
             // asynchronous and the count already rose.
             Y.applyUpdate(doc, update);
+            // A transient refusal is not a broken generation, and rebinding
+            // for one is worse than doing nothing. The provider holds what the
+            // engine refused and has already re-armed its own ladder to resend
+            // it; closing that provider CANCELS the retry, and if the
+            // replacement's replay meets the same busy store the session is
+            // marked dead with no timer behind it — canonical text in memory
+            // only, the .md stale until some unrelated edit (#658).
+            //
+            // Absorbed, therefore, rather than recovered from: the retry
+            // already exists one layer down. Every other class here really
+            // does need a new generation — a dropped transport, a quarantined
+            // session, a session the daemon no longer knows — so this stays
+            // narrow and everything else still rebinds.
+            if (isTransientEngineCause(error)) {
+              armed();
+              return;
+            }
             await rebind(generation, {
               releaseBeforeOpen: !isEngineSessionReconnectError(error),
               onReplayArmed: armed,
@@ -3718,7 +3742,7 @@ export function createWorkspaceEngineCapture(
           error: unknown,
           opts?: WorkspaceEngineYDocCloseOptions,
         ): void => {
-          if (!isTransientCloseCause(error) || lockedCloseRetryTimer !== null)
+          if (!isTransientEngineCause(error) || lockedCloseRetryTimer !== null)
             return;
           if (stopped || liveYDocSessions.get(input.path) !== entry) return;
           const delay = lockedCloseRetryMs;
@@ -3730,7 +3754,7 @@ export function createWorkspaceEngineCapture(
             lockedCloseRetryTimer = null;
             if (stopped || liveYDocSessions.get(input.path) !== entry) return;
             void closeEntry(opts).catch((retryError: unknown) => {
-              if (isTransientCloseCause(retryError)) {
+              if (isTransientEngineCause(retryError)) {
                 scheduleLockedCloseRetry(retryError, opts);
                 return;
               }
