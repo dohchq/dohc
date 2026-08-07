@@ -10,9 +10,11 @@
 //    (an ATX line, or the setext underline under a paragraph), a thematic
 //    break, and a fenced code block at its closing fence.
 //  - Some blocks START without a blank line above them, interrupting what is
-//    open: a heading, a fence, a thematic break, and — under a PARAGRAPH
-//    only — a quote or a list. An ordered list interrupts only when it counts
-//    from 1, because `2.` under a paragraph is that paragraph's own text.
+//    open: a heading, a fence, a thematic break, and — under a PARAGRAPH or a
+//    TABLE only — a quote, a list or a table. An ordered list interrupts only
+//    when it counts from 1, because `2.` under a paragraph is that
+//    paragraph's own text. A heading indented into a list item is that item's
+//    heading, not a new block.
 //  - Some blocks RUN THROUGH a blank line, because the next line continues
 //    them: another item of the SAME list (a changed marker is a new list),
 //    content indented into that item, and the next chunk of an indented code
@@ -50,6 +52,7 @@ type BlockKind =
   | "heading"
   | "code"
   | "break"
+  | "table"
   | "other";
 
 const HEADING_RE = /^[ \t]{0,3}#{1,6}(?:[ \t]|$)/;
@@ -81,6 +84,16 @@ const INTERRUPTING_ORDERED_RE = /^[ \t]{0,3}1[.)](?:[ \t]|$)/;
 const DEFINITION_RE = /^[ \t]{0,3}\[[^\]]+\]:[ \t]*\S/;
 // A definition's title may sit alone on the next line, indented.
 const DEFINITION_TITLE_RE = /^[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\))[ \t]*$/;
+// A table's DELIMITER row is what tells its header row apart from an ordinary
+// paragraph, so the header is only a header when this follows it. Leading and
+// trailing pipes are both optional; a pipe somewhere is not, or `---` alone
+// would read as a one-column table instead of a break.
+const TABLE_DELIMITER_RE =
+  /^[ \t]{0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+
+function opensTable(next: string): boolean {
+  return next.includes("|") && TABLE_DELIMITER_RE.test(next);
+}
 
 type Fence = { marker: string; length: number };
 
@@ -188,7 +201,7 @@ function blockStartLines(body: string): number[] {
       if (DEFINITION_TITLE_RE.test(lines[index + 1] ?? "")) index += 1;
       continue;
     }
-    const kind = blockKind(text);
+    const kind = opensTable(lines[index + 1] ?? "") ? "table" : blockKind(text);
     const marker = listMarker(text);
     const listOpen = openKind === "bullet" || openKind === "ordered";
     const opener = fenceOpener(text);
@@ -208,22 +221,29 @@ function blockStartLines(body: string): number[] {
     // cannot START under an open paragraph: there an indented line is that
     // paragraph's lazy continuation, not code.
     const leavesCode = openKind === "code" && kind !== "code";
-    // Blocks that do not wait for a blank line to start. A list or a quote
-    // interrupts a PARAGRAPH only — under an open list or quote the same line
-    // is that block's own next line, not a new one.
+    // A table ROW is not paragraph text, so an indented line under one is a
+    // code block rather than that paragraph's lazy continuation.
+    const leavesTable = openKind === "table" && kind === "code";
+    // Blocks that do not wait for a blank line to start. A list, a quote or a
+    // table interrupts a PARAGRAPH (or a table) only — under an open list or
+    // quote the same line is that block's own next line, not a new one.
     const interrupts =
       !!opener ||
       mathClose !== null ||
       kind === "break" ||
       leavesCode ||
+      leavesTable ||
       (open &&
-        openKind === "other" &&
+        (openKind === "other" || openKind === "table") &&
         (kind === "bullet" ||
           kind === "quote" ||
+          kind === "table" ||
           (kind === "ordered" && INTERRUPTING_ORDERED_RE.test(text)))) ||
       // A bullet whose marker changes starts a new list on the spot.
       (open && openKind === "bullet" && kind === "bullet" && marker !== openMarker);
-    if (kind === "heading" || ((interrupts || !open) && !resumes)) {
+    // A heading opens a block wherever one can open — but indented into a
+    // list item it is that item's own heading, which is what `resumes` says.
+    if ((kind === "heading" || interrupts || !open) && !resumes) {
       starts.push(index + 1);
       openKind = kind;
       openMarker = marker;

@@ -271,6 +271,38 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("Intro\n[a]: https://a.com\n\nAfter", 4)).toBe(1);
   });
 
+  it("keeps a heading indented into a list item inside that item", () => {
+    // The list is ONE node, so a heading indented into it opens nothing.
+    expect(blockIndexForLine("- item\n\n  # matched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("- item\n\n  # matched\n\nAfter", 5)).toBe(1);
+    expect(blockIndexForLine("- item\n  # matched\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("1. item\n\n   # matched\n\nAfter", 3)).toBe(0);
+  });
+
+  it("still opens a block at a heading that is not in a list item", () => {
+    // Unindented, the heading ends the list — the direction that must keep
+    // working. Nothing else keeps a heading either: only a list item does.
+    expect(blockIndexForLine("- item\n\n# matched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("- item\n# matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("> q\n  # matched\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("Para\n  # matched\n\nAfter", 2)).toBe(1);
+  });
+
+  it("reads a table as its own block, not as a paragraph", () => {
+    // A table ROW is not paragraph text: an indented line under one starts a
+    // code block, where the same line under a paragraph continues it.
+    const body = "| A |\n| --- |\n| row |\n    matched\n\nAfter";
+    expect(blockIndexForLine(body, 4)).toBe(1);
+    expect(blockIndexForLine(body, 6)).toBe(2);
+    expect(blockIndexForLine("Para\n    more\n\nAfter", 2)).toBe(0);
+    // A table interrupts a paragraph, and a plain line under one stays in it.
+    expect(blockIndexForLine("Intro\n| A |\n| --- |\n| row |\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("| A |\n| --- |\n| row |\nAfter", 4)).toBe(0);
+    // The delimiter row is what makes it a table. Without one it is prose,
+    // and the indented line below is that paragraph's own continuation.
+    expect(blockIndexForLine("| A |\n| row |\n    matched\n\nAfter", 3)).toBe(0);
+  });
+
   it("reads CRLF documents with the same line numbers", () => {
     const body = "First\r\n\r\nSecond\r\n\r\nThird";
     expect(blockIndexForLine(body, 5)).toBe(2);
@@ -730,6 +762,57 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
       lands: [
         [2, "https://a.com"],
         [4, "After"],
+      ],
+    },
+    {
+      name: "a heading indented into a list item stays in that item",
+      body: "- item\n\n  # matched\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "an unindented heading still ends the list",
+      body: "- item\n\n# matched\n\nAfter",
+      lands: [
+        [1, "item"],
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "indented code starts under a table row",
+      body: "| A |\n| --- |\n| row |\n    matched\n\nAfter",
+      lands: [
+        [3, "row"],
+        [4, "matched"],
+        [6, "After"],
+      ],
+    },
+    {
+      name: "a table interrupts a paragraph",
+      body: "Intro\n| A |\n| --- |\n| row |\n\nAfter",
+      lands: [
+        [1, "Intro"],
+        [4, "row"],
+        [6, "After"],
+      ],
+    },
+    {
+      name: "a table without a delimiter row is prose",
+      body: "| A |\n| row |\n    matched\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a table needs no leading pipes",
+      body: "A | B\n--- | ---\n1 | 2\n\nAfter",
+      lands: [
+        [3, "2"],
+        [5, "After"],
       ],
     },
     {
