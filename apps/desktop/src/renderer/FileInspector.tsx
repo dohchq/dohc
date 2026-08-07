@@ -349,6 +349,15 @@ export function markdownEditorBody(markdown: string): string {
   return splitRawFrontmatter(markdown).body;
 }
 
+/** Lines of frontmatter above the editor body. Search numbers its lines
+ *  against the FILE; the editor and the block mapping both count from the
+ *  body, and this is the offset between them. */
+function frontmatterLineCount(markdown: string): number {
+  const body = markdownEditorBody(markdown);
+  return (markdown.slice(0, markdown.length - body.length).match(/\n/g) ?? [])
+    .length;
+}
+
 export function mergeMarkdownEditorBody(sourceMarkdown: string, body: string): string {
   const split = splitRawFrontmatter(sourceMarkdown);
   if (!split.frontmatter) return body;
@@ -914,35 +923,39 @@ function MarkdownView(props: {
         : undefined,
     [props.pendingUndo],
   );
-  // Search lands HERE. One pending line, two seams that consume it — whichever
-  // surface owns the document: the plain source textarea selects the line, and
-  // the engine editor reveals the block holding it (#661). Exactly one of them
-  // runs, and it retires the line so a later commit cannot replay the jump.
-  const [pendingScrollLine, setPendingScrollLine] = useState<number | null>(null);
-  const [blockTarget, setBlockTarget] = useState<BlockNavigationTarget | null>(null);
-  const blockTargetNonce = useRef(0);
-  // The editor reports the jump it landed, and the target goes away. Keyed by
-  // nonce so a report for a jump this view has already replaced is ignored.
-  const retireBlockTarget = useCallback((nonce: number) => {
-    setBlockTarget((current) => (current?.nonce === nonce ? null : current));
+  // Search lands HERE. ONE jump at a time, in one of two states: the LINE the
+  // result named, and — once the engine editor has something to map it
+  // against — the BLOCK holding that line (#661). Whichever surface owns the
+  // document consumes it: the plain source textarea selects the line, the
+  // engine editor reveals the block. Consuming it retires it, so a later
+  // commit cannot replay the jump.
+  const [jump, setJump] = useState<
+    { kind: "line"; line: number } | ({ kind: "block" } & BlockNavigationTarget) | null
+  >(null);
+  const jumpNonce = useRef(0);
+  // The editor reports the jump it landed, and it goes away. Keyed by nonce so
+  // a report for a jump this view has already replaced is ignored.
+  const retireJump = useCallback((nonce: number) => {
+    setJump((current) =>
+      current?.kind === "block" && current.nonce === nonce ? null : current,
+    );
   }, []);
   // A version switch retires a jump that has not landed yet. Reporting back
   // covers the applied one; this covers everything before that, where the
   // reopen unbinds the Y.Doc and the editor that remounts on the new version
-  // would land a line the reader numbered against the version they left.
-  // BOTH states go: the line still waiting to be mapped (a document still
-  // opening has nothing to map against yet, #533) and the mapped block index.
+  // would land a line the reader numbered against the version they left. It
+  // covers the unmapped line too — a document still opening has nothing to map
+  // against yet (#533) — because both states live here.
   const jumpReopenKey = useRef(props.reopenKey);
   if (props.reopenKey !== jumpReopenKey.current) {
     jumpReopenKey.current = props.reopenKey;
-    if (blockTarget) setBlockTarget(null);
-    if (pendingScrollLine !== null) setPendingScrollLine(null);
+    if (jump) setJump(null);
   }
   const scrollTargetNonce = props.scrollTarget?.nonce;
   useEffect(() => {
     if (!props.scrollTarget || props.scrollTarget.path !== props.path) return;
     setMode("source");
-    setPendingScrollLine(props.scrollTarget.line);
+    setJump({ kind: "line", line: props.scrollTarget.line });
     // Applied once per jump: nonce is the identity of one click.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTargetNonce]);
@@ -1100,19 +1113,19 @@ function MarkdownView(props: {
   }, [surfaceMode, props.path]);
 
   useEffect(() => {
-    if (pendingScrollLine === null || surfaceMode !== "source") return;
+    if (jump?.kind !== "line" || surfaceMode !== "source") return;
     const textarea = editorRef.current;
     if (!textarea) return;
-    const { start, end } = lineSpanInText(textarea.value, pendingScrollLine);
+    const { start, end } = lineSpanInText(textarea.value, jump.line);
     textarea.focus();
     textarea.setSelectionRange(start, end);
     const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight) || 21;
     textarea.scrollTop = Math.max(
       0,
-      (pendingScrollLine - 1) * lineHeight - textarea.clientHeight / 3,
+      (jump.line - 1) * lineHeight - textarea.clientHeight / 3,
     );
-    setPendingScrollLine(null);
-  }, [pendingScrollLine, surfaceMode]);
+    setJump(null);
+  }, [jump, surfaceMode]);
 
   const { onSaveStateChange } = props;
 
@@ -1224,11 +1237,7 @@ function MarkdownView(props: {
       // Local source is an intentional editing/viewing mode. Keep it visible
       // and select the heading's real markdown line instead of replacing it
       // with the rich editor merely to navigate.
-      const bodyOffset = source.length - markdown.length;
-      const frontmatterLineCount = (
-        source.slice(0, bodyOffset).match(/\n/g) ?? []
-      ).length;
-      setPendingScrollLine(heading.line + frontmatterLineCount);
+      setJump({ kind: "line", line: heading.line + frontmatterLineCount(source) });
       return;
     }
     if (readOnly || surfaceMode === "read") {
@@ -1274,34 +1283,32 @@ function MarkdownView(props: {
   // lines against, so it is the right text to map — even though the canonical
   // Y.Doc may have moved on since. The block index absorbs small drift.
   useEffect(() => {
-    if (pendingScrollLine === null || !engineMode) return;
+    if (jump?.kind !== "line" || !engineMode) return;
     // Show the document, not the source projection. A reader who clicked a
     // search result wants the match, and the editor pane is `hidden` while
     // source is up — the reveal would land where nobody can see it. Same move
     // the heading jump makes above.
     setShowSource(false);
     const body = markdownEditorBody(props.body);
-    const frontmatterLines = (
-      props.body.slice(0, props.body.length - body.length).match(/\n/g) ?? []
-    ).length;
-    const bodyLine = pendingScrollLine - frontmatterLines;
+    const bodyLine = jump.line - frontmatterLineCount(props.body);
     if (bodyLine < 1) {
       // The hit is in the frontmatter. The title and properties it names are
       // rendered by PageIdentity/PropertiesPanel ABOVE the editor, so there is
       // no body block to reveal — and revealing the first one would scroll the
-      // real match off the top. Show the top of the document instead — and
-      // drop a body jump still waiting on the lazy editor, which names the
-      // result before this one and would land the moment that editor arrives.
-      setBlockTarget(null);
+      // real match off the top. Show the top of the document instead.
+      setJump(null);
       engineDocPaneRef.current?.scrollTo({ top: 0 });
     } else {
-      setBlockTarget({
+      // The line BECOMES the block, which is what retires it: a jump still
+      // waiting on the lazy editor names the result before this one, and
+      // would land the moment that editor arrives.
+      setJump({
+        kind: "block",
         index: blockIndexForLine(body, bodyLine),
-        nonce: ++blockTargetNonce.current,
+        nonce: ++jumpNonce.current,
       });
     }
-    setPendingScrollLine(null);
-  }, [pendingScrollLine, engineMode, props.body]);
+  }, [jump, engineMode, props.body]);
   useEffect(() => {
     if (!showSource || !engine.doc) {
       setSourceMarkdown(null);
@@ -1840,8 +1847,8 @@ function MarkdownView(props: {
                 knownFiles={knownFiles}
                 onOpenWikilink={openWikilink}
                 headingTarget={props.headingTarget}
-                blockTarget={blockTarget ?? undefined}
-                onBlockTargetConsumed={retireBlockTarget}
+                blockTarget={jump?.kind === "block" ? jump : undefined}
+                onBlockTargetConsumed={retireJump}
                 pendingUndo={editorPendingUndo}
                 onPendingUndoConsumed={props.onPendingUndoConsumed}
                 collab={{

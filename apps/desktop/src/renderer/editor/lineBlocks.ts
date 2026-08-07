@@ -200,33 +200,24 @@ function blockKind(text: string): BlockKind {
   return "other";
 }
 
-function fenceOpener(text: string): Fence | null {
+/** `allowBacktickInfo` is the CALLOUT tokenizer's contract (extensions.ts
+ *  calloutFenceOpener): it opens a fence on an info string an ordinary fence
+ *  rejects, and that one character decides whether the quote around it goes
+ *  on absorbing the unquoted line below. */
+function fenceOpener(text: string, allowBacktickInfo = false): Fence | null {
   // Four COLUMNS in, the line is indented code and the backticks are its
   // text. FENCE_RE counts a tab as one of three prefix characters, so `\t```
-  // has to be rejected here rather than there.
+  // has to be rejected here rather than there. The callout's own opener
+  // allows no tab at all, which this same test covers.
   if (leadingColumns(text) >= CODE_COLUMNS) return null;
   const match = FENCE_RE.exec(text);
   if (!match?.[1]) return null;
   const marker = match[1][0]!;
   // CommonMark forbids a backtick anywhere in a backtick fence's info string.
-  if (marker === "`" && (match[2] ?? "").includes("`")) return null;
+  if (!allowBacktickInfo && marker === "`" && (match[2] ?? "").includes("`")) {
+    return null;
+  }
   return { marker, length: match[1].length };
-}
-
-/** A fence opener INSIDE a quote. The callout tokenizer has its own opener
- *  (extensions.ts calloutFenceOpener) and does not mind a backtick in the info
- *  string, so ```` ```js`x ```` opens a fence there and stays literal text in
- *  an ordinary blockquote. That one character decides whether the quote goes
- *  on absorbing the unquoted line below it. */
-function quotedFenceOpener(inner: string, callout: boolean): Fence | null {
-  if (!callout) return fenceOpener(inner);
-  // The callout's own opener allows no tab in its prefix at all, which the
-  // column test covers: a tab in the first three characters always lands on
-  // four.
-  if (leadingColumns(inner) >= CODE_COLUMNS) return null;
-  const match = FENCE_RE.exec(inner);
-  if (!match?.[1]) return null;
-  return { marker: match[1][0]!, length: match[1].length };
 }
 
 function closesFence(text: string, fence: Fence): boolean {
@@ -239,10 +230,14 @@ function closesFence(text: string, fence: Fence): boolean {
   );
 }
 
-/** 1-based line numbers where each top-level block begins, in document order. */
-function blockStartLines(body: string): number[] {
+/** PURE: the index of the top-level block holding 1-based `line` of `body`.
+ *  A line in the gap between blocks resolves to the block above it; a line
+ *  past the end resolves to the last block. Returns 0 for an empty body. */
+export function blockIndexForLine(body: string, line: number): number {
   const lines = body.split(/\r?\n/);
-  const starts: number[] = [];
+  // Blocks opened so far, and the one holding `line`.
+  let blocks = 0;
+  let holder = 0;
   let open = false;
   let openKind: BlockKind = "other";
   let openMarker = "";
@@ -300,7 +295,7 @@ function blockStartLines(body: string): number[] {
         if (closesFence(inner, quoteFence)) quoteFence = null;
         open = false;
       } else {
-        quoteFence = quotedFenceOpener(inner, quoteCallout);
+        quoteFence = fenceOpener(inner, quoteCallout);
         const innerKind = blockKind(inner);
         open = !(
           quoteFence !== null ||
@@ -379,7 +374,11 @@ function blockStartLines(body: string): number[] {
     // list item it is that item's own heading, which is what `resumes` says.
     const opens = (kind === "heading" || interrupts || !open) && !resumes;
     if (opens) {
-      starts.push(index + 1);
+      // Blocks open in document order, so the first one starting PAST `line`
+      // settles the answer and leaves nothing worth walking.
+      if (index + 1 > line) return holder;
+      holder = blocks;
+      blocks += 1;
       openKind = kind;
       openMarker = marker;
       quoteOpen = false;
@@ -406,18 +405,5 @@ function blockStartLines(body: string): number[] {
       else open = false;
     }
   }
-  return starts;
-}
-
-/** PURE: the index of the top-level block holding 1-based `line` of `body`.
- *  A line in the gap between blocks resolves to the block above it; a line
- *  past the end resolves to the last block. Returns 0 for an empty body. */
-export function blockIndexForLine(body: string, line: number): number {
-  const starts = blockStartLines(body);
-  let index = 0;
-  for (let candidate = 0; candidate < starts.length; candidate += 1) {
-    if (starts[candidate]! <= line) index = candidate;
-    else break;
-  }
-  return index;
+  return holder;
 }

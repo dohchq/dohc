@@ -303,10 +303,19 @@ function stubEditorGlobals() {
     Number(setTimeout(() => callback(performance.now()), 16)),
   );
   vi.stubGlobal("cancelAnimationFrame", (handle: number) => clearTimeout(handle));
-  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+  stubScrollSpy("scrollIntoView");
+}
+
+/** jsdom implements neither scroll method, and the jump seams are only
+ *  observable through them — so stub one on every element and hand back the
+ *  spy the test asserts against. */
+function stubScrollSpy(method: "scrollIntoView" | "scrollTo") {
+  const spy = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, method, {
     configurable: true,
-    value: vi.fn(),
+    value: spy,
   });
+  return spy;
 }
 
 // data-testid="markdown-editor" names the editing surface, and BOTH editing
@@ -1679,11 +1688,7 @@ describe("engine markdown source view", () => {
   it("shows the top of the document for a frontmatter hit", async () => {
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
     vi.stubGlobal("dohcDesktop", bridgeMock);
-    const scrollTo = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollTo", {
-      configurable: true,
-      value: scrollTo,
-    });
+    const scrollTo = stubScrollSpy("scrollTo");
 
     render(
       <FileInspector
@@ -1705,6 +1710,59 @@ describe("engine markdown source view", () => {
     expect(flashedBlockText()).toBeUndefined();
   });
 
+  // A frontmatter hit retires the jump like any other. Its landing writes no
+  // block target, so nothing downstream reports it consumed — the branch that
+  // shows the top has to retire it itself, or a later re-read of the open
+  // document scrolls the reader back up to a result they already left.
+  it("retires a frontmatter jump, so a later re-read cannot replay it", async () => {
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    let reads = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      readWorkspaceText: vi.fn(async () => {
+        reads += 1;
+        return {
+          text: reads === 1 ? SEARCH_DOC : `${SEARCH_DOC}\nFourth paragraph.\n`,
+          truncated: false,
+        };
+      }),
+    });
+    const scrollTo = stubScrollSpy("scrollTo");
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 2, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+
+    // An agent edits the file and workspace activity re-reads it, which is
+    // what re-runs the mapping effect under a jump that is already done.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // MUTATION: drop the setJump(null) in the frontmatter branch -> the line
+    // stays pending and the re-read scrolls the reader to the top again.
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+  });
+
   // codex round 2 on 9184cf04. Two results, clicked back to back: the body
   // jump is still waiting on the editor's settle frames when the frontmatter
   // one arrives. The newest click is the reader's answer, so the older target
@@ -1713,11 +1771,7 @@ describe("engine markdown source view", () => {
   it("drops an unlanded body jump when a frontmatter hit replaces it", async () => {
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
     vi.stubGlobal("dohcDesktop", bridgeMock);
-    const scrollTo = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollTo", {
-      configurable: true,
-      value: scrollTo,
-    });
+    const scrollTo = stubScrollSpy("scrollTo");
 
     const view = render(
       <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
@@ -1757,11 +1811,7 @@ describe("engine markdown source view", () => {
   // the target standing, and the editor that remounts on the new version
   // applies a block index mapped against the version the reader left.
   it("drops an unlanded jump when the version switches under it", async () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
     vi.stubGlobal("dohcDesktop", bridgeMock);
 
@@ -1809,11 +1859,7 @@ describe("engine markdown source view", () => {
   // A version switch arriving in that window left the line to be mapped
   // against the body of a version the reader never searched.
   it("drops a jump waiting on the engine open when the version switches", async () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
     let releaseOpen = () => {};
     const held = new Promise<void>((resolve) => {
@@ -1869,11 +1915,7 @@ describe("engine markdown source view", () => {
   // replaces it has no memory of having applied anything, so a target still
   // held above lands a second time — on a document the reader did not search.
   it("retires the target once applied, so a reopened editor cannot replay it", async () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
     vi.stubGlobal("dohcDesktop", bridgeMock);
 
@@ -1918,11 +1960,7 @@ describe("engine markdown source view", () => {
   });
 
   it("retires the jump after one landing, so a later re-read cannot replay it", async () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
     let reads = 0;
     vi.stubGlobal("dohcDesktop", {
