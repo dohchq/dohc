@@ -321,6 +321,92 @@ describe("orphanedDrafts persistence (#600)", () => {
     ).toEqual(["FRACTION", "VALID"]);
   });
 
+  // The capture time has the id's hole exactly: `1e400` reads as not yet
+  // expired, comes back durable, then serializes as JSON null and the launch
+  // after that drops the row. The other direction is worse still — a negative
+  // or a zero reads as older than the window, so the retention filter would
+  // delete the text before anything could repair it. (NaN cannot be seeded:
+  // JSON has no literal for it, and the whole value fails to parse.)
+  it("repairs a capture time nothing can age, and keeps the text", async () => {
+    localStorage.setItem(
+      ORPHANED_DRAFT_STORAGE_KEY,
+      `[{"id":1,"workspaceId":"ws-1","path":"a.md","text":"OVERFLOWED","capturedAtMs":1e400},
+        {"id":2,"workspaceId":"ws-1","path":"a.md","text":"NEGATIVE","capturedAtMs":-5},
+        {"id":3,"workspaceId":"ws-1","path":"a.md","text":"EPOCH","capturedAtMs":0}]`,
+    );
+    const repairedAt = Date.now();
+    // MUTATION (capture-time repair): take `row.capturedAtMs` as given. The
+    // overflowed row survives this launch reported durable and is gone from
+    // the next one, and the negative row never reaches the store at all.
+    const next = await relaunch(repairedAt);
+    expect(
+      [
+        ...draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
+      ].sort(),
+    ).toEqual(["EPOCH", "NEGATIVE", "OVERFLOWED"]);
+    expect(storedText()).not.toContain("null");
+
+    // The round trip that matters: the launch after the repair still has them.
+    const after = await relaunch(repairedAt);
+    expect(draftsFor(after.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(3);
+
+    // ...and they age from the repair, so the window still ends them.
+    const expired = await relaunch(repairedAt + ORPHANED_DRAFT_RETENTION_MS);
+    expect(draftsFor(expired.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
+  });
+
+  // Allocating above the highest id walks out of the safe range when the rows
+  // already sit near the top of it: `MAX_SAFE_INTEGER + 1` increments to
+  // itself, so the third repair reuses the second one's id and one Dismiss
+  // takes both texts.
+  it("allocates repaired ids inside the safe range, however high the stored ones", async () => {
+    const capturedAt = Date.now();
+    const top = Number.MAX_SAFE_INTEGER - 1;
+    localStorage.setItem(
+      ORPHANED_DRAFT_STORAGE_KEY,
+      JSON.stringify(
+        ["TOP", "DUP1", "DUP2", "DUP3"].map((text) => ({
+          id: top,
+          workspaceId: "ws-1",
+          path: "a.md",
+          text,
+          capturedAtMs: capturedAt,
+        })),
+      ),
+    );
+    // MUTATION (allocation): draw replacements from `highest + 1` again. Two
+    // of the four land on the same id and the distinct-id count below fails.
+    const next = await relaunch();
+    const restored = draftsFor(next.useOrphanedDrafts, "ws-1", "a.md");
+    expect(restored.map((d) => d.text).sort()).toEqual([
+      "DUP1",
+      "DUP2",
+      "DUP3",
+      "TOP",
+    ]);
+    expect(restored.every((d) => Number.isSafeInteger(d.id))).toBe(true);
+    expect(new Set(restored.map((d) => d.id)).size).toBe(4);
+
+    // One confirmation retires one edit.
+    next.dismissOrphanedDraft(
+      "ws-1",
+      "a.md",
+      restored.find((d) => d.text === "DUP2")!.id,
+    );
+    const left = ["DUP1", "DUP3", "TOP"];
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md")
+        .map((d) => d.text)
+        .sort(),
+    ).toEqual(left);
+    const after = await relaunch();
+    expect(
+      draftsFor(after.useOrphanedDrafts, "ws-1", "a.md")
+        .map((d) => d.text)
+        .sort(),
+    ).toEqual(left);
+  });
+
   // One order, whichever surface asks. The store sorts oldest first, and a
   // rename that merges two paths must not answer differently before and after
   // a restart.

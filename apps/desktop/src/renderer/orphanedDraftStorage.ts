@@ -74,6 +74,22 @@ function isUsableDraftId(id: number): boolean {
   return Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
 }
 
+// A capture time this store can age. Same hole as the id: `1e400` parses to
+// Infinity, reads as not yet expired, and serializes back as JSON null, so the
+// row comes back durable and the launch after that drops it. NaN and anything
+// at or below zero fail the other way — they read as older than the retention
+// window and would take the text with them.
+//
+// The repair is the reading clock, which restarts the window. It over-retains
+// a foreign row by up to 30 days, and that is the direction to be wrong in:
+// expiry here is housekeeping, and the row stays listed and dismissable the
+// whole time. A time in the FUTURE is left alone — it is readable, it survives
+// a round trip, and rewriting it on every launch under a skewed clock would
+// churn storage for nothing.
+function isUsableCaptureTime(capturedAtMs: number): boolean {
+  return Number.isFinite(capturedAtMs) && capturedAtMs > 0;
+}
+
 function isStoredDraft(value: unknown): value is StoredOrphanedDraft {
   if (typeof value !== "object" || value === null) return false;
   const row: Record<string, unknown> = value as Record<string, unknown>;
@@ -164,35 +180,47 @@ function writeRows(rows: readonly StoredOrphanedDraft[]): boolean {
 // nothing lists or copies it, and this pass runs again on the next launch.
 export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] {
   const { rows, discarded } = readRows();
+  // A row whose capture time cannot be aged is not expired, it is unreadable —
+  // it goes to the repair below, never to the retention drop.
   const kept = rows.filter(
     (row) =>
       isPersistableDraftPath(row.path) &&
-      nowMs - row.capturedAtMs < ORPHANED_DRAFT_RETENTION_MS,
+      (!isUsableCaptureTime(row.capturedAtMs) ||
+        nowMs - row.capturedAtMs < ORPHANED_DRAFT_RETENTION_MS),
   );
+  // Identity and capture time are the two numbers this store counts on, and
+  // storage is foreign input for both. A row that carries a broken one keeps
+  // its text and gets a working replacement, because the break is in the
+  // bookkeeping, not in what the user typed.
+  //
   // An id is the handle Dismiss uses, and `forgetStoredDraft` matches on it
   // alone, so two rows under one id would let one confirmation delete two
-  // texts — while the confirm says it deletes the only copy, of one edit. A
-  // repeat is re-keyed rather than dropped, and so is an id nothing can count
-  // from: both texts survive, tellable apart, and the rewrite below makes the
-  // new id the stored one. Only usable ids raise the watermark, or one
-  // pathological row would hand every re-key the same broken id.
-  const seen = new Set<number>();
-  let freeId =
-    kept.reduce(
-      (highest, row) =>
-        isUsableDraftId(row.id) ? Math.max(highest, row.id) : highest,
-      0,
-    ) + 1;
-  let rekeyed = false;
+  // texts — while the confirm says it deletes the only copy, of one edit.
+  // Replacements come from the LOWEST free id rather than above the highest
+  // one: allocating upward from a row that already sits near the top of the
+  // safe range walks out of it, where `+ 1` stops moving and hands the same
+  // id out twice. Every id in the store is claimed first, so a repair never
+  // takes one a later row still holds.
+  const taken = new Set<number>();
+  for (const row of kept) if (isUsableDraftId(row.id)) taken.add(row.id);
+  const used = new Set<number>();
+  let freeId = 1;
+  let repaired = false;
   const unique = kept.map((row) => {
-    if (isUsableDraftId(row.id) && !seen.has(row.id)) {
-      seen.add(row.id);
-      return row;
+    const capturedAtMs = isUsableCaptureTime(row.capturedAtMs)
+      ? row.capturedAtMs
+      : nowMs;
+    if (capturedAtMs !== row.capturedAtMs) repaired = true;
+    if (isUsableDraftId(row.id) && !used.has(row.id)) {
+      used.add(row.id);
+      return capturedAtMs === row.capturedAtMs ? row : { ...row, capturedAtMs };
     }
-    rekeyed = true;
-    return { ...row, id: freeId++ };
+    repaired = true;
+    while (taken.has(freeId) || used.has(freeId)) freeId += 1;
+    used.add(freeId);
+    return { ...row, id: freeId, capturedAtMs };
   });
-  if (discarded || rekeyed || unique.length !== rows.length) writeRows(unique);
+  if (discarded || repaired || unique.length !== rows.length) writeRows(unique);
   return unique;
 }
 
