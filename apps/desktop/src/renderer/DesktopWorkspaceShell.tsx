@@ -1932,20 +1932,17 @@ export function DesktopWorkspaceShell(props: {
   }, [engineHistoryAnswerIsStale]);
   useEffect(
     () => () => {
-      // Unmount invalidates every load in flight, on every lane. Hygiene, not
-      // a repaint guard: the shell is keyed by workspace, so a late response
-      // has no mounted state to reach. It keeps the invalidation true to what
-      // it claims, now that the issue counter alone no longer stops a response
-      // from committing.
+      // Unmount invalidates every load in flight on the history page. Hygiene,
+      // not a repaint guard: the shell is keyed by workspace, so a late
+      // response has no mounted state to reach. It keeps the invalidation true
+      // to what it claims, now that the issue counter alone no longer stops a
+      // response from committing. The snapshot lanes invalidate themselves.
       engineHistoryToken.current += 1;
       committedEngineHistoryToken.current = engineHistoryToken.current;
       newestEngineHistoryRefresh.current = engineHistoryToken.current;
-      syncStatusLane.invalidate();
-      agentActiveLane.invalidate();
-      tryStateLane.invalidate();
       blockedEngineHistoryRefresh.current = null;
     },
-    [agentActiveLane, syncStatusLane, tryStateLane],
+    [],
   );
   // Which surface the right-hand Chats panel shows (all chats vs the active
   // file's). Runtime-only — not persisted.

@@ -14,6 +14,7 @@ function lane<T>(initial: T) {
     take: () => ++issue.current,
     value: () => view.result.current[0],
     handle: () => view.result.current[1],
+    unmount: view.unmount,
   };
 }
 
@@ -56,13 +57,14 @@ describe("snapshot lane", () => {
     expect(it0.value()).toBe(true);
   });
 
-  // Unmount, in the shell. Everything outstanding is stale, and a lane that
-  // still believed nothing had answered would let any of it write.
-  it("stops every read in flight from writing after an invalidation", async () => {
+  // The owner went away. Everything outstanding is stale, and a lane that
+  // still believed nothing had answered would let any of it write. The lane
+  // invalidates itself, so nobody has to remember to.
+  it("stops every read in flight from writing once its owner unmounts", async () => {
     const it0 = lane<string | null>(null);
     const outstanding = it0.take();
 
-    act(() => it0.handle().invalidate());
+    act(() => it0.unmount());
     await act(async () => {
       it0.handle().settle(
         outstanding,
@@ -72,6 +74,9 @@ describe("snapshot lane", () => {
       );
       await Promise.resolve();
     });
-    expect(it0.value()).toBeNull();
+    // Asserted on what the lane WROTE, not on what it rendered: an unmounted
+    // hook never re-renders, so the rendered value cannot move whether the
+    // invalidation happened or not. `latest` is set by the write itself.
+    expect(it0.handle().latest()).toBeNull();
   });
 });

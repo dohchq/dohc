@@ -5982,7 +5982,7 @@ describe("history page", () => {
     // The older read answers last, from before the run existed.
     await act(async () => {
       heldRead.resolve(idle);
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await heldRead.promise;
     });
     expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
   });
@@ -6027,7 +6027,7 @@ describe("history page", () => {
     // The older read answers last, and it says the workspace opted out.
     await act(async () => {
       heldRead.resolve(recordingOff);
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await heldRead.promise;
     });
     expect(placeholder.textContent).toContain("History is unavailable");
     expect(placeholder.textContent).not.toContain("Settings");
@@ -6069,7 +6069,7 @@ describe("history page", () => {
     // It answers last, describing a workspace both newer answers have left.
     await act(async () => {
       heldRead.resolve(conflictStatus);
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await heldRead.promise;
     });
     expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing");
   });

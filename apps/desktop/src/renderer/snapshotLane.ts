@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 // Two facts per lane, because the two questions a lane is asked are different
 // ones:
@@ -61,9 +61,6 @@ export type SnapshotLane<T> = {
     select: (value: R) => T,
     report: (error: unknown) => void,
   ) => void;
-  // Everything in flight is now stale, on this lane. The committed mark jumps
-  // to the newest token issued, so no outstanding read can write.
-  invalidate: () => void;
 };
 
 export function useSnapshotLane<T>(
@@ -102,10 +99,20 @@ export function useSnapshotLane<T>(
           },
         );
       },
-      invalidate: () => {
-        mark.current.committed = issue.current;
-      },
     };
   }, [issue]);
+  // The owner is gone, so everything in flight on this lane is stale: the
+  // committed mark jumps to the newest token issued and no outstanding read
+  // can write. The lane does this itself rather than being told to, so a lane
+  // added later cannot be the one nobody remembered to invalidate.
+  //
+  // Unmount only. `issue` is the group's counter ref, whose identity React
+  // holds for the owner's whole life, so this cleanup has no other trigger.
+  useEffect(
+    () => () => {
+      mark.current.committed = issue.current;
+    },
+    [issue],
+  );
   return [value, lane];
 }
