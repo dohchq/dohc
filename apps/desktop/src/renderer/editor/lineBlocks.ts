@@ -113,6 +113,11 @@ const INTERRUPTING_ORDERED_RE = /^[ \t]{0,3}1[.)](?:[ \t]|$)/;
 const DEFINITION_LABEL_RE = /^[ \t]{0,3}\[[^\]]+\]:[ \t]*/;
 // A definition's title may sit alone on its own line, indented.
 const DEFINITION_TITLE_RE = /^[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\))[ \t]*$/;
+// What may follow the label: an angle-bracketed destination (which MAY hold
+// spaces) or a bare one (which may not, and may not open with `<`), then an
+// optional title and nothing else. `[a]: <broken` is a paragraph.
+const DEFINITION_DESTINATION_RE =
+  /^(?:<[^<>\n]*>|[^<\s]\S*)(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/;
 // A table's DELIMITER row is what tells its header row apart from an ordinary
 // paragraph, so the header is only a header when this follows it. Leading and
 // trailing pipes are both optional; a pipe somewhere is not, or `---` alone
@@ -142,6 +147,10 @@ function cellCount(text: string): number {
  *  `| --- |` is a one-column table the same as `| A |` would be. */
 function opensTable(header: string, delimiter: string): boolean {
   return (
+    // Either row four COLUMNS in is indented code, not a table. The patterns
+    // below count a tab as one of three prefix characters; these do not.
+    leadingColumns(header) < CODE_COLUMNS &&
+    leadingColumns(delimiter) < CODE_COLUMNS &&
     delimiter.includes("|") &&
     TABLE_DELIMITER_RE.test(delimiter) &&
     cellCount(header) === cellCount(delimiter)
@@ -168,16 +177,22 @@ function mathBlockEnd(lines: string[], start: number): number | null {
 /** The LAST line of a link reference definition starting at `start`, or null
  *  when there is none. The destination may sit on the line under the label
  *  and the title under that; the whole run renders no node. A label with
- *  nothing under it is ordinary text. */
+ *  nothing under it, or one whose destination does not parse, is ordinary
+ *  text — and hiding a PARAGRAPH would shift every block after it. */
 function definitionEnd(lines: string[], start: number): number | null {
   const line = lines[start] ?? "";
+  if (leadingColumns(line) >= CODE_COLUMNS) return null;
   const label = DEFINITION_LABEL_RE.exec(line);
   if (!label) return null;
   let last = start;
-  if (!/\S/.test(line.slice(label[0].length))) {
-    if ((lines[start + 1] ?? "").trim() === "") return null;
+  let rest = line.slice(label[0].length);
+  if (!/\S/.test(rest)) {
+    const next = lines[start + 1] ?? "";
+    if (next.trim() === "") return null;
+    rest = next.replace(/^[ \t]+/, "");
     last = start + 1;
   }
+  if (!DEFINITION_DESTINATION_RE.test(rest)) return null;
   if (DEFINITION_TITLE_RE.test(lines[last + 1] ?? "")) last += 1;
   return last;
 }

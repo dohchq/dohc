@@ -541,6 +541,40 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("Title\n===\nBody", 3)).toBe(1);
   });
 
+  it("reads a table and a definition in COLUMNS like everything else", () => {
+    // The last two patterns that counted prefix CHARACTERS. Four columns in,
+    // both rows of a table and a definition's label are indented code.
+    expect(blockIndexForLine("Intro\n\n\t| A |\n\t| --- |\n\t| r |\n\nAfter", 7)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n\t| A |\n| --- |\n| r |\n\nAfter", 4)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n| A |\n\t| --- |\n| r |\n\nAfter", 7)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n\t[a]: https://e.com\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("Intro\n\n\t[a]:\n\thttps://e.com\n\nAfter", 3)).toBe(1);
+    // Three columns is still a table and still a definition.
+    expect(blockIndexForLine("Intro\n\n   | A |\n   | --- |\n   | r |\n\nAfter", 7)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n   [a]: https://e.com\n\nAfter", 5)).toBe(1);
+    // The kinds guarded earlier stay guarded: a tab makes each of these code.
+    for (const marker of ["# H", "- item", "1. item", "> q", "---"]) {
+      expect(blockIndexForLine(`Intro\n\n\t${marker}\n\nAfter`, 5)).toBe(2);
+    }
+  });
+
+  it("hides a definition only when its destination parses", () => {
+    // An unparseable destination is a PARAGRAPH, and hiding it would shift
+    // every block after it.
+    expect(blockIndexForLine("Intro\n\n[docs]: <broken\n\nAfter", 5)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n[docs]: foo bar\n\nAfter", 5)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n[docs]: https://e.com 'unclosed\n\nAfter", 5)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n[docs]: https://e.com junk\n\nAfter", 5)).toBe(2);
+    expect(blockIndexForLine("Intro\n\n[docs]:\n  <broken\n\nAfter", 6)).toBe(2);
+    // The forms that DO parse still render nothing.
+    expect(blockIndexForLine("Intro\n\n[docs]: https://e.com\n\nAfter", 5)).toBe(1);
+    expect(blockIndexForLine("Intro\n\n[docs]: <https://e.com>\n\nAfter", 5)).toBe(1);
+    // Angle brackets may hold spaces where a bare destination may not.
+    expect(blockIndexForLine("Intro\n\n[docs]: <foo bar>\n\nAfter", 5)).toBe(1);
+    expect(blockIndexForLine('Intro\n\n[docs]: https://e.com "T"\n\nAfter', 5)).toBe(1);
+    expect(blockIndexForLine("Intro\n\n[docs]: https://e.com (T)\n\nAfter", 5)).toBe(1);
+  });
+
   it("only drops a definition where the tokenizer resolves one", () => {
     // No label, no destination, and four columns of indent are all content.
     expect(blockIndexForLine("Intro\n\n[]: https://a.com\n\nAfter", 5)).toBe(2);
@@ -1418,6 +1452,46 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
       name: "a tab-indented underline underlines nothing",
       body: "Title\n\t===\nBody",
       lands: [[3, "Title"]],
+    },
+    {
+      name: "a tab-indented table is code, not a table",
+      body: "Intro\n\n\t| A |\n\t| --- |\n\t| r |\n\nAfter",
+      lands: [
+        [3, "| A |"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "a tab-indented definition is code, not metadata",
+      body: "Intro\n\n\t[a]: https://e.com\n\nAfter",
+      lands: [
+        [3, "[a]: https://e.com"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "an unparseable destination leaves an ordinary paragraph",
+      body: "Intro\n\n[docs]: <broken\n\nAfter",
+      lands: [
+        [3, "[docs]: <broken"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a bare destination may not carry spaces",
+      body: "Intro\n\n[docs]: foo bar\n\nAfter",
+      lands: [
+        [3, "[docs]: foo bar"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "an angle-bracketed destination may",
+      body: "Intro\n\n[docs]: <foo bar>\n\nAfter",
+      lands: [
+        [1, "Intro"],
+        [5, "After"],
+      ],
     },
     {
       name: "three columns is not an indented code block",
