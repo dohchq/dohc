@@ -709,25 +709,36 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
-  // A provider whose settle is refused `file-locked` until the test releases
-  // it, with the settle scheduler captured so the ladder can be driven a rung
-  // at a time. Shared by the two tests below; each drives it differently,
+  // A provider whose settle is refused by a transient blocker until the test
+  // clears it, with the settle scheduler captured so the ladder can be driven
+  // a rung at a time. Shared by the tests below; each drives it differently,
   // because a debounced settle and an explicit flush are different behaviors.
-  async function openAgainstALockedFile(
+  //
+  // The blocker is a parameter because the two answers must come from the
+  // SAME fixture: a copy of it per blocker is where one of the two ladders
+  // quietly stops being exercised.
+  async function openAgainstABlockedSettle(
     text: string,
-    options?: { settleDebounceMs?: number },
+    options?: {
+      settleDebounceMs?: number;
+      blocker?: "file-locked" | "engine-store-busy";
+    },
   ) {
     const engine = seedPlaintextEngine();
-    const lock = { held: true };
-    const lockedRefusal = new DaemonRefusalError(
-      { code: "OVERLOADED", message: "file-locked", retry: "afterBackoff" },
+    const blocked = { held: true };
+    const refusal = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: options?.blocker ?? "file-locked",
+        retry: "afterBackoff",
+      },
       new Error("daemon response"),
     );
     const transport: EngineTransport = {
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
-        if (request.method === YDOC_METHOD.settle && lock.held) {
-          throw lockedRefusal;
+        if (request.method === YDOC_METHOD.settle && blocked.held) {
+          throw refusal;
         }
         return engine.sendRequest(request);
       },
@@ -762,8 +773,8 @@ describe("YdocLiveAdapter", () => {
     return {
       engine,
       provider,
-      lock,
-      lockedRefusal,
+      blocked,
+      refusal,
       settleErrors,
       settled,
       scheduler,
@@ -776,8 +787,8 @@ describe("YdocLiveAdapter", () => {
     // in the engine — the ONLY missing piece is a later attempt. The provider
     // re-arms itself on a doubling delay, so the save lands when the external
     // handle releases instead of waiting for an unrelated future edit.
-    const { provider, lock, lockedRefusal, settleErrors, settled, delays, scheduler } =
-      await openAgainstALockedFile("typed against a locked file", {
+    const { provider, blocked, refusal, settleErrors, settled, delays, scheduler } =
+      await openAgainstABlockedSettle("typed against a locked file", {
         settleDebounceMs: 100,
       });
 
@@ -789,11 +800,11 @@ describe("YdocLiveAdapter", () => {
       scheduler.fire();
       await drain();
     }
-    expect(settleErrors).toEqual([lockedRefusal, lockedRefusal, lockedRefusal]);
+    expect(settleErrors).toEqual([refusal, refusal, refusal]);
     expect(delays).toEqual([100, 100, 200, 400]);
 
     // The lock releases; the pending retry lands the write by itself.
-    lock.held = false;
+    blocked.held = false;
     scheduler.fire();
     await drain();
     expect(settled).toHaveLength(1);
@@ -803,12 +814,76 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
+  it("retries an engine-store-busy settle until the store frees, then saves", async () => {
+    // #658: a busy SQLite handle is dohc's OWN writers meeting, and the store
+    // reports itself intact and the operation retryable. It used to reach the
+    // caller as INTERNAL / retry "no", so the settle stood down on a condition
+    // that clears by waiting and the user's edits reached the file only on
+    // some unrelated later settle. The ladder now re-arms on it beside the
+    // file lock.
+    const { provider, blocked, refusal, settleErrors, settled, delays, scheduler } =
+      await openAgainstABlockedSettle("typed while the store was busy", {
+        settleDebounceMs: 100,
+        blocker: "engine-store-busy",
+      });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(scheduler.armed).toHaveLength(1);
+      scheduler.fire();
+      await drain();
+    }
+    // Every failure re-armed the next attempt and none went quiet.
+    expect(settleErrors).toEqual([refusal, refusal, refusal]);
+    expect(settled).toEqual([]);
+
+    // The contention clears; the pending retry lands the write by itself.
+    blocked.held = false;
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    expect(scheduler.armed).toHaveLength(0);
+    // The rungs are the busy store's, capped at 1s rather than the lock's 10s.
+    expect(delays).toEqual([100, 100, 200, 400]);
+
+    await provider.close({ settle: false });
+  });
+
+  it("caps the busy-store ladder far below the file lock's", async () => {
+    // The two waits are for different things. A file lock is held by a
+    // program outside dohc and can last as long as that program does; SQLite
+    // contention is dohc's own and clears in milliseconds. One shared cap
+    // would either hold a document unsettled for ten seconds over a
+    // millisecond of contention, or retry a locked file too eagerly to be
+    // worth bounding.
+    const busy = await openAgainstABlockedSettle("typed while the store was busy", {
+      settleDebounceMs: 4000,
+      blocker: "engine-store-busy",
+    });
+    const lockedFile = await openAgainstABlockedSettle("typed against a lock", {
+      settleDebounceMs: 4000,
+    });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      busy.scheduler.fire();
+      await drain();
+      lockedFile.scheduler.fire();
+      await drain();
+    }
+    // Both ladders start at the debounce the caller asked for and are then
+    // held down to their OWN ceiling.
+    expect(busy.delays).toEqual([4000, 1000, 1000, 1000]);
+    expect(lockedFile.delays).toEqual([4000, 4000, 8000, 10_000]);
+
+    await busy.provider.close({ settle: false });
+    await lockedFile.provider.close({ settle: false });
+  });
+
   it("resets the ladder once a settle reaches disk, so the next lock starts over", async () => {
     // The reset is what keeps a document that is locked twice in a session
     // from inheriting the first lock's grown delay — the second lock must be
     // retried as promptly as the first, not minutes later.
-    const { provider, lock, settled, delays, scheduler } =
-      await openAgainstALockedFile("typed against a locked file", {
+    const { provider, blocked, settled, delays, scheduler } =
+      await openAgainstABlockedSettle("typed against a locked file", {
         settleDebounceMs: 100,
       });
 
@@ -820,13 +895,13 @@ describe("YdocLiveAdapter", () => {
     expect(delays).toEqual([100, 100, 200]);
 
     // The lock releases and the pending retry lands the write.
-    lock.held = false;
+    blocked.held = false;
     scheduler.fire();
     await drain();
     expect(settled).toHaveLength(1);
 
     // A LATER lock: the next failure must re-arm at the debounce, not at 400.
-    lock.held = true;
+    blocked.held = true;
     await provider.applyLocalUpdate(
       plaintextUpdate(provider.initialUpdate, (body) => {
         body.insert(0, "typed again");
@@ -843,7 +918,7 @@ describe("YdocLiveAdapter", () => {
     // The cap bounds how long the on-disk artifact stays stale after the lock
     // releases. Without it the delay doubles without limit and a file locked
     // for an afternoon is retried hours after the handle is gone.
-    const { provider, delays, scheduler } = await openAgainstALockedFile(
+    const { provider, delays, scheduler } = await openAgainstABlockedSettle(
       "typed against a long-held lock",
       { settleDebounceMs: 4000 },
     );
@@ -858,7 +933,7 @@ describe("YdocLiveAdapter", () => {
   });
 
   it("starts the ladder at the DEFAULT debounce when the caller sets none", async () => {
-    const { provider, delays, scheduler } = await openAgainstALockedFile(
+    const { provider, delays, scheduler } = await openAgainstABlockedSettle(
       "typed with the default debounce",
     );
 
@@ -873,7 +948,7 @@ describe("YdocLiveAdapter", () => {
     // An edit is the strongest retry trigger there is, so the settle it arms
     // supersedes the ladder's. Arming a second timer alongside it would leave
     // the edit's timer orphaned and settle the document twice.
-    const { provider, delays, scheduler } = await openAgainstALockedFile(
+    const { provider, delays, scheduler } = await openAgainstABlockedSettle(
       "typed against a locked file",
       { settleDebounceMs: 100 },
     );
@@ -898,18 +973,18 @@ describe("YdocLiveAdapter", () => {
     // settleNow rejects to its caller — a delete or merge must fail loudly —
     // but the write it left pending is the same one, so the background retry
     // is armed as well.
-    const { provider, lock, lockedRefusal, settled, scheduler } =
-      await openAgainstALockedFile("flushed against a locked file", {
+    const { provider, blocked, refusal, settled, scheduler } =
+      await openAgainstABlockedSettle("flushed against a locked file", {
         settleDebounceMs: 100,
       });
 
-    await expect(provider.settleNow()).rejects.toBe(lockedRefusal);
+    await expect(provider.settleNow()).rejects.toBe(refusal);
     await drain();
     // The debounced settle the edit armed was superseded by the explicit
     // flush, so the one armed timer is the flush's own retry.
     expect(scheduler.armed.map((entry) => entry.ms)).toEqual([100]);
 
-    lock.held = false;
+    blocked.held = false;
     scheduler.fire();
     await drain();
     expect(settled).toHaveLength(1);

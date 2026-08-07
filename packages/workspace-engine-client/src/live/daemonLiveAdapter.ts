@@ -157,6 +157,18 @@ export function isFileLockedRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "file-locked";
 }
 
+// The engine's OWN database was busy and its bounded retry budget ran out
+// (`StorageError::FileLocked`, which the store documents as intact and the
+// operation as retryable). Not the artifact lock above and not the user's
+// file: nothing outside dohc holds anything, and there is nothing a person
+// can do — dohc's writers met inside SQLite and the contention clears by
+// itself. OVERLOADED carries the wire's retry-after-backoff contract, and the
+// message names the busy resource so a caller cannot report it as the user's
+// document being held.
+export function isEngineStoreBusyRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") === "engine-store-busy";
+}
+
 // Remote edits drained under this session's lease while this settle was in
 // flight, so the doc is BEHIND the durable lineage and the engine refuses
 // rather than materializing content this editor never saw

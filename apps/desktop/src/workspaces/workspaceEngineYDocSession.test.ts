@@ -425,6 +425,64 @@ it("reports file-locked, not error, for a lock refusal", async () => {
   await session.close({ settle: false });
 });
 
+// #658. The OTHER busy thing needs the other answer. A busy engine database
+// is dohc's own writers meeting inside SQLite: nothing of the user's is held,
+// nobody can act, and the provider retries by itself. So the surface stays
+// quiet and keeps saying what is true — dohc is still saving. `file-locked`
+// copy would name a program that does not exist, and "Couldn't save" would
+// report a failure that has not happened.
+it("stays on settling for a busy engine store, because the retry is coming", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed in dohc.");
+  await session.settleNow();
+  states.length = 0;
+  captureErrors = [];
+
+  settleRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
+  await expect(session.settleNow()).rejects.toThrow("engine-store-busy");
+
+  expect(states.at(-1)).toBe("settling");
+  expect(states).not.toContain("error");
+  expect(states).not.toContain("file-locked");
+  // Still loud in the log: staying quiet on the chip is not going quiet.
+  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
+  settleRefusal = null;
+  await session.close({ settle: false });
+});
+
+// The boundary of that quiet, and the fact that draws it: `close()` disarms
+// the provider's retry ladder before its pre-close settle runs, and a busy
+// store commits nothing. No retry is coming and no write is pending, so this
+// save really did stop — reporting it as still settling would leave the
+// document claiming forever that dohc was about to save it.
+it("reports an error when a busy store fails a close's settle", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
+  });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed in dohc.");
+  await session.settleNow();
+  states.length = 0;
+  captureErrors = [];
+
+  settleRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  expect(states.at(-1)).toBe("error");
+  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
+});
+
 // `changed-on-disk` promises the file is not this document's. The refusal does
 // not prove that: the engine raises ConflictStaleTarget for any divergence of
 // the head — a path rebound to another object, or a settle whose

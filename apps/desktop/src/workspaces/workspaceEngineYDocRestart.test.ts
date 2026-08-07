@@ -2776,6 +2776,34 @@ it("a close that fails for a non-lock cause is not retried by the capture layer"
   await capture.stop();
 }, 10_000);
 
+it("retries a close the engine refused because its own store was busy", async () => {
+  // #658, the close half of the same answer. A busy engine database clears by
+  // waiting exactly as a file lock does, so a teardown refused for it re-arms
+  // beside the lock. Left out of the ladder it read as a terminal failure:
+  // the entry stayed failing-close with the daemon still holding its lease,
+  // and nothing would run again until restart.
+  //
+  // MUTATION: narrow `isTransientCloseCause` back to `isFileLockedCause` and
+  // no second close is ever attempted.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-busy-close-");
+  const { session } = await openWithOneEdit(capture, "closing edit");
+
+  state.closeFailure = new DaemonRefusalError(
+    { code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" },
+    new Error("daemon response"),
+  );
+  await expect(session.close()).rejects.toThrow("engine-store-busy");
+  const closesAtFailure = state.closeCalls.length;
+
+  // The contention clears after the renderer has already given up. The
+  // capture entry outlives it and finishes the teardown by itself.
+  state.closeFailure = null;
+  await expect
+    .poll(() => state.closeCalls.length, { timeout: 15_000 })
+    .toBeGreaterThan(closesAtFailure);
+  await capture.stop();
+}, 20_000);
+
 it("pays a locked close debt even when a replicated release succeeds", async () => {
   // #595 round 4: a replicated lineage compacts on release without the
   // local-only pending-job guard, so the close RELEASES over the locked

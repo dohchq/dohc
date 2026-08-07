@@ -31,6 +31,7 @@ import {
   openEngineYdocProviderSession,
   DaemonRefusalError,
   isConflictStaleTargetRefusal,
+  isEngineStoreBusyRefusal,
   isFileLockedRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
@@ -635,6 +636,52 @@ function hasRefusalInCauseChain(
 
 function isFileLockedCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isFileLockedRefusal);
+}
+
+// The OTHER transient contention, and it is dohc's own: writers met inside
+// SQLite and the store's bounded retry budget ran out. Nothing outside dohc
+// holds anything, so it must never be reported with `file-locked` copy — but
+// it clears by waiting exactly as a file lock does, so a ladder aimed at a
+// transient blocker re-arms on it too (#658).
+function isEngineStoreBusyCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, isEngineStoreBusyRefusal);
+}
+
+// A teardown blocked by something that clears on its own. The close ladder
+// re-arms on either — the same answer #679 gave for the capture ladder — and
+// the two are named apart everywhere the answer differs: only the file lock
+// leaves a durably pending write for the detached debt registry to pay.
+function isTransientCloseCause(error: unknown): boolean {
+  return isFileLockedCause(error) || isEngineStoreBusyCause(error);
+}
+
+/**
+ * What the document may claim after a settle failed.
+ *
+ * `file-locked`: the settle COMMITTED and the write job is durably pending,
+ * so the write outlives this attempt — the provider retries it while the
+ * session lives and the detached debt registry pays it after close. Name the
+ * blocker; the user's own file is held and no user action helps.
+ *
+ * `engine-store-busy`: dohc's own database was busy. Nothing of the user's is
+ * held, nobody can act, and the provider's ladder retries — so the document is
+ * still SETTLING, and any other word would report a failure that has not
+ * happened. This is #658's deliberate decision to stay quiet: store
+ * contention gets no state of its own and no copy of its own, because there
+ * is nothing to tell the user.
+ *
+ * A close is the exception, and the reason is the same fact read the other
+ * way: `close()` disarms the provider's ladder before its pre-close settle
+ * runs, and a busy store commits nothing. No retry is coming and no write is
+ * pending, so the save really did stop and the user must hear it.
+ */
+function settleFailureSaveState(
+  error: unknown,
+  closing: boolean,
+): EngineYDocSaveState {
+  if (isFileLockedRefusal(error)) return "file-locked";
+  if (isEngineStoreBusyRefusal(error) && !closing) return "settling";
+  return "error";
 }
 
 // The engine refuses a pending write whose preimage no longer matches the
@@ -3030,6 +3077,11 @@ export function createWorkspaceEngineCapture(
             // re-enter the session or wedge the settle chain.
           }
         };
+        // Set while this session's own teardown runs. The provider disarms its
+        // settle-retry ladder when `close()` begins, so a transient refusal
+        // raised from inside the teardown gets no retry — which is what makes
+        // it the end of a save rather than a pause in one.
+        let closingSession = false;
         // How many updates entered this document, and how many of them a
         // COMMITTED settle carried. The close downgrade below needs proof that
         // the text settled, and a successful RELEASE is not that proof:
@@ -3195,10 +3247,7 @@ export function createWorkspaceEngineCapture(
             settleFailureTokens.set(error, token);
           }
           onError(`ydoc settle of ${input.path}`, error);
-          // A file-locked refusal is the transient case the provider retries
-          // on its own (#554): report it as such, so the surface can name the
-          // blocker instead of advising another edit.
-          reportSaveState(isFileLockedRefusal(error) ? "file-locked" : "error", token);
+          reportSaveState(settleFailureSaveState(error, closingSession), token);
         };
         let entry: LiveYDocSession | null = null;
         const { session, head, lineage } = await openRestartSafeRustYDocSession({
@@ -3669,7 +3718,8 @@ export function createWorkspaceEngineCapture(
           error: unknown,
           opts?: WorkspaceEngineYDocCloseOptions,
         ): void => {
-          if (!isFileLockedCause(error) || lockedCloseRetryTimer !== null) return;
+          if (!isTransientCloseCause(error) || lockedCloseRetryTimer !== null)
+            return;
           if (stopped || liveYDocSessions.get(input.path) !== entry) return;
           const delay = lockedCloseRetryMs;
           lockedCloseRetryMs = Math.min(
@@ -3680,7 +3730,7 @@ export function createWorkspaceEngineCapture(
             lockedCloseRetryTimer = null;
             if (stopped || liveYDocSessions.get(input.path) !== entry) return;
             void closeEntry(opts).catch((retryError: unknown) => {
-              if (isFileLockedCause(retryError)) {
+              if (isTransientCloseCause(retryError)) {
                 scheduleLockedCloseRetry(retryError, opts);
                 return;
               }
@@ -3710,6 +3760,7 @@ export function createWorkspaceEngineCapture(
             liveEntry.orphaned
               ? { ...opts, settle: false, settleOnRefusal: false }
               : opts;
+          closingSession = true;
           try {
             await session.close(effective);
           } catch (error) {
