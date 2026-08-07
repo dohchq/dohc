@@ -148,12 +148,22 @@ export async function materializeSharedViewPaths(
     // resolves inside the mount and would let relay-controlled bytes rewrite
     // the store that decides what the projection holds. The rule runs against
     // the MOUNT root, which is what `.dohc` means here.
+    //
+    // "entry" for BOTH operations, because neither follows the leaf: a delete
+    // is `rm`, and a write removes the target and recreates it with `wx`. So
+    // the leaf is never a path this code reads or writes through, and a
+    // tampered one is the thing being repaired. Following it here would refuse
+    // a projected file someone replaced with a dangling, escaping, or
+    // reserved-target link, and the refresh would throw before it commits its
+    // cursor -- wedging every later replay on the same path instead of
+    // healing it. The PARENT chain still resolves in full, so an alias into a
+    // reserved area is still refused.
     await assertResolvedWorkspacePath({
       rootPath: rootDir,
       absolutePath: target,
       spelled: change.path,
       label: "Shared view path",
-      access: change.operation === "delete" ? "entry" : "write",
+      access: "entry",
     });
     if (change.operation === "delete") {
       // Deletes get the same REAL-parent containment as writes: a planted

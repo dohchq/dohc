@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { collectZipEntries, createFile, createFolder, deletePath, movePath } from "./workspaceFiles";
@@ -179,20 +179,55 @@ describe("engine disk writer through an in-workspace alias", () => {
 });
 
 describe("shared view materialization through an in-mount alias", () => {
+  const store = {
+    ensureMainVersion: async () => ({ id: "main" }),
+    readTextFile: async () => ({ text: "relay bytes" }),
+    readBinaryFile: async () => {
+      throw new Error("not part of this test");
+    },
+    close: async () => undefined,
+  } as unknown as Parameters<typeof materializeSharedViewPaths>[3];
+
+  const write = (path: string) =>
+    materializeSharedViewPaths(root, "ws", [
+      { path, operation: "write", contentKind: "text" },
+    ], store);
+
   it("refuses relay-controlled bytes that land in the mount's own .dohc", async () => {
-    const store = {
-      ensureMainVersion: async () => ({ id: "main" }),
-      readTextFile: async () => ({ text: "relay bytes" }),
-      readBinaryFile: async () => {
-        throw new Error("not part of this test");
-      },
-      close: async () => undefined,
-    } as unknown as Parameters<typeof materializeSharedViewPaths>[3];
-    await expect(
-      materializeSharedViewPaths(root, "ws", [
-        { path: "meta/owned.md", operation: "write", contentKind: "text" },
-      ], store),
-    ).rejects.toThrow(/Shared view path leads to a reserved area/);
+    await expect(write("meta/owned.md")).rejects.toThrow(
+      /Shared view path leads to a reserved area/,
+    );
     expect(existsSync(join(root, ".dohc", "owned.md"))).toBe(false);
+  });
+
+  // The LEAF is a different question from its parent chain. A materialize
+  // removes the target and recreates it (`rm` then `wx`), so it never writes
+  // THROUGH a leaf link -- a tampered one is the thing being repaired. A guard
+  // that followed it would refuse, the refresh would throw before it commits
+  // its cursor, and every later replay would wedge on the same path.
+  //
+  // MUTATION NOTE: give write deltas "write" access and these three fail.
+  it("heals a projected file someone replaced with a dangling link", async () => {
+    await symlink(join(root, "gone.md"), join(root, "note.md"));
+    await write("note.md");
+    expect((await lstat(join(root, "note.md"))).isSymbolicLink()).toBe(false);
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("relay bytes");
+  });
+
+  it("heals a leaf link into .dohc without writing through it", async () => {
+    await symlink(join(root, ".dohc", "settings.json"), join(root, "note.md"));
+    await write("note.md");
+    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
+    expect((await lstat(join(root, "note.md"))).isSymbolicLink()).toBe(false);
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("relay bytes");
+  });
+
+  it("heals a leaf link that escapes the mount without writing outside it", async () => {
+    const outside = await createTestScratch("dohc-real-path-outside-");
+    await writeFile(join(outside, "victim.md"), "untouched");
+    await symlink(join(outside, "victim.md"), join(root, "note.md"));
+    await write("note.md");
+    expect(await readFile(join(outside, "victim.md"), "utf8")).toBe("untouched");
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("relay bytes");
   });
 });
