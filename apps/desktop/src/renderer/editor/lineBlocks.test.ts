@@ -494,6 +494,43 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("> intro\nmore text\n\nAfter", 2)).toBe(0);
   });
 
+  it("strips the quote prefix the tokenizer strips, and no more", () => {
+    // One SPACE after `>`, never a tab: `>\t# T` keeps its tab, which four
+    // columns in is code rather than a heading, so the callout reads on.
+    expect(blockIndexForLine("> [!note]\n>\t# T\nMatched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("> [!note]\n>\t- item\nMatched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("> [!note]\n> \t# T\nMatched\n\nAfter", 3)).toBe(0);
+    // A space after `>` is stripped, so these DO break.
+    expect(blockIndexForLine("> [!note]\n> # T\nMatched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("> [!note]\n># T\nMatched\n\nAfter", 3)).toBe(1);
+    // Spaces before `>` up to three keep it a quoted line; a tab does not,
+    // so that line is unquoted content the callout absorbs.
+    expect(blockIndexForLine("> [!note]\n   > # T\nMatched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("> [!note]\n\t> # T\nMatched\n\nAfter", 3)).toBe(0);
+  });
+
+  it("breaks a callout on HTML only where the tokenizer does", () => {
+    expect(blockIndexForLine("> [!note]\n> <div>\nMatched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("> [!note]\n>    <div>\nMatched\n\nAfter", 3)).toBe(1);
+    // A tab, or four columns of spaces, is content rather than a block start.
+    expect(blockIndexForLine("> [!note]\n>\t<div>\nMatched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("> [!note]\n>     <div>\nMatched\n\nAfter", 3)).toBe(0);
+  });
+
+  it("counts a line blank only when it is spaces", () => {
+    // A tab-only line and a non-breaking space are NOT blank here, so the
+    // paragraph runs through them.
+    expect(blockIndexForLine("First\n\t\nMatched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("First\n \nMatched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("First\n  \nMatched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("First\n\f\nMatched\n\nAfter", 3)).toBe(0);
+    // Spaces alone still end it.
+    expect(blockIndexForLine("First\n   \nMatched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("First\n\nMatched\n\nAfter", 3)).toBe(1);
+    // And a quote is not split by one either.
+    expect(blockIndexForLine("> a\n \n> b\n\nAfter", 3)).toBe(0);
+  });
+
   it("does not underline a paragraph from four columns in", () => {
     // `\t===` reaches column four, so it is the paragraph's own text and the
     // paragraph runs on. Three columns still underlines.

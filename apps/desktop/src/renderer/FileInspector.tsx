@@ -1215,6 +1215,7 @@ function MarkdownView(props: {
   const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<
     number | null
   >(null);
+  const [pendingTopScroll, setPendingTopScroll] = useState(false);
   const headingTargetNonce = props.headingTarget?.nonce;
   useEffect(() => {
     if (!props.headingTarget || props.truncated) return;
@@ -1299,9 +1300,11 @@ function MarkdownView(props: {
       // The hit is in the frontmatter. The title and properties it names are
       // rendered by PageIdentity/PropertiesPanel ABOVE the editor, so there is
       // no body block to reveal — and revealing the first one would scroll the
-      // real match off the top. Show the top of the document instead.
+      // real match off the top. Show the top of the document instead — after
+      // the pane is visible, because `setShowSource` above only SCHEDULES the
+      // unhide and a hidden element cannot be scrolled.
       setJump(null);
-      engineDocPaneRef.current?.scrollTo({ top: 0 });
+      setPendingTopScroll(true);
     } else {
       // The line BECOMES the block, which is what retires it: a jump still
       // waiting on the lazy editor names the result before this one, and
@@ -1313,6 +1316,12 @@ function MarkdownView(props: {
       });
     }
   }, [jump, engineMode, props.body]);
+  // The frontmatter jump's landing, once the pane it moves is on screen.
+  useEffect(() => {
+    if (!pendingTopScroll || showSource) return;
+    engineDocPaneRef.current?.scrollTo({ top: 0 });
+    setPendingTopScroll(false);
+  }, [pendingTopScroll, showSource]);
   useEffect(() => {
     if (!showSource || !engine.doc) {
       setSourceMarkdown(null);

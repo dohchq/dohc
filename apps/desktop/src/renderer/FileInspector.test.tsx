@@ -1710,6 +1710,47 @@ describe("engine markdown source view", () => {
     expect(flashedBlockText()).toBeUndefined();
   });
 
+  // codex round 14 on b67d649c. `setShowSource(false)` only SCHEDULES the
+  // unhide, so scrolling in the same effect moves an element that is still
+  // `hidden` — the pane never moves and the matched title stays offscreen.
+  it("scrolls to the top only once the pane is on screen", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    // Record whether the pane was hidden AT THE MOMENT it was scrolled — the
+    // one thing a plain call-count cannot say, and the whole defect.
+    const hiddenAtScroll: boolean[] = [];
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+      configurable: true,
+      value: function (this: HTMLElement) {
+        hiddenAtScroll.push(this.hasAttribute("hidden"));
+      },
+    });
+
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await screen.findByTestId("view-markdown-source");
+    expect(screen.getByTestId("view-markdown").hasAttribute("hidden")).toBe(true);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        // Line 2 of the file is `title: Plan`, inside the frontmatter.
+        scrollTarget={{ path: "a.md", line: 2, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(hiddenAtScroll.length).toBeGreaterThan(0));
+    // MUTATION: scroll inside the mapping effect -> the one recorded call
+    // happens while the pane is still hidden and moves nothing.
+    expect(hiddenAtScroll).not.toContain(true);
+  });
+
   // A frontmatter hit retires the jump like any other. Its landing writes no
   // block target, so nothing downstream reports it consumed — the branch that
   // shows the top has to retire it itself, or a later re-read of the open

@@ -73,16 +73,22 @@ const HEADING_RE = /^[ \t]{0,3}#{1,6}(?:[ \t]|$)/;
 const BULLET_RE = /^[ \t]{0,3}([-+*])(?:[ \t]|$)/;
 const ORDERED_RE = /^[ \t]{0,3}\d{1,9}([.)])(?:[ \t]|$)/;
 const QUOTE_RE = /^[ \t]{0,3}>/;
-// The quote's `>` prefix, which the tokenizer strips before reading the line
-// underneath it. A callout announces itself on that first stripped line.
-const QUOTE_PREFIX_RE = /^[ \t]{0,3}>[ \t]?/;
+// A quoted LINE and the prefix stripped off it, mirroring extensions.ts
+// CALLOUT_LINE_RE and stripBlockquotePrefix EXACTLY: spaces before the `>`,
+// never a tab, and exactly one optional SPACE after it. `>\t# T` therefore
+// keeps its tab, which four columns in makes code rather than a heading.
+const QUOTE_LINE_RE = /^ {0,3}>/;
+const QUOTE_PREFIX_RE = /^ {0,3}> ?/;
+// A blank line, which is what ends most blocks. SPACES only — a tab-only line
+// is not blank here, and neither is a non-breaking space.
+const BLANK_RE = /^ *$/;
 // A COMPLETE callout header, mirroring extensions.ts CALLOUT_HEADER_RE. An
 // unclosed `> [!oops` is an ordinary blockquote, which continues lazily where
 // a callout would not.
 const CALLOUT_RE = /^\[![^\]\n]+\]/;
 // Raw HTML, which is a block start to the callout tokenizer but not a kind
-// this module otherwise needs (extensions.ts CALLOUT_LAZY_BREAK_RE).
-const HTML_BLOCK_RE = /^[ \t]{0,3}<[a-zA-Z!/]/;
+// this module otherwise needs. Spaces only, per CALLOUT_LAZY_BREAK_RE.
+const HTML_BLOCK_RE = /^ {0,3}<[a-zA-Z!/]/;
 const FENCE_RE = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/;
 // A run of `=` or `-` under a paragraph is that paragraph's setext underline.
 const SETEXT_RE = /^[ \t]{0,3}(?:=+|-+)[ \t]*$/;
@@ -292,7 +298,10 @@ export function blockIndexForLine(body: string, line: number): number {
       }
       continue;
     }
-    if (text.trim() === "") {
+    // SPACES only. A tab-only line is not blank to this tokenizer, and
+    // neither is one holding a non-breaking space — `trim()` would call both
+    // blank and split a paragraph the editor keeps whole.
+    if (BLANK_RE.test(text)) {
       open = false;
       quoteOpen = false;
       continue;
@@ -320,7 +329,7 @@ export function blockIndexForLine(body: string, line: number): number {
     // A fence ends it for either, but they do not agree on what a fence IS:
     // the callout tokenizer opens one on an info string an ordinary
     // blockquote leaves as text (quotedFenceOpener).
-    if (openKind === "quote" && (open || quoteOpen) && QUOTE_RE.test(text)) {
+    if (openKind === "quote" && (open || quoteOpen) && QUOTE_LINE_RE.test(text)) {
       const inner = text.replace(QUOTE_PREFIX_RE, "");
       if (quoteFence) {
         if (closesFence(inner, quoteFence)) quoteFence = null;
