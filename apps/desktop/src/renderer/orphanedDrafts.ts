@@ -23,7 +23,31 @@ export type OrphanedDraft = {
   // The full serialized document as the user last had it, frontmatter
   // included — what Copy hands back.
   text: string;
+  // When the reopen set this text aside. THE order key (see the merge in
+  // `remapOrphanedDraftPaths`), and deliberately not the id: an id is a slot
+  // an allocator can hand out again after a dismissal frees it, so the newest
+  // draft in a run can hold a lower id than a survivor captured before it.
+  // A capture time is the same number on both sides of a restart, and storage
+  // has carried it since #600.
+  capturedAtMs: number;
 };
+
+// THE order every surface reads: oldest first. Capture time is the key, and
+// the id breaks a tie — two reopens inside one millisecond are ordinary, and
+// leaving those to a stable sort is not enough, because the two halves feed
+// their sort in different orders (this map merges target-then-moved, storage
+// keeps arrival order) and would disagree exactly on the tie.
+//
+// Both numbers travel with the row and survive a restart, so the notice reads
+// the same before and after a launch. That is what this order promises. It
+// does not promise which of two drafts captured in the same millisecond truly
+// came first — nothing recorded can answer that, and no surface asks.
+function byCaptureOrder(
+  a: { capturedAtMs: number; id: number },
+  b: { capturedAtMs: number; id: number },
+): number {
+  return a.capturedAtMs - b.capturedAtMs || a.id - b.id;
+}
 
 const EMPTY: readonly OrphanedDraft[] = [];
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
@@ -93,15 +117,18 @@ export function captureOrphanedDraft(
 ): void {
   const key = keyFor(workspaceId, path);
   const id = allocateDraftId();
+  // One reading for both halves, or the copy that outlives the run would sort
+  // against a different clock than the copy on screen.
+  const capturedAtMs = Date.now();
   // Durable before the notice exists (#600). The write is synchronous, so the
   // answer the close guard needs is already true here — a draft is at risk
   // only when storage REFUSED it.
-  if (storeDraft({ id, workspaceId, path, text, capturedAtMs: Date.now() })) {
+  if (storeDraft({ id, workspaceId, path, text, capturedAtMs })) {
     storedIds.add(id);
   }
   // Append, never overwrite: a second reopen with the first notice still up
   // must not destroy the first draft (#579 review, P2).
-  drafts.set(key, [...(drafts.get(key) ?? EMPTY), { id, text }]);
+  drafts.set(key, [...(drafts.get(key) ?? EMPTY), { id, text, capturedAtMs }]);
   scheduleNotify();
 }
 
@@ -112,11 +139,15 @@ export function captureOrphanedDraft(
 // or any workspace exists, so there is nothing to notify and no in-flight
 // response that could repaint a workspace the user has switched away from.
 export function restoreOrphanedDrafts(nowMs: number = Date.now()): void {
-  for (const row of loadStoredDrafts(nowMs)) {
+  // Oldest first, by the same key the merge uses — storage holds arrival
+  // order, which agrees with it except for a row whose capture time the load
+  // pass had to repair.
+  const stored = [...loadStoredDrafts(nowMs)].sort(byCaptureOrder);
+  for (const row of stored) {
     const key = keyFor(row.workspaceId, row.path);
     drafts.set(key, [
       ...(drafts.get(key) ?? EMPTY),
-      { id: row.id, text: row.text },
+      { id: row.id, text: row.text, capturedAtMs: row.capturedAtMs },
     ]);
     storedIds.add(row.id);
     // Ids stay stable across restarts so a dismissal reaches the right stored
@@ -170,13 +201,13 @@ export function remapOrphanedDraftPaths(
     if (next === null || next === path) continue;
     drafts.delete(key);
     const nextKey = keyFor(workspaceId, next);
-    // Merge, never overwrite: the target path may hold drafts of its own.
-    // Sorted by id, which is capture order, because that is the one order the
-    // store offers — appending would read newest-first here and oldest-first
-    // after the next launch, which reorders the Copy buttons under the user.
+    // Merge, never overwrite: the target path may hold drafts of its own, and
+    // `byCaptureOrder` is what keeps this run's reading and the next launch's
+    // reading the same — appending would read one way here and the other way
+    // after a restart, reordering the Copy buttons under the user.
     drafts.set(
       nextKey,
-      [...(drafts.get(nextKey) ?? EMPTY), ...kept].sort((a, b) => a.id - b.id),
+      [...(drafts.get(nextKey) ?? EMPTY), ...kept].sort(byCaptureOrder),
     );
     changed = true;
   }

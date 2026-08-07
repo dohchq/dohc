@@ -256,16 +256,31 @@ describe("orphanedDrafts persistence (#600)", () => {
     const next = await relaunch();
     const restored = draftsFor(next.useOrphanedDrafts, "ws-1", "a.md");
     // Neither text is dropped — destroying recovery text is never this
-    // store's call — and the two are now tellable apart.
-    expect(restored.map((d) => d.text)).toEqual(["FIRST", "SECOND"]);
+    // store's call — and the two are now tellable apart. Their ORDER is not
+    // asserted: these rows share an id and a capture time, so nothing recorded
+    // says which came first. What the order contract promises is that every
+    // launch reads them the same way, and the relaunch at the end is where
+    // that is checked.
+    expect([...restored.map((d) => d.text)].sort()).toEqual(["FIRST", "SECOND"]);
     expect(new Set(restored.map((d) => d.id)).size).toBe(2);
 
-    next.dismissOrphanedDraft("ws-1", "a.md", restored[0].id);
+    next.dismissOrphanedDraft(
+      "ws-1",
+      "a.md",
+      restored.find((d) => d.text === "FIRST")!.id,
+    );
     expect(
       draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
     ).toEqual(["SECOND"]);
     expect(storedText()).toContain("SECOND");
     expect(storedText()).not.toContain("FIRST");
+
+    // The repaired ids are the stored ones now, so the next launch reads the
+    // same store without repairing anything again.
+    const after = await relaunch();
+    expect(
+      draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
+    ).toEqual(["SECOND"]);
   });
 
   // `typeof x === "number"` is not an identity. `1e400` parses to Infinity,
@@ -451,6 +466,40 @@ describe("orphanedDrafts persistence (#600)", () => {
         ...draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
       ].sort(),
     ).toEqual(["RESTORED", "SECOND"]);
+  });
+
+  // An id is a slot, not a clock. A dismissal frees its slot for the next
+  // launch, so the newest draft in a run can hold a LOWER id than a survivor
+  // captured before it — and an order keyed on ids then puts the new one
+  // first, while storage keeps arrival order and the launch after swaps them
+  // back.
+  it("keeps one order when a dismissal frees a low id for a later capture", async () => {
+    const base = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(base);
+    captureOrphanedDraft("ws-1", "gone.md", "dismissed soon");
+    clock.mockReturnValue(base + 1);
+    captureOrphanedDraft("ws-1", "target.md", "the survivor");
+    const [doomed] = draftsFor(useOrphanedDrafts, "ws-1", "gone.md");
+    // Frees the low id in storage; the survivor keeps the higher one.
+    dismissOrphanedDraft("ws-1", "gone.md", doomed.id);
+
+    const next = await relaunch(base + 2);
+    clock.mockReturnValue(base + 2);
+    next.captureOrphanedDraft("ws-1", "a.md", "captured last");
+    // MUTATION (order key): sort the merge by id again. "captured last" holds
+    // the freed low id, so it sorts FIRST here and second after the relaunch
+    // below — the two Copy buttons swap places across a restart.
+    next.remapOrphanedDraftPaths("ws-1", (path) =>
+      path === "a.md" ? "target.md" : path,
+    );
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
+    ).toEqual(["the survivor", "captured last"]);
+
+    const after = await relaunch(base + 3);
+    expect(
+      draftsFor(after.useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
+    ).toEqual(["the survivor", "captured last"]);
   });
 
   // One order, whichever surface asks. The store sorts oldest first, and a
