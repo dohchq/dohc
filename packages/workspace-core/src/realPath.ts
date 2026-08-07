@@ -8,7 +8,7 @@
 // subpath export ("@dohc/workspace-core/realPath") and stays out of the barrel
 // the renderer bundles.
 import { lstat, realpath } from "node:fs/promises";
-import { basename, dirname, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { hasIgnoredSegment, isDohcMetadataPath, isSharedWithMePath } from "./paths";
 
 // What a caller does with the path, in the same read/write split the lexical
@@ -27,8 +27,14 @@ export type PathAccess = "read" | "write" | "entry";
 // Returns the real path RELATIVE to the canonical root, with the still-absent
 // tail appended — the answer callers need to judge where the operation lands,
 // not just whether it is inside. Every failure refuses.
+//
+// `resolvedAbsolute` is that same answer as an absolute path: the resolution
+// this walk performed, offered so a caller acts on the path it JUDGED instead
+// of resolving a second time and hoping the two agree. In `noFollow` mode it
+// is the resolved PARENT plus the held-back name, which is the entry the
+// caller renames — not wherever that entry points.
 export type RealTarget =
-  | { ok: true; relative: string }
+  | { ok: true; relative: string; resolvedAbsolute: string }
   | { ok: false; reason: "escapes-workspace" }
   | { ok: false; reason: "unreadable-root"; code: string }
   | { ok: false; reason: "dangling-symlink" }
@@ -120,6 +126,7 @@ export async function realRelativeInRoot(
     return {
       ok: true,
       relative: [...resolved.split(sep), ...absentTail].filter(Boolean).join("/"),
+      resolvedAbsolute: absentTail.length === 0 ? real : join(real, ...absentTail),
     };
   }
 }

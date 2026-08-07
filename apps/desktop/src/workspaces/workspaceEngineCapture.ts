@@ -1215,25 +1215,25 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       access: "entry",
     });
   }
+  // Text and bytes take the SAME four checks in the same order, so they take
+  // one path through them. writeFile defaults a string to UTF-8 and ignores
+  // the encoding for a Uint8Array, so one call serves both. Two copies of a
+  // security sequence can drift; one cannot.
+  async function writeEngineFile(
+    absolutePath: string,
+    data: string | Uint8Array,
+  ): Promise<void> {
+    const dir = dirname(absolutePath);
+    await assertContainedNearestAncestor(dir);
+    await assertResolvedArea(absolutePath, "Engine write path");
+    await mkdir(dir, { recursive: true });
+    await assertContainedDir(dir);
+    await assertLeafNotSymlink(absolutePath);
+    await writeFile(absolutePath, data);
+  }
   return {
-    async writeTextFile(absolutePath, text) {
-      const dir = dirname(absolutePath);
-      await assertContainedNearestAncestor(dir);
-      await assertResolvedArea(absolutePath, "Engine write path");
-      await mkdir(dir, { recursive: true });
-      await assertContainedDir(dir);
-      await assertLeafNotSymlink(absolutePath);
-      await writeFile(absolutePath, text, "utf8");
-    },
-    async writeBinaryFile(absolutePath, bytes) {
-      const dir = dirname(absolutePath);
-      await assertContainedNearestAncestor(dir);
-      await assertResolvedArea(absolutePath, "Engine write path");
-      await mkdir(dir, { recursive: true });
-      await assertContainedDir(dir);
-      await assertLeafNotSymlink(absolutePath);
-      await writeFile(absolutePath, bytes);
-    },
+    writeTextFile: writeEngineFile,
+    writeBinaryFile: writeEngineFile,
     async deletePath(absolutePath) {
       await assertContainedDir(dirname(absolutePath));
       await assertResolvedArea(absolutePath, "Engine delete path");

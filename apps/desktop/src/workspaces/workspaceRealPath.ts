@@ -5,8 +5,6 @@ import {
   type RealTarget,
 } from "@dohc/workspace-core/realPath";
 
-export type { PathAccess };
-
 // The desktop's guards read a path as SPELLED, then prove only that it stays
 // INSIDE the workspace root. An in-workspace symlink answers that yes: a
 // containment check stops an escape OUT of the root and says nothing about
@@ -17,6 +15,11 @@ export type { PathAccess };
 // `label` names the operation in the user's nouns ("File path", "Move
 // destination"), and `spelled` is the path as the caller named it, so a refusal
 // carries both spellings: the one asked for and the one it leads to.
+//
+// Answers with the resolution it judged, root-relative and absolute. A caller
+// that then acts on the path should use `resolvedAbsolute` rather than resolve
+// again: two resolutions of one path can disagree, and the second one is the
+// one no rule was applied to.
 export async function assertResolvedWorkspacePath(input: {
   // The root the reservation is relative to. `.dohc` means the workspace's
   // own metadata dir, so a share mount passes ITS root, not the host's.
@@ -28,7 +31,7 @@ export async function assertResolvedWorkspacePath(input: {
   // read); "write" refuses it; "entry" is "write" plus "this renames the entry
   // itself rather than following it" — a delete, or a move's source.
   access: PathAccess;
-}): Promise<string> {
+}): Promise<{ relative: string; resolvedAbsolute: string }> {
   const target = await realRelativeInRoot(
     input.rootPath,
     input.absolutePath,
@@ -42,7 +45,7 @@ export async function assertResolvedWorkspacePath(input: {
         `${input.spelled} leads to ${target.relative}. ${refused.explain}`,
     );
   }
-  return target.relative;
+  return { relative: target.relative, resolvedAbsolute: target.resolvedAbsolute };
 }
 
 // A path the resolver could not place. Each cause gets its own next step: a

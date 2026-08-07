@@ -90,24 +90,23 @@ async function resolveContainedDir(rootPath: string, relativePath: string): Prom
   if (parts.some((part) => part === "." || part === "..")) {
     throw new Error(`Site path contains traversal: ${relativePath}`);
   }
-  const realRoot = await realpath(rootPath);
   const absolute = join(rootPath, ...parts);
   // A site root is a directory dohc serves, spawns a dev server in, and builds
   // from. `app -> .dohc` spells an ordinary folder and makes all three run on
   // the workspace's control plane, so the reserved rule decides on where the
   // root really is. This is also the only guard the spelled path gets: a site
   // root named `.dohc` outright is refused by the same test.
-  await assertResolvedWorkspacePath({
+  //
+  // The served root, the dev server's cwd, and the build's cwd are all the
+  // path this judged. Resolving a second time would run them somewhere the
+  // reserved rule never saw.
+  const { resolvedAbsolute: realSite } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absolute,
     spelled: relativePath,
     label: "Site path",
     access: "read",
   });
-  const realSite = await realpath(absolute);
-  if (!isInside(realRoot, realSite)) {
-    throw new Error(`Site path escapes the workspace: ${relativePath}`);
-  }
   const info = await stat(realSite);
   if (!info.isDirectory()) throw new Error(`Site path is not a directory: ${relativePath}`);
   return realSite;

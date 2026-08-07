@@ -989,7 +989,11 @@ export async function collectZipEntries(
     // The secret floor decided on BOTH spellings: `notes.md -> .env` spells an
     // ordinary file and exports the secret's bytes. The resolved location also
     // decides the reservation, so `link -> .dohc` cannot export workspace state.
-    const realRelative = await assertResolvedWorkspacePath({
+    //
+    // The archive is then read from the path this classified. Resolving a
+    // second time would let the bytes come from somewhere the secret floor
+    // never judged, which is the whole defect this guard exists for.
+    const { relative: realRelative, resolvedAbsolute } = await assertResolvedWorkspacePath({
       rootPath,
       absolutePath: join(rootPath, validated.normalized),
       spelled: relativePath,
@@ -1004,11 +1008,7 @@ export async function collectZipEntries(
         `Secret files never leave the workspace in an export: ${validated.normalized}`,
       );
     }
-    const realTarget = await realpath(join(rootPath, validated.normalized));
-    if (!isInside(realRoot, realTarget)) {
-      throw new Error(`Export path escapes workspace: ${relativePath}`);
-    }
-    startAbsolute = realTarget;
+    startAbsolute = resolvedAbsolute;
     // Entries keep the exported folder/file as their top-level name so the
     // extracted archive unpacks to "notes/…", not loose children.
     prefix = basename(validated.normalized);
