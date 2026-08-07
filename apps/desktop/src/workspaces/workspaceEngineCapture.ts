@@ -159,12 +159,11 @@ export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 // capture.stop(). A healthy open never consults it: the budget gates retries
 // only. Measured healthy opens on a busy chain are in ydocOpenDeadline.test.ts.
 //
-// What it does NOT bound: one in-flight `ydoc.open`. That request carries no
-// deadlineMs — unlike `workspace.open`, whose 2 s is in the derivation above —
-// so a daemon that accepts the open and then hangs holds the chain for as
-// long as it hangs. Bounding it needs a measured value for the opens it would
-// reject (a large document's lineage resurrection is the slow case #514
-// fought), which this issue did not measure. Tracked separately.
+// It does not bound one in-flight `ydoc.open` either, and does not have to:
+// that request carries its own measured YDOC_OPEN_DEADLINE_MS (#616), so a
+// daemon that accepts the open and then hangs frees the chain at that bound.
+// The two limits answer different questions — this one bounds RETRY WAITING,
+// which a daemon that never fails never enters.
 export const YDOC_OPEN_RETRY_DEADLINE_MS =
   2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
 export const MAX_ENGINE_CAPTURE_TEXT_BYTES = MAX_HISTORY_TEXT_SNAPSHOT_BYTES;

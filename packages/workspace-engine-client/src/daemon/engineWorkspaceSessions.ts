@@ -1,6 +1,7 @@
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
+  isYdocSessionBusyRefusal,
   WorkspaceDaemonRequester,
 } from "../live/daemonLiveAdapter";
 import type { AgentAuthor } from "../versioned/versionedWireContract";
@@ -9,6 +10,7 @@ import {
   decodeWorkspaceResult,
 } from "../workspace/workspaceWireContract";
 import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import { YdocOpenTimedOutError } from "../ydoc/ydocLiveAdapter";
 import {
   DOHC_ENGINE_GUARD,
   DOHC_METADATA_GUARD,
@@ -186,12 +188,24 @@ export class EngineWorkspaceShuttingDownError extends Error {
 }
 
 // The refusals a document open must NOT answer with the writable plain editor.
-// Both mean the same thing to the surface — the engine did not open this
-// document, and may still own it — so both keep it read-only (#533/#564).
+// Each means the same thing to the surface — the engine did not open this
+// document, and may still own it — so each keeps it read-only
+// (#533/#564/#616).
+//
+// `ydoc-session-busy` is the daemon SAYING SO, and it is not scoped to the
+// timeout that motivated it. Whenever a lease is held, the daemon's Y.Doc is
+// the canonical copy and the file on disk is not, so a writable plain editor
+// over that file is a second writer whatever produced the lease: this client's
+// timed-out open, another window, or a session whose close failed. The cost of
+// classifying it this way is that a document whose session id was lost stays
+// read-only until the workspace closes. That is the honest state, and the
+// notice carries a retry.
 export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
   return (
     error instanceof EngineWorkspaceRetryDeadlineError ||
-    error instanceof EngineWorkspaceShuttingDownError
+    error instanceof EngineWorkspaceShuttingDownError ||
+    error instanceof YdocOpenTimedOutError ||
+    isYdocSessionBusyRefusal(error)
   );
 }
 
@@ -380,9 +394,7 @@ export class EngineWorkspaceSessions {
         );
         // The second door: the operation is daemon work this class does not
         // issue itself, and the rebind above can take the whole window with it
-        // (#564, codex r17). What it admits may be a `ydoc.open`, which
-        // carries no deadline of its own — the exact call this region exists
-        // to bound.
+        // (#564, codex r17).
         this.assertRegionLive(workspace.workspaceId);
         try {
           return await operation(binding);
@@ -454,8 +466,8 @@ export class EngineWorkspaceSessions {
     // was consulted on the failure path alone, so a task that never failed
     // never saw it: a document open still queued on the capture chain when
     // `will-quit` fired would enter here afterwards, succeed at its first
-    // workspace call, and proceed into a `ydoc.open` that carries no deadline
-    // — holding the chain through the 3 s forced-exit timer (#564, codex).
+    // workspace call, and proceed into a `ydoc.open` whose own bound (#616)
+    // outlasts the 3 s forced-exit timer (#564, codex).
     // Nothing user-visible is lost: a bounded region is the abandonable kind
     // by construction, and an opening document is read-only (#533).
     if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();

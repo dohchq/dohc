@@ -7935,8 +7935,8 @@ function registerIpcHandlers(
     // this handler sat in a release, and then this handler would take a daemon
     // session for a generation that no longer exists. The check after the open
     // does release that session — but the replacement renderer racing the same
-    // document meanwhile gets ydoc-session-busy, which reads as an ordinary
-    // fallback and puts the writable plain editor over it.
+    // document meanwhile gets ydoc-session-busy, and is then stuck read-only
+    // over a document nothing is going to release (#616).
     const finishPendingOpen = beginPendingEngineYDocOpen(sender.id);
     try {
       // A stale session under this id — a renderer that reused one after a
@@ -7960,7 +7960,9 @@ function registerIpcHandlers(
       // new one, so nothing keyed by id would ever reach it. The daemon would
       // then answer this open ydoc-session-busy (workspaceEngineCapture.ts,
       // openYDocSessionTask — a failing-close session someone still HOLDS keeps
-      // refusing), which reads as an ordinary fallback to the plain editor.
+      // refusing), and the retry that was meant to recover the document would
+      // instead be the answer that never can: read-only over a session only
+      // this loop knows how to release (#616).
       for (const [sessionId, entry] of [...engineYDocSessions]) {
         if (!entry.closeFailed) continue;
         if (entry.workspaceId !== workspace.workspaceId) continue;

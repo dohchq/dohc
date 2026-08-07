@@ -74,9 +74,10 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
   it("retries a failed close BY PATH before it binds anything", () => {
     // The renderer retries under a NEW session id (useEngineDoc, nextSessionId),
     // so an id-keyed retry never reaches the session whose close failed. The
-    // daemon then answers the fresh open ydoc-session-busy — an ordinary
-    // fallback — and the writable plain editor lands back on a document the
-    // engine may still hold.
+    // daemon then answers the fresh open ydoc-session-busy, and this loop is
+    // the only thing that can release the session it names — without it the
+    // document is read-only for good (#616), and before #616 it took the
+    // writable plain editor instead.
     const handler = handlerSource("engineYDocOpen");
     const retryAt = handler.indexOf("unreleased session retried by a new open");
     expect(retryAt).toBeGreaterThan(-1);
@@ -99,8 +100,8 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     // can finish both sweeps and reload while this handler sits in a release,
     // and the handler then takes a daemon session for a generation that no
     // longer exists — while the replacement renderer's open of the same
-    // document gets ydoc-session-busy, an ordinary fallback to the writable
-    // plain editor.
+    // document gets ydoc-session-busy, leaving it read-only over a session
+    // that generation can no longer release (#616).
     const handler = handlerSource("engineYDocOpen");
     const beginAt = handler.indexOf("beginPendingEngineYDocOpen(");
     const tryAt = handler.indexOf("try {", beginAt);

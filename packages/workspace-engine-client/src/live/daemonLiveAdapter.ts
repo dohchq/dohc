@@ -129,6 +129,18 @@ export function isYdocSessionNotFoundRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-session-not-found";
 }
 
+// A live session already holds this document's lease, so the daemon refuses to
+// bind a second one (`ydoc-session-busy`, dohc-workspace-engine/src/lib.rs).
+//
+// The lease is an RAII guard stored in the daemon's session entry
+// (dohc-engine-collab/src/lease.rs), and only `ydoc.close` — which needs the
+// session id — or the workspace's own eviction removes that entry. There is no
+// TTL. So a caller that lost the id cannot free the document, and must not
+// treat the refusal as "the engine does not have this document".
+export function isYdocSessionBusyRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "ydoc-session-busy";
+}
+
 // The engine refused because the path's head moved under this caller: another
 // writer — the daemon's own capture ingesting an edit made outside dohc —
 // committed to the same object first. `DomainError::ConflictStaleTarget`.

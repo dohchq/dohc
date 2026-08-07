@@ -1,9 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import {
+  EngineRequestDeadlineError,
+  EngineRequestError,
+} from "../daemon/engineClient";
 import { DaemonRefusalError } from "../live/daemonLiveAdapter";
+import type { Request } from "./generated/Request";
 import {
   IllFormedUtf16EditError,
   RemoteYdocApplyError,
+  YDOC_OPEN_DEADLINE_MS,
+  YdocOpenTimedOutError,
   YdocResyncNeededError,
   YdocSessionQuarantinedError,
   YdocLiveAdapter,
@@ -1931,6 +1938,171 @@ describe("YdocLiveAdapter", () => {
       cause: seedFailure,
     });
     expect(closes).toEqual([false, true]);
+    adapter.dispose();
+  });
+});
+
+describe("the ydoc.open deadline (#616)", () => {
+  // The seam EngineClient owns for a deadlined request: arm a timer at
+  // `request.deadlineMs`, and reject with EngineRequestDeadlineError when it
+  // fires (engineClient.ts, `sendRequest`, pinned there by "times out only the
+  // expired request and ignores its late reply"). A daemon fake that answers
+  // instantly would certify the translation below without ever reaching it, so
+  // this one answers nothing at all.
+  function silentDaemon(): EngineTransport & { armed: number[] } {
+    const armed: number[] = [];
+    return {
+      armed,
+      sendRequest(request) {
+        const deadlineMs = request.deadlineMs;
+        if (deadlineMs === undefined || deadlineMs === null) {
+          return new Promise<never>(() => undefined);
+        }
+        armed.push(deadlineMs);
+        return new Promise<never>((_resolve, reject) => {
+          setTimeout(() => {
+            reject(
+              new EngineRequestDeadlineError(
+                request.id,
+                request.method,
+                deadlineMs,
+              ),
+            );
+          }, deadlineMs);
+        });
+      },
+      onEvent: () => () => undefined,
+    };
+  }
+
+  it("carries the measured bound on ydoc.open, and on no other request", async () => {
+    const requests: Request[] = [];
+    const engine = seedPlaintextEngine("hello");
+    const recording: EngineTransport = {
+      async sendRequest(request) {
+        requests.push(request);
+        return await engine.sendRequest(request);
+      },
+      onEvent: (handler) => engine.onEvent(handler),
+    };
+    const adapter = new YdocLiveAdapter(recording);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 5,
+      insert: "!",
+    });
+    await session.close({ settle: true });
+    adapter.dispose();
+
+    const deadlines = new Map(
+      requests.map((request) => [request.method, request.deadlineMs ?? null]),
+    );
+    expect(deadlines.get(YDOC_METHOD.open)).toBe(YDOC_OPEN_DEADLINE_MS);
+    expect(deadlines.get(YDOC_METHOD.recordUpdate)).toBeNull();
+    expect(deadlines.get(YDOC_METHOD.close)).toBeNull();
+  });
+
+  it("refuses at the bound when the daemon never answers, naming the limit and the wait", async () => {
+    // What the bound's SIZE has to clear is measured in
+    // ydocOpenMeasurement.e2e.test.ts. What is pinned here is that the open
+    // ends at whatever that bound is, and not one tick before it.
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "Date", "performance"],
+    });
+    try {
+      const transport = silentDaemon();
+      const adapter = new YdocLiveAdapter(transport);
+      const opening = adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+      });
+      const settled = vi.fn();
+      void opening.then(settled, settled);
+
+      await vi.advanceTimersByTimeAsync(YDOC_OPEN_DEADLINE_MS - 1);
+      expect(transport.armed).toEqual([YDOC_OPEN_DEADLINE_MS]);
+      expect(settled).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      const error: unknown = await opening.catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(YdocOpenTimedOutError);
+      const timedOut = error as YdocOpenTimedOutError;
+      expect(timedOut.limitMs).toBe(YDOC_OPEN_DEADLINE_MS);
+      expect(timedOut.waitedMs).toBe(YDOC_OPEN_DEADLINE_MS);
+      expect(timedOut.path).toBe(PATH);
+      expect(timedOut.message).toContain(
+        `The ydoc.open deadlineMs limit of ${YDOC_OPEN_DEADLINE_MS}ms was reached`,
+      );
+      expect(timedOut.message).toContain(
+        `the caller waited ${YDOC_OPEN_DEADLINE_MS}ms`,
+      );
+      expect(timedOut.cause).toBeInstanceOf(EngineRequestDeadlineError);
+      adapter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("answers the daemon's own DEADLINE_EXCEEDED the same way", async () => {
+    // The number is on the wire, so the daemon's supervisor holds it too and
+    // can be the side that reports it (supervisor.rs adopts `deadline_ms`).
+    // Its refusal arrives as a wire error, which no ladder above retries and
+    // `isEngineWorkspaceOpenRefusedError` did not recognise — so the same
+    // expiry, reported by the other clock, put the writable plain editor over
+    // a document the daemon may still hold.
+    const adapter = new YdocLiveAdapter({
+      sendRequest: (request) =>
+        Promise.reject(
+          new EngineRequestError(request.id, {
+            code: "DEADLINE_EXCEEDED",
+            message: "request deadline elapsed",
+            retry: "afterBackoff",
+          }),
+        ),
+      onEvent: () => () => undefined,
+    });
+    const error: unknown = await adapter
+      .openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+      })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(YdocOpenTimedOutError);
+    expect((error as YdocOpenTimedOutError).limitMs).toBe(YDOC_OPEN_DEADLINE_MS);
+    expect((error as YdocOpenTimedOutError).cause).toBeInstanceOf(
+      EngineRequestError,
+    );
+    adapter.dispose();
+  });
+
+  it("leaves a transport failure that is not this deadline exactly as it was", async () => {
+    // The translation is keyed on the deadline error's IDENTITY, not on the
+    // code every dropped socket also carries: a daemon that died mid-open is
+    // still a reconnect to the ladder above, and calling it a timeout would
+    // stop the rebind that recovers it.
+    const dropped = { code: "transport-error", message: "socket closed" };
+    const adapter = new YdocLiveAdapter({
+      sendRequest: () => Promise.reject(dropped),
+      onEvent: () => () => undefined,
+    });
+    await expect(
+      adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+      }),
+    ).rejects.toBe(dropped);
     adapter.dispose();
   });
 });

@@ -9,6 +9,7 @@ import {
   EngineClientError,
   DuplexEngineClientConnection,
   EngineFrameError,
+  EngineRequestDeadlineError,
   EngineRequestError,
   FrameDecoder,
   FrameType,
@@ -510,13 +511,24 @@ describe("EngineClient", () => {
         deadlineMs: 25,
       });
       const unrelated = transport.sendRequest(request(56, "unrelated.method"));
+      // Its own class, and still `transport-error`: the request left and
+      // nothing came back, so every caller that rebinds on a dropped socket
+      // must keep rebinding here. The class is what lets the ONE caller that
+      // set the deadline — `ydoc.open` (#616) — tell its own limit firing apart
+      // from a socket that died, which a message match cannot do safely.
       const rejection = expect(expired).rejects.toMatchObject({
+        name: "EngineRequestDeadlineError",
         code: "transport-error",
-        message: "Engine request 1 timed out after 25ms.",
+        method: "silent.method",
+        deadlineMs: 25,
+        message:
+          "engine-request-deadline-exceeded: request 1 (silent.method) carries " +
+          "a deadline of 25 ms and the daemon did not answer inside it.",
       });
 
       await vi.advanceTimersByTimeAsync(25);
       await rejection;
+      await expect(expired).rejects.toBeInstanceOf(EngineRequestDeadlineError);
       peer.send({ type: "response", id: requests[0]!.id, result: "late" });
       peer.send({ type: "response", id: requests[1]!.id, result: "unrelated" });
       await expect(unrelated).resolves.toEqual({
