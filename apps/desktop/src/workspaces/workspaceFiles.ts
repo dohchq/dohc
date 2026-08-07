@@ -1027,7 +1027,12 @@ export async function collectZipEntries(
     // window. Size comes from fstat on the open fd (not a prior stat that a
     // concurrent grow could outrun), and the read is bounded to that size, so a
     // file that grows after the cap check cannot blow the in-memory budget.
-    const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
+    //
+    // O_NOFOLLOW is POSIX-only. On win32 it is undefined, so `?? 0` keeps the
+    // flags well-formed instead of coercing the whole expression to 0, and the
+    // no-follow half of the paragraph above does not hold there — the fstat and
+    // the bounded read from one descriptor still do.
+    const handle = await open(absolute, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     try {
       const st = await handle.stat();
       if (!st.isFile()) {

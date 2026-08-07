@@ -1206,14 +1206,19 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   //      link — step 3 refuses one, and rm removes one as a link — so only the
   //      parent chain decides. It runs BEFORE mkdir, so a reserved ancestor
   //      cannot have directories created through it either.
-  async function assertResolvedArea(absolutePath: string, label: string): Promise<void> {
-    await assertResolvedWorkspacePath({
+  //      It answers with the resolution it judged, and every step after it
+  //      works on THAT path. Re-walking the spelling would let an ancestor
+  //      alias swapped after the check redirect the mkdir, the checks, and the
+  //      write to somewhere no rule was applied.
+  async function assertResolvedArea(absolutePath: string, label: string): Promise<string> {
+    const { resolvedAbsolute } = await assertResolvedWorkspacePath({
       rootPath,
       absolutePath,
       spelled: absolutePath,
       label,
       access: "entry",
     });
+    return resolvedAbsolute;
   }
   // Text and bytes take the SAME four checks in the same order, so they take
   // one path through them. writeFile defaults a string to UTF-8 and ignores
@@ -1223,23 +1228,25 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     absolutePath: string,
     data: string | Uint8Array,
   ): Promise<void> {
-    const dir = dirname(absolutePath);
-    await assertContainedNearestAncestor(dir);
-    await assertResolvedArea(absolutePath, "Engine write path");
+    await assertContainedNearestAncestor(dirname(absolutePath));
+    // Entry mode, so this is the resolved parent chain plus the held-back
+    // name: the directories are canonical and only the leaf is still spelling.
+    const target = await assertResolvedArea(absolutePath, "Engine write path");
+    const dir = dirname(target);
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
-    await assertLeafNotSymlink(absolutePath);
-    await writeFile(absolutePath, data);
+    await assertLeafNotSymlink(target);
+    await writeFile(target, data);
   }
   return {
     writeTextFile: writeEngineFile,
     writeBinaryFile: writeEngineFile,
     async deletePath(absolutePath) {
       await assertContainedDir(dirname(absolutePath));
-      await assertResolvedArea(absolutePath, "Engine delete path");
+      const target = await assertResolvedArea(absolutePath, "Engine delete path");
       // rm on a symlink removes the link itself, never the target, so a
       // symlink leaf needs no extra handling here.
-      await rm(absolutePath, { force: true });
+      await rm(target, { force: true });
     },
   };
 }

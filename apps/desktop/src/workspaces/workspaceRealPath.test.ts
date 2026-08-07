@@ -235,6 +235,38 @@ describe("engine disk writer through an in-workspace alias", () => {
     );
     expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
   });
+
+  // The writer now mkdirs, checks, and writes on the resolution the guard
+  // judged rather than re-walking the spelling. That narrowing is NOT what
+  // these pin — a benign alias lands in the same place either way, and opening
+  // the window needs a concurrent swap.
+  //
+  // What they DO pin is `resolvedAbsolute` itself, which six call sites now
+  // act on: the resolved parent is where the bytes land, and a still-absent
+  // parent chain under it is created correctly. MUTATION NOTE: drop the
+  // absent-tail join in realRelativeInRoot and all three fail.
+  it("writes through a benign alias directory at its canonical location", async () => {
+    await symlink(join(root, "notes"), join(root, "inbox"), "dir");
+    const writer = createDefaultDiskWriter(root);
+    await writer.writeTextFile(join(root, "inbox", "owned.md"), "engine text");
+    expect(await readFile(join(root, "notes", "owned.md"), "utf8")).toBe("engine text");
+  });
+
+  it("creates a still-absent parent chain under the resolved parent", async () => {
+    await symlink(join(root, "notes"), join(root, "inbox"), "dir");
+    const writer = createDefaultDiskWriter(root);
+    await writer.writeTextFile(join(root, "inbox", "a", "b", "deep.md"), "nested");
+    expect(await readFile(join(root, "notes", "a", "b", "deep.md"), "utf8")).toBe("nested");
+  });
+
+  it("deletes at the resolved location, leaving the alias itself alone", async () => {
+    await symlink(join(root, "notes"), join(root, "inbox"), "dir");
+    await writeFile(join(root, "notes", "doomed.md"), "bye");
+    const writer = createDefaultDiskWriter(root);
+    await writer.deletePath(join(root, "inbox", "doomed.md"));
+    expect(existsSync(join(root, "notes", "doomed.md"))).toBe(false);
+    expect((await lstat(join(root, "inbox"))).isSymbolicLink()).toBe(true);
+  });
 });
 
 describe("shared view materialization through an in-mount alias", () => {

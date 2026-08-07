@@ -1,7 +1,7 @@
 import { hasIgnoredSegment } from "@dohc/workspace-core";
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
-import { access, readFile, realpath, stat } from "node:fs/promises";
+import { access, open, realpath, stat } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { extname, isAbsolute, join, relative, sep } from "node:path";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
@@ -72,6 +72,13 @@ const MIME_TYPES: Record<string, string> = {
   ".woff": "font/woff",
   ".woff2": "font/woff2",
 };
+
+// Read-only, and do not follow a final-component symlink where the platform
+// can say so. O_NOFOLLOW is POSIX-only: on win32 `fs.constants.O_NOFOLLOW` is
+// undefined, and `O_RDONLY | undefined` silently yields 0 rather than failing
+// loudly, so `?? 0` keeps the intent explicit. Windows therefore keeps the
+// residual named at the read site.
+const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
 function isInside(parent: string, child: string): boolean {
   if (child === parent) return true;
@@ -217,18 +224,36 @@ export async function startStaticSitePreview(
         response.end("Forbidden");
         return;
       }
-      const entryInfo = await stat(realTarget);
-      if (!entryInfo.isFile()) {
-        response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-        response.end("Not found");
-        return;
+      // ONE open, and everything after it comes from that handle. The fd is
+      // bound to the object open() found, so the file that is checked is the
+      // file that is read — a stat followed by a separate read let the name be
+      // swapped in between and served bytes nothing had checked.
+      //
+      // RESIDUAL, stated rather than papered over: this narrows the window to
+      // the single open() call, it does not close it. On POSIX O_NOFOLLOW makes
+      // even that refuse a leaf swapped for a symlink. On win32 Node exposes no
+      // O_NOFOLLOW and no fd->path affordance, so a swap landing between the
+      // guard and this open is still followed. Closing it needs an API Node
+      // does not offer; an identity compare here would only be another
+      // checkable proxy with its own window.
+      const handle = await open(realTarget, READ_NO_FOLLOW);
+      try {
+        const entryInfo = await handle.stat();
+        if (!entryInfo.isFile()) {
+          response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+          response.end("Not found");
+          return;
+        }
+        const body = await handle.readFile();
+        response.writeHead(200, {
+          "cache-control": "no-store",
+          "content-type": mimeType(realTarget),
+          "x-content-type-options": "nosniff",
+        });
+        response.end(body);
+      } finally {
+        await handle.close();
       }
-      response.writeHead(200, {
-        "cache-control": "no-store",
-        "content-type": mimeType(realTarget),
-        "x-content-type-options": "nosniff",
-      });
-      response.end(await readFile(realTarget));
     } catch {
       response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
       response.end("Not found");
