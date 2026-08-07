@@ -17,9 +17,12 @@
 //    heading, not a new block.
 //  - Some blocks RUN THROUGH a blank line, because the next line continues
 //    them: another item of the SAME list (a changed marker is a new list),
-//    content indented into that item, and the next chunk of an indented code
-//    block. A quoted blank ends a quote's lazy continuation the same way,
-//    without ending the quote.
+//    content indented to that item's own content column, and the next chunk
+//    of an indented code block.
+//  - A quote absorbs an UNQUOTED line as a lazy continuation until something
+//    inside it ends that: a quoted blank or a quoted fence for any quote, and
+//    for a callout every quoted block start. The quote itself survives — the
+//    next `>` line is still the same node.
 //  - A fence's contents are inert, and so are a `$$…$$` block's. Blank lines
 //    and `#` inside either are that block's own text.
 //  - A link reference definition renders NO node, so it starts no block. A
@@ -60,14 +63,20 @@ const HEADING_RE = /^[ \t]{0,3}#{1,6}(?:[ \t]|$)/;
 const BULLET_RE = /^[ \t]{0,3}([-+*])(?:[ \t]|$)/;
 const ORDERED_RE = /^[ \t]{0,3}\d{1,9}([.)])(?:[ \t]|$)/;
 const QUOTE_RE = /^[ \t]{0,3}>/;
-// A `>`-only line ends the quote's LAZY continuation without ending the quote.
-const QUOTED_BLANK_RE = /^[ \t]{0,3}>[ \t]*$/;
+// The quote's `>` prefix, which the tokenizer strips before reading the line
+// underneath it. A callout announces itself on that first stripped line.
+const QUOTE_PREFIX_RE = /^[ \t]{0,3}>[ \t]?/;
+const CALLOUT_RE = /^\[!/;
+// Raw HTML, which is a block start to the callout tokenizer but not a kind
+// this module otherwise needs (extensions.ts CALLOUT_LAZY_BREAK_RE).
+const HTML_BLOCK_RE = /^[ \t]{0,3}<[a-zA-Z!/]/;
 const FENCE_RE = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/;
 // A run of `=` or `-` under a paragraph is that paragraph's setext underline.
 const SETEXT_RE = /^[ \t]{0,3}(?:=+|-+)[ \t]*$/;
-// Content indented into the list item above it. Two columns is where the
-// parser starts reading a line that way, tab or spaces.
-const CONTINUATION_RE = /^(?:\t| {2})/;
+// Where a list item's own content begins, which is the column a continuation
+// line has to reach. It is the ACTIVE item's marker plus the spaces after it,
+// so `-    item` wants five columns where `- item` wants two.
+const LIST_MARKER_RE = /^[ \t]{0,3}(?:[-+*]|\d{1,9}[.)])/;
 // Four columns with nothing open above is an INDENTED code block, which runs
 // through its own blank lines and ends where the indentation stops.
 const INDENTED_CODE_RE = /^(?:\t| {4})/;
@@ -116,6 +125,33 @@ function listMarker(text: string): string {
   return (BULLET_RE.exec(text)?.[1] ?? ORDERED_RE.exec(text)?.[1]) ?? "";
 }
 
+/** The column reached after `end` characters of `text`, counting a tab as the
+ *  jump to the next multiple of four the way the tokenizer does. */
+function columnAt(text: string, end: number): number {
+  let column = 0;
+  for (let index = 0; index < end; index += 1) {
+    column = text[index] === "\t" ? column + 4 - (column % 4) : column + 1;
+  }
+  return column;
+}
+
+function leadingColumns(text: string): number {
+  const spaces = /^[ \t]*/.exec(text)?.[0] ?? "";
+  return columnAt(text, spaces.length);
+}
+
+/** The column a continuation line must reach to stay inside this list item.
+ *  Measured against the tokenizer rather than derived: a bullet or a
+ *  `)`-ordered item wants its content column, while a `.`-ordered item takes
+ *  any indent at all. */
+function continuationIndent(text: string): number {
+  const match = LIST_MARKER_RE.exec(text);
+  if (!match) return 1;
+  if (listMarker(text) === ".") return 1;
+  const spaces = /^[ \t]*/.exec(text.slice(match[0].length))?.[0] ?? "";
+  return columnAt(text, match[0].length + spaces.length);
+}
+
 function blockKind(text: string): BlockKind {
   if (HEADING_RE.test(text)) return "heading";
   // Before the bullet: `- - -` is a break, not a one-item list.
@@ -153,7 +189,10 @@ function blockStartLines(body: string): number[] {
   let open = false;
   let openKind: BlockKind = "other";
   let openMarker = "";
+  let openIndent = 1;
   let quoteOpen = false;
+  let quoteCallout = false;
+  let quoteFence: Fence | null = null;
   let fence: Fence | null = null;
   let mathUntil: number | null = null;
 
@@ -188,10 +227,32 @@ function blockStartLines(body: string): number[] {
       open = false;
       continue;
     }
-    // A quoted blank ends the quote's lazy continuation: the next unquoted
-    // line is a new block, while the next `>` line is still this one.
-    if (openKind === "quote" && QUOTED_BLANK_RE.test(text)) {
-      open = false;
+    // A quoted line either keeps the quote's LAZY continuation alive or ends
+    // it — and once it ends, an unquoted line is a new block while another
+    // `>` line is still this one. What ends it was measured, not assumed: a
+    // quoted blank or a quoted fence for any quote, and for a CALLOUT every
+    // quoted block start (extensions.ts closes the continuable paragraph
+    // there). A plain quote absorbs those, which is why it needs the flag.
+    if (openKind === "quote" && (open || quoteOpen) && QUOTE_RE.test(text)) {
+      const inner = text.replace(QUOTE_PREFIX_RE, "");
+      if (quoteFence) {
+        if (closesFence(inner, quoteFence)) quoteFence = null;
+        open = false;
+      } else {
+        quoteFence = fenceOpener(inner);
+        const innerKind = blockKind(inner);
+        open = !(
+          quoteFence !== null ||
+          inner.trim() === "" ||
+          (quoteCallout &&
+            (innerKind === "quote" ||
+              innerKind === "heading" ||
+              innerKind === "bullet" ||
+              innerKind === "ordered" ||
+              innerKind === "break" ||
+              HTML_BLOCK_RE.test(inner)))
+        );
+      }
       quoteOpen = true;
       continue;
     }
@@ -210,10 +271,10 @@ function blockStartLines(body: string): number[] {
     // of the same list, content indented into that item, or the next chunk of
     // an indented code block. A fence indented into a list item is one of
     // those continuations, which is why this is read before the starts below.
+    const indent = leadingColumns(text);
     const resumes =
       (listOpen &&
-        ((kind === openKind && marker === openMarker) ||
-          CONTINUATION_RE.test(text))) ||
+        ((kind === openKind && marker === openMarker) || indent >= openIndent)) ||
       (openKind === "code" && kind === "code") ||
       (quoteOpen && kind === "quote");
     // Indented code ends where the indentation stops, blank line or not — the
@@ -240,14 +301,30 @@ function blockStartLines(body: string): number[] {
           kind === "table" ||
           (kind === "ordered" && INTERRUPTING_ORDERED_RE.test(text)))) ||
       // A bullet whose marker changes starts a new list on the spot.
-      (open && openKind === "bullet" && kind === "bullet" && marker !== openMarker);
+      (open && openKind === "bullet" && kind === "bullet" && marker !== openMarker) ||
+      // Indented, but not far enough to reach the open item's content. Column
+      // zero would be a lazy continuation of it; this is neither.
+      (open && listOpen && indent > 0 && indent < openIndent);
     // A heading opens a block wherever one can open — but indented into a
     // list item it is that item's own heading, which is what `resumes` says.
-    if ((kind === "heading" || interrupts || !open) && !resumes) {
+    const opens = (kind === "heading" || interrupts || !open) && !resumes;
+    if (opens) {
       starts.push(index + 1);
       openKind = kind;
       openMarker = marker;
       quoteOpen = false;
+      quoteCallout =
+        kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));
+      quoteFence = null;
+    }
+    // The ACTIVE item sets the continuation column, so a later item with a
+    // wider marker moves it. Only a real item does — content merely indented
+    // into this one keeps the column it has.
+    if (
+      (kind === "bullet" || kind === "ordered") &&
+      (opens || (listOpen && kind === openKind && marker === openMarker))
+    ) {
+      openIndent = continuationIndent(text);
     }
     // An ATX heading and a thematic break are one line each. The next line
     // opens its own block, blank line or not — `# Plan\nBody` is two nodes.

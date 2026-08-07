@@ -238,6 +238,64 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("> one\n\n> two\n\nAfter", 3)).toBe(1);
   });
 
+  it("ends a callout's lazy continuation at any quoted block start", () => {
+    // The callout tokenizer closes its continuable paragraph at a quoted
+    // heading, list, break, nested quote or HTML — so the unquoted line
+    // under one is a new top-level paragraph.
+    for (const inner of ["# Title", "- item", "1. item", "---", "> deep", "<div>"]) {
+      const body = `> [!note]\n> ${inner}\nMatched\n\nAfter`;
+      expect(blockIndexForLine(body, 3)).toBe(1);
+      expect(blockIndexForLine(body, 5)).toBe(2);
+    }
+    // A quoted paragraph still continues lazily, and a later quoted line is
+    // still the same callout.
+    expect(blockIndexForLine("> [!note]\n> body\nMatched\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("> [!note]\n> # T\n> body\n\nAfter", 3)).toBe(0);
+  });
+
+  it("holds a plain quote's lazy continuation open past the same lines", () => {
+    // A plain blockquote absorbs what a callout breaks on, which is why the
+    // two cannot share one rule.
+    for (const inner of ["# Title", "- item", "---", "<div>"]) {
+      expect(blockIndexForLine(`> a\n> ${inner}\nMatched\n\nAfter`, 3)).toBe(0);
+    }
+    // A quoted FENCE ends it for either kind.
+    expect(
+      blockIndexForLine("> a\n> ```\n> code\n> ```\nMatched\n\nAfter", 5),
+    ).toBe(1);
+    expect(
+      blockIndexForLine("> [!note]\n> ```\n> code\n> ```\nMatched\n\nAfter", 5),
+    ).toBe(1);
+  });
+
+  it("measures continuation indent from the item's own marker", () => {
+    // `- item` wants two columns; `-    item` wants five, so two is a new
+    // block under the wider marker and the same two columns still work under
+    // the narrow one.
+    expect(blockIndexForLine("- item\n\n  para\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("-    item\n\n  para\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("-    item\n\n     para\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("-  item\n\n  para\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("-  item\n\n   para\n\nAfter", 3)).toBe(0);
+    // A tab takes the marker to column four.
+    expect(blockIndexForLine("-\titem\n\n  para\n\nAfter", 3)).toBe(1);
+    // Without a blank line it is the same column that decides.
+    expect(blockIndexForLine("-    item\n  para\n\nAfter", 2)).toBe(1);
+    expect(blockIndexForLine("- item\n  para\n\nAfter", 2)).toBe(0);
+    // The ACTIVE item sets the column, so a wider later item moves it.
+    expect(blockIndexForLine("- a\n\n-    b\n\n  para\n\nAfter", 5)).toBe(1);
+  });
+
+  it("takes any indent for a `.`-ordered item, and the column for `)`", () => {
+    // Measured, not derived: the tokenizer keeps a one-column continuation
+    // inside `1. item` but wants the content column under `1) item`.
+    expect(blockIndexForLine("1. item\n\n para\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("1. item\n\npara\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("10. item\n\n   para\n\nAfter", 3)).toBe(0);
+    expect(blockIndexForLine("1) item\n\n  para\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("1) item\n\n   para\n\nAfter", 3)).toBe(0);
+  });
+
   it("starts a new list when the marker changes", () => {
     expect(blockIndexForLine("- one\n\n* two\n\nAfter", 3)).toBe(1);
     expect(blockIndexForLine("- one\n* two", 2)).toBe(1);
@@ -812,6 +870,73 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
       body: "A | B\n--- | ---\n1 | 2\n\nAfter",
       lands: [
         [3, "2"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a callout's lazy continuation ends at a quoted heading",
+      body: "> [!note]\n> # Title\nMatched\n\nAfter",
+      lands: [
+        [3, "Matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a plain quote absorbs the same line",
+      body: "> a\n> # Title\nMatched\n\nAfter",
+      lands: [
+        [3, "Matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a quoted fence ends the lazy continuation for either kind",
+      body: "> a\n> ```\n> code\n> ```\nMatched\n\nAfter",
+      lands: [
+        [5, "Matched"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "a wide marker wants its own continuation column",
+      body: "-    item\n\n  para\n\nAfter",
+      lands: [
+        [1, "item"],
+        [3, "para"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "the same wide marker keeps content that reaches it",
+      body: "-    item\n\n     para\n\nAfter",
+      lands: [
+        [3, "para"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a later wider item moves the continuation column",
+      body: "- a\n\n-    b\n\n  para\n\nAfter",
+      lands: [
+        [3, "b"],
+        [5, "para"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "a tab takes the marker to column four",
+      body: "-\titem\n\n  para\n\nAfter",
+      lands: [
+        [3, "para"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a `)`-ordered item wants its content column",
+      body: "1) item\n\n  para\n\nAfter",
+      lands: [
+        [1, "item"],
+        [3, "para"],
         [5, "After"],
       ],
     },
