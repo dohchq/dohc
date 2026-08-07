@@ -192,20 +192,26 @@ export async function startStaticSitePreview(
       // and this server would hand its bytes to the preview over HTTP. The
       // reservation is decided against the WORKSPACE root, because that is what
       // `.dohc` is relative to — the site root may be any folder below it.
+      //
+      // The stat and the read below use the resolution this JUDGED. Resolving
+      // the request's spelling a second time would let an alias swapped
+      // between the two serve bytes no rule was applied to.
+      let realTarget: string;
       try {
-        await assertResolvedWorkspacePath({
-          rootPath: workspaceRoot,
-          absolutePath: target,
-          spelled: relativePath,
-          label: "Site request path",
-          access: "read",
-        });
+        realTarget = (
+          await assertResolvedWorkspacePath({
+            rootPath: workspaceRoot,
+            absolutePath: target,
+            spelled: relativePath,
+            label: "Site request path",
+            access: "read",
+          })
+        ).resolvedAbsolute;
       } catch {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");
         return;
       }
-      const realTarget = await realpath(target);
       if (!isInside(root, realTarget)) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");

@@ -288,12 +288,17 @@ async function writeWorkspaceBytes(
     throw new Error(`Invalid database path (${validated.reason}): ${relativePath}`);
   }
   const absolute = join(rootPath, validated.normalized);
+  // "entry" for the same reason writeContainedFile uses it: `link()` refuses
+  // an existing entry rather than writing through it, so this never follows
+  // the leaf. A link squatting the path then reports "already exists", which
+  // is what it is, instead of a symlink refusal from a rule that does not
+  // apply. The parent chain still decides the reserved rule.
   await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absolute,
     spelled: relativePath,
     label: "Database path",
-    access: "write",
+    access: "entry",
   });
   const realRoot = await realpath(rootPath);
   if (!isInside(realRoot, await existingAncestor(dirname(absolute)))) {

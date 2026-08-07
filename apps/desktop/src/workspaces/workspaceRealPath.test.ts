@@ -3,7 +3,11 @@ import { lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { collectZipEntries, createFile, createFolder, deletePath, movePath } from "./workspaceFiles";
-import { resolveWorkspaceFile, restoreWorkspaceText } from "./workspaceAssets";
+import {
+  createWorkspaceTextExclusive,
+  resolveWorkspaceFile,
+  restoreWorkspaceText,
+} from "./workspaceAssets";
 import { importToDatabase } from "./workspaceDatabase";
 import { createDefaultDiskWriter } from "./workspaceEngineCapture";
 import { materializeSharedViewPaths } from "./sharedView";
@@ -125,6 +129,41 @@ describe("workspaceAssets through an in-workspace alias", () => {
     );
     expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
   });
+
+  // A restore commits with rename over the entry, so it never writes THROUGH
+  // the leaf. Following it would refuse the very file the restore repairs.
+  //
+  // MUTATION NOTE: give writeContainedFile "write" access and these two fail.
+  it("heals a file someone replaced with a link into .dohc", async () => {
+    await symlink(join(root, ".dohc", "settings.json"), join(root, "note.md"));
+    await restoreWorkspaceText(root, "note.md", "# Restored\n");
+    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
+    expect((await lstat(join(root, "note.md"))).isSymbolicLink()).toBe(false);
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("# Restored\n");
+  });
+
+  it("heals a file someone replaced with a link out of the workspace", async () => {
+    const outside = await createTestScratch("dohc-real-path-assets-outside-");
+    await writeFile(join(outside, "victim.md"), "untouched");
+    await symlink(join(outside, "victim.md"), join(root, "note.md"));
+    await restoreWorkspaceText(root, "note.md", "# Restored\n");
+    expect(await readFile(join(outside, "victim.md"), "utf8")).toBe("untouched");
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("# Restored\n");
+  });
+
+  // `wx` does NOT refuse every existing entry: on a DANGLING link it follows
+  // the link and creates its target. So the exclusive path judges the leaf
+  // while the rename path does not — the commit mode decides.
+  //
+  // MUTATION NOTE: give the exclusive path "entry" access and this writes
+  // into .dohc.
+  it("refuses an exclusive create through a dangling link into .dohc", async () => {
+    await symlink(join(root, ".dohc", "planted.json"), join(root, "note.md"));
+    await expect(createWorkspaceTextExclusive(root, "note.md", "# New\n")).rejects.toThrow(
+      /Restore path has a symlink with no target/,
+    );
+    expect(existsSync(join(root, ".dohc", "planted.json"))).toBe(false);
+  });
 });
 
 describe("workspaceDatabase through an in-workspace alias", () => {
@@ -158,6 +197,26 @@ describe("siteRunner through an in-workspace alias", () => {
       expect(await denied.text()).not.toContain("engine");
       // The ordinary page still serves.
       await expect(fetch(preview.url).then((res) => res.text())).resolves.toContain("site");
+    } finally {
+      await preview.stop();
+    }
+  });
+
+  it("still serves a benign alias directory from the guard's own resolution", async () => {
+    // The serve path now uses the resolution the guard produced instead of
+    // realpathing the request spelling a second time. That closes a window a
+    // test cannot open without a concurrent swap, so this does NOT pin the
+    // window — it pins the part that IS observable: the guard's resolution is
+    // a usable canonical path, and alias directories still serve through it.
+    await writeFile(join(root, "index.html"), "<h1>site</h1>");
+    await mkdir(join(root, "pages"), { recursive: true });
+    await writeFile(join(root, "pages", "real.html"), "<h1>real page</h1>");
+    await symlink(join(root, "pages"), join(root, "alias"), "dir");
+    const preview = await startStaticSitePreview(root, ".");
+    try {
+      const served = await fetch(new URL("/alias/real.html", preview.url));
+      expect(served.status).toBe(200);
+      expect(await served.text()).toContain("real page");
     } finally {
       await preview.stop();
     }
