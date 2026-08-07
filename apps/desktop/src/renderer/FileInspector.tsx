@@ -35,9 +35,11 @@ import {
   parseFrontmatter,
 } from "./markdown/frontmatter";
 import type {
+  BlockNavigationTarget,
   MarkdownEditorHandle,
   MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
+import { blockIndexForLine } from "./editor/lineBlocks";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
@@ -345,6 +347,15 @@ function splitRawFrontmatter(markdown: string): {
 
 export function markdownEditorBody(markdown: string): string {
   return splitRawFrontmatter(markdown).body;
+}
+
+/** Lines of frontmatter above the editor body. Search numbers its lines
+ *  against the FILE; the editor and the block mapping both count from the
+ *  body, and this is the offset between them. */
+function frontmatterLineCount(markdown: string): number {
+  const body = markdownEditorBody(markdown);
+  return (markdown.slice(0, markdown.length - body.length).match(/\n/g) ?? [])
+    .length;
 }
 
 export function mergeMarkdownEditorBody(sourceMarkdown: string, body: string): string {
@@ -912,16 +923,44 @@ function MarkdownView(props: {
         : undefined,
     [props.pendingUndo],
   );
-  // Search lands HERE (Phase E5.0): the rendered document has no per-line DOM
-  // to anchor, so the smallest honest seam is opening SOURCE mode and
-  // selecting the matched line. Phase E4's WYSIWYG editor takes this seam
-  // over with a real in-document scroll-to-position once it owns the surface.
-  const [pendingScrollLine, setPendingScrollLine] = useState<number | null>(null);
+  // Search lands HERE. ONE jump at a time, in one of two states: the LINE the
+  // result named, and — once the engine editor has something to map it
+  // against — the BLOCK holding that line (#661). Whichever surface owns the
+  // document consumes it: the plain source textarea selects the line, the
+  // engine editor reveals the block. Consuming it retires it, so a later
+  // commit cannot replay the jump.
+  const [jump, setJump] = useState<
+    | { kind: "line"; line: number }
+    | ({ kind: "block" } & BlockNavigationTarget)
+    // A frontmatter hit, whose landing is the top of the pane rather than any
+    // block. In the union so the three retire sites cover it too.
+    | { kind: "top" }
+    | null
+  >(null);
+  const jumpNonce = useRef(0);
+  // The editor reports the jump it landed, and it goes away. Keyed by nonce so
+  // a report for a jump this view has already replaced is ignored.
+  const retireJump = useCallback((nonce: number) => {
+    setJump((current) =>
+      current?.kind === "block" && current.nonce === nonce ? null : current,
+    );
+  }, []);
+  // A version switch retires a jump that has not landed yet. Reporting back
+  // covers the applied one; this covers everything before that, where the
+  // reopen unbinds the Y.Doc and the editor that remounts on the new version
+  // would land a line the reader numbered against the version they left. It
+  // covers the unmapped line too — a document still opening has nothing to map
+  // against yet (#533) — because both states live here.
+  const jumpReopenKey = useRef(props.reopenKey);
+  if (props.reopenKey !== jumpReopenKey.current) {
+    jumpReopenKey.current = props.reopenKey;
+    if (jump) setJump(null);
+  }
   const scrollTargetNonce = props.scrollTarget?.nonce;
   useEffect(() => {
     if (!props.scrollTarget || props.scrollTarget.path !== props.path) return;
     setMode("source");
-    setPendingScrollLine(props.scrollTarget.line);
+    setJump({ kind: "line", line: props.scrollTarget.line });
     // Applied once per jump: nonce is the identity of one click.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTargetNonce]);
@@ -1079,19 +1118,19 @@ function MarkdownView(props: {
   }, [surfaceMode, props.path]);
 
   useEffect(() => {
-    if (pendingScrollLine === null || surfaceMode !== "source") return;
+    if (jump?.kind !== "line" || surfaceMode !== "source") return;
     const textarea = editorRef.current;
     if (!textarea) return;
-    const { start, end } = lineSpanInText(textarea.value, pendingScrollLine);
+    const { start, end } = lineSpanInText(textarea.value, jump.line);
     textarea.focus();
     textarea.setSelectionRange(start, end);
     const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight) || 21;
     textarea.scrollTop = Math.max(
       0,
-      (pendingScrollLine - 1) * lineHeight - textarea.clientHeight / 3,
+      (jump.line - 1) * lineHeight - textarea.clientHeight / 3,
     );
-    setPendingScrollLine(null);
-  }, [pendingScrollLine, surfaceMode]);
+    setJump(null);
+  }, [jump, surfaceMode]);
 
   const { onSaveStateChange } = props;
 
@@ -1175,6 +1214,9 @@ function MarkdownView(props: {
   const [showSource, setShowSource] = useState(false);
   const [sourceMarkdown, setSourceMarkdown] = useState<string | null>(null);
   const readDocumentRef = useRef<HTMLDivElement | null>(null);
+  // The engine branch's scroller. It holds the top-matter (title, properties)
+  // ABOVE the editor, which is where a frontmatter search hit actually lives.
+  const engineDocPaneRef = useRef<HTMLDivElement | null>(null);
   const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<
     number | null
   >(null);
@@ -1189,6 +1231,10 @@ function MarkdownView(props: {
       // the markdown cache below). Reveal it and let OutlinePanel resolve the
       // target against that live Y.Doc.
       setShowSource(false);
+      // The heading is the reader's newest destination, so a search jump that
+      // has not landed yet is over. Left pending it lands the moment the lazy
+      // editor arrives and pulls them off the heading they just chose.
+      setJump(null);
       return;
     }
     const source = surfaceMode === "source" ? latestDraft.current : savedBody;
@@ -1200,11 +1246,7 @@ function MarkdownView(props: {
       // Local source is an intentional editing/viewing mode. Keep it visible
       // and select the heading's real markdown line instead of replacing it
       // with the rich editor merely to navigate.
-      const bodyOffset = source.length - markdown.length;
-      const frontmatterLineCount = (
-        source.slice(0, bodyOffset).match(/\n/g) ?? []
-      ).length;
-      setPendingScrollLine(heading.line + frontmatterLineCount);
+      setJump({ kind: "line", line: heading.line + frontmatterLineCount(source) });
       return;
     }
     if (readOnly || surfaceMode === "read") {
@@ -1240,6 +1282,49 @@ function MarkdownView(props: {
     observer.observe(container, { childList: true, subtree: true });
     return () => observer.disconnect();
   }, [surfaceMode, pendingRenderedHeadingIndex]);
+  // The engine editor's line-jump seam (#661). Engine mode renders no source
+  // textarea, so before this every engine-backed search result opened at the
+  // top of the document. The jump is retired HERE, once, for every engine-
+  // backed open — including the recovery path, whose `props.body` is empty
+  // (the failed read, #564) and therefore resolves to the first block.
+  //
+  // `props.body` is the on-disk Markdown, which is what search numbered its
+  // lines against, so it is the right text to map — even though the canonical
+  // Y.Doc may have moved on since. The block index absorbs small drift.
+  useEffect(() => {
+    if (jump?.kind !== "line" || !engineMode) return;
+    // Show the document, not the source projection. A reader who clicked a
+    // search result wants the match, and the editor pane is `hidden` while
+    // source is up — the reveal would land where nobody can see it. Same move
+    // the heading jump makes above.
+    setShowSource(false);
+    const body = markdownEditorBody(props.body);
+    const bodyLine = jump.line - frontmatterLineCount(props.body);
+    if (bodyLine < 1) {
+      // The hit is in the frontmatter. The title and properties it names are
+      // rendered by PageIdentity/PropertiesPanel ABOVE the editor, so there is
+      // no body block to reveal — and revealing the first one would scroll the
+      // real match off the top. Show the top of the document instead — after
+      // the pane is visible, because `setShowSource` above only SCHEDULES the
+      // unhide and a hidden element cannot be scrolled.
+      setJump({ kind: "top" });
+    } else {
+      // The line BECOMES the block, which is what retires it: a jump still
+      // waiting on the lazy editor names the result before this one, and
+      // would land the moment that editor arrives.
+      setJump({
+        kind: "block",
+        index: blockIndexForLine(body, bodyLine),
+        nonce: ++jumpNonce.current,
+      });
+    }
+  }, [jump, engineMode, props.body]);
+  // The frontmatter jump's landing, once the pane it moves is on screen.
+  useEffect(() => {
+    if (jump?.kind !== "top" || showSource) return;
+    engineDocPaneRef.current?.scrollTo({ top: 0 });
+    setJump(null);
+  }, [jump, showSource]);
   useEffect(() => {
     if (!showSource || !engine.doc) {
       setSourceMarkdown(null);
@@ -1741,6 +1826,7 @@ function MarkdownView(props: {
             stale mount-time body. The hidden editor stays bound to the Y.Doc,
             so toggling back restores the exact editing state. */}
         <div
+          ref={engineDocPaneRef}
           data-testid="view-markdown"
           data-dohc-doc-pane=""
           hidden={showSource}
@@ -1777,6 +1863,8 @@ function MarkdownView(props: {
                 knownFiles={knownFiles}
                 onOpenWikilink={openWikilink}
                 headingTarget={props.headingTarget}
+                blockTarget={jump?.kind === "block" ? jump : undefined}
+                onBlockTargetConsumed={retireJump}
                 pendingUndo={editorPendingUndo}
                 onPendingUndoConsumed={props.onPendingUndoConsumed}
                 collab={{

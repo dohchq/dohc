@@ -303,10 +303,19 @@ function stubEditorGlobals() {
     Number(setTimeout(() => callback(performance.now()), 16)),
   );
   vi.stubGlobal("cancelAnimationFrame", (handle: number) => clearTimeout(handle));
-  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+  stubScrollSpy("scrollIntoView");
+}
+
+/** jsdom implements neither scroll method, and the jump seams are only
+ *  observable through them — so stub one on every element and hand back the
+ *  spy the test asserts against. */
+function stubScrollSpy(method: "scrollIntoView" | "scrollTo") {
+  const spy = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, method, {
     configurable: true,
-    value: vi.fn(),
+    value: spy,
   });
+  return spy;
 }
 
 // data-testid="markdown-editor" names the editing surface, and BOTH editing
@@ -1561,13 +1570,9 @@ describe("engine markdown source view", () => {
   // search result, gets the document, and some unrelated later open jumps to
   // that old line.
   //
-  // What it does NOT do is APPLY the jump. No engine-backed document does:
-  // the line jump's only seam is the plain source textarea, which engine mode
-  // does not render (the comment on `pendingScrollLine` says the WYSIWYG
-  // editor takes that seam over when it owns the surface). This path behaves
-  // exactly like every other engine document — consumed, not applied — and
-  // making it the one place a jump lands would be a feature smuggled into a
-  // bugfix.
+  // Retiring the shell's target and APPLYING the jump are two different
+  // signals, and this test owns the first. #661 gave the engine editor the
+  // seam that applies it; the tests below own that half, this path included.
   it("retires the search jump when the document comes back through the Y.Doc", async () => {
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
     const onScrollConsumed = vi.fn();
@@ -1594,6 +1599,626 @@ describe("engine markdown source view", () => {
     // MUTATION: keep `textReady` on the disk read alone -> this never fires,
     // the shell holds the jump, and it replays on a later open of this path.
     await waitFor(() => expect(onScrollConsumed).toHaveBeenCalled());
+  });
+
+  // #661. Engine mode renders no source textarea, and that textarea held the
+  // only consumer of the pending line — so every engine-backed search result
+  // opened at the top of the document, whatever line it named. The engine
+  // editor now takes the seam over: the line resolves to the top-level block
+  // holding it, and the editor reveals that block.
+  const SEARCH_DOC =
+    "---\ntitle: Plan\n---\n\n# Plan\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n";
+
+  function flashedBlockText(): string | undefined {
+    return document.querySelector(".dohc-outline-target-flash")?.textContent ?? undefined;
+  }
+
+  it("lands an engine-backed search jump on the block holding the line", async () => {
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        // Line 11 of the file: "Third paragraph." — three lines of
+        // frontmatter above the body, and the fourth block within it.
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    // MUTATION: drop the engine branch of the pending-line effect -> the
+    // document opens at the top and nothing is ever revealed.
+    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."), {
+      timeout: 5_000,
+    });
+
+    // The flash has to OUTLIVE the retire. Retiring the target changes the
+    // editor's prop, and that effect's cleanup is what cancels the flash —
+    // so a careless retire clears the highlight in the same frame it was
+    // drawn and the reader never sees where they landed.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(flashedBlockText()).toBe("Third paragraph.");
+  });
+
+  // codex on 76298ccd. The source projection HIDES the editor pane, so a jump
+  // applied while it is up reveals a block nobody can see. A reader who
+  // clicked a search result asked for the match; give them the document.
+  it("leaves the source projection to show the match", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await screen.findByTestId("view-markdown-source");
+    expect(screen.getByTestId("view-markdown").hasAttribute("hidden")).toBe(true);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    // MUTATION: drop the setShowSource(false) -> the pane stays hidden and
+    // the reveal lands behind the source view.
+    await waitFor(() =>
+      expect(screen.getByTestId("view-markdown").hasAttribute("hidden")).toBe(false),
+    );
+    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."), {
+      timeout: 5_000,
+    });
+  });
+
+  // codex on 76298ccd. A frontmatter hit has no body block to land on: the
+  // title and properties it names render ABOVE the editor, and revealing the
+  // first body block would scroll them off the top — the reader would be
+  // taken PAST the thing they matched.
+  it("shows the top of the document for a frontmatter hit", async () => {
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const scrollTo = stubScrollSpy("scrollTo");
+
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        // Line 2 of the file is `title: Plan`, inside the frontmatter.
+        scrollTarget={{ path: "a.md", line: 2, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    // MUTATION: map the frontmatter line onto block 0 anyway -> the first
+    // body block is revealed and the matched title scrolls out of view.
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    expect(flashedBlockText()).toBeUndefined();
+  });
+
+  // codex round 14 on b67d649c. `setShowSource(false)` only SCHEDULES the
+  // unhide, so scrolling in the same effect moves an element that is still
+  // `hidden` — the pane never moves and the matched title stays offscreen.
+  it("scrolls to the top only once the pane is on screen", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    // Record whether the pane was hidden AT THE MOMENT it was scrolled — the
+    // one thing a plain call-count cannot say, and the whole defect.
+    const hiddenAtScroll: boolean[] = [];
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+      configurable: true,
+      value: function (this: HTMLElement) {
+        hiddenAtScroll.push(this.hasAttribute("hidden"));
+      },
+    });
+
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await screen.findByTestId("view-markdown-source");
+    expect(screen.getByTestId("view-markdown").hasAttribute("hidden")).toBe(true);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        // Line 2 of the file is `title: Plan`, inside the frontmatter.
+        scrollTarget={{ path: "a.md", line: 2, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(hiddenAtScroll.length).toBeGreaterThan(0));
+    // MUTATION: scroll inside the mapping effect -> the one recorded call
+    // happens while the pane is still hidden and moves nothing.
+    expect(hiddenAtScroll).not.toContain(true);
+  });
+
+  // A frontmatter hit retires the jump like any other. Its landing writes no
+  // block target, so nothing downstream reports it consumed — the branch that
+  // shows the top has to retire it itself, or a later re-read of the open
+  // document scrolls the reader back up to a result they already left.
+  it("retires a frontmatter jump, so a later re-read cannot replay it", async () => {
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    let reads = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      readWorkspaceText: vi.fn(async () => {
+        reads += 1;
+        return {
+          text: reads === 1 ? SEARCH_DOC : `${SEARCH_DOC}\nFourth paragraph.\n`,
+          truncated: false,
+        };
+      }),
+    });
+    const scrollTo = stubScrollSpy("scrollTo");
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 2, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+
+    // An agent edits the file and workspace activity re-reads it, which is
+    // what re-runs the mapping effect under a jump that is already done.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // MUTATION: drop the setJump(null) in the frontmatter branch -> the line
+    // stays pending and the re-read scrolls the reader to the top again.
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+  });
+
+  // The landing effect above re-runs whenever the source projection unhides
+  // the pane, so it must retire the jump itself — or every later toggle back
+  // to the editor yanks the reader to the top of the document again.
+  it("does not re-scroll to the top when a source toggle follows the jump", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const scrollTo = stubScrollSpy("scrollTo");
+
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        // Line 2 of the file is `title: Plan`, inside the frontmatter.
+        scrollTarget={{ path: "a.md", line: 2, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await screen.findByTestId("view-markdown-source");
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await waitFor(() =>
+      expect(screen.getByTestId("view-markdown").hasAttribute("hidden")).toBe(false),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+
+    // MUTATION: drop the setJump(null) in the top-scroll effect -> the jump
+    // stays live and the unhidden pane is scrolled to the top a second time.
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+  });
+
+  // codex round 12 on 0d498bcb. A heading is a destination too. Clicking one
+  // while a search jump is still waiting on the lazy editor makes the heading
+  // the reader's newest choice — and the older jump has to go, or it lands the
+  // moment that editor arrives and pulls them off the heading.
+  it("drops an unlanded search jump when a heading is chosen instead", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+
+    // No await between them: the editor's settle frames are 16ms timers, so
+    // the block target is set and unconsumed when the heading arrives.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        headingTarget={{ anchor: "plan", nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // ONE reveal, the heading's. The flash cannot say this — it has faded by
+    // now, and both reveals draw the same class, so it reads `undefined`
+    // either way. The count is what separates them.
+    //
+    // MUTATION: drop the setJump(null) in the heading branch -> two reveals,
+    // the second dragging the reader off the heading they just chose.
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  // codex round 2 on 9184cf04. Two results, clicked back to back: the body
+  // jump is still waiting on the editor's settle frames when the frontmatter
+  // one arrives. The newest click is the reader's answer, so the older target
+  // has to go — otherwise it lands the moment those frames run and drags them
+  // away from the result they just asked for.
+  it("drops an unlanded body jump when a frontmatter hit replaces it", async () => {
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const scrollTo = stubScrollSpy("scrollTo");
+
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+
+    // No await between them: the settle frames are 16ms timers, so the body
+    // target is set and unconsumed when the frontmatter one lands.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 2, nonce: 2 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    // MUTATION: drop the setBlockTarget(null) in the frontmatter branch ->
+    // "Third paragraph." flashes and the matched title is scrolled off.
+    expect(flashedBlockText()).toBeUndefined();
+  });
+
+  // codex round 2 on 9184cf04. The window BEFORE the editor reports back.
+  // Reporting retires an applied jump; a version switch arriving first leaves
+  // the target standing, and the editor that remounts on the new version
+  // applies a block index mapped against the version the reader left.
+  it("drops an unlanded jump when the version switches under it", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // MUTATION: drop the reopenKey guard -> the remounted editor reveals a
+    // block of the new version chosen by the old version's line numbers.
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(flashedBlockText()).toBeUndefined();
+  });
+
+  // codex round 5 on b65c469f. The window BEFORE the line is even mapped. An
+  // engine document that is still opening has nothing to map against (#533),
+  // so the line waits — and the round-2 guard retired only the mapped target.
+  // A version switch arriving in that window left the line to be mapped
+  // against the body of a version the reader never searched.
+  it("drops a jump waiting on the engine open when the version switches", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    let releaseOpen = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseOpen = () => resolve();
+    });
+    let opens = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
+        opens += 1;
+        // The first open never answers until the switch has happened.
+        if (opens === 1) await held;
+        return bridgeMock.openEngineYDocSession(payload);
+      }),
+    });
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(opens).toBe(1));
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    releaseOpen();
+    await waitFor(() => expect(opens).toBe(2));
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // MUTATION: clear only blockTarget on the reopen -> the line survives, the
+    // new session binds, and the jump lands on the version nobody searched.
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(flashedBlockText()).toBeUndefined();
+  });
+
+  // codex on 76298ccd. A version switch drops the bound Y.Doc while the
+  // reopen runs (useEngineDoc), which unmounts this editor. The instance that
+  // replaces it has no memory of having applied anything, so a target still
+  // held above lands a second time — on a document the reader did not search.
+  // The reopenKey guard covers a VERSION switch. It is not the only rebind:
+  // useEngineDoc keys its request on [enabled, workspaceId, path, reopenKey,
+  // retryKey], so flipping `readOnly` unbinds the Y.Doc and binds a fresh one
+  // with reopenKey untouched. Reporting the landing back is what stops the
+  // editor that mounts on the far side from applying the same jump again.
+  it("retires the target once applied, so a rebind cannot replay it", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."), {
+      timeout: 5_000,
+    });
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+    // readOnly flips `enabled`, which is part of the request key — the doc
+    // unbinds and the editor goes with it. reopenKey never moves.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        readOnly
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-editor")).toBeNull(),
+    );
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // MUTATION: make retireJump a no-op -> the target outlives the rebind and
+    // the fresh editor reveals it a second time.
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires the target once applied, so a reopened editor cannot replay it", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."), {
+      timeout: 5_000,
+    });
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+    // The version switch: the shell cleared its target, and engineVersionKey
+    // reopens the session. The editor unmounts and a fresh one binds.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // MUTATION: drop onBlockTargetConsumed (or leave blockTarget set) -> the
+    // remounted editor applies the same target again.
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires the jump after one landing, so a later re-read cannot replay it", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    let reads = 0;
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      readWorkspaceText: vi.fn(async () => {
+        reads += 1;
+        return {
+          text: reads === 1 ? SEARCH_DOC : `${SEARCH_DOC}\nFourth paragraph.\n`,
+          truncated: false,
+        };
+      }),
+    });
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 9, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await waitFor(() => expect(flashedBlockText()).toBe("Second paragraph."), {
+      timeout: 5_000,
+    });
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+    // What the shell does next: it consumed the target and cleared it. Then an
+    // agent edits the file and workspace activity re-reads the open document —
+    // the Markdown the mapping reads changes underneath a jump that is done.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    // Twice: the first act flushes the re-read's state into the tree, the
+    // second gives the editor's two settle frames room to land a jump. One
+    // act cannot see both, and the replay this test denies happens in the
+    // second.
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // MUTATION: leave the pending line set -> the re-read derives a second
+    // block target and yanks the reader back to an old search result.
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes the recovery path's jump through the same seam", async () => {
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      readWorkspaceText: vi.fn(async () => {
+        throw new Error("read failed");
+      }),
+    });
+
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    // The read failed, so the Markdown the line was numbered against is gone
+    // and the line resolves to the first block. The seam still runs — the
+    // recovery path is not a document where jumps quietly do nothing.
+    //
+    // MUTATION: gate the effect on disk text being present -> no flash here.
+    await waitFor(() => expect(flashedBlockText()).toBe("Plan"), { timeout: 5_000 });
   });
 
   // codex on the round-9 head: the SAME failed-read branch, but reached with a

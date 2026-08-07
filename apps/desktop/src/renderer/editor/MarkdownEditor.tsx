@@ -10,7 +10,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
-import { Extension } from "@tiptap/core";
+import { Extension, type Editor } from "@tiptap/core";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -107,6 +107,7 @@ import { makeMermaidPreviewPlugin } from "./mermaidRender";
 import {
   OutlinePanel,
   makeHeadingFlashPlugin,
+  revealDocPosition,
   type HeadingNavigationTarget,
 } from "./OutlinePanel";
 import { SafeTrailingNode } from "./safeTrailingNode";
@@ -135,6 +136,15 @@ export type MarkdownEditorPendingUndo = {
   undoText: string;
 };
 
+/** A one-shot request to reveal a top-level block, by its index in document
+ * order. `nonce` lets a caller repeat the same block. This is the seam a
+ * search line jump lands on: the caller maps its Markdown line to a block
+ * (renderer/editor/lineBlocks.ts) and the editor reveals it. */
+export type BlockNavigationTarget = {
+  index: number;
+  nonce: number;
+};
+
 export type MarkdownEditorProps = {
   value: string;
   onDirty: () => void;
@@ -143,6 +153,8 @@ export type MarkdownEditorProps = {
   knownFiles: ReadonlyArray<WikilinkFile>;
   onOpenWikilink?: (path: string) => void;
   headingTarget?: HeadingNavigationTarget;
+  blockTarget?: BlockNavigationTarget;
+  onBlockTargetConsumed?: (nonce: number) => void;
   resolveWorkspaceAssetUrl?: (workspacePath: string) => string | null;
   autoFocus?: boolean;
   collab?: MarkdownEditorCollab | null;
@@ -271,6 +283,23 @@ function BubbleButton(props: {
   );
 }
 
+/** Reveal the top-level block at `index`, clamped to the last block — the
+ *  caller's index comes from Markdown that can have drifted from the live
+ *  document, and the nearest block is the honest answer. No cursor move: an
+ *  external jump reveals the passage, it does not take over the caret (the
+ *  heading seam navigates the same way). */
+function scrollToBlock(editor: Editor, index: number): (() => void) | undefined {
+  const doc = editor.state.doc;
+  if (doc.childCount === 0) return;
+  const child = Math.min(Math.max(index, 0), doc.childCount - 1);
+  let pos = 0;
+  for (let before = 0; before < child; before += 1) pos += doc.child(before).nodeSize;
+  return revealDocPosition(editor, pos, () => {
+    const dom = editor.view.nodeDOM(pos);
+    return dom instanceof HTMLElement ? dom : null;
+  });
+}
+
 const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInnerProps>(
   function MarkdownEditorInner(
     {
@@ -279,6 +308,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       knownFiles,
       onOpenWikilink,
       headingTarget,
+      blockTarget,
+      onBlockTargetConsumed,
       resolveWorkspaceAssetUrl,
       autoFocus,
       collab,
@@ -748,6 +779,46 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       }
       onPendingUndoConsumed?.(pendingUndo.token);
     }, [editor, collabActive, pendingUndo, onPendingUndoConsumed]);
+
+    // Where a search line jump lands. Same shape as the heading jump in
+    // OutlinePanel: two frames for the editor's decorations to settle, then
+    // apply — and if the document has no block to reveal yet (a collaborative
+    // doc still filling in), keep one update listener rather than dropping the
+    // jump. Applied once per nonce.
+    //
+    // Reporting back is what makes it once. A version switch unbinds the Y.Doc
+    // and unmounts this editor (useEngineDoc drops `doc` while the reopen
+    // runs), and the instance that replaces it has no memory of having applied
+    // anything — a target still held above would land a second time, on a
+    // document the reader did not search. The caller retires it instead.
+    // The flash is deliberately NOT torn down here, unlike the heading seam.
+    // Reporting the jump retires the target, which re-runs this effect — a
+    // cleanup that cancelled the flash would erase the highlight in the frame
+    // it was drawn. revealDocPosition's own timer owns it, and a second jump
+    // supersedes the first by token, so nothing is left behind.
+    useEffect(() => {
+      if (!editor || !blockTarget) return;
+      let applied = false;
+      let firstFrame = 0;
+      let secondFrame = 0;
+      const applyTarget = () => {
+        if (!scrollToBlock(editor, blockTarget.index)) return;
+        applied = true;
+        editor.off("update", applyTarget);
+        onBlockTargetConsumed?.(blockTarget.nonce);
+      };
+      firstFrame = requestAnimationFrame(() => {
+        secondFrame = requestAnimationFrame(() => {
+          applyTarget();
+          if (!applied) editor.on("update", applyTarget);
+        });
+      });
+      return () => {
+        cancelAnimationFrame(firstFrame);
+        cancelAnimationFrame(secondFrame);
+        editor.off("update", applyTarget);
+      };
+    }, [editor, blockTarget?.index, blockTarget?.nonce, onBlockTargetConsumed]);
 
     useImperativeHandle(
       ref,

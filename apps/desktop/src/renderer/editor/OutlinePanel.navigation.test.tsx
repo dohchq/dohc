@@ -2,11 +2,33 @@
 import { createElement } from "react";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Editor } from "@tiptap/core";
+import { StarterKit } from "@tiptap/starter-kit";
 import { MarkdownEditor } from "./MarkdownEditor";
 import {
   resolveOutlineHeadingTarget,
+  revealDocPosition,
   type HeadingNavigationTarget,
 } from "./OutlinePanel";
+
+// Every `moveCursorTo` the editor asked for. The block seam must ask for
+// none — an external jump reveals a passage, it does not take the caret.
+const revealCalls: Array<number | undefined> = [];
+vi.mock("./OutlinePanel", async (importActual) => {
+  const actual = await importActual<typeof import("./OutlinePanel")>();
+  return {
+    ...actual,
+    revealDocPosition: (
+      editor: Parameters<typeof actual.revealDocPosition>[0],
+      pos: number,
+      resolveElement: () => HTMLElement | null,
+      moveCursorTo?: number,
+    ) => {
+      revealCalls.push(moveCursorTo);
+      return actual.revealDocPosition(editor, pos, resolveElement, moveCursorTo);
+    },
+  };
+});
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -42,6 +64,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  revealCalls.length = 0;
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -147,5 +170,109 @@ describe("MarkdownEditor heading navigation", () => {
         .querySelectorAll("h2")[1]
         ?.classList.contains("dohc-outline-target-flash"),
     ).toBe(true);
+  });
+});
+
+// #661: the seam a search line jump lands on. FileInspector maps its pending
+// Markdown line to a top-level block index; this reveals that block.
+describe("MarkdownEditor block navigation", () => {
+  const VALUE = "# Intro\n\nFirst para\n\nSecond para\n\nThird para";
+
+  function renderEditor(blockTarget: { index: number; nonce: number }) {
+    return createElement(MarkdownEditor, {
+      value: VALUE,
+      onDirty: vi.fn(),
+      workspaceId: "workspace-1",
+      path: "notes/plan.md",
+      knownFiles: [],
+      blockTarget,
+    });
+  }
+
+  it("scrolls to and flashes the named block, and repeats on a new nonce", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    const view = render(renderEditor({ index: 2, nonce: 1 }));
+    await screen.findByTestId("markdown-editor");
+
+    // MUTATION: drop the blockTarget effect -> nothing scrolls, and an
+    // engine-backed search result opens at the top of the document again.
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+      ).toBe("Second para"),
+    );
+
+    view.rerender(renderEditor({ index: 3, nonce: 2 }));
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(
+        view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+      ).toBe("Third para"),
+    );
+  });
+
+  it("reveals the nearest block when the index runs past the document", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    const view = render(renderEditor({ index: 99, nonce: 1 }));
+    await screen.findByTestId("markdown-editor");
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+      ).toBe("Third para"),
+    );
+  });
+
+  // `document.activeElement` cannot answer this: setTextSelection never moves
+  // focus, so asserting on it passed with the cursor move left IN. The
+  // SELECTION is the thing, and revealDocPosition only touches it when the
+  // caller asks — which the block seam never does.
+  it("leaves the selection where it is unless the caller asks", () => {
+    const editor = new Editor({
+      element: document.createElement("div"),
+      extensions: [StarterKit],
+      content: "<p>First para</p><p>Second para</p><p>Third para</p>",
+    });
+    editor.commands.setTextSelection(2);
+    const before = editor.state.selection.from;
+
+    // How the block seam calls it: no cursor argument.
+    revealDocPosition(editor, 20, () => null);
+    expect(editor.state.selection.from).toBe(before);
+
+    // And the heading seam, which does ask, still moves it.
+    revealDocPosition(editor, 20, () => null, 20);
+    expect(editor.state.selection.from).toBe(20);
+    editor.destroy();
+  });
+
+  it("reveals a block without asking for a cursor move", async () => {
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
+
+    const view = render(renderEditor({ index: 2, nonce: 1 }));
+    await screen.findByTestId("markdown-editor");
+    await waitFor(() =>
+      expect(view.container.querySelector(".dohc-outline-target-flash")).toBeTruthy(),
+    );
+
+    // MUTATION: pass `pos + 1` as moveCursorTo in scrollToBlock -> the reveal
+    // takes the caret over, and this records the argument that did it.
+    expect(revealCalls.length).toBeGreaterThan(0);
+    for (const call of revealCalls) expect(call).toBeUndefined();
   });
 });

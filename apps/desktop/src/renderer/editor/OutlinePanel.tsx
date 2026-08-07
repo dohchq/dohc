@@ -105,26 +105,29 @@ function findScrollParent(el: HTMLElement | null): HTMLElement | null {
   return null;
 }
 
-/** Scroll the editor to a heading, briefly flashing it, and (when the
- *  editor is editable) moving the cursor there. Read-only mode still gets
- *  the scroll + flash, just no cursor move. */
-function scrollToHeading(
+/** Reveal a navigation target: flash the node at `pos`, scroll it into view,
+ *  and — when `moveCursorTo` is given and the editor is editable — put the
+ *  cursor there. `resolveElement` runs AFTER the flash dispatch, because
+ *  selection-driven decorations can replace the rendered node and resolving
+ *  the DOM first would scroll a detached element.
+ *
+ *  Returns a cleanup that clears the flash early, or undefined when nothing
+ *  was revealed — a caller that must not lose the jump retries on that. */
+export function revealDocPosition(
   editor: Editor,
-  heading: OutlineHeading,
-  moveCursor = true,
+  pos: number,
+  resolveElement: () => HTMLElement | null,
+  moveCursorTo?: number,
 ): (() => void) | undefined {
   try {
-    // Move the selection first: selection-driven decorations can replace the
-    // rendered block node, so resolving the DOM before this transaction would
-    // flash a detached heading instead of the one the user sees.
-    if (moveCursor && editor.isEditable) {
-      editor.chain().setTextSelection(heading.pos + 1).run();
+    if (moveCursorTo !== undefined && editor.isEditable) {
+      editor.chain().setTextSelection(moveCursorTo).run();
     }
     const flashToken = ++nextHeadingFlashToken;
     editor.view.dispatch(
       editor.state.tr.setMeta(headingFlashPluginKey, {
         kind: "show",
-        pos: heading.pos,
+        pos,
         token: flashToken,
       } satisfies HeadingFlashMeta),
     );
@@ -135,20 +138,6 @@ function scrollToHeading(
           kind: "clear",
           token: flashToken,
         } satisfies HeadingFlashMeta),
-      );
-    };
-    const resolveElement = (): HTMLElement | null => {
-      // Resolve by document-order index against the live editor DOM. Some
-      // decoration plugins briefly retain stale position→DOM mappings while
-      // replacing block nodes, but heading order remains identical.
-      const headingIndex = extractOutline(editor.state.doc).findIndex(
-        (candidate) => candidate.pos === heading.pos,
-      );
-      if (headingIndex < 0) return null;
-      return (
-        editor.view.dom.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")[
-          headingIndex
-        ] ?? null
       );
     };
     const target = resolveElement();
@@ -168,6 +157,35 @@ function scrollToHeading(
   } catch {
     // Offscreen/jsdom editors cannot always resolve DOM positions.
   }
+}
+
+/** Scroll the editor to a heading, briefly flashing it, and (when the
+ *  editor is editable) moving the cursor there. Read-only mode still gets
+ *  the scroll + flash, just no cursor move. */
+function scrollToHeading(
+  editor: Editor,
+  heading: OutlineHeading,
+  moveCursor = true,
+): (() => void) | undefined {
+  return revealDocPosition(
+    editor,
+    heading.pos,
+    () => {
+      // Resolve by document-order index against the live editor DOM. Some
+      // decoration plugins briefly retain stale position→DOM mappings while
+      // replacing block nodes, but heading order remains identical.
+      const headingIndex = extractOutline(editor.state.doc).findIndex(
+        (candidate) => candidate.pos === heading.pos,
+      );
+      if (headingIndex < 0) return null;
+      return (
+        editor.view.dom.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")[
+          headingIndex
+        ] ?? null
+      );
+    },
+    moveCursor ? heading.pos + 1 : undefined,
+  );
 }
 
 /** A one-shot navigation request. `nonce` lets callers repeat a jump to the
