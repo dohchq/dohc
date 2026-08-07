@@ -597,7 +597,10 @@ mod tests {
             "an aged directory that is not run-shaped is not this crate's to remove"
         );
         // And the guard did not just turn the sweep off.
-        assert!(!mine.exists(), "an aged run-shaped root must still be swept");
+        assert!(
+            !mine.exists(),
+            "an aged run-shaped root must still be swept"
+        );
     }
 
     /// The guard is only as good as its agreement with the names this crate and
@@ -616,7 +619,9 @@ mod tests {
 
         // What `run-rust-checks.mjs` hands down:
         // `rust-gate-${process.pid}-${randomBytes(8).toString("hex")}`.
-        assert!(is_run_root_name(OsStr::new("rust-gate-1180-3c2e9a1b7d4f0e65")));
+        assert!(is_run_root_name(OsStr::new(
+            "rust-gate-1180-3c2e9a1b7d4f0e65"
+        )));
 
         for refused in [
             "notes-from-a-conference",

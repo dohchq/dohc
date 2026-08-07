@@ -6,7 +6,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   cleanupSuiteTestScratch,
@@ -184,6 +184,28 @@ describe("test scratch", () => {
     expect(
       await pathExists(mine),
       "an aged run-shaped root must still be swept",
+    ).toBe(false);
+  });
+
+  // The guard is only as good as its agreement with the name this module gives
+  // its own run root. A run id that drifted out of the shape would leak every
+  // run it named, silently — so the producer is checked through the sweep, not
+  // described in a comment. The Rust twin holds the same line in
+  // `every_run_root_this_repo_creates_is_run_shaped`.
+  it("sweeps a run root named the way this module names its own", async () => {
+    const harness = await createTestScratch("own-name-");
+    const parent = join(harness, "runs");
+    const mine = join(parent, basename(testScratchRunRoot()));
+    await mkdir(mine, { recursive: true });
+
+    const nowMs = Date.now();
+    await age(mine, nowMs, 49);
+
+    await sweepScratchParent(parent, join(parent, "current-run-4821-0000000000000003"), nowMs);
+
+    expect(
+      await pathExists(mine),
+      "this module's own run root name must be one the sweep can reclaim",
     ).toBe(false);
   });
 });

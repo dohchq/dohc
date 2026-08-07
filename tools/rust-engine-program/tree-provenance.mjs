@@ -74,10 +74,10 @@ function reflogDrift(before, after, during) {
       .slice(gained)
       .every((entry, at) => entry === before.reflog[at]);
   if (appended && gained === 0) return null;
-  const at = short(before.head);
+  const head = short(before.head);
   if (!appended) {
     return (
-      `the HEAD reflog was rewritten during \`${during}\` at ${at}: ` +
+      `the HEAD reflog was rewritten during \`${during}\` at ${head}: ` +
       `${before.reflog.length} entries then ${after.reflog.length}, and the ` +
       "later reading does not extend the earlier one; this run cannot say " +
       "what HEAD did inside that step"
@@ -86,7 +86,7 @@ function reflogDrift(before, after, during) {
   const visited = [...new Set(after.reflog.slice(0, gained).map(short))];
   return (
     `HEAD was updated ${gained} ${gained === 1 ? "time" : "times"} during ` +
-    `\`${during}\` and read ${at} at both ends (${nameSome(visited)}); the ` +
+    `\`${during}\` and read ${head} at both ends (${nameSome(visited)}); the ` +
     "readings around that step agree about a commit the step did not hold " +
     "throughout"
   );
