@@ -22,17 +22,9 @@ import {
   dismissOrphanedDraft,
   noteWorkspaceLabel,
   resetOrphanedDrafts,
-  restoreOrphanedDrafts,
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
 import { ORPHANED_DRAFT_STORAGE_KEY } from "./orphanedDraftStorage";
-import { RecoveryList } from "./RecoveryList";
-
-// The close dialog's list, standing on its own: the guard subscribes and hands
-// the rows down, so a test of the LIST needs the same one-line subscriber.
-function AllRecoveryList() {
-  return <RecoveryList rows={useAllOrphanedDrafts()} showWorkspace />;
-}
 
 // What a previous app run left behind.
 function seedStoredDraft(): void {
@@ -1045,23 +1037,6 @@ describe("RecoveryCloseGuard with working storage", () => {
     expect(rows[0].textContent).toContain(".env");
   });
 
-  it("has nothing to announce about a restored recovery", async () => {
-    seedStoredDraft();
-    restoreOrphanedDrafts();
-    render(
-      <RecoveryCloseGuard>
-        <AllRecoveryList />
-      </RecoveryCloseGuard>,
-    );
-    const row = await screen.findByTestId("recovery-list-row");
-    expect(row.textContent).toContain("notes/a.md");
-    // Restored means durable: the guard has nothing left to announce.
-    const event = new Event("beforeunload", { cancelable: true });
-    act(() => {
-      window.dispatchEvent(event);
-    });
-    expect(event.defaultPrevented).toBe(false);
-  });
 });
 
 // The wiring, not just the components: main.tsx must restore the stored

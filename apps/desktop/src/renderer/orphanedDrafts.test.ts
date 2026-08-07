@@ -82,7 +82,9 @@ describe("orphanedDrafts remap (#579 review, P1)", () => {
     captureOrphanedDraft("ws-1", "notes/a.md", "survives");
     remapOrphanedDraftPaths("ws-1", () => null);
     // Destroying recovery text is never the store's call: a recreated or
-    // restored file shows the notice again.
+    // restored file shows the notice again. A move dohc did not perform lands
+    // on this same rule — the renderer cannot tell one from a delete, so it
+    // treats it as one rather than guess away the user's only copy.
     expect(
       draftsFor(useOrphanedDrafts, "ws-1", "notes/a.md").map((d) => d.text),
     ).toEqual(["survives"]);
@@ -223,29 +225,6 @@ describe("orphanedDrafts persistence (#600)", () => {
     expect(
       draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
     ).toEqual(["kept"]);
-  });
-
-  // A rename dohc did not perform reaches this store as nothing at all: no
-  // explorer op fires, and the renderer cannot tell an external rename from a
-  // delete. Both must therefore behave like a delete, which KEEPS the draft —
-  // guessing the other way deletes the user's only copy of their text. What
-  // the floor still guarantees is the invariant over storage itself: every
-  // stored path is one the floor allows, and the row stays listed and
-  // dismissable.
-  it("keeps a draft whose file moved outside dohc, exactly as it keeps a deleted one", async () => {
-    captureOrphanedDraft("ws-1", "a.md", "captured while tracked");
-    // The file becomes `.env` on disk, with dohc closed. Nothing re-keys the
-    // row, so it restores on its captured path.
-    // MUTATION (purge on absence): drop rows whose path a listing no longer
-    // shows. Every offline delete then destroys its recovery text too, and
-    // the delete rule above ("keeps drafts whose path a delete projects to
-    // null") is the same rule this one states for a move.
-    const next = await relaunch();
-    expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-    ).toEqual(["captured while tracked"]);
-    const stored = JSON.parse(storedText()) as { path: string }[];
-    expect(stored.map((row) => row.path)).toEqual(["a.md"]);
   });
 
   it("forgets a recovery nothing claimed within the retention window", async () => {

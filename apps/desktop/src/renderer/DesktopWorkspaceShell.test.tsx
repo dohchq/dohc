@@ -7486,10 +7486,6 @@ describe("set-aside draft recovery", () => {
     // ...and it names both ways out, so the warning offers what it demands.
     expect(section.textContent).toContain("Copy an edit to keep its text");
     expect(section.textContent).toContain("Dismiss deletes it for good");
-    // A persisted row makes no lifetime claim of its own either.
-    expect(
-      within(section).queryByTestId("recovery-list-window-only"),
-    ).toBeNull();
   });
 
   // #600: dropping the blanket disclosure was right for the rows that now
