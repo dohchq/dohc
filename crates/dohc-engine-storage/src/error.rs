@@ -137,14 +137,37 @@ impl StorageError {
     }
 
     /// Wrap an unexpected error as `migration-failed` with the source attached.
+    ///
+    /// A busy database did not fail to migrate. Every shipped migration is
+    /// transactional (`MigrationKind`), so contention rolls the whole step
+    /// back — body, `user_version` stamp, integrity result and ledger row
+    /// together — leaving the store exactly as it was and the work still to
+    /// do. `migration-failed` is what a store nobody should reopen answers;
+    /// this one should simply be opened again.
+    ///
+    /// A retry is genuinely collected here: the open ladder in
+    /// `engineWorkspaceSessions` waits and re-sends any `afterBackoff`
+    /// refusal of `workspace.open`, which is the call this failure aborts.
     pub(crate) fn migration(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        if Self::is_busy(&source) {
+            return StorageError::FileLocked;
+        }
         StorageError::MigrationFailed {
             source: Some(Box::new(source)),
         }
     }
 
     /// Wrap an unexpected error as `backup-failed` with the source attached.
+    ///
+    /// `VACUUM INTO` meeting a busy database says nothing about the store's
+    /// health, and `backup-failed` routes to the diagnostics that treat a
+    /// backup failure as evidence about the store. The transient lock is
+    /// classified `CorruptionKind::TransientLock` instead, which is the
+    /// difference between "try again" and "this store is suspect".
     pub(crate) fn backup(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        if Self::is_busy(&source) {
+            return StorageError::FileLocked;
+        }
         StorageError::BackupFailed {
             source: Some(Box::new(source)),
         }
@@ -232,5 +255,50 @@ impl StorageError {
     /// through the [`crate::EngineStore::write_with`] seam.
     pub fn persist_public(source: impl std::error::Error + Send + Sync + 'static) -> Self {
         StorageError::persist(source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StorageError;
+
+    /// The classifier serves every SQLite-specific wrapper, not just the two
+    /// on the read/write path.
+    ///
+    /// A busy database met during a MIGRATION was boxed as
+    /// `migration-failed` — the code a store nobody should reopen answers —
+    /// and during a backup as `backup-failed`, which the diagnostics read as
+    /// evidence about the store's health. Both are the same transient
+    /// contention and both are retryable: every shipped migration is
+    /// transactional, so contention rolls the whole step back and leaves the
+    /// store exactly as it was.
+    ///
+    /// MUTATION: drop the `is_busy` check from `migration` or from `backup`
+    /// -> that wrapper reports its terminal code for a condition that clears
+    /// by waiting.
+    #[test]
+    fn every_sqlite_wrapper_tells_a_busy_database_apart() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(5), // SQLITE_BUSY
+            Some("database is locked".to_owned()),
+        );
+        assert_eq!(StorageError::migration(busy).code(), "file-locked");
+
+        let locked = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(6), // SQLITE_LOCKED
+            Some("database table is locked".to_owned()),
+        );
+        assert_eq!(StorageError::backup(locked).code(), "file-locked");
+
+        // Narrowness: an ordinary failure keeps its own terminal code, so the
+        // recognizer cannot turn every wrapper into a retry.
+        assert_eq!(
+            StorageError::migration(rusqlite::Error::InvalidQuery).code(),
+            "migration-failed"
+        );
+        assert_eq!(
+            StorageError::backup(rusqlite::Error::InvalidQuery).code(),
+            "backup-failed"
+        );
     }
 }

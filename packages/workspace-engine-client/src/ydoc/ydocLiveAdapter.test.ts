@@ -901,9 +901,11 @@ describe("YdocLiveAdapter", () => {
       new Error("daemon response"),
     );
     let remaining = refusals;
+    const methods: string[] = [];
     const transport: EngineTransport = {
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
+        methods.push(request.method);
         if (request.method === YDOC_METHOD.recordUpdate && remaining > 0) {
           remaining -= 1;
           throw busy;
@@ -931,7 +933,7 @@ describe("YdocLiveAdapter", () => {
       body.insert(0, text);
     });
     const journaled = provider.applyLocalUpdate(update);
-    return { provider, busy, settled, scheduler, journaled };
+    return { provider, busy, settled, scheduler, journaled, methods };
   }
 
   it("sends the engine the state a busy journal write left it missing", async () => {
@@ -988,6 +990,92 @@ describe("YdocLiveAdapter", () => {
     expect(settled[0]?.markdown).toContain("typed against a stubborn store");
 
     await provider.close({ settle: false });
+  });
+
+  it("sends the missing state before an external edit merges against durable state", async () => {
+    // #658, codex P1. `applyExternalMarkdownEdit` flushes the adapter's record
+    // chain first, so the engine merges the external body against fully
+    // recorded state. That flush cannot see what a transient refusal left
+    // unsent: the chain is NEUTRALIZED after one, so awaiting it succeeds
+    // while the engine is still missing this session's text — and the merge
+    // then runs against a document without it.
+    //
+    // MUTATION: delete the `resendMissingLocalState()` call from
+    // `applyExternalMarkdownEdit` -> the merge sees a lineage without
+    // "typed before the merge" and the local edit is reordered out.
+    const { provider, methods, journaled } = await openAgainstABusyJournal(
+      "typed before the merge ",
+      2,
+    );
+    // Settle the refusal BEFORE clearing the log: the journal write is still
+    // in flight otherwise, and its own recovery attempt would land in the
+    // window this test measures.
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+    methods.length = 0;
+
+    // The external editor's full body, which the engine merges against
+    // whatever the lineage holds.
+    const merged = await provider.applyExternalMarkdownEdit(
+      "written outside dohc",
+    );
+    expect(merged.kind).toBe("merged");
+
+    // THE assertion, and it has to be about ORDER at the transport: a settle
+    // afterwards would resend the missing state itself and hide the defect.
+    // The engine must have received the local text BEFORE it was asked to
+    // merge anything against the lineage.
+    const resendAt = methods.indexOf(YDOC_METHOD.recordUpdate);
+    const mergeAt = methods.indexOf(YDOC_METHOD.applyExternalMarkdownEdit);
+    expect(mergeAt).toBeGreaterThanOrEqual(0);
+    expect(resendAt).toBeGreaterThanOrEqual(0);
+    expect(resendAt).toBeLessThan(mergeAt);
+
+    await provider.close({ settle: false });
+  });
+
+  it("refuses to release a session still holding text the engine never got", async () => {
+    // #658, codex P1. The pre-close settle is the LAST chance to hand the
+    // engine text a transient refusal left unsent, and the doc holding that
+    // text goes away with the release. Releasing anyway produced the one
+    // outcome nothing downstream can repair: the caller sees a clean
+    // "released, settle failed", arms a retry that reopens and settles what
+    // the lineage holds, and reports a save of a document missing the edit.
+    //
+    // So the teardown is REFUSED while local state is unsent, and the close
+    // ladder above retries the whole thing.
+    //
+    // MUTATION: drop the `engineMissingLocalState` guard before the release
+    // in `close` -> this rejects with YdocReleasedWithSettleFailureError, the
+    // shape that says the session is gone and only the settle failed.
+    const { provider, journaled } = await openAgainstABusyJournal(
+      "typed and never sent",
+      // The write, its recovery replay, and every resend the close attempts.
+      99,
+    );
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+
+    const closeFailure = await provider
+      .close()
+      .then(() => null)
+      .catch((error: unknown) => error);
+
+    expect(closeFailure).not.toBeNull();
+    // NOT the released-with-failed-settle shape: the session is still here.
+    expect(closeFailure).not.toBeInstanceOf(YdocReleasedWithSettleFailureError);
+    expect(String(closeFailure)).toContain("engine-store-busy");
+  });
+
+  it("releases once the resend lands, so a close is not blocked for good", async () => {
+    // The other half: the refusal above is a WAIT, not a wedge. Once the
+    // store frees, the same close hands over the text and completes.
+    const { provider, journaled } = await openAgainstABusyJournal(
+      "typed and eventually sent",
+      2,
+    );
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+
+    // The store is free by now, so the pre-close settle resends and settles.
+    await provider.close();
   });
 
   it("keeps the session alive through a busy journal write", async () => {

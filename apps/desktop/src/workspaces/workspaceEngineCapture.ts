@@ -3781,11 +3781,19 @@ export function createWorkspaceEngineCapture(
             await session.close(effective);
           } catch (error) {
             if (error instanceof YdocReleasedWithSettleFailureError) {
-              // A locked settle under a SUCCEEDED release is the replicated
-              // shape: this error is the last time anyone
-              // hears about the durably pending write, so arm the detached
-              // debt BEFORE the entry goes away.
-              if (isFileLockedCause(error.cause)) {
+              // A transient settle failure under a SUCCEEDED release is the
+              // replicated shape: this error is the last time anyone hears
+              // about the unsettled document, so arm the detached debt BEFORE
+              // the entry goes away.
+              //
+              // Either blocker qualifies, because the debt is paid by
+              // SETTLING and by the time this error exists the engine holds
+              // the text either way: a file lock leaves the write durably
+              // pending, and a busy store that had left text UNSENT refuses
+              // the release rather than reaching here (ydocProviderSession
+              // `close`). So the settle a payment runs can only be missing the
+              // artifact, never the content.
+              if (isTransientEngineCause(error.cause)) {
                 scheduleDetachedLockedSettle();
               }
               // The daemon session and its lease ARE gone — only the settle

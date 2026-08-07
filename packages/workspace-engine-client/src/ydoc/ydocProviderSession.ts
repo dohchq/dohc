@@ -210,6 +210,16 @@ export async function openEngineYdocProviderSession(
   // many writes were refused.
   let engineMissingLocalState = false;
 
+  // Bring the engine level with this doc, if a transient refusal left it
+  // behind. Every operation whose result depends on durable state runs this
+  // first — the settle, and the external-edit merge — because each of them
+  // would otherwise read a lineage missing text the user has already typed.
+  async function resendMissingLocalState(): Promise<void> {
+    if (!engineMissingLocalState) return;
+    await session.resendMissingState();
+    engineMissingLocalState = false;
+  }
+
   async function runSettle(summary?: string): Promise<YdocSettleResult> {
     // One identity per settle, echoed by whichever outcome this run produces.
     // Callers pair on it instead of on arrival order, which does NOT hold:
@@ -235,10 +245,7 @@ export async function openEngineYdocProviderSession(
       // BEFORE the settle, which must never commit a projection the engine is
       // still missing text for. A refusal here aborts this settle exactly as a
       // journal failure does, and the ladder tries again.
-      if (engineMissingLocalState) {
-        await session.resendMissingState();
-        engineMissingLocalState = false;
-      }
+      await resendMissingLocalState();
     } catch (error) {
       notifySettleError(error, token);
       throw error;
@@ -382,8 +389,20 @@ export async function openEngineYdocProviderSession(
       return operation;
     },
 
-    applyExternalMarkdownEdit(markdown) {
-      return session.applyExternalMarkdownEdit(markdown);
+    async applyExternalMarkdownEdit(markdown) {
+      // The adapter flushes its record chain before merging, so the engine
+      // merges against fully-recorded state rather than a stale doc. That
+      // flush cannot see what a TRANSIENT refusal left unsent: the chain is
+      // neutralized after one, so awaiting it succeeds while the engine is
+      // still missing this session's text — and the merge would then run
+      // against a document without it, reordering or dropping the user's
+      // edit inside the canonical Y.Doc.
+      //
+      // Send it first, exactly as a settle does, and for the same reason: no
+      // operation that reads durable state may run while durable state is
+      // known to be behind (#658).
+      await resendMissingLocalState();
+      return await session.applyExternalMarkdownEdit(markdown);
     },
 
     async close(closeOptions) {
@@ -407,6 +426,18 @@ export async function openEngineYdocProviderSession(
         } catch (error) {
           preCloseError = error;
         }
+      }
+      // Releasing now would DISCARD the only copy. The pre-close settle above
+      // was this session's last chance to hand the engine text it never
+      // received, and the doc holding that text goes away with the release —
+      // so a caller that saw a clean "released, settle failed" would arm a
+      // retry that reopens, settles what the lineage holds, and reports a save
+      // of a document missing the user's edit.
+      //
+      // Refuse the teardown instead. The session stays alive, and the caller's
+      // close ladder retries the whole thing until the store frees (#658).
+      if (engineMissingLocalState && preCloseError !== undefined) {
+        throw preCloseError;
       }
       try {
         try {
