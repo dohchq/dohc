@@ -11,7 +11,8 @@ import { z } from "zod";
 // rejects. Untrusted is not the opt-out — it may hold one dohc cannot read, and
 // reporting a choice the user never made is its own defect (#641). Both
 // processes fail closed on it, so neither names a recorder, but they report it
-// differently: the desktop recovers to the defaults, and MCP answers
+// differently: the desktop recovers to engine-off settings and warns — never to
+// the defaults, which are engine-ON — and MCP answers
 // `historyRecording: "unknown"` with the cause.
 
 // The schema bound on `files.attachmentFolderName`. Exported because the
