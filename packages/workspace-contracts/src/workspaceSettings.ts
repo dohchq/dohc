@@ -4,10 +4,15 @@ import { z } from "zod";
 //
 // It lives here, not in the desktop app, because TWO processes decide from it:
 // the desktop resolves the engine capture at workspace open, and the MCP server
-// decides whether a mutating tool may name a recorder. Both must answer "is
-// this workspace opted out?" the same way, and a file that fails this schema
-// reads as opted out in both. A hand-copied second schema is how those answers
-// drift apart.
+// decides whether a mutating tool may name a recorder. Both ask this one
+// schema, because a hand-copied second schema is how those answers drift apart.
+//
+// The verdict is three-valued: on, off, or UNTRUSTED for a body the schema
+// rejects. Untrusted is not the opt-out — it may hold one dohc cannot read, and
+// reporting a choice the user never made is its own defect (#641). Both
+// processes fail closed on it, so neither names a recorder, but they report it
+// differently: the desktop recovers to the defaults, and MCP answers
+// `historyRecording: "unknown"` with the cause.
 
 // The schema bound on `files.attachmentFolderName`. Exported because the
 // settings UI must enforce the SAME bound on its input: mergeWorkspaceSettings

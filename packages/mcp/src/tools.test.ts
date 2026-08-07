@@ -79,6 +79,15 @@ const renameRace = vi.hoisted(() => ({
   path: null as string | null,
   replaceWith: null as string | null,
 }));
+// realpath can fail where the lstat just before it succeeded: a permission
+// change, or another process moving the path in the gap between the two calls.
+// Neither is arrangeable as a real filesystem state on this host, and both must
+// report a check that did not finish rather than an escape that was never
+// established. One armed entry per matching call, like lstatOverride.
+const realpathOverride = vi.hoisted(() => ({
+  path: null as string | null,
+  results: [] as (NodeJS.ErrnoException | null)[],
+}));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -98,6 +107,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         }
       }
       return stats;
+    },
+    realpath: async (path: Parameters<typeof actual.realpath>[0]) => {
+      if (realpathOverride.path === String(path) && realpathOverride.results.length > 0) {
+        const failure = realpathOverride.results.shift();
+        if (failure) throw failure;
+      }
+      return actual.realpath(path);
     },
     rename: async (
       from: Parameters<typeof actual.rename>[0],
@@ -2072,6 +2088,59 @@ describe("workspace engine flag", () => {
     });
   });
 
+  // Only ONE resolver failure is an escape. The others are checks that did not
+  // finish, and calling them an escape tells an agent to remove a settings file
+  // over a fact dohc never established -- this PR's own defect, one layer down.
+  // Consume the resolver's boolean instead of its reason and both cases here
+  // report the escape wording, so both fail.
+  describe("a resolver failure that is not an escape", () => {
+    const armRealpathErrno = (path: string, code: string) => {
+      realpathOverride.path = path;
+      realpathOverride.results = [errnoError(code)];
+    };
+    const disarm = () => {
+      realpathOverride.path = null;
+      realpathOverride.results = [];
+    };
+
+    it("reports an unreadable path as a check that failed, not as an escape", async () => {
+      await withWorkspace(async (ctx) => {
+        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+        await writeFile(settingsPath(ctx.root), validSettings(true));
+        armRealpathErrno(settingsPath(ctx.root), "EACCES");
+        try {
+          const read = await readHistoryRecording(ctx);
+          expect(read.state).toBe("unknown");
+          if (read.state !== "unknown") throw new Error("unreachable");
+          expect(read.cause).toContain("could not check where that path leads (EACCES)");
+          // The claim never established.
+          expect(read.cause).not.toContain("leads outside this workspace");
+          expectWorkspaceRelative(read.cause, ctx);
+        } finally {
+          disarm();
+        }
+      });
+    });
+
+    it("reports an unreadable workspace folder as the folder's failure, not this file's", async () => {
+      await withWorkspace(async (ctx) => {
+        await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+        await writeFile(settingsPath(ctx.root), validSettings(true));
+        armRealpathErrno(ctx.root, "EACCES");
+        try {
+          const read = await readHistoryRecording(ctx);
+          expect(read.state).toBe("unknown");
+          if (read.state !== "unknown") throw new Error("unreachable");
+          expect(read.cause).toContain("could not resolve the workspace folder (EACCES)");
+          expect(read.cause).not.toContain("leads outside this workspace");
+          expectWorkspaceRelative(read.cause, ctx);
+        } finally {
+          disarm();
+        }
+      });
+    });
+  });
+
   // #641, the whole point: what the AGENT reads. A settings file dohc cannot
   // trust used to report `historyRecording: "off"` -- the opt-out's copy, on
   // no evidence. Revert the fix and this fails: the report becomes "off".
@@ -2140,6 +2209,38 @@ describe("a metadata-folder failure reaches the agent translated", () => {
       // The claim the message makes, checked.
       await expect(readFile(join(ctx.root, "notes.md"), "utf8")).rejects.toThrow();
     });
+  });
+
+  // AGENTS.md: a backpressure error must name the saturated resource and how to
+  // retry or degrade. A full disk is not a permission problem, and the
+  // permission instruction sends an agent to widen access that was never the
+  // obstacle. Drop the capacity branch and every code below borrows that
+  // instruction again, so each case here fails.
+  it("names the resource that ran out instead of the permission instruction", async () => {
+    const instructions = new Map([
+      ["ENOSPC", "The disk holding this workspace is full. Free disk space."],
+      ["EDQUOT", "The disk quota for this workspace is used up. Free space, or raise the quota."],
+      ["EMFILE", "dohc holds too many open files. Restart dohc."],
+      ["ENFILE", "This computer holds too many open files. Close other apps."],
+    ]);
+    for (const [code, instruction] of instructions) {
+      await withWorkspace(async (ctx) => {
+        armMetadataErrno(ctx, code);
+        try {
+          const result = await writeWorkspaceFile(ctx, { path: "notes.md", content: "draft\n" });
+          const reason = refusalReason(result);
+          expect(reason, code).toContain(`(${code})`);
+          expect(reason, code).toContain(instruction);
+          // The permission instruction belongs to a permission failure.
+          expect(reason, code).not.toContain("Check that dohc can read and write");
+          expectWorkspaceRelative(reason, ctx);
+        } finally {
+          disarm();
+        }
+        // The claim the message makes, checked.
+        await expect(readFile(join(ctx.root, "notes.md"), "utf8")).rejects.toThrow();
+      });
+    }
   });
 
   it("passes a guard refusal through whole", async () => {

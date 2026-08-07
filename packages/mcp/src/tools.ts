@@ -438,6 +438,39 @@ function settingsSquatterNoun(stats: Stats): string {
   return stats.isDirectory() ? "folder" : "item";
 }
 
+// Why the resolver could not place the settings file. Only ONE of these is an
+// escape; the rest are checks that did not finish. Collapsing them to "that
+// path leads outside this workspace" would tell an agent to remove a file over
+// an escape dohc never established -- the same defect this fix exists to
+// remove, one layer down. Each cause names its own next step.
+function settingsPathDetail(target: Extract<RealTarget, { ok: false }>): string {
+  switch (target.reason) {
+    case "escapes-workspace":
+      return "That path leads outside this workspace, and it must stay inside. Remove or rename it. Then retry.";
+    case "unreadable-root":
+      return (
+        `dohc could not resolve the workspace folder (${target.code}). The workspace ` +
+        `folder failed, not this file. Check that the workspace folder is present and ` +
+        `readable. Then retry.`
+      );
+    case "dangling-symlink":
+      return (
+        "A link on that path has no target, so dohc cannot tell where the path leads. " +
+        "Create the target, or remove the link. Then retry."
+      );
+    case "unresolvable-symlink":
+      return (
+        `A link on that path cannot be resolved (${target.code}), so dohc cannot tell ` +
+        `where the path leads. Remove the link. Then retry.`
+      );
+    case "unreadable-path":
+      return (
+        `dohc could not check where that path leads (${target.code}). Fix that error on ` +
+        `the path, or remove it. Then retry.`
+      );
+  }
+}
+
 export async function readHistoryRecording(ctx: ToolContext): Promise<HistoryRecordingRead> {
   const path = join(ctx.root, ".dohc", "settings.local.json");
   let stats: Stats;
@@ -462,11 +495,8 @@ export async function readHistoryRecording(ctx: ToolContext): Promise<HistoryRec
       `The file is ${stats.size} bytes and the limit is ${MAX_WORKSPACE_SETTINGS_FILE_BYTES} bytes. Shrink it below the limit. Then retry.`,
     );
   }
-  if (!(await isWithinRealRoot(ctx.root, path))) {
-    return historyUnknown(
-      "That path leads outside this workspace, and it must stay inside. Remove or rename it. Then retry.",
-    );
-  }
+  const target = await realRelativeInRoot(ctx.root, path);
+  if (!target.ok) return historyUnknown(settingsPathDetail(target));
   let body: unknown;
   try {
     body = JSON.parse(await readFile(path, "utf8"));
@@ -647,12 +677,27 @@ async function ensureRecordable(ctx: ToolContext) {
 // `code`, so it is already workspace-relative and passes through whole. Only
 // a platform failure is translated. The code stays, as detail rather than as
 // the whole message — an agent can act on "EPERM".
+// A saturated resource is not a permission problem, and the permission
+// instruction sends an agent to widen access that was never the obstacle. Each
+// one names the resource that ran out and how to free it, per the backpressure
+// rule in AGENTS.md. Both descriptor limits are here because the per-process
+// one (EMFILE) and the system-wide one (ENFILE) are freed by different acts.
+const METADATA_CAPACITY_INSTRUCTIONS = new Map<string, string>([
+  ["ENOSPC", "The disk holding this workspace is full. Free disk space. Then retry."],
+  ["EDQUOT", "The disk quota for this workspace is used up. Free space, or raise the quota. Then retry."],
+  ["EMFILE", "dohc holds too many open files. Restart dohc. Then retry."],
+  ["ENFILE", "This computer holds too many open files. Close other apps. Then retry."],
+]);
+
 function metadataDirRefusal(error: unknown): string {
   const code = errnoCode(error);
   if (code === null) return failureReason(error, DOHC_METADATA_GUARD.lead);
+  const lead = `${DOHC_METADATA_GUARD.lead} Preparing that folder failed (${code}). dohc changed no files.`;
+  const capacity = METADATA_CAPACITY_INSTRUCTIONS.get(code);
+  if (capacity) return `${lead} ${capacity}`;
   return (
-    `${DOHC_METADATA_GUARD.lead} Preparing that folder failed (${code}). dohc changed no files.` +
-    ` Check that dohc can read and write ${DOHC_METADATA_GUARD.path} in this workspace. Then retry.`
+    `${lead} Check that dohc can read and write ${DOHC_METADATA_GUARD.path} in this` +
+    ` workspace. Then retry.`
   );
 }
 
