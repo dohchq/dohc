@@ -2422,9 +2422,14 @@ async function lockedRebindCapture(prefix: string) {
     // release. It reaches the durable lineage; the deaf session never hears
     // it. This is the window a stale write proof survives into.
     peerEditWhileRetained: false,
-    // Parks the NEXT provider open until the test releases it, so a payment
-    // can be caught mid-RPC — the window a destructive finisher runs in.
+    // Parks the NEXT provider open until the test releases it. An open runs as
+    // a capture-chain task, so parking one HOLDS THE CHAIN — which is how a
+    // test puts a debt payment on the queue ahead of work a finisher appends
+    // later.
     openGate: null as Promise<void> | null,
+    // Counts every provider open the ladder attempts, including one that never
+    // completes. A test proving a payment did NOT start reads this, because
+    // `generation` only moves once the open succeeds.
     openAttempts: 0,
     // #595 round 12: the engine COMMITS the settle and declines to write the
     // target (a symlinked path or ancestor), so the call resolves clean while
@@ -2445,9 +2450,7 @@ async function lockedRebindCapture(prefix: string) {
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
   ): Promise<EngineYdocProviderSession> => {
-    // Counted BEFORE the gate: `generation` only moves once the open
-    // completes, so a test waiting for a parked payment has to watch the
-    // attempt, not the result.
+    // Counted BEFORE the gate, so a test can see a parked open.
     state.openAttempts += 1;
     if (state.openGate) {
       const gate = state.openGate;
@@ -2938,7 +2941,7 @@ it("a rename drains the detached locked debt before touching disk", async () => 
   // through a detached reopen, not left targeting a dead path.
   expect(state.settledMarkdowns).toEqual(["renamed edit"]);
   expect(state.generation).toBe(2);
-  await finish(true).catch(() => undefined);
+  await finish(true);
   await capture.stop();
 }, 20_000);
 
@@ -3214,7 +3217,7 @@ it("a directory move drains a detached debt under its prefix", async () => {
   const finish = await capture.beginFileRename("dir", "moved");
   // The descendant's debt was paid BEFORE the move proceeded.
   expect(state.settledMarkdowns).toEqual(["moved edit"]);
-  await finish(true).catch(() => undefined);
+  await finish(true);
   await capture.stop();
 }, 20_000);
 
@@ -3257,16 +3260,21 @@ it("a move cancels a debt that registered while the disk move was in flight", as
   await capture.stop();
 }, 20_000);
 
-it("a payment caught mid-RPC by a move does not settle the moved-from path", async () => {
-  // The fence above cancels REGISTRY ENTRIES. It runs off the capture chain,
-  // after the disk move, and it neither waits for an in-flight payment nor
-  // makes one re-check itself — so a payment that already passed its ownership
-  // and cancellation checks and is parked in an awaited RPC sails past the
-  // cancel and settles the moved-from path anyway. Cancelling an entry is not
-  // the same as stopping the write it authorises.
+it("a move window stops a debt's payment before it ever reaches the daemon", async () => {
+  // The fence above cancels REGISTRY ENTRIES, off the capture chain, AFTER the
+  // disk move. That is too late for a payment already parked in its settle RPC:
+  // the cancel lands at the client while the daemon writes the moved-from path,
+  // and a settle cannot be recalled (#663).
   //
-  // MUTATION: drop the re-check in `settleForProof` -> the parked payment
-  // resumes and settles, and `settledMarkdowns` is no longer empty.
+  // This test used to park the ladder at its session OPEN and lean on the
+  // re-check in `settleForProof` to stop it on the way out. The removal window
+  // refuses the payment a step earlier — it never opens, so nothing is ever in
+  // flight to be caught. That construction is no longer reachable, and the
+  // stronger fact replaces it.
+  //
+  // MUTATION: drop the removal-window check in `payDetachedLockedDebt` -> the
+  // ladder opens a second generation over the moved-from path and settles
+  // "mid-flight edit" onto it while the disk move is still running.
   const { capture, state, rootPath } = await lockedRebindCapture(
     "dohc-ydoc-move-inflight-",
   );
@@ -3279,24 +3287,261 @@ it("a payment caught mid-RPC by a move does not settle the moved-from path", asy
   await expect(session.close()).rejects.toThrow(
     /released, but its pre-close settle failed/,
   );
+  const attemptsAtMove = state.openAttempts;
 
-  // Park the ladder's next open, then let it fire: the payment is now past
-  // its checks and waiting on the daemon.
+  // The lock releases while the disk move is still running, so every rung of
+  // the ladder from here on would settle the moved-from path. The wait is past
+  // the ladder's 1 s first rung; `flush()` then drains the capture chain, so
+  // the assertion never has to guess whether a payment already ran.
+  state.locked = false;
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await capture.flush();
+
+  // THE FACT: no reopen of the moved-from path, and nothing written to it.
+  expect(state.openAttempts).toBe(attemptsAtMove);
+  expect(state.settledMarkdowns).toEqual([]);
+
+  await finishMove(true);
+  await capture.stop();
+}, 25_000);
+
+it("a delete window refuses a debt's payment while the disk delete is unfinished", async () => {
+  // #663. The fence above cancels REGISTRY ENTRIES from the finisher, which
+  // runs off the capture chain AFTER the disk delete. A payment that starts
+  // inside that window passes every check, reaches its settle, and parks in the
+  // RPC — and the cancel then lands at the client while the daemon is already
+  // writing the path the user just deleted. A settle cannot be recalled, so the
+  // window itself has to refuse the payment.
+  //
+  // Driven through the INLINE door (`beginFileRename` pays a matching debt on
+  // the chain), so every step is awaited and no timer decides the outcome. It
+  // is the same predicate the ladder's timer-driven payment consults — the
+  // test below covers that door end to end.
+  //
+  // MUTATION: drop the removal-window check in `payDetachedLockedDebt` -> the
+  // drain reopens the path mid-delete and settles it, so `settledMarkdowns`
+  // holds "written mid-delete" and the rename no longer refuses.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-delete-window-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
+
+  // The delete starts. Its disk work has not reported, so the finisher is held.
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+
+  // The document is opened again while the delete is unfinished, and meets the
+  // lock — registering a debt the suspension snapshot never saw.
+  const { session } = await openWithOneEdit(capture, "written mid-delete");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  const generationAtDelete = state.generation;
+
+  // The lock is GONE — nothing but the window can hold this payment now.
+  state.locked = false;
+
+  // A rename drains matching debts on the chain. The window refuses that
+  // payment, so the debt is still owed and the rename refuses in turn — naming
+  // the delete, because "close that program" would send the user after a lock
+  // that no longer exists.
+  await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
+    /dohc is still deleting note\.md\./,
+  );
+
+  // THE FACT: the path being deleted was never reopened and never written.
+  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.generation).toBe(generationAtDelete);
+
+  finishDelete(true);
+  await capture.stop();
+}, 20_000);
+
+it("a delete window that closes hands the debt back instead of stranding it", async () => {
+  // The other half of the same rule: the fence is an INTERVAL, not a verdict.
+  // The same no-share handle that blocks the write blocks the trash and the
+  // workspace-trash fallback too, so a delete that FAILS must leave the path
+  // owing its write — and the payment the window refused must land as soon as
+  // the window closes.
+  //
+  // MUTATION: never call `closeRemovalWindow` in the finisher -> the drain is
+  // refused forever and the rename throws instead of settling.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-delete-window-release-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
+
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+  const { session } = await openWithOneEdit(capture, "survives the window");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+
+  // The delete FAILED. The path is still there and still owes its write.
+  finishDelete(false);
+
+  // The very next drain lands it — no timer, no backoff, nothing stranded.
+  const finish = await capture.beginFileRename("note.md", "renamed.md");
+  expect(state.settledMarkdowns).toEqual(["survives the window"]);
+  await finish(true);
+  await capture.stop();
+}, 20_000);
+
+it("a failed move holds its window across the rollback, not just up to it", async () => {
+  // codex on #696. A finisher that closes the window and THEN calls
+  // `enqueueResult("rename rollback", …)` has only APPENDED the rollback: work
+  // already queued on the capture chain runs first, against an engine whose
+  // object sits at `moved.md` while the file is still at `note.md`. A payment
+  // released into that gap settles `note.md` against an identity that is about
+  // to stop existing. The move is not over until its engine state is back.
+  //
+  // The ORDER is forced, not timed: a parked provider open holds the chain, the
+  // ladder's payment queues behind it, and the finisher's rollback queues
+  // behind the payment. Releasing the gate runs payment-then-rollback.
+  //
+  // TWO MUTATIONS, one per assertion, because this test owns both halves of
+  // the engine finisher's failure path:
+  //   - close the window before the rollback is enqueued -> the payment runs
+  //     in the gap and `settledMarkdowns` already holds the edit when the
+  //     finisher resolves.
+  //   - never close it -> the debt never discharges and the second assertion
+  //     times out. (This is why the separate engine-finisher release test was
+  //     dropped: verified subsumed, by running that mutation against this test
+  //     alone.)
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-move-rollback-gap-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
+
+  // An engine-coordinated rename, so a rollback exists at all.
+  const finishMove = await capture.beginFileRename("note.md", "moved.md");
+
+  // A debt for the source registers inside the move window and arms its ladder.
+  const { session } = await openWithOneEdit(capture, "written in the rollback gap");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+
+  // HOLD THE CHAIN. An open is a chain task, so parking one keeps every later
+  // task queued — including the ladder's payment and, after it, the rollback.
   let releaseOpen!: () => void;
   state.openGate = new Promise<void>((resolve) => {
     releaseOpen = resolve;
   });
-  state.locked = false;
+  const parked = capture.openYDocSession({
+    path: "other.md",
+    onRemoteUpdate: () => undefined,
+  });
   await expect
     .poll(() => state.openAttempts, { timeout: 15_000 })
     .toBeGreaterThan(1);
 
-  // The move completes and cancels the debt WHILE that payment is parked.
-  await finishMove(true);
-  releaseOpen();
+  // Long enough for a rung of the ladder to fire while the chain is held: the
+  // first is 1 s and the next 2 s, so one payment is queued either way.
+  await new Promise((resolve) => setTimeout(resolve, 2_500));
 
-  // THE FACT: the parked payment stops instead of writing the moved-from path.
+  // The disk move FAILED. The rollback is appended behind the queued payment.
+  const finishing = finishMove(false);
+  releaseOpen();
+  await finishing;
+
+  // THE FACT: the payment did not run in the gap. Had it, it would have settled
+  // the source against the engine's mid-move identity.
+  expect(state.settledMarkdowns).toEqual([]);
+
+  // And the window did end with the rollback: the debt discharges cleanly on
+  // its next rung, with the engine object back at note.md.
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["written in the rollback gap"]);
+
+  await (await parked).close({ settle: false });
+  await capture.stop();
+}, 30_000);
+
+it("a move window that closes hands the debt back, on the no-op finisher", async () => {
+  // The other finisher. `beginFileRename` returns a no-op for everything the
+  // engine rename declines — folders, binary, untracked paths — and the window
+  // it opened is just as real, so the no-op has to close it too.
+  //
+  // MUTATION: drop `closeRemovalWindow()` from `noop` -> the second move
+  // refuses instead of draining the descendant's debt.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-foldermove-release-",
+  );
+  await mkdir(join(rootPath, "dir"), { recursive: true });
+  await writeFile(join(rootPath, "dir", "note.md"), "stale artifact\n", "utf8");
+
+  const finishMove = await capture.beginFileRename("dir", "moved");
+  const { session } = await openWithOneEdit(
+    capture,
+    "survives a failed folder move",
+    "dir/note.md",
+  );
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+
+  await finishMove(false);
+
+  // The next move drains the descendant's debt by prefix, exactly as the
+  // first one would have.
+  const finish = await capture.beginFileRename("dir", "moved");
+  expect(state.settledMarkdowns).toEqual(["survives a failed folder move"]);
+  await finish(true);
+  await capture.stop();
+}, 20_000);
+
+it("a debt's ladder settles nothing while its path's delete is in flight", async () => {
+  // #663 at the door that actually hurts: the ladder's own timer. The test
+  // above pins the predicate deterministically through the inline drain; this
+  // one pins the product fact, because a real delete races the ladder, not a
+  // rename. The wait is past the ladder's 1 s first rung, and `flush()` then
+  // drains the capture chain, so the assertion never has to guess whether the
+  // payment already ran.
+  //
+  // MUTATION: drop the removal-window check in `payDetachedLockedDebt` -> the
+  // ladder opens a fresh generation over the deleted path and settles
+  // "written by the ladder" onto it.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-delete-ladder-");
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+
+  const { session } = await openWithOneEdit(capture, "written by the ladder");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  const generationAtDelete = state.generation;
+
+  // The lock releases while the disk delete is still running: every rung of
+  // the ladder from here on would settle, and every one must be refused.
+  state.locked = false;
   await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await capture.flush();
+
+  expect(state.generation).toBe(generationAtDelete);
+  expect(state.settledMarkdowns).toEqual([]);
+
+  // The delete landed. The debt the window held is cancelled with a trace, and
+  // the deleted path stays deleted.
+  finishDelete(true);
+  await expect
+    .poll(
+      () => state.errors.filter((context) => context.includes("close retry")),
+      { timeout: 5_000 },
+    )
+    .toHaveLength(1);
   expect(state.settledMarkdowns).toEqual([]);
   await capture.stop();
 }, 25_000);

@@ -1440,6 +1440,41 @@ export function createWorkspaceEngineCapture(
     }
   }
 
+  // A destructive operation is an INTERVAL, not an instant. The seam vacates
+  // sessions and suspends debts on the capture chain, main does the disk work
+  // OFF the chain, and only then does the finisher decide the debts' fate. The
+  // suspend/cancel pair covers the debts that exist at each end of that
+  // interval; a REMOVAL WINDOW covers the interval itself.
+  //
+  // It is what the cancel alone cannot do (#663). A payment that starts inside
+  // the window passes its ownership check, reaches its settle, and parks in the
+  // RPC; the finisher's cancel then lands at the client while the daemon is
+  // already writing. A settle cannot be recalled, so the path the user just
+  // deleted or moved away comes back. Refusing the payment while the window is
+  // open is the only point where the answer still stops a write.
+  //
+  // A window opens on the capture chain and a payment runs on the capture
+  // chain, so no payment can be in flight when one opens. That is why the
+  // window needs no drain: refusing the STARTS is the whole fence.
+  interface RemovalWindow {
+    match: (path: string) => boolean;
+    // What another operation tells the user when it has to wait for this one.
+    inProgress: string;
+  }
+  const removalWindows = new Set<RemovalWindow>();
+  function openRemovalWindow(window: RemovalWindow): () => void {
+    removalWindows.add(window);
+    return () => {
+      removalWindows.delete(window);
+    };
+  }
+  function removalWindowFor(path: string): RemovalWindow | null {
+    for (const window of removalWindows) {
+      if (window.match(path)) return window;
+    }
+    return null;
+  }
+
   async function openRestartSafeRustYDocSession(input: {
     versionId: string;
     path: string;
@@ -3340,6 +3375,16 @@ export function createWorkspaceEngineCapture(
             detachedLockedDebts.delete(input.path);
             return;
           }
+          // A destructive operation is under way over this path and its disk
+          // work has not reported yet (#663). Starting here settles a path
+          // that is about to stop existing, and no later cancel can recall
+          // the RPC. DEFER, do not stand down: the removal can still fail,
+          // and the finisher is what decides between cancelling this debt and
+          // restoring it.
+          if (removalWindowFor(input.path) !== null) {
+            armDetachedLockedRetry();
+            return;
+          }
           // WHERE a failure came from decides which obligation it answers: a
           // settle refusal answers W, a close refusal answers L. They share
           // one catch, and "terminal" means opposite things for the two — a
@@ -3934,14 +3979,26 @@ export function createWorkspaceEngineCapture(
       // takes the outcome — `true` cancels with a trace (the path is gone;
       // a later payment would recreate it), `false` restores and re-arms
       // (the path is still there and still owes its write).
+      const match = (p: string) =>
+        p === pathOrPrefix || p.startsWith(`${pathOrPrefix}/`);
       return enqueueResult("close live session for destructive op", async () => {
-        const match = (p: string) =>
-          p === pathOrPrefix || p.startsWith(`${pathOrPrefix}/`);
         await settleAndCloseLiveYDocSessions(
           match,
           "Saved latest edits before removing the file",
         );
         const suspended = suspendDetachedDebts(match);
+        // Held from here until the finisher reports the outcome, so a debt
+        // registered inside the window cannot settle the path mid-delete
+        // (#663). Nothing after this line can throw, so the finisher is the
+        // only closer this seam needs.
+        const closeRemovalWindow = openRemovalWindow({
+          match,
+          inProgress: `dohc is still deleting ${pathOrPrefix}.`,
+        });
+        // Closed LAST. Both branches below are synchronous and append nothing
+        // to the chain, so no task can observe a half-decided outcome — but
+        // the rule is the same one the move seam needs, and stating it once is
+        // cheaper than re-deriving it per seam.
         return (removed: boolean) => {
           if (removed) {
             // RESCAN — the snapshot is not the whole set. The disk delete
@@ -3956,6 +4013,7 @@ export function createWorkspaceEngineCapture(
           } else {
             restoreSuspendedDebts(suspended);
           }
+          closeRemovalWindow();
         };
       });
     },
@@ -5195,6 +5253,11 @@ export function createWorkspaceEngineCapture(
     },
 
     beginFileRename(fromPath, toPath) {
+      // Held from the vacate until the finisher reports the outcome, so a debt
+      // registered inside the window cannot settle an endpoint mid-move
+      // (#663). Opened after the drain below, never before: the drain's own
+      // payment is the one payment this move NEEDS to land.
+      let closeRemovalWindow: () => void = () => undefined;
       return enqueueResult("prepare rename", async () => {
         // A DETACHED locked-write debt is another live thing a
         // rename must vacate — its session is gone, so the vacate below
@@ -5234,11 +5297,18 @@ export function createWorkspaceEngineCapture(
           if (!debt) continue;
           await debt.pay();
           if (detachedLockedDebts.has(endpoint)) {
+            // WHY the payment did not land decides what the user is told. A
+            // removal window over the endpoint holds every payment for it, so
+            // the lock may be long gone and "close that program" would send
+            // the user after nothing.
+            const removal = removalWindowFor(endpoint);
             throw new Error(
               // Explorer renders this verbatim, so it follows
               // docs/brand/copy.md: what happened, why, then ONE instruction
               // per sentence.
-              `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
+              removal
+                ? `dohc could not rename ${fromPath}. ${removal.inProgress} Wait for that to finish. Then rename again.`
+                : `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
             );
           }
         }
@@ -5276,11 +5346,25 @@ export function createWorkspaceEngineCapture(
             `a move of ${fromPath}`,
           );
         };
+        // Cancelling those entries is not the same as stopping the write they
+        // authorise: it runs off the chain, after the disk move, and a payment
+        // already parked in its settle RPC sails past it (#663). The window
+        // stops them from starting for as long as the move is unfinished.
+        closeRemovalWindow = openRemovalWindow({
+          match: endpointMatch,
+          inProgress: `dohc is still moving ${fromPath}.`,
+        });
         const policy = await readPolicyForTask();
-        // Every path out of this method must fence the move, not just the
-        // engine-rename one: the disk move happens either way.
-        const noop: WorkspaceEngineRenameFinisher = async (ok: boolean) => {
+        // THE OUTCOME, then the window — the one rule every finisher here
+        // follows. It serves both moves that leave nothing to undo: the ones
+        // the engine rename declined (folders, binary, untracked — the disk
+        // move still happens, so they still need the fence) and the ones that
+        // succeeded.
+        const finishWithoutRollback: WorkspaceEngineRenameFinisher = async (
+          ok: boolean,
+        ) => {
           if (ok) cancelDebtsRegisteredDuringTheMove();
+          closeRemovalWindow();
         };
         // Only a clean single-file rename between two engine-owned text paths
         // goes through the engine rename (preserving the stable object id);
@@ -5289,14 +5373,16 @@ export function createWorkspaceEngineCapture(
           !policyTracksPath(fromPath, policy) ||
           !policyTracksPath(toPath, policy)
         ) {
-          return noop;
+          return finishWithoutRollback;
         }
         const toCheck = validateUserWritePath(toPath);
-        if (!toCheck.ok || toCheck.normalized !== toPath) return noop;
+        if (!toCheck.ok || toCheck.normalized !== toPath) {
+          return finishWithoutRollback;
+        }
         const engine = await engineStore();
         const versionId = await activeVersionIdOf(engine);
         const disk = await readDiskTextState(rootPath, fromPath);
-        if (disk.kind !== "text") return noop;
+        if (disk.kind !== "text") return finishWithoutRollback;
         try {
           // Sync the latest disk content first so the rename moment carries
           // exactly what moves on disk.
@@ -5319,36 +5405,58 @@ export function createWorkspaceEngineCapture(
           // destination already tracked) must never block the disk rename —
           // the watcher's plain capture takes over.
           onError(`prepare rename of ${fromPath}`, error);
-          return noop;
+          return finishWithoutRollback;
         }
         const cancel = registerExpectedEngineEvents([
           { path: fromPath, operation: "delete" },
           { path: toPath, operation: "write", sha256: disk.sha256 },
         ]);
         return async (ok: boolean) => {
-          if (ok) {
-            cancelDebtsRegisteredDuringTheMove();
-            return;
-          }
+          // A move that landed has nothing to undo, so it ends exactly like
+          // one the engine never recorded.
+          if (ok) return finishWithoutRollback(true);
           cancel();
           // The disk move failed after the engine recorded the rename: rename
           // back so engine state keeps mirroring the folder. Forward history —
           // both rename moments stay visible.
-          await enqueueResult("rename rollback", async () => {
-            await engine.renameTextFile({
-              workspaceId,
-              versionId,
-              fromPath: toPath,
-              toPath: fromPath,
-              metadata: {
-                origin: "local-file",
-                summary: `Rename of ${fromPath} did not complete`,
-              },
+          //
+          // THE WINDOW SPANS THE ROLLBACK. Closing it here only APPENDS the
+          // rollback to the chain, and whatever is already queued runs first —
+          // against an engine whose object sits at toPath while the file is
+          // still at fromPath. A payment released into that gap settles
+          // fromPath against an identity that is about to stop existing. The
+          // move is not over until its engine state is back, so neither is the
+          // window (codex, #696).
+          try {
+            await enqueueResult("rename rollback", async () => {
+              await engine.renameTextFile({
+                workspaceId,
+                versionId,
+                fromPath: toPath,
+                toPath: fromPath,
+                metadata: {
+                  origin: "local-file",
+                  summary: `Rename of ${fromPath} did not complete`,
+                },
+              });
             });
-          }).catch((error) => {
+          } catch (error) {
             onError("rename rollback", error);
-          });
+          } finally {
+            // A rollback that failed leaves the engine mid-move, but holding
+            // the window past that would silence these paths' debts for good.
+            // Close it either way; the trace above is what says the engine and
+            // the folder disagree.
+            closeRemovalWindow();
+          }
         };
+      }).catch((error: unknown) => {
+        // Unlike the delete seam, this one still reads policy, opens the
+        // engine and touches disk after the window opens. A throw there hands
+        // the caller no finisher, and a leaked window silences these
+        // endpoints' debts for the workspace's lifetime.
+        closeRemovalWindow();
+        throw error;
       });
     },
 
