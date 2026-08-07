@@ -25,6 +25,26 @@ const MAX_RUN_AGE_MS = 48 * 60 * 60 * 1_000;
 // replaces already used: `100ms * attempt` over 8 attempts.
 const WINDOWS_CLEANUP_ATTEMPTS = 8;
 const WINDOWS_CLEANUP_DELAY_MS = 100;
+// The shape a run root's name has: a component, the id of the process that
+// made it, and a 16-digit hex nonce — `process-4821-3f9a1c0d5e2b7648`, or
+// `rust-gate-1180-...` from the gate that hands one down. The sweep's next act
+// is a recursive delete, so it removes only names carrying this shape. An aged
+// directory somebody else left in the shared parent is not this sweep's to
+// remove. The Rust twin's `is_run_root_name` reads the same way.
+//
+// A root named by `DOHC_TEST_SCRATCH_RUN` is never swept: whoever named it owns
+// it. `scratchRunId` refuses a configured id of this shape for that reason —
+// otherwise `ci-123-0123456789abcdef` would be deleted as one we generated, and
+// ownership would rest on a name rather than on who made the directory.
+// `[\s\S]`, not `.`: a newline is a legal character in a name on Linux, and
+// `.` would not match one — the Rust twin accepts any non-empty component, so
+// a `.` here would make the two sweeps disagree about `a\nb-4821-<hex>`.
+const RUN_ROOT_NAME = /^[\s\S]+-\d+-[0-9a-f]{16}$/u;
+
+/** Whether a name is one a run root generator produced. Exported to be tested. */
+export function isRunRootName(name: string): boolean {
+  return RUN_ROOT_NAME.test(name);
+}
 
 const testScratch = new Set<string>();
 const suiteScratch = new Set<string>();
@@ -133,7 +153,7 @@ export async function sweepScratchParent(
   }
   for (const name of names) {
     const path = join(parent, name);
-    if (path === currentRun) continue;
+    if (path === currentRun || !isRunRootName(name)) continue;
     let metadata;
     try {
       // `lstat` for the same reason `isIdleSince` uses it, and for one more: a
@@ -170,8 +190,15 @@ function scratchRunId(): string {
         "DOHC_TEST_SCRATCH_RUN must contain only ASCII letters, digits, periods, hyphens, or underscores",
       );
     }
+    if (isRunRootName(configured)) {
+      throw new Error(
+        `DOHC_TEST_SCRATCH_RUN must not end in \`-<digits>-<16 hex>\`, the shape of a generated run id: ${configured}. The sweep removes names of that shape as runs it created, and a root you named is yours to remove.`,
+      );
+    }
     return configured;
   }
+  // The shape `RUN_ROOT_NAME` describes, and the only run root name this
+  // module invents. Change one and the sweep stops reclaiming the other.
   processRunId ??= `process-${process.pid}-${randomBytes(8).toString("hex")}`;
   return processRunId;
 }

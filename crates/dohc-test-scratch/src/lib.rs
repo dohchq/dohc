@@ -12,6 +12,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 const SCRATCH_PARENT: &str = "dohc-test-scratch";
+/// The nonce every run root's name ends in: `{:016x}` here, and
+/// `randomBytes(8).toString("hex")` in the JS twin and in the Rust gate that
+/// hands a root down (`tools/rust-engine-program/run-rust-checks.mjs`).
+const RUN_NONCE_HEX: usize = 16;
 /// How long a run root must be untouched before the sweep may remove it.
 ///
 /// This is a limit that destroys work, so it is set past the longest run this
@@ -157,6 +161,18 @@ fn safe_component_checked(value: &str) -> io::Result<String> {
             "DOHC_TEST_SCRATCH_RUN must contain only ASCII letters, digits, periods, hyphens, or underscores",
         ));
     }
+    // Ownership is the contract; the name is only allowed to stand for it
+    // because nothing else may take that shape. `ci-123-0123456789abcdef` would
+    // otherwise be swept as a run this crate generated, which is the opposite
+    // of "a root you named is yours".
+    if is_run_root_name(OsStr::new(&safe)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "DOHC_TEST_SCRATCH_RUN must not end in `-<digits>-<16 hex>`, the shape of a generated run id: {safe}. The sweep removes names of that shape as runs it created, and a root you named is yours to remove."
+            ),
+        ));
+    }
     Ok(safe)
 }
 
@@ -202,6 +218,38 @@ fn managed_parent(current_run: &Path) -> Option<&Path> {
         .filter(|parent| parent.file_name() == Some(OsStr::new(SCRATCH_PARENT)))
 }
 
+/// Whether a name has the shape this crate gives a run root.
+///
+/// Every run root created here ends in the id of the process that made it and a
+/// 16-digit hex nonce: `process-4821-3f9a1c0d5e2b7648`, and
+/// `rust-gate-1180-...` from the gate that hands one down. The sweep's next act
+/// is a recursive delete, so it removes only what carries that shape. An aged
+/// directory somebody dropped in the managed parent is not this crate's to
+/// delete, and neither is a parent a custom `DOHC_TEST_SCRATCH_ROOT` points
+/// into.
+///
+/// A root named by `DOHC_TEST_SCRATCH_RUN` is never swept: whoever named it owns
+/// it. `safe_component_checked` refuses a configured id of this shape for that
+/// reason, so a run-shaped name under the managed parent is always one this
+/// crate or its gate generated.
+fn is_run_root_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    // From the right: the component may hold hyphens of its own (`rust-gate`).
+    let Some((rest, nonce)) = name.rsplit_once('-') else {
+        return false;
+    };
+    let Some((component, process)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    nonce.len() == RUN_NONCE_HEX
+        && nonce.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+        && !process.is_empty()
+        && process.chars().all(|c| c.is_ascii_digit())
+        && !component.is_empty()
+}
+
 fn sweep_old_runs(parent: &Path, current_run: &Path, now: SystemTime) -> io::Result<()> {
     let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
@@ -211,7 +259,10 @@ fn sweep_old_runs(parent: &Path, current_run: &Path, now: SystemTime) -> io::Res
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path == current_run || !entry.file_type()?.is_dir() {
+        if path == current_run
+            || !entry.file_type()?.is_dir()
+            || !is_run_root_name(&entry.file_name())
+        {
             continue;
         }
         if !is_idle_since(&path, now, MAX_RUN_AGE) {
@@ -299,6 +350,11 @@ mod tests {
     use super::*;
     use filetime::{FileTime, set_file_mtime};
 
+    /// The run doing the sweeping. Run-shaped, so the sweep's decision about
+    /// every other entry is about that entry, never about the current run's
+    /// name.
+    const THIS_RUN: &str = "current-run-4821-0000000000000003";
+
     #[test]
     fn drop_removes_the_scratch_directory() {
         let path = {
@@ -384,6 +440,30 @@ mod tests {
         }
     }
 
+    /// The sweep infers ownership from the run shape, so nothing a caller names
+    /// may take that shape. Without this, `DOHC_TEST_SCRATCH_RUN=ci-123-0123456789abcdef`
+    /// would be swept as a run this crate created. The JS twin refuses the same
+    /// ids in `scratchRunId`.
+    #[test]
+    fn a_configured_run_id_shaped_like_a_generated_one_is_refused() {
+        let temp = Path::new(if cfg!(windows) { r"C:\temp" } else { "/tmp" });
+        let error = resolve_run_root(None, Some("ci-123-0123456789abcdef"), temp)
+            .expect_err("a configured id that reads as generated is not the caller's to keep");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("DOHC_TEST_SCRATCH_RUN"),
+            "the refusal must name the variable, got: {error}"
+        );
+
+        // A name of the caller's own is still theirs to choose.
+        let kept = resolve_run_root(None, Some("ci-123"), temp).expect("a caller's own name");
+        assert_eq!(kept.file_name(), Some(OsStr::new("ci-123")));
+        assert!(
+            !is_run_root_name(OsStr::new("ci-123")),
+            "a name the sweep refuses to touch must not be run-shaped"
+        );
+    }
+
     #[test]
     fn a_relative_root_is_refused_by_name() {
         let error = resolve_run_root(Some("relative/root"), None, Path::new("/tmp"))
@@ -402,7 +482,7 @@ mod tests {
     fn sweep_keeps_a_run_whose_only_recent_write_is_deep_inside() {
         let harness = ScratchDir::new_named("deep-activity").expect("scratch");
         let parent = harness.join("runs");
-        let live = parent.join("live-soak");
+        let live = parent.join("live-soak-4821-00000000000000aa");
         let deep = live.join("workspace").join(".dohc").join("engine");
         fs::create_dir_all(&deep).expect("deep tree");
         fs::write(deep.join("engine.db"), b"live").expect("recent deep write");
@@ -432,7 +512,9 @@ mod tests {
         let harness = ScratchDir::new_named("outside-root").expect("scratch");
         let outside = harness.join("a-developers-own-directory");
         let run_root = outside.join("my-scratch");
-        let victim = outside.join("important-project");
+        // Run-shaped on purpose: only the managed-parent guard may save it, so
+        // the name-shape guard cannot answer this test for the wrong reason.
+        let victim = outside.join("important-project-4821-00000000000000cc");
         let victim_file = victim.join("do-not-delete.txt");
         fs::create_dir_all(&run_root).expect("handed-down root");
         fs::create_dir_all(&victim).expect("victim");
@@ -484,7 +566,7 @@ mod tests {
     fn sweep_keeps_a_run_whose_mtime_is_in_the_future() {
         let harness = ScratchDir::new_named("future-mtime").expect("scratch");
         let parent = harness.join("runs");
-        let live = parent.join("run-from-the-future");
+        let live = parent.join("future-run-4821-00000000000000bb");
         fs::create_dir_all(&live).expect("run root");
         let file = live.join("engine.db");
         fs::write(&file, b"written after the clock moved back").expect("write");
@@ -511,9 +593,9 @@ mod tests {
     fn sweep_removes_only_aged_inactive_runs() {
         let harness = ScratchDir::new_named("sweep-test").expect("scratch");
         let parent = harness.join("runs");
-        let old = parent.join("old-run");
-        let live = parent.join("live-run");
-        let current = parent.join("current-run");
+        let old = parent.join("old-run-4821-0000000000000001");
+        let live = parent.join("live-run-4821-0000000000000002");
+        let current = parent.join(THIS_RUN);
         fs::create_dir_all(&old).expect("old run");
         fs::create_dir_all(&live).expect("live run");
         fs::create_dir_all(&current).expect("current run");
@@ -527,5 +609,139 @@ mod tests {
         assert!(!old.exists(), "the sweep must remove an aged run");
         assert!(live.exists(), "the sweep must keep a recent run");
         assert!(current.exists(), "the sweep must keep the current run");
+    }
+
+    /// The managed parent is a shared directory in `%TEMP%`, and anything can
+    /// land in it: a person's own folder, an unpacked archive, another tool's
+    /// cache. Age says nothing about who made a directory, and what follows a
+    /// sweep decision is a recursive delete — so the sweep removes only names
+    /// carrying this crate's run shape.
+    #[test]
+    fn sweep_refuses_an_aged_directory_that_is_not_run_shaped() {
+        let harness = ScratchDir::new_named("shape-guard").expect("scratch");
+        let parent = harness.join(SCRATCH_PARENT);
+        let mine = parent.join("process-4821-0f3a1c0d5e2b7648");
+        let theirs = parent.join("notes-from-a-conference");
+        let their_file = theirs.join("do-not-delete.md");
+        fs::create_dir_all(&mine).expect("a run this crate made");
+        fs::create_dir_all(&theirs).expect("somebody else's directory");
+        fs::write(&their_file, b"a year of work").expect("their file");
+
+        let now = SystemTime::now();
+        let stale = FileTime::from_system_time(now - MAX_RUN_AGE - Duration::from_secs(60));
+        set_file_mtime(&their_file, stale).expect("age their file");
+        set_file_mtime(&theirs, stale).expect("age their directory");
+        set_file_mtime(&mine, stale).expect("age the run");
+
+        sweep_managed_parent(&parent.join(THIS_RUN), now);
+
+        assert!(
+            their_file.exists(),
+            "an aged directory that is not run-shaped is not this crate's to remove"
+        );
+        // And the guard did not just turn the sweep off.
+        assert!(
+            !mine.exists(),
+            "an aged run-shaped root must still be swept"
+        );
+    }
+
+    /// The name the Rust gate hands down, read out of the gate itself.
+    ///
+    /// The third producer of run roots is a JavaScript template this crate
+    /// cannot call, and a hand-copied example of its output proves only that
+    /// somebody once typed a matching string. Reading the template means a gate
+    /// that changes how it names its run root fails here instead of leaking
+    /// every root it creates.
+    fn gate_run_root_name() -> String {
+        let gate = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rust-engine-program/run-rust-checks.mjs");
+        let source = fs::read_to_string(&gate).expect("the gate script is readable");
+        const PREFIX: &str = "rust-gate-${process.pid}-${randomBytes(";
+        let after = source.split_once(PREFIX).map(|(_, rest)| rest).unwrap_or_else(|| {
+            panic!(
+                "{} no longer names its run root `{PREFIX}...`; the sweep's shape guard must be \
+                 checked against whatever it names them now",
+                gate.display()
+            )
+        });
+        let (bytes, rest) = after
+            .split_once(')')
+            .expect("the nonce width is parenthesised");
+        assert!(
+            rest.starts_with(".toString(\"hex\")}"),
+            "the gate's nonce is no longer hex; got `{}`",
+            &rest[..rest.len().min(24)]
+        );
+        let bytes: usize = bytes.parse().expect("the nonce width is a number");
+        format!("rust-gate-4821-{}", "0".repeat(bytes * 2))
+    }
+
+    /// The guard is only as good as its agreement with the names this crate and
+    /// its callers actually create. A producer that drifts out of the shape
+    /// would leak every run it makes, silently, so every producer is checked
+    /// against the predicate rather than described in a comment.
+    #[test]
+    fn every_run_root_this_repo_creates_is_run_shaped() {
+        let temp = Path::new(if cfg!(windows) { r"C:\temp" } else { "/tmp" });
+        let derived = resolve_run_root(None, None, temp).expect("a derived run root");
+        let name = derived.file_name().expect("the run root is named");
+        assert!(
+            is_run_root_name(name),
+            "this crate's own run root is not run-shaped: {name:?}"
+        );
+
+        let gate = gate_run_root_name();
+        assert!(
+            is_run_root_name(OsStr::new(&gate)),
+            "the Rust gate's run root is not run-shaped: {gate:?}"
+        );
+
+        for refused in [
+            "notes-from-a-conference",
+            "process-4821",
+            "process-4821-",
+            "-4821-0f3a1c0d5e2b7648",
+            "process--0f3a1c0d5e2b7648",
+            // A short nonce, an over-long one, and a non-hex one: each is a
+            // name something else made that happens to read like a run.
+            "process-4821-0f3a1c0d",
+            "process-4821-0f3a1c0d5e2b76489",
+            "process-4821-0F3A1C0D5E2B7648",
+            "process-4821-zzzzzzzzzzzzzzzz",
+            // The process id is a number, not any component.
+            "process-main-0f3a1c0d5e2b7648",
+        ] {
+            assert!(
+                !is_run_root_name(OsStr::new(refused)),
+                "{refused:?} is not a name this crate creates, so the sweep must refuse it"
+            );
+        }
+    }
+
+    /// Names both sweeps must agree about, and the answer. `apps/desktop/src/
+    /// workspaces/testTemp.test.ts` holds the same list. A newline is a legal
+    /// character in a name where the gate runs on Linux, and a component may
+    /// hold hyphens of its own — the two are the cases the twins are most
+    /// likely to read differently.
+    const TWIN_CORPUS: &[(&str, bool)] = &[
+        ("process-4821-0f3a1c0d5e2b7648", true),
+        ("rust-gate-1180-3c2e9a1b7d4f0e65", true),
+        ("a-b-c-4821-0f3a1c0d5e2b7648", true),
+        ("a\nb-4821-0f3a1c0d5e2b7648", true),
+        ("notes-from-a-conference", false),
+        ("ci-123", false),
+        ("process-4821-0f3a1c0d", false),
+    ];
+
+    #[test]
+    fn a_run_root_name_is_read_the_same_by_both_sweeps() {
+        for (name, expected) in TWIN_CORPUS {
+            assert_eq!(
+                is_run_root_name(OsStr::new(name)),
+                *expected,
+                "the shared corpus disagrees about {name:?}"
+            );
+        }
     }
 }

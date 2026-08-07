@@ -19,16 +19,18 @@
 // row is how the fault-injection tests went unrun for a month. Optional tools
 // may still skip.
 //
-// PROVENANCE: the run resolves `git rev-parse HEAD` before the first step and
-// again after the last, and stamps the commit into both the summary block and
-// the evidence line. A verdict that cannot name the tree it examined is not
-// evidence — two concurrent runs sharing one worktree produced PASS and FAIL
-// for the same commit, and neither log could say which tree it had read. HEAD
-// moving mid-run FAILS the verdict, and so does the worktree changing under
-// it; a tree already dirty when the run starts is recorded, not failed,
-// because running the gate over uncommitted work is the normal local loop and
-// a check that forbids it just gets removed. Recorded is the point: the
-// reader learns the sha does not describe everything that ran.
+// PROVENANCE: the run reads the tree at every step boundary and stamps the
+// commit into both the summary block and the evidence line. A verdict that
+// cannot name the tree it examined is not evidence — two concurrent runs
+// sharing one worktree produced PASS and FAIL for the same commit, and neither
+// log could say which tree it had read. HEAD moving mid-run FAILS the verdict,
+// and so does the worktree changing under it, and so does a HEAD that moved
+// and returned inside one step — the reading carries the HEAD reflog, which
+// records that even when both ends name the same commit. A tree already dirty
+// when the run starts is recorded, not failed, because running the gate over
+// uncommitted work is the normal local loop and a check that forbids it just
+// gets removed. Recorded is the point: the reader learns the sha does not
+// describe everything that ran.
 //
 // Usage:
 //   node tools/rust-engine-program/run-rust-checks.mjs
@@ -40,7 +42,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { arch, platform, release, tmpdir } from "node:os";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
   classifyTreeProvenance,
@@ -138,13 +140,25 @@ let failed = false;
 // that changes and changes back reads identical at the two ends, so endpoints
 // alone certify an interval nothing observed.
 //
-// Each reading is a `git rev-parse` and a `git status --untracked-files=all`
-// through a shell. Measured on this repo on Windows, the slowest of the
-// platforms the gate runs on: ~0.9s per reading, ~9s for the ten a full run
-// takes — under a percent of a gate that spends twenty minutes in cargo.
-const readings = [{ step: "start", state: readTreeState(captureGit) }];
-const readTreeAfter = (step) =>
-  readings.push({ step, state: readTreeState(captureGit) });
+// Each reading is a `git rev-parse`, a `git status --untracked-files=all`, and
+// two bounded reads of this checkout's HEAD reflog, all through a shell.
+// Measured on this repo on Windows, the slowest of the platforms the gate runs
+// on: ~1s per reading, ~10s for the ten a full run takes — under a percent of
+// a gate that spends twenty minutes in cargo.
+
+// Where this checkout keeps its HEAD log. `--git-path` names the log of the
+// worktree the run is in, not the main one, and answers relatively there and
+// absolutely in a linked worktree — so it is resolved against the root the
+// commands ran in. The path cannot move under a run, so it is asked once; its
+// EXISTENCE is read at every reading, because a log removed mid-run is a run
+// that stopped being able to see a HEAD that moved and came back.
+const headLogPath = captureGit("git rev-parse --git-path logs/HEAD");
+const hasHeadLog = () =>
+  headLogPath === null ? null : existsSync(resolve(repoRoot, headLogPath.trim()));
+const readTree = () => readTreeState(captureGit, hasHeadLog);
+
+const readings = [{ step: "start", state: readTree() }];
+const readTreeAfter = (step) => readings.push({ step, state: readTree() });
 
 console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);

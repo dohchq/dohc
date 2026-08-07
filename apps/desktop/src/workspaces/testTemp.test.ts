@@ -6,16 +6,20 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   cleanupSuiteTestScratch,
   createTestScratch,
+  isRunRootName,
   sweepScratchParent,
   testScratchRunRoot,
 } from "./testTemp";
 
 const HOUR_MS = 60 * 60 * 1_000;
+// The run doing the sweeping. Run-shaped, so the sweep's decision about
+// every other entry is about that entry, never about the current run's name.
+const THIS_RUN = "current-run-4821-0000000000000003";
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -38,9 +42,9 @@ describe("test scratch", () => {
   it("sweeps aged runs without removing recent or current runs", async () => {
     const harness = await createTestScratch("sweep-test-");
     const parent = join(harness, "runs");
-    const old = join(parent, "old-run");
-    const live = join(parent, "live-run");
-    const current = join(parent, "current-run");
+    const old = join(parent, "old-run-4821-0000000000000001");
+    const live = join(parent, "live-run-4821-0000000000000002");
+    const current = join(parent, THIS_RUN);
     await Promise.all([
       mkdir(old, { recursive: true }),
       mkdir(live, { recursive: true }),
@@ -80,7 +84,7 @@ describe("test scratch", () => {
   it("does not follow a link out of an abandoned run", async () => {
     const harness = await createTestScratch("linked-activity-");
     const parent = join(harness, "runs");
-    const abandoned = join(parent, "killed-run");
+    const abandoned = join(parent, "killed-run-4821-00000000000000dd");
     const outside = join(harness, "someone-elses-workspace");
     await mkdir(abandoned, { recursive: true });
     await mkdir(outside, { recursive: true });
@@ -94,7 +98,7 @@ describe("test scratch", () => {
     await lutimes(link, when, when);
     await age(abandoned, nowMs, 49);
 
-    await sweepScratchParent(parent, join(parent, "current-run"), nowMs);
+    await sweepScratchParent(parent, join(parent, THIS_RUN), nowMs);
 
     expect(
       await pathExists(abandoned),
@@ -134,7 +138,7 @@ describe("test scratch", () => {
   it("keeps a run whose only recent write is deep inside it", async () => {
     const harness = await createTestScratch("deep-activity-");
     const parent = join(harness, "runs");
-    const soak = join(parent, "live-soak");
+    const soak = join(parent, "live-soak-4821-00000000000000aa");
     const engine = join(soak, "workspace", ".dohc", "engine");
     await mkdir(engine, { recursive: true });
     await writeFile(join(engine, "engine.db"), "live");
@@ -146,11 +150,105 @@ describe("test scratch", () => {
     await age(join(soak, "workspace"), nowMs, 49);
     await age(soak, nowMs, 49);
 
-    await sweepScratchParent(parent, join(parent, "current-run"), nowMs);
+    await sweepScratchParent(parent, join(parent, THIS_RUN), nowMs);
 
     expect(
       await pathExists(soak),
       "a run with recent work deep inside is live and must survive",
     ).toBe(true);
+  });
+
+  // The parent this sweep walks is a shared directory in the platform temp
+  // dir, and anything can land in it. Age says nothing about who made a
+  // directory, and what follows the decision is a recursive delete — so only
+  // names carrying the run shape are swept. The Rust twin holds the same line
+  // in `sweep_refuses_an_aged_directory_that_is_not_run_shaped`.
+  it("removes an aged run root, and never an aged directory of somebody else's", async () => {
+    const harness = await createTestScratch("shape-guard-");
+    const parent = join(harness, "runs");
+    const mine = join(parent, "process-4821-0f3a1c0d5e2b7648");
+    const theirs = join(parent, "notes-from-a-conference");
+    await mkdir(mine, { recursive: true });
+    await mkdir(theirs, { recursive: true });
+    const theirFile = join(theirs, "do-not-delete.md");
+    await writeFile(theirFile, "a year of work");
+
+    const nowMs = Date.now();
+    await age(theirFile, nowMs, 49);
+    await age(theirs, nowMs, 49);
+    await age(mine, nowMs, 49);
+
+    await sweepScratchParent(parent, join(parent, THIS_RUN), nowMs);
+
+    expect(
+      await pathExists(theirFile),
+      "an aged directory that is not run-shaped is not this sweep's to remove",
+    ).toBe(true);
+    // And the guard did not just turn the sweep off.
+    expect(
+      await pathExists(mine),
+      "an aged run-shaped root must still be swept",
+    ).toBe(false);
+  });
+
+  // Names both sweeps must agree about, and the answer. The Rust twin holds
+  // the same list in `TWIN_CORPUS`. A newline is a legal character in a name
+  // where the gate runs on Linux, and a component may hold hyphens of its own
+  // — the two are the cases the twins are most likely to read differently.
+  it.each([
+    ["process-4821-0f3a1c0d5e2b7648", true],
+    ["rust-gate-1180-3c2e9a1b7d4f0e65", true],
+    ["a-b-c-4821-0f3a1c0d5e2b7648", true],
+    ["a\nb-4821-0f3a1c0d5e2b7648", true],
+    ["notes-from-a-conference", false],
+    ["ci-123", false],
+    ["process-4821-0f3a1c0d", false],
+  ] as const)("reads %j as run-shaped: %s", (name, expected) => {
+    expect(isRunRootName(name)).toBe(expected);
+  });
+
+  // Ownership is the contract, and a name is only allowed to stand for it
+  // because nothing else may take that shape. A configured id like
+  // `ci-123-0123456789abcdef` would otherwise be swept as one this module
+  // generated, which is the opposite of "a root you named is yours". The Rust
+  // twin refuses the same ids in `safe_component_checked`.
+  it("refuses a configured run id shaped like a generated one", () => {
+    const previous = process.env.DOHC_TEST_SCRATCH_RUN;
+    const root = process.env.DOHC_TEST_SCRATCH_ROOT;
+    delete process.env.DOHC_TEST_SCRATCH_ROOT;
+    try {
+      process.env.DOHC_TEST_SCRATCH_RUN = "ci-123-0123456789abcdef";
+      expect(() => testScratchRunRoot()).toThrow(/generated run id/);
+
+      // A name of the caller's own is still theirs to choose.
+      process.env.DOHC_TEST_SCRATCH_RUN = "ci-123";
+      expect(basename(testScratchRunRoot())).toBe("ci-123");
+    } finally {
+      if (previous === undefined) delete process.env.DOHC_TEST_SCRATCH_RUN;
+      else process.env.DOHC_TEST_SCRATCH_RUN = previous;
+      if (root !== undefined) process.env.DOHC_TEST_SCRATCH_ROOT = root;
+    }
+  });
+
+  // The guard is only as good as its agreement with the name this module gives
+  // its own run root. A run id that drifted out of the shape would leak every
+  // run it named, silently — so the producer is checked through the sweep, not
+  // described in a comment. The Rust twin holds the same line in
+  // `every_run_root_this_repo_creates_is_run_shaped`.
+  it("sweeps a run root named the way this module names its own", async () => {
+    const harness = await createTestScratch("own-name-");
+    const parent = join(harness, "runs");
+    const mine = join(parent, basename(testScratchRunRoot()));
+    await mkdir(mine, { recursive: true });
+
+    const nowMs = Date.now();
+    await age(mine, nowMs, 49);
+
+    await sweepScratchParent(parent, join(parent, THIS_RUN), nowMs);
+
+    expect(
+      await pathExists(mine),
+      "this module's own run root name must be one the sweep can reclaim",
+    ).toBe(false);
   });
 });
