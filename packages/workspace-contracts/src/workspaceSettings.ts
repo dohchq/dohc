@@ -88,14 +88,8 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   },
 };
 
-// The one verdict every reader asks of the file's parsed JSON.
-//
-// Three states, not two. A body the schema rejects may hold an opt-out we
-// cannot read, so it is UNTRUSTED — never the engine-on default, and never the
-// opt-out either: "the user turned the engine off" and "dohc could not tell"
-// are different facts, and a reader that reports the first on the evidence for
-// the second states something it did not establish (#641). Both states fail
-// closed, so neither names a recorder.
+// The one verdict every reader asks of the file's parsed JSON. Three states,
+// not two — the contract is stated at the top of this file.
 export type WorkspaceEngineSetting =
   | { state: "on" }
   | { state: "off" }

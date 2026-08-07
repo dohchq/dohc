@@ -83,10 +83,10 @@ const renameRace = vi.hoisted(() => ({
 // change, or another process moving the path in the gap between the two calls.
 // Neither is arrangeable as a real filesystem state on this host, and both must
 // report a check that did not finish rather than an escape that was never
-// established. One armed entry per matching call, like lstatOverride.
+// established. The armed path fails every call until it is disarmed.
 const realpathOverride = vi.hoisted(() => ({
   path: null as string | null,
-  results: [] as (NodeJS.ErrnoException | null)[],
+  error: null as NodeJS.ErrnoException | null,
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -109,9 +109,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       return stats;
     },
     realpath: async (path: Parameters<typeof actual.realpath>[0]) => {
-      if (realpathOverride.path === String(path) && realpathOverride.results.length > 0) {
-        const failure = realpathOverride.results.shift();
-        if (failure) throw failure;
+      if (realpathOverride.path === String(path) && realpathOverride.error) {
+        throw realpathOverride.error;
       }
       return actual.realpath(path);
     },
@@ -2096,11 +2095,11 @@ describe("workspace engine flag", () => {
   describe("a resolver failure that is not an escape", () => {
     const armRealpathErrno = (path: string, code: string) => {
       realpathOverride.path = path;
-      realpathOverride.results = [errnoError(code)];
+      realpathOverride.error = errnoError(code);
     };
     const disarm = () => {
       realpathOverride.path = null;
-      realpathOverride.results = [];
+      realpathOverride.error = null;
     };
 
     it("reports an unreadable path as a check that failed, not as an escape", async () => {
@@ -2197,12 +2196,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
             "dohc could not open this workspace's .dohc folder. Preparing that folder failed (EPERM). dohc changed no files." +
             " Check that dohc can read and write .dohc in this workspace. Then retry.",
         });
-        const reason = refusalReason(result);
-        expectWorkspaceRelative(reason, ctx);
-        // The code survives as detail an agent can branch on; it is no longer
-        // the message.
-        expect(reason).toContain("(EPERM)");
-        expect(reason.startsWith("EPERM")).toBe(false);
+        expectWorkspaceRelative(refusalReason(result), ctx);
       } finally {
         disarm();
       }

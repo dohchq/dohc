@@ -406,14 +406,9 @@ async function readFileWindowWithDigest(
 // workspace out. Cheap enough to read per mutating call — the flag can flip
 // between desktop opens.
 //
-// #641: a file that EXISTS but cannot be trusted (symlink, non-regular,
-// oversized, escaped .dohc, unparseable JSON, any body the schema rejects, or
-// a read that failed) resolves UNKNOWN, not OFF. Both fail closed and neither
-// names a recorder, but OFF asserts the user chose this, and dohc established
-// no such thing. The desktop already carries the split —
-// `historyRecordingOff` beside `historyRecordingUnavailable` in
-// bridgeContract.ts (#483, #505) — and MCP was the surface still collapsing
-// the two.
+// #641: a file that EXISTS but cannot be trusted resolves UNKNOWN, not OFF —
+// the three-state contract at the top of workspaceSettings.ts. Unknown never
+// names a recorder, so the read still fails closed.
 const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
 const WORKSPACE_SETTINGS_PATH = ".dohc/settings.local.json";
 
@@ -541,21 +536,18 @@ type RecordedChangeFields =
 
 async function recordedChangeFields(ctx: ToolContext): Promise<RecordedChangeFields> {
   const history = await readHistoryRecording(ctx);
-  if (history.state === "on") return { recordedBy: "workspace-engine" as const };
-  if (history.state === "off") return { historyRecording: "off" as const };
-  return {
-    historyRecording: "unknown" as const,
-    historyRecordingUnavailable: history.cause,
-  };
+  if (history.state === "on") return { recordedBy: "workspace-engine" };
+  if (history.state === "off") return { historyRecording: "off" };
+  return { historyRecording: "unknown", historyRecordingUnavailable: history.cause };
 }
 
 // Forward a write's history fields whole. Naming them one by one dropped the
 // unknown arm's cause, which is the only part of it an agent can act on.
 function forwardedRecordedChangeFields(written: RecordedChangeFields): RecordedChangeFields {
   if ("recordedBy" in written) return { recordedBy: written.recordedBy };
-  if (written.historyRecording === "off") return { historyRecording: "off" as const };
+  if (written.historyRecording === "off") return { historyRecording: "off" };
   return {
-    historyRecording: "unknown" as const,
+    historyRecording: "unknown",
     historyRecordingUnavailable: written.historyRecordingUnavailable,
   };
 }
@@ -692,13 +684,10 @@ const METADATA_CAPACITY_INSTRUCTIONS = new Map<string, string>([
 function metadataDirRefusal(error: unknown): string {
   const code = errnoCode(error);
   if (code === null) return failureReason(error, DOHC_METADATA_GUARD.lead);
-  const lead = `${DOHC_METADATA_GUARD.lead} Preparing that folder failed (${code}). dohc changed no files.`;
-  const capacity = METADATA_CAPACITY_INSTRUCTIONS.get(code);
-  if (capacity) return `${lead} ${capacity}`;
-  return (
-    `${lead} Check that dohc can read and write ${DOHC_METADATA_GUARD.path} in this` +
-    ` workspace. Then retry.`
-  );
+  const instruction =
+    METADATA_CAPACITY_INSTRUCTIONS.get(code) ??
+    `Check that dohc can read and write ${DOHC_METADATA_GUARD.path} in this workspace. Then retry.`;
+  return `${DOHC_METADATA_GUARD.lead} Preparing that folder failed (${code}). dohc changed no files. ${instruction}`;
 }
 
 // mkdir{recursive} throws a raw errno (EEXIST, or a Windows variant) when
