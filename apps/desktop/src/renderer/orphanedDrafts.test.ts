@@ -268,6 +268,59 @@ describe("orphanedDrafts persistence (#600)", () => {
     expect(storedText()).not.toContain("FIRST");
   });
 
+  // `typeof x === "number"` is not an identity. `1e400` parses to Infinity,
+  // which the rewrite serializes as JSON null — so the row came back durable,
+  // the close guard let the app exit, and the launch AFTER that rejected the
+  // null and took the text with it. A claimed durability that a later launch
+  // un-claims is the worst shape this store has, which is why the round trip
+  // below is the assertion that matters.
+  //
+  // Seeded as raw JSON: JSON.stringify would fold these into null before they
+  // ever reached storage, and then the test would seed a different bug.
+  it("re-keys an id nothing can count from, and keeps every text", async () => {
+    const capturedAt = Date.now();
+    localStorage.setItem(
+      ORPHANED_DRAFT_STORAGE_KEY,
+      `[{"id":1e400,"workspaceId":"ws-1","path":"a.md","text":"OVERFLOW","capturedAtMs":${capturedAt}},
+        {"id":-3.5,"workspaceId":"ws-1","path":"a.md","text":"FRACTION","capturedAtMs":${capturedAt}},
+        {"id":2,"workspaceId":"ws-1","path":"a.md","text":"VALID","capturedAtMs":${capturedAt}}]`,
+    );
+    // MUTATION (usable id): let the watermark and the keep-it test read
+    // `typeof row.id === "number"`. Infinity survives, every re-key draws the
+    // same Infinity, the rewrite writes nulls, and the second relaunch below
+    // comes back empty.
+    const next = await relaunch();
+    const restored = draftsFor(next.useOrphanedDrafts, "ws-1", "a.md");
+    // No text is dropped for carrying a broken id...
+    expect([...restored.map((d) => d.text)].sort()).toEqual([
+      "FRACTION",
+      "OVERFLOW",
+      "VALID",
+    ]);
+    // ...every row can be counted from and told apart...
+    expect(restored.every((d) => Number.isSafeInteger(d.id))).toBe(true);
+    expect(new Set(restored.map((d) => d.id)).size).toBe(3);
+    // ...and nothing serialized to a null the next launch would reject.
+    expect(storedText()).not.toContain("null");
+
+    // A dismissal retires exactly its own row.
+    const dismissed = restored.find((d) => d.text === "OVERFLOW")!;
+    next.dismissOrphanedDraft("ws-1", "a.md", dismissed.id);
+    expect(
+      [
+        ...draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
+      ].sort(),
+    ).toEqual(["FRACTION", "VALID"]);
+
+    // The round trip: the launch after the repair still has both texts.
+    const after = await relaunch();
+    expect(
+      [
+        ...draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
+      ].sort(),
+    ).toEqual(["FRACTION", "VALID"]);
+  });
+
   // One order, whichever surface asks. The store sorts oldest first, and a
   // rename that merges two paths must not answer differently before and after
   // a restart.

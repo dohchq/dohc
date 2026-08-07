@@ -63,6 +63,17 @@ function isPersistableDraftPath(path: string): boolean {
   return classifyEngineFilePathForRead(path).kind === "tracked";
 }
 
+// An id this store can still count from. Storage is foreign input, and
+// `typeof x === "number"` accepts values that break every use an id has:
+// `1e400` parses to Infinity, which serializes back as JSON null and takes its
+// row's text with it on the launch after; NaN and a fraction never match the
+// dismissal that is supposed to retire them; the top of the safe range leaves
+// no room to allocate above it. Each one is a broken identity, not broken
+// text, so the load pass gives the row a new id instead of dropping it.
+function isUsableDraftId(id: number): boolean {
+  return Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
+}
+
 function isStoredDraft(value: unknown): value is StoredOrphanedDraft {
   if (typeof value !== "object" || value === null) return false;
   const row: Record<string, unknown> = value as Record<string, unknown>;
@@ -161,13 +172,20 @@ export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] 
   // An id is the handle Dismiss uses, and `forgetStoredDraft` matches on it
   // alone, so two rows under one id would let one confirmation delete two
   // texts — while the confirm says it deletes the only copy, of one edit. A
-  // repeat is re-keyed rather than dropped: both texts survive, tellable
-  // apart, and the rewrite below makes the new id the stored one.
+  // repeat is re-keyed rather than dropped, and so is an id nothing can count
+  // from: both texts survive, tellable apart, and the rewrite below makes the
+  // new id the stored one. Only usable ids raise the watermark, or one
+  // pathological row would hand every re-key the same broken id.
   const seen = new Set<number>();
-  let freeId = kept.reduce((highest, row) => Math.max(highest, row.id), 0) + 1;
+  let freeId =
+    kept.reduce(
+      (highest, row) =>
+        isUsableDraftId(row.id) ? Math.max(highest, row.id) : highest,
+      0,
+    ) + 1;
   let rekeyed = false;
   const unique = kept.map((row) => {
-    if (!seen.has(row.id)) {
+    if (isUsableDraftId(row.id) && !seen.has(row.id)) {
       seen.add(row.id);
       return row;
     }
