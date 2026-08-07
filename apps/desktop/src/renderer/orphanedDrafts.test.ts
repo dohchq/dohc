@@ -227,6 +227,89 @@ describe("orphanedDrafts persistence (#600)", () => {
     ).toEqual(["kept"]);
   });
 
+  // An id is the handle Dismiss uses, and `forgetStoredDraft` matches on it
+  // alone. Two rows under one id would make one confirmation delete two texts
+  // — and the confirm says it deletes the only copy, of one edit.
+  it("gives every restored recovery an id of its own", async () => {
+    const capturedAt = Date.now();
+    localStorage.setItem(
+      ORPHANED_DRAFT_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: 4,
+          workspaceId: "ws-1",
+          path: "a.md",
+          text: "FIRST",
+          capturedAtMs: capturedAt,
+        },
+        {
+          id: 4,
+          workspaceId: "ws-1",
+          path: "a.md",
+          text: "SECOND",
+          capturedAtMs: capturedAt,
+        },
+      ]),
+    );
+    // MUTATION (re-key): restore the rows as they are stored. One Dismiss then
+    // takes both texts, and neither the notice nor storage keeps the other.
+    const next = await relaunch();
+    const restored = draftsFor(next.useOrphanedDrafts, "ws-1", "a.md");
+    // Neither text is dropped — destroying recovery text is never this
+    // store's call — and the two are now tellable apart.
+    expect(restored.map((d) => d.text)).toEqual(["FIRST", "SECOND"]);
+    expect(new Set(restored.map((d) => d.id)).size).toBe(2);
+
+    next.dismissOrphanedDraft("ws-1", "a.md", restored[0].id);
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
+    ).toEqual(["SECOND"]);
+    expect(storedText()).toContain("SECOND");
+    expect(storedText()).not.toContain("FIRST");
+  });
+
+  // One order, whichever surface asks. The store sorts oldest first, and a
+  // rename that merges two paths must not answer differently before and after
+  // a restart.
+  it("keeps one order for a merged rename, this run and the next", async () => {
+    captureOrphanedDraft("ws-1", "a.md", "captured first");
+    captureOrphanedDraft("ws-1", "target.md", "captured second");
+    // MUTATION (merge order): append the moved drafts after the target's own.
+    // This run reads newest-first while the next launch reads oldest-first,
+    // and the two Copy buttons swap places across a restart.
+    remapOrphanedDraftPaths("ws-1", (path) =>
+      path === "a.md" ? "target.md" : path,
+    );
+    expect(
+      draftsFor(useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
+    ).toEqual(["captured first", "captured second"]);
+
+    const next = await relaunch();
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
+    ).toEqual(["captured first", "captured second"]);
+  });
+
+  // The floor decides once, when the draft is captured. A rename can take a
+  // row OUT of plaintext storage, because re-keying it would WRITE a row under
+  // a secret path; it never puts one in, because that is a new write of text
+  // the floor already refused.
+  it("keeps a secret-path draft window-only after a rename onto a tracked path", () => {
+    captureOrphanedDraft("ws-1", ".env", "API_KEY=shh");
+    expect(atRiskOrphanedDraftIds()).toHaveLength(1);
+    // MUTATION (promote on rename): store eligible drafts at the remap. The
+    // text the floor refused at capture reaches plaintext storage because a
+    // file was renamed.
+    remapOrphanedDraftPaths("ws-1", (path) =>
+      path === ".env" ? "notes.md" : path,
+    );
+    expect(
+      draftsFor(useOrphanedDrafts, "ws-1", "notes.md").map((d) => d.text),
+    ).toEqual(["API_KEY=shh"]);
+    expect(storedText()).not.toContain("shh");
+    expect(atRiskOrphanedDraftIds()).toHaveLength(1);
+  });
+
   it("forgets a recovery nothing claimed within the retention window", async () => {
     const capturedAt = Date.now();
     vi.spyOn(Date, "now").mockReturnValue(capturedAt);

@@ -149,7 +149,13 @@ export function remapOrphanedDraftPaths(
     drafts.delete(key);
     const nextKey = keyFor(workspaceId, next);
     // Merge, never overwrite: the target path may hold drafts of its own.
-    drafts.set(nextKey, [...(drafts.get(nextKey) ?? EMPTY), ...kept]);
+    // Sorted by id, which is capture order, because that is the one order the
+    // store offers — appending would read newest-first here and oldest-first
+    // after the next launch, which reorders the Copy buttons under the user.
+    drafts.set(
+      nextKey,
+      [...(drafts.get(nextKey) ?? EMPTY), ...kept].sort((a, b) => a.id - b.id),
+    );
     changed = true;
   }
   if (changed) scheduleNotify();

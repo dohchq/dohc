@@ -52,6 +52,13 @@ type StoredOrphanedDraft = {
 // the engine floor could not normalize, and a store that cannot classify a
 // path does not get to guess it is safe. Unpersistable drafts keep their
 // in-memory copy, and the close warning is the last line for them.
+//
+// It decides once, when the draft is captured, and the decision only ever
+// tightens. A later rename can take a row OUT of storage, because re-keying it
+// would write a row under a secret path (`remapStoredDraftPaths`). It never
+// puts one in: writing text the floor already refused would be a new decision,
+// made on a path that was not the path when the text was captured, about bytes
+// nothing has re-read since.
 function isPersistableDraftPath(path: string): boolean {
   return classifyEngineFilePathForRead(path).kind === "tracked";
 }
@@ -151,8 +158,24 @@ export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] 
       isPersistableDraftPath(row.path) &&
       nowMs - row.capturedAtMs < ORPHANED_DRAFT_RETENTION_MS,
   );
-  if (discarded || kept.length !== rows.length) writeRows(kept);
-  return kept;
+  // An id is the handle Dismiss uses, and `forgetStoredDraft` matches on it
+  // alone, so two rows under one id would let one confirmation delete two
+  // texts — while the confirm says it deletes the only copy, of one edit. A
+  // repeat is re-keyed rather than dropped: both texts survive, tellable
+  // apart, and the rewrite below makes the new id the stored one.
+  const seen = new Set<number>();
+  let freeId = kept.reduce((highest, row) => Math.max(highest, row.id), 0) + 1;
+  let rekeyed = false;
+  const unique = kept.map((row) => {
+    if (!seen.has(row.id)) {
+      seen.add(row.id);
+      return row;
+    }
+    rekeyed = true;
+    return { ...row, id: freeId++ };
+  });
+  if (discarded || rekeyed || unique.length !== rows.length) writeRows(unique);
+  return unique;
 }
 
 export function storeDraft(draft: StoredOrphanedDraft): boolean {
