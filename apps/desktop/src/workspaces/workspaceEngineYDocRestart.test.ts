@@ -2422,6 +2422,11 @@ async function lockedRebindCapture(prefix: string) {
     // release. It reaches the durable lineage; the deaf session never hears
     // it. This is the window a stale write proof survives into.
     peerEditWhileRetained: false,
+    // Parks the NEXT provider open until the test releases it. An open runs as
+    // a capture-chain task, so parking one HOLDS THE CHAIN — which is how a
+    // test puts a debt payment on the queue ahead of work a finisher appends
+    // later.
+    openGate: null as Promise<void> | null,
     // Counts every provider open the ladder attempts, including one that never
     // completes. A test proving a payment did NOT start reads this, because
     // `generation` only moves once the open succeeds.
@@ -2445,7 +2450,13 @@ async function lockedRebindCapture(prefix: string) {
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
   ): Promise<EngineYdocProviderSession> => {
+    // Counted BEFORE the gate, so a test can see a parked open.
     state.openAttempts += 1;
+    if (state.openGate) {
+      const gate = state.openGate;
+      state.openGate = null;
+      await gate;
+    }
     const gen = ++state.generation;
     state.generationOptions.push(options);
     const doc = new Y.Doc();
@@ -3409,6 +3420,75 @@ it("a move window that closes hands the debt back, on the engine-rename finisher
   await finish(true).catch(() => undefined);
   await capture.stop();
 }, 20_000);
+
+it("a failed move holds its window across the rollback, not just up to it", async () => {
+  // codex on #696. A finisher that closes the window and THEN calls
+  // `enqueueResult("rename rollback", …)` has only APPENDED the rollback: work
+  // already queued on the capture chain runs first, against an engine whose
+  // object sits at `moved.md` while the file is still at `note.md`. A payment
+  // released into that gap settles `note.md` against an identity that is about
+  // to stop existing. The move is not over until its engine state is back.
+  //
+  // The ORDER is forced, not timed: a parked provider open holds the chain, the
+  // ladder's payment queues behind it, and the finisher's rollback queues
+  // behind the payment. Releasing the gate runs payment-then-rollback.
+  //
+  // MUTATION: close the window before the rollback is enqueued -> the payment
+  // runs in the gap and `settledMarkdowns` already holds "written in the
+  // rollback gap" when the finisher resolves.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-move-rollback-gap-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
+
+  // An engine-coordinated rename, so a rollback exists at all.
+  const finishMove = await capture.beginFileRename("note.md", "moved.md");
+
+  // A debt for the source registers inside the move window and arms its ladder.
+  const { session } = await openWithOneEdit(capture, "written in the rollback gap");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+
+  // HOLD THE CHAIN. An open is a chain task, so parking one keeps every later
+  // task queued — including the ladder's payment and, after it, the rollback.
+  let releaseOpen!: () => void;
+  state.openGate = new Promise<void>((resolve) => {
+    releaseOpen = resolve;
+  });
+  const parked = capture.openYDocSession({
+    path: "other.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await expect
+    .poll(() => state.openAttempts, { timeout: 15_000 })
+    .toBeGreaterThan(1);
+
+  // Long enough for a rung of the ladder to fire while the chain is held: the
+  // first is 1 s and the next 2 s, so one payment is queued either way.
+  await new Promise((resolve) => setTimeout(resolve, 2_500));
+
+  // The disk move FAILED. The rollback is appended behind the queued payment.
+  const finishing = finishMove(false);
+  releaseOpen();
+  await finishing;
+
+  // THE FACT: the payment did not run in the gap. Had it, it would have settled
+  // the source against the engine's mid-move identity.
+  expect(state.settledMarkdowns).toEqual([]);
+
+  // And the window did end with the rollback: the debt discharges cleanly on
+  // its next rung, with the engine object back at note.md.
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["written in the rollback gap"]);
+
+  await (await parked).close({ settle: false });
+  await capture.stop();
+}, 30_000);
 
 it("a move window that closes hands the debt back, on the no-op finisher", async () => {
   // The other finisher. `beginFileRename` returns a no-op for everything the

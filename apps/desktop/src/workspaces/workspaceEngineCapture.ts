@@ -3996,8 +3996,11 @@ export function createWorkspaceEngineCapture(
           match,
           inProgress: `dohc is still deleting ${pathOrPrefix}.`,
         });
+        // Closed LAST. Both branches below are synchronous and append nothing
+        // to the chain, so no task can observe a half-decided outcome — but
+        // the rule is the same one the move seam needs, and stating it once is
+        // cheaper than re-deriving it per seam.
         return (removed: boolean) => {
-          closeRemovalWindow();
           if (removed) {
             // RESCAN — the snapshot is not the whole set. The disk delete
             // runs OFF the capture chain, so an open of this path can land on
@@ -4011,6 +4014,7 @@ export function createWorkspaceEngineCapture(
           } else {
             restoreSuspendedDebts(suspended);
           }
+          closeRemovalWindow();
         };
       });
     },
@@ -5354,9 +5358,12 @@ export function createWorkspaceEngineCapture(
         const policy = await readPolicyForTask();
         // Every path out of this method must fence the move, not just the
         // engine-rename one: the disk move happens either way.
+        // Closed LAST, like every other finisher: the window may only end once
+        // the outcome is fully recorded. Nothing is appended to the chain here
+        // — no engine rename ran, so there is nothing to roll back.
         const noop: WorkspaceEngineRenameFinisher = async (ok: boolean) => {
-          closeRemovalWindow();
           if (ok) cancelDebtsRegisteredDuringTheMove();
+          closeRemovalWindow();
         };
         // Only a clean single-file rename between two engine-owned text paths
         // goes through the engine rename (preserving the stable object id);
@@ -5402,29 +5409,45 @@ export function createWorkspaceEngineCapture(
           { path: toPath, operation: "write", sha256: disk.sha256 },
         ]);
         return async (ok: boolean) => {
-          closeRemovalWindow();
           if (ok) {
             cancelDebtsRegisteredDuringTheMove();
+            closeRemovalWindow();
             return;
           }
           cancel();
           // The disk move failed after the engine recorded the rename: rename
           // back so engine state keeps mirroring the folder. Forward history —
           // both rename moments stay visible.
-          await enqueueResult("rename rollback", async () => {
-            await engine.renameTextFile({
-              workspaceId,
-              versionId,
-              fromPath: toPath,
-              toPath: fromPath,
-              metadata: {
-                origin: "local-file",
-                summary: `Rename of ${fromPath} did not complete`,
-              },
+          //
+          // THE WINDOW SPANS THE ROLLBACK. Closing it here only APPENDS the
+          // rollback to the chain, and whatever is already queued runs first —
+          // against an engine whose object sits at toPath while the file is
+          // still at fromPath. A payment released into that gap settles
+          // fromPath against an identity that is about to stop existing. The
+          // move is not over until its engine state is back, so neither is the
+          // window (codex, #696).
+          try {
+            await enqueueResult("rename rollback", async () => {
+              await engine.renameTextFile({
+                workspaceId,
+                versionId,
+                fromPath: toPath,
+                toPath: fromPath,
+                metadata: {
+                  origin: "local-file",
+                  summary: `Rename of ${fromPath} did not complete`,
+                },
+              });
             });
-          }).catch((error) => {
+          } catch (error) {
             onError("rename rollback", error);
-          });
+          } finally {
+            // A rollback that failed leaves the engine mid-move, but holding
+            // the window past that would silence these paths' debts for good.
+            // Close it either way; the trace above is what says the engine and
+            // the folder disagree.
+            closeRemovalWindow();
+          }
         };
       }).catch((error: unknown) => {
         // Unlike the delete seam, this one still reads policy, opens the
