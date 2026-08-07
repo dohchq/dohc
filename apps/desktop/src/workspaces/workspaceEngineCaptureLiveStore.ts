@@ -104,13 +104,12 @@ function domainErrorFrom(error: unknown): VersionedTextStoreError | null {
   // sentence, so the WIRE code names this refusal and the numbers survive as
   // the message.
   const code =
-    error.wireCode === "PAYLOAD_TOO_LARGE"
-      ? "payload-too-large"
-      : DOMAIN_ERROR_CODES.has(error.message)
-        ? (error.message as VersionedTextStoreErrorCode)
-        : null;
-  if (code === null) return null;
-  const translated = new VersionedTextStoreError(code, error.message);
+    error.wireCode === "PAYLOAD_TOO_LARGE" ? "payload-too-large" : error.message;
+  if (!DOMAIN_ERROR_CODES.has(code)) return null;
+  const translated = new VersionedTextStoreError(
+    code as VersionedTextStoreErrorCode,
+    error.message,
+  );
   // The wire code and retryability stay reachable; translation adds a domain
   // code, it does not replace the refusal.
   translated.cause = error;
