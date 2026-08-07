@@ -118,6 +118,14 @@ export const YDOC_OPEN_DEADLINE_MS = 5_000;
  * against a daemon that is already not answering. The surface answers the same
  * read-only "the engine may still hold this document" state it answers for a
  * spent retry budget, with the user's own retry (#564, #657).
+ *
+ * The open may have COMPLETED daemon-side, with only its reply queued behind
+ * other output — so this refusal can discard the only copy of a live session
+ * id. Nothing here can release that session: `ydoc.close` needs the id, and no
+ * RPC addresses a session by path. What keeps that safe is the daemon's own
+ * refusal, `ydoc-session-busy`, which every later open of the path answers and
+ * which is read-only too (isEngineWorkspaceOpenRefusedError). The session
+ * itself goes when the workspace closes.
  */
 export class YdocOpenTimedOutError extends Error {
   readonly path: string;

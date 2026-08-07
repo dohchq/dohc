@@ -12,6 +12,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import {
   EngineRequestDeadlineError,
+  EngineRequestError,
   EngineWorkspaceRetryDeadlineError,
   EngineWorkspaceSessions,
   EngineWorkspaceShuttingDownError,
@@ -255,6 +256,103 @@ describe("the document open's capture-chain hold (#564)", () => {
       expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
       await queued;
       expect(chainFreed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await engine.stop();
+    }
+  });
+
+  it("keeps the RETRY read-only when the timed-out open had already taken the session", async () => {
+    // #616, codex P1. The deadline can fire over an open that SUCCEEDED: the
+    // daemon writes one output item at a time and its queue holds 64 of them,
+    // any of which may be a frame-sized `ydoc.open` state
+    // (engineDaemonLifecycle.ts). A reply stuck behind that queue is not a
+    // daemon that failed — the session exists, the lease is held, and this
+    // refusal discards the only copy of the session id.
+    //
+    // So the first open is read-only, which is right, and then "Try again"
+    // meets `ydoc-session-busy` — the daemon saying it holds this document.
+    // Classified as an ordinary refusal, that answered the retry with the
+    // WRITABLE plain editor over a daemon-held canonical Y.Doc: the double
+    // writer #533 exists to prevent, reached by way of the fix for #616.
+    const root = await tempRoot();
+    await write(root, "note.md", "hello\n");
+    const loopback = new VersionedLoopbackEngine();
+    // A daemon that takes the lease and then cannot get its reply out. It is
+    // stateful on purpose: the busy refusal is a CONSEQUENCE of the first open
+    // landing, not a canned answer, so a fake that never took the session
+    // could not produce it either.
+    let leaseHeld = false;
+    const client = {
+      close: () => undefined,
+      onEvent: () => () => undefined,
+      async sendRequest(request: Request): Promise<Response> {
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: String(WORKSPACE_ID) } };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        if (request.method === "ydoc.open") {
+          if (leaseHeld) {
+            throw new EngineRequestError(request.id, {
+              code: "INVALID_PARAMS",
+              message: "ydoc-session-busy",
+              retry: "no",
+            });
+          }
+          const deadlineMs = request.deadlineMs ?? 0;
+          return await new Promise<never>((_resolve, reject) => {
+            // The session lands daemon-side while the reply waits behind the
+            // output queue. Nothing resolves this promise afterwards, which is
+            // what EngineClient does with a reply for an abandoned id.
+            setTimeout(() => {
+              leaseHeld = true;
+            }, deadlineMs / 2);
+            setTimeout(() => {
+              reject(
+                new EngineRequestDeadlineError(
+                  request.id,
+                  request.method,
+                  deadlineMs,
+                ),
+              );
+            }, deadlineMs);
+          });
+        }
+        return await loopback.sendRequest(request);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      rustEngineSessions: sessions,
+    });
+    engine.start();
+    await engine.flush();
+
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "Date", "performance"],
+    });
+    try {
+      const opening = engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(YDOC_OPEN_DEADLINE_MS);
+      expect(await opening).toBeInstanceOf(YdocOpenTimedOutError);
+      expect(leaseHeld).toBe(true);
+
+      // "Try again": a fresh open of the same document, which the daemon now
+      // refuses because it holds the session the first attempt took.
+      const retry = await engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+      expect((retry as Error).message).toBe("ydoc-session-busy");
+      // MUTATION: drop the busy refusal from the read-only family -> this is
+      // `false`, main answers a plain `available: false`, and the renderer puts
+      // a writable plain editor over a document the daemon still holds.
+      expect(isEngineWorkspaceOpenRefusedError(retry)).toBe(true);
     } finally {
       vi.useRealTimers();
       await engine.stop();

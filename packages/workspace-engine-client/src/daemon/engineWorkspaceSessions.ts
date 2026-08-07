@@ -1,6 +1,7 @@
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
+  isYdocSessionBusyRefusal,
   WorkspaceDaemonRequester,
 } from "../live/daemonLiveAdapter";
 import type { AgentAuthor } from "../versioned/versionedWireContract";
@@ -187,15 +188,24 @@ export class EngineWorkspaceShuttingDownError extends Error {
 }
 
 // The refusals a document open must NOT answer with the writable plain editor.
-// All three mean the same thing to the surface — the engine did not open this
-// document, and may still own it — so all three keep it read-only
-// (#533/#564/#616). The third is the strongest case for the rule: a `ydoc.open`
-// the daemon never answered may have registered a session all the same.
+// Each means the same thing to the surface — the engine did not open this
+// document, and may still own it — so each keeps it read-only
+// (#533/#564/#616).
+//
+// `ydoc-session-busy` is the daemon SAYING SO, and it is not scoped to the
+// timeout that motivated it. Whenever a lease is held, the daemon's Y.Doc is
+// the canonical copy and the file on disk is not, so a writable plain editor
+// over that file is a second writer whatever produced the lease: this client's
+// timed-out open, another window, or a session whose close failed. The cost of
+// classifying it this way is that a document whose session id was lost stays
+// read-only until the workspace closes. That is the honest state, and the
+// notice carries a retry.
 export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
   return (
     error instanceof EngineWorkspaceRetryDeadlineError ||
     error instanceof EngineWorkspaceShuttingDownError ||
-    error instanceof YdocOpenTimedOutError
+    error instanceof YdocOpenTimedOutError ||
+    isYdocSessionBusyRefusal(error)
   );
 }
 
