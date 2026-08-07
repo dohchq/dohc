@@ -49,6 +49,7 @@ import { buildChatCollaboration } from "./collab/chatCollaboration";
 import type { SearchResultsEventEntry } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
+import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
 import { CloudLogin } from "./CloudLogin";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -209,59 +210,6 @@ export function chatsNavigationChangesDestination(
   return (
     chatsNavigationLeavesConversation(current, next) ||
     chatsFocusMessageId(current) !== chatsFocusMessageId(next)
-  );
-}
-
-// One lane of the snapshot group. Two facts, because the two questions a lane
-// is asked are different ones:
-//
-// - `committed` — what this lane last WROTE. A response, or a local action by
-//   the user, which counts as newer than every request already issued.
-// - `issued` — the newest request this lane has ASKED. Not the same fact: a
-//   request in flight has written nothing, and "is anything newer coming"
-//   cannot be answered from what was last written.
-type SnapshotLane = { committed: number; issued: number };
-
-// The only thing that writes a lane from an answer. It takes the whole read,
-// so BOTH ways a read can settle face the same rule, and it registers the
-// request itself, so no caller can issue a read the lane does not know about.
-//
-// A value writes the lane when it is newer than what the lane last wrote.
-//
-// A failure is an answer too, and asking it separately is how the rule leaks.
-// It may report, because a lane with no failure surface of its own has only
-// the banner to say a shown value is now old. It may report only when it is
-// still the newest thing this lane asked — which covers BOTH orderings of a
-// stale failure against a fresher request. The newer answer may already have
-// committed (then `committed` outranks it), or it may still be in flight (then
-// `issued` does). Both are the same fact: a failure whose question someone has
-// already asked again has nothing to say, and a banner it raised would claim
-// the value on screen could not be read.
-//
-// A failure never advances either mark. A read that failed proves nothing, and
-// an older read that still succeeds is the only answer anyone has (#507).
-//
-// The history page is not a lane here. It carries its own admission rules —
-// version staleness, a pagination that may hold it — and the refresh returns
-// it, so it is judged where those rules live.
-function settleSnapshotLane<T>(
-  lane: { current: SnapshotLane },
-  token: number,
-  read: Promise<T>,
-  apply: (value: T) => void,
-  report: (error: unknown) => void,
-): void {
-  if (token > lane.current.issued) lane.current.issued = token;
-  void read.then(
-    (value) => {
-      if (token <= lane.current.committed) return;
-      lane.current.committed = token;
-      apply(value);
-    },
-    (error: unknown) => {
-      if (token <= lane.current.committed || token < lane.current.issued) return;
-      report(error);
-    },
   );
 }
 
@@ -1230,16 +1178,6 @@ export function DesktopWorkspaceShell(props: {
   // that has not happened yet.
   const [filesLoaded, setFilesLoaded] = useState(false);
   const [folders, setFolders] = useState<string[]>([]);
-  const [syncStatus, setSyncStatusState] = useState<SyncStatusResult | null>(null);
-  // Mirror of the newest status, readable by callbacks without re-creating
-  // them per status change (#542): refreshHistory consults it to decide
-  // whether the engine-history fetch may run at all, and its identity churn
-  // would re-run the workspace-open effect that lists it as a dependency.
-  const syncStatusRef = useRef<SyncStatusResult | null>(null);
-  const setSyncStatus = useCallback((status: SyncStatusResult | null) => {
-    syncStatusRef.current = status;
-    setSyncStatusState(status);
-  }, []);
   // Main's single answer to "does anything record here" (#542): when the
   // open-time decision produced no recorder — opt-out, unreadable settings,
   // or a failed capture build — every engine-history call can only error,
@@ -1285,7 +1223,6 @@ export function DesktopWorkspaceShell(props: {
   // identifiable and filtered out of "others". Lazily minted ONCE — a fresh id
   // per render would churn the presence channel.
   const [presenceClientId] = useState(() => crypto.randomUUID());
-  const [agentActive, setAgentActive] = useState(false);
   const [sitesRefreshKey, setSitesRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
@@ -1923,9 +1860,23 @@ export function DesktopWorkspaceShell(props: {
   // write only ever knows about the lane it wrote — dismissing a review says
   // nothing about sync state, and rejecting all three would strand a status
   // bar that has no other source (the dismiss emits no activity event).
-  const syncStatusLane = useRef<SnapshotLane>({ committed: 0, issued: 0 });
-  const agentActiveLane = useRef<SnapshotLane>({ committed: 0, issued: 0 });
-  const tryStateLane = useRef<SnapshotLane>({ committed: 0, issued: 0 });
+  //
+  // Each lane owns its state, so a write that names no request cannot be
+  // written at all (#636). The history page is not one of these: it carries
+  // its own admission rules — version staleness, a pagination that may hold it
+  // — and the refresh returns it, so it is judged where those rules live.
+  const [syncStatus, syncStatusLane] = useSnapshotLane<SyncStatusResult | null>(
+    engineHistoryToken,
+    null,
+  );
+  const [agentActive, agentActiveLane] = useSnapshotLane(engineHistoryToken, false);
+  // "Try it in a version" (PR 0N-2): the workspace's live try session —
+  // running banner or the run's review card. Refreshed with history (the
+  // manager pings the same workspace-activity channel on every transition).
+  const [tryState, tryStateLane] = useSnapshotLane<TryInVersionRunState | null>(
+    engineHistoryToken,
+    null,
+  );
   // The version the DISPLAYED timeline describes, so a pagination can prove
   // its page extends the same timeline it is appending to.
   const committedEngineVersionId = useRef<string | null>(null);
@@ -1979,18 +1930,6 @@ export function DesktopWorkspaceShell(props: {
     setEngineHistory(null);
     return true;
   }, [engineHistoryAnswerIsStale]);
-  // A LOCAL write to a snapshot lane is newer information than every request
-  // in flight: the user acted AFTER all of them were issued, so counting only
-  // responses would let one of those answers undo what they just did. Raising
-  // that lane's watermark to the newest ISSUED token says so, and the losing
-  // answers lose by construction whenever they land. Dismissing a review is
-  // the case that bites: it emits no replacement activity, so a restored card
-  // would sit there until something unrelated refreshed.
-  // It writes `committed` and not `issued`: the user asked nothing. A failure
-  // from the request they superseded is judged by `committed`, and stays quiet.
-  const supersedeSnapshotLane = useCallback((lane: { current: SnapshotLane }) => {
-    lane.current.committed = engineHistoryToken.current;
-  }, []);
   useEffect(
     () => () => {
       // Unmount invalidates every load in flight, on every lane. Hygiene, not
@@ -2001,12 +1940,12 @@ export function DesktopWorkspaceShell(props: {
       engineHistoryToken.current += 1;
       committedEngineHistoryToken.current = engineHistoryToken.current;
       newestEngineHistoryRefresh.current = engineHistoryToken.current;
-      syncStatusLane.current.committed = engineHistoryToken.current;
-      agentActiveLane.current.committed = engineHistoryToken.current;
-      tryStateLane.current.committed = engineHistoryToken.current;
+      syncStatusLane.invalidate();
+      agentActiveLane.invalidate();
+      tryStateLane.invalidate();
       blockedEngineHistoryRefresh.current = null;
     },
-    [],
+    [agentActiveLane, syncStatusLane, tryStateLane],
   );
   // Which surface the right-hand Chats panel shows (all chats vs the active
   // file's). Runtime-only — not persisted.
@@ -2015,17 +1954,12 @@ export function DesktopWorkspaceShell(props: {
     thread: ChatThreadRecord;
     focusMessageId?: string;
   } | null>(null);
-  // "Try it in a version" (PR 0N-2): the workspace's live try session —
-  // running banner or the run's review card. Refreshed with history (the
-  // manager pings the same workspace-activity channel on every transition).
-  const [tryState, setTryState] = useState<TryInVersionRunState | null>(null);
   // The local writers on these lanes. Dismissing the review card clears it
   // here, and that IS the user acting: it supersedes whatever a request issued
   // earlier will eventually say.
   const onTryReviewDismissed = useCallback(() => {
-    supersedeSnapshotLane(tryStateLane);
-    setTryState(null);
-  }, [supersedeSnapshotLane]);
+    tryStateLane.set(null);
+  }, [tryStateLane]);
   // Settings reports the agent lane two different ways, and only one of them
   // is the user acting. Starting or ending a run is a local write, newer than
   // every request in flight. Merely OBSERVING that the run changed under the
@@ -2043,27 +1977,25 @@ export function DesktopWorkspaceShell(props: {
   // so it is the freshest thing available.
   const refreshAgentLane = useCallback(() => {
     const token = ++engineHistoryToken.current;
-    settleSnapshotLane(
-      agentActiveLane,
+    agentActiveLane.settle(
       token,
       bridge().getAgentRunStatus({ workspaceId }),
-      (agent) => setAgentActive(agent.activeRun !== null),
+      (agent) => agent.activeRun !== null,
       (error) =>
         reportLaneFailure("dohc could not refresh agent runs.", error, () =>
           refreshAgentLane(),
         ),
     );
-  }, [reportLaneFailure, workspaceId]);
+  }, [agentActiveLane, reportLaneFailure, workspaceId]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
       if (!mutated) {
         refreshAgentLane();
         return;
       }
-      supersedeSnapshotLane(agentActiveLane);
-      setAgentActive(active);
+      agentActiveLane.set(active);
     },
-    [refreshAgentLane, supersedeSnapshotLane],
+    [agentActiveLane, refreshAgentLane],
   );
 
   const refreshHistory = useCallback(async () => {
@@ -2080,7 +2012,7 @@ export function DesktopWorkspaceShell(props: {
     // The engine fetch runs only when main's status agrees a recorder exists
     // (#542): after a failed capture build the renderer's own read still
     // says engine-on, and every listEngineMoments call would error.
-    if (engineEnabled && !isShareView && !statusSaysNoRecorder(syncStatusRef.current)) {
+    if (engineEnabled && !isShareView && !statusSaysNoRecorder(syncStatusLane.latest())) {
       // Latest-COMMITTED-wins: each request advances the token, and an answer
       // displays only if it is newer than the answer already displayed, so an
       // older response can never overwrite newer moments or move
@@ -2115,27 +2047,24 @@ export function DesktopWorkspaceShell(props: {
           reportShellError("Could not refresh history.", error),
         );
       };
-      settleSnapshotLane(
-        syncStatusLane,
+      syncStatusLane.settle(
         token,
         bridge().getSyncStatus({ workspaceId }),
-        (status) => setSyncStatus(status),
+        (status) => status,
         (error) =>
           reportLaneFailure("dohc could not refresh sync status.", error, askAgain),
       );
-      settleSnapshotLane(
-        agentActiveLane,
+      agentActiveLane.settle(
         token,
         bridge().getAgentRunStatus({ workspaceId }),
-        (agent) => setAgentActive(agent.activeRun !== null),
+        (agent) => agent.activeRun !== null,
         (error) =>
           reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
       );
-      settleSnapshotLane(
-        tryStateLane,
+      tryStateLane.settle(
         token,
         bridge().getTryInVersionState({ workspaceId }),
-        (trySession) => setTryState(trySession.state),
+        (trySession) => trySession.state,
         (error) =>
           reportLaneFailure(
             "dohc could not refresh this workspace's try run.",
@@ -2191,14 +2120,28 @@ export function DesktopWorkspaceShell(props: {
       return;
     }
     // Opted-out workspace (retirement Phase C): no history source exists —
-    // only status and agent state refresh.
+    // only status and agent state refresh. They ride the same issue order as
+    // the engine branch's reads: this refresh answers the very lanes the
+    // settings panel and a second refresh also write, and an untimed write
+    // ranked by arrival undid both — a run the user had just started, and a
+    // newer status (#636).
+    const token = ++engineHistoryToken.current;
     const [status, agent] = await Promise.all([
       bridge().getSyncStatus({ workspaceId }),
       bridge().getAgentRunStatus({ workspaceId }),
     ]);
-    setSyncStatus(status);
-    setAgentActive(agent.activeRun !== null);
-  }, [engineEnabled, isShareView, reportLaneFailure, reportShellError, workspaceId]);
+    syncStatusLane.commit(token, status);
+    agentActiveLane.commit(token, agent.activeRun !== null);
+  }, [
+    agentActiveLane,
+    engineEnabled,
+    isShareView,
+    reportLaneFailure,
+    reportShellError,
+    syncStatusLane,
+    tryStateLane,
+    workspaceId,
+  ]);
 
   const loadMoreEngineHistory = useCallback(async () => {
     const cursor = engineHistory?.nextBeforeMomentOrder;
@@ -2397,7 +2340,7 @@ export function DesktopWorkspaceShell(props: {
         engineEnabled &&
         !isShareView &&
         captureDecidedRef.current === workspaceId &&
-        !statusSaysNoRecorder(syncStatusRef.current)
+        !statusSaysNoRecorder(syncStatusLane.latest())
       ) {
         // Nobody could name it: the operation changed no version, or it failed
         // and left an unknown one active. Ask. This read is the only remaining
@@ -3181,6 +3124,12 @@ export function DesktopWorkspaceShell(props: {
   // recorded — the timeline and status stay live without polling.
   useEffect(() => {
     let cancelled = false;
+    // The open carries a status, so it takes its place in the same issue order
+    // as every other read of that lane. This effect re-runs when
+    // refreshHistory's identity changes, and the second open used to write its
+    // status untimed — leaving the lane's watermark where it was, so the first
+    // run's refresh could still land its older status on top (#636).
+    const token = ++engineHistoryToken.current;
     void (async () => {
       try {
         const status = await bridge().openWorkspace({ workspaceId });
@@ -3192,8 +3141,12 @@ export function DesktopWorkspaceShell(props: {
         // retracted: this effect re-runs whenever refreshHistory's identity
         // changes, and retracting here would blink every version surface off
         // and on when the settings read lands.
+        //
+        // The lane may refuse this status, and the decision still stands: what
+        // outranks it is a NEWER status, which describes a workspace at least
+        // as decided as this one.
         if (!cancelled) {
-          setSyncStatus(status);
+          syncStatusLane.commit(token, status);
           setCaptureDecidedFor(workspaceId);
         }
         await refreshFiles();
@@ -3214,7 +3167,7 @@ export function DesktopWorkspaceShell(props: {
       cancelled = true;
       unsubscribe();
     };
-  }, [workspaceId, refreshFiles, refreshHistory, reportShellError]);
+  }, [workspaceId, refreshFiles, refreshHistory, reportShellError, syncStatusLane]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
