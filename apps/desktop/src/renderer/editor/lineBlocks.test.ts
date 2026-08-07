@@ -341,6 +341,33 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("| A |\n| --- |\n| r |\n    matched\n\nAfter", 4)).toBe(1);
   });
 
+  it("counts an escaped pipe as cell text, not a column", () => {
+    // `A \| B | C` is TWO cells, so it matches a two-column delimiter and the
+    // pair is a table — which is what lets the indented line below it be a
+    // code block instead of the paragraph's continuation.
+    expect(blockIndexForLine("A \\| B | C\n--- | ---\n    matched\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("A \\| B \\| C | D\n--- | ---\n1 | 2\n\nAfter", 3)).toBe(0);
+    // An escaped BACKSLASH does not escape the pipe after it.
+    expect(blockIndexForLine("A \\\\ B | C\n--- | ---\n1 | 2\n\nAfter", 3)).toBe(0);
+    // A pipe in a code span is NOT protected — the tokenizer divides on it,
+    // so this header is three cells over two and forms no table.
+    expect(blockIndexForLine("A `x | y` B | C\n--- | ---\n    matched\n\nAfter", 3)).toBe(0);
+  });
+
+  it("rejects a fence opener that is already four columns in", () => {
+    // `\t```” reaches column four, so the parser reads indented code and the
+    // backticks are its text. The ``` below it is the real fence.
+    const body = "Para\n\n\t```\ncode\n```\n\nAfter";
+    expect(blockIndexForLine(body, 3)).toBe(1);
+    expect(blockIndexForLine(body, 4)).toBe(2);
+    expect(blockIndexForLine(body, 5)).toBe(3);
+    // Under an OPEN paragraph the same line is that paragraph's own text.
+    expect(blockIndexForLine("Intro\n\t```\ncode\nAfter", 4)).toBe(0);
+    // A tab anywhere in the prefix lands on four, spaces or not.
+    expect(blockIndexForLine("Para\n\n \t```\ncode\n```\n\nAfter", 3)).toBe(1);
+    expect(blockIndexForLine("Para\n\n\t~~~\ncode\n~~~\n\nAfter", 3)).toBe(1);
+  });
+
   it("measures continuation indent from the item's own marker", () => {
     // `- item` wants two columns; `-    item` wants five, so two is a new
     // block under the wider marker and the same two columns still work under
@@ -1120,6 +1147,33 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
         [1, "A"],
         [5, "After"],
       ],
+    },
+    {
+      name: "an escaped pipe is cell text, so the columns still agree",
+      body: "A \\| B | C\n--- | ---\n    matched\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a pipe in a code span still divides, so this forms no table",
+      body: "A `x | y` B | C\n--- | ---\n    matched\n\nAfter",
+      lands: [[5, "After"]],
+    },
+    {
+      name: "a tab-indented fence is code, and the next fence is the real one",
+      body: "Para\n\n\t```\ncode\n```\n\nAfter",
+      lands: [
+        [1, "Para"],
+        [3, "```"],
+        [4, "code"],
+      ],
+    },
+    {
+      name: "a tab-indented fence under a paragraph is that paragraph's text",
+      body: "Intro\n\t```\ncode\nAfter",
+      lands: [[4, "Intro"]],
     },
     {
       name: "three columns is not an indented code block",

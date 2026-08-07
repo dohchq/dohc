@@ -110,9 +110,20 @@ const DEFINITION_TITLE_RE = /^[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\))[ \t]*$/;
 const TABLE_DELIMITER_RE =
   /^[ \t]{0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
 
-/** The cells a table row declares, ignoring the optional outer pipes. */
+/** The cells a table row declares. The outer pipes bound the row rather than
+ *  dividing it, and a BACKSLASH-escaped pipe is cell text — `A \| B | C` is
+ *  two cells. A pipe inside a code span is NOT protected: the tokenizer
+ *  divides on it, and the test below holds that. */
 function cellCount(text: string): number {
-  return text.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").length;
+  const row = text.trim();
+  let cells = 1;
+  let escaped = false;
+  for (let index = 0; index < row.length; index += 1) {
+    if (escaped) escaped = false;
+    else if (row[index] === "\\") escaped = true;
+    else if (row[index] === "|" && index > 0 && index < row.length - 1) cells += 1;
+  }
+  return cells;
 }
 
 /** A header row and the delimiter under it only make a table when they AGREE
@@ -190,6 +201,10 @@ function blockKind(text: string): BlockKind {
 }
 
 function fenceOpener(text: string): Fence | null {
+  // Four COLUMNS in, the line is indented code and the backticks are its
+  // text. FENCE_RE counts a tab as one of three prefix characters, so `\t```
+  // has to be rejected here rather than there.
+  if (leadingColumns(text) >= CODE_COLUMNS) return null;
   const match = FENCE_RE.exec(text);
   if (!match?.[1]) return null;
   const marker = match[1][0]!;
@@ -205,6 +220,10 @@ function fenceOpener(text: string): Fence | null {
  *  on absorbing the unquoted line below it. */
 function quotedFenceOpener(inner: string, callout: boolean): Fence | null {
   if (!callout) return fenceOpener(inner);
+  // The callout's own opener allows no tab in its prefix at all, which the
+  // column test covers: a tab in the first three characters always lands on
+  // four.
+  if (leadingColumns(inner) >= CODE_COLUMNS) return null;
   const match = FENCE_RE.exec(inner);
   if (!match?.[1]) return null;
   return { marker: match[1][0]!, length: match[1].length };
