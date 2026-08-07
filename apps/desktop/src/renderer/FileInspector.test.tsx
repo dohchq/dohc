@@ -1804,6 +1804,43 @@ describe("engine markdown source view", () => {
     expect(scrollTo).toHaveBeenCalledTimes(1);
   });
 
+  // The landing effect above re-runs whenever the source projection unhides
+  // the pane, so it must retire the jump itself — or every later toggle back
+  // to the editor yanks the reader to the top of the document again.
+  it("does not re-scroll to the top when a source toggle follows the jump", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const scrollTo = stubScrollSpy("scrollTo");
+
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        // Line 2 of the file is `title: Plan`, inside the frontmatter.
+        scrollTarget={{ path: "a.md", line: 2, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await screen.findByTestId("view-markdown-source");
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await waitFor(() =>
+      expect(screen.getByTestId("view-markdown").hasAttribute("hidden")).toBe(false),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+
+    // MUTATION: drop the setJump(null) in the top-scroll effect -> the jump
+    // stays live and the unhidden pane is scrolled to the top a second time.
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+  });
+
   // codex round 12 on 0d498bcb. A heading is a destination too. Clicking one
   // while a search jump is still waiting on the lazy editor makes the heading
   // the reader's newest choice — and the older jump has to go, or it lands the
