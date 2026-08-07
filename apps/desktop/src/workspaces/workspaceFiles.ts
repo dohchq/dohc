@@ -35,6 +35,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import type { ZipEntry } from "./zipWriter";
 
 // Deepest already-existing ancestor of a (possibly not-yet-created) path —
@@ -221,10 +222,17 @@ export async function createFile(
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
   }
   const absolute = join(rootPath, validated.normalized);
-  // Lexical validation can't see symlinks: a workspace-internal symlinked
-  // ancestor ("link/evil.md") could resolve outside the root. Check the real
-  // deepest-existing ancestor BEFORE mkdir, so a symlinked ancestor can't even
-  // cause directories to be created outside the workspace.
+  // Lexical validation can't see symlinks, and it read the path as SPELLED.
+  // Both questions get asked of the real path BEFORE mkdir, so a symlinked
+  // ancestor can neither have directories created through it nor name a
+  // reserved area under an ordinary name.
+  await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: absolute,
+    spelled: relativePath,
+    label: "File path",
+    access: "write",
+  });
   const realRoot = await realpath(rootPath);
   if (!isInside(realRoot, await existingAncestor(dirname(absolute)))) {
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
@@ -668,6 +676,13 @@ export async function createFolder(
     throw new Error(`Invalid folder path (${validated.reason}): ${relativePath}`);
   }
   const absolute = join(rootPath, validated.normalized);
+  await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: absolute,
+    spelled: relativePath,
+    label: "Folder path",
+    access: "write",
+  });
   const realRoot = await realpath(rootPath);
   if (!isInside(realRoot, await existingAncestor(absolute))) {
     throw new Error(`Invalid folder path (escapes workspace): ${relativePath}`);
@@ -715,6 +730,26 @@ export async function movePath(
   }
   const realRoot = await realpath(rootPath);
   const absFrom = join(rootPath, from.normalized);
+  const absTo = join(rootPath, to.normalized);
+  // A move leaks BOTH ways through an alias: `meta/manifest.json -> leak.json`
+  // (meta -> .dohc) lifts workspace state into the visible tree, and
+  // `notes.md -> meta/notes.md` buries a user file in it. The source resolves
+  // as an ENTRY -- a rename moves the link, it does not follow it -- so only
+  // its parent chain decides; the destination is created, so it follows.
+  await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: absFrom,
+    spelled: fromPath,
+    label: "Move source",
+    access: "entry",
+  });
+  await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: absTo,
+    spelled: toPath,
+    label: "Move destination",
+    access: "write",
+  });
   const realFromParent = await realpath(dirname(absFrom));
   if (!isInside(realRoot, realFromParent)) {
     throw new Error(`Invalid move source (escapes workspace): ${fromPath}`);
@@ -727,7 +762,6 @@ export async function movePath(
   // case-only-rename carve-out. The symlink refusal above means realpath here
   // resolves only ancestor links, never the source itself.
   const realFrom = await realpath(absFrom);
-  const absTo = join(rootPath, to.normalized);
   if (!isInside(realRoot, await existingAncestor(dirname(absTo)))) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
   }
@@ -795,6 +829,16 @@ export async function deletePath(
   }
   const realRoot = await realpath(rootPath);
   const absTarget = join(rootPath, validated.normalized);
+  // Resolved as an ENTRY: trashing a link removes the link, so where it points
+  // is not the question. Its parent chain still decides the reserved rule, so
+  // `meta/settings.json` (meta -> .dohc) cannot delete workspace state.
+  await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: absTarget,
+    spelled: relativePath,
+    label: "Delete path",
+    access: "entry",
+  });
   // lstat does NOT follow the final component: decide on the LINK, not what it
   // points at. Deleting a symlink must trash the LINK itself — realpath-ing it
   // would resolve to (and trash) its target, which could be a real file
@@ -942,7 +986,20 @@ export async function collectZipEntries(
     if (!validated.ok) {
       throw new Error(`Invalid export path (${validated.reason}): ${relativePath}`);
     }
-    if (classifyEngineFilePathForRead(validated.normalized).kind === "secret") {
+    // The secret floor decided on BOTH spellings: `notes.md -> .env` spells an
+    // ordinary file and exports the secret's bytes. The resolved location also
+    // decides the reservation, so `link -> .dohc` cannot export workspace state.
+    const realRelative = await assertResolvedWorkspacePath({
+      rootPath,
+      absolutePath: join(rootPath, validated.normalized),
+      spelled: relativePath,
+      label: "Export path",
+      access: "read",
+    });
+    if (
+      classifyEngineFilePathForRead(validated.normalized).kind === "secret" ||
+      classifyEngineFilePathForRead(realRelative).kind === "secret"
+    ) {
       throw new Error(
         `Secret files never leave the workspace in an export: ${validated.normalized}`,
       );

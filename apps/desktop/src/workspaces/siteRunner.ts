@@ -6,6 +6,7 @@ import { createServer, type Server } from "node:http";
 import { extname, isAbsolute, join, relative, sep } from "node:path";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { isLoopbackHostname } from "../security/loopback";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 export interface SiteLogEntry {
   stream: "stdout" | "stderr" | "system";
@@ -91,6 +92,18 @@ async function resolveContainedDir(rootPath: string, relativePath: string): Prom
   }
   const realRoot = await realpath(rootPath);
   const absolute = join(rootPath, ...parts);
+  // A site root is a directory dohc serves, spawns a dev server in, and builds
+  // from. `app -> .dohc` spells an ordinary folder and makes all three run on
+  // the workspace's control plane, so the reserved rule decides on where the
+  // root really is. This is also the only guard the spelled path gets: a site
+  // root named `.dohc` outright is refused by the same test.
+  await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: absolute,
+    spelled: relativePath,
+    label: "Site path",
+    access: "read",
+  });
   const realSite = await realpath(absolute);
   if (!isInside(realRoot, realSite)) {
     throw new Error(`Site path escapes the workspace: ${relativePath}`);
@@ -175,6 +188,24 @@ export async function startStaticSitePreview(
         return;
       }
       const target = join(root, relativePath);
+      // The check above read the request path as SPELLED. A directory alias
+      // inside the site (`assets -> ../.dohc`) still spells an ordinary folder,
+      // and this server would hand its bytes to the preview over HTTP. The
+      // reservation is decided against the WORKSPACE root, because that is what
+      // `.dohc` is relative to — the site root may be any folder below it.
+      try {
+        await assertResolvedWorkspacePath({
+          rootPath: workspaceRoot,
+          absolutePath: target,
+          spelled: relativePath,
+          label: "Site request path",
+          access: "read",
+        });
+      } catch {
+        response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+        response.end("Forbidden");
+        return;
+      }
       const realTarget = await realpath(target);
       if (!isInside(root, realTarget)) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });

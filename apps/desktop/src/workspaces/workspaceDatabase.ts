@@ -13,6 +13,7 @@ import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { resolveWorkspaceFile } from "./workspaceAssets";
 import { existingAncestor } from "./workspaceFiles";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 // node:sqlite is a Node built-in (no native addon, no electron-rebuild). It is
 // loaded via createRequire so the bundler leaves it as a runtime require and it
@@ -287,6 +288,13 @@ async function writeWorkspaceBytes(
     throw new Error(`Invalid database path (${validated.reason}): ${relativePath}`);
   }
   const absolute = join(rootPath, validated.normalized);
+  await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: absolute,
+    spelled: relativePath,
+    label: "Database path",
+    access: "write",
+  });
   const realRoot = await realpath(rootPath);
   if (!isInside(realRoot, await existingAncestor(dirname(absolute)))) {
     throw new Error(`Invalid database path (escapes workspace): ${relativePath}`);

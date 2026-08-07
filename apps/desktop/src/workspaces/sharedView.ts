@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { isValidShareVersionId } from "@dohc/security-contract/share-selector";
 import {
   ShareUnavailableError,
@@ -142,6 +143,18 @@ export async function materializeSharedViewPaths(
   const main = await store.ensureMainVersion({ workspaceId });
   for (const change of changedPaths) {
     const target = containedTarget(rootDir, change.path);
+    // A mount keeps its own engine store at <mount>/.dohc. Containment cannot
+    // see that: an alias planted inside the projection (`docs -> .dohc`)
+    // resolves inside the mount and would let relay-controlled bytes rewrite
+    // the store that decides what the projection holds. The rule runs against
+    // the MOUNT root, which is what `.dohc` means here.
+    await assertResolvedWorkspacePath({
+      rootPath: rootDir,
+      absolutePath: target,
+      spelled: change.path,
+      label: "Shared view path",
+      access: change.operation === "delete" ? "entry" : "write",
+    });
     if (change.operation === "delete") {
       // Deletes get the same REAL-parent containment as writes: a planted
       // directory symlink must not route the unlink outside the root. The

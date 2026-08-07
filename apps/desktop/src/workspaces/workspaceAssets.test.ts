@@ -39,11 +39,11 @@ describe("resolveWorkspaceFile containment", () => {
     await writeFile(join(outside, "secret.txt"), "top secret");
     await symlink(join(outside, "secret.txt"), join(root, "notes", "link.txt"));
     await expect(resolveWorkspaceFile(root, "notes/link.txt")).rejects.toThrow(
-      /escapes workspace/,
+      /escapes the workspace/,
     );
     // And the read paths built on it refuse too — nothing leaks via media/text.
-    await expect(readWorkspaceAsset(root, "notes/link.txt")).rejects.toThrow(/escapes workspace/);
-    await expect(readWorkspaceText(root, "notes/link.txt")).rejects.toThrow(/escapes workspace/);
+    await expect(readWorkspaceAsset(root, "notes/link.txt")).rejects.toThrow(/escapes the workspace/);
+    await expect(readWorkspaceText(root, "notes/link.txt")).rejects.toThrow(/escapes the workspace/);
   });
 });
 
@@ -112,7 +112,7 @@ describe("restoreWorkspaceText", () => {
 
     await expect(
       restoreWorkspaceText(root, "notes/outside/secret.md", "nope"),
-    ).rejects.toThrow(/escapes workspace/);
+    ).rejects.toThrow(/escapes the workspace/);
   });
 });
 

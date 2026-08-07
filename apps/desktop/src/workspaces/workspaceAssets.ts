@@ -7,6 +7,7 @@ import { mkdir, open, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, sep } from "node:path";
 import { join } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 // Media types served to the renderer for binary assets. Kept small and
 // explicit — only types a view actually renders (image/audio src, pdf);
@@ -63,6 +64,16 @@ export async function resolveWorkspaceFile(
   if (!validated.ok) {
     throw new Error(`Invalid asset path (${validated.reason}): ${relativePath}`);
   }
+  // This resolver FOLLOWS the path (it hands back a realpath every caller then
+  // opens), so an in-workspace alias reads or writes whatever it points at.
+  // The reservation is therefore decided again on where the path lands.
+  await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: "Asset path",
+    access,
+  });
   const realRoot = await realpath(rootPath);
   const realTarget = await realpath(join(rootPath, validated.normalized));
   if (!isInside(realRoot, realTarget)) {
@@ -150,6 +161,13 @@ async function writeContainedFile(
   if (!validated.ok) {
     throw new Error(`Invalid ${kind} path (${validated.reason}): ${relativePath}`);
   }
+  await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: `${label} path`,
+    access: "write",
+  });
   const realRoot = await realpath(rootPath);
   assertWriteNotAborted(signal);
   const absolute = join(rootPath, validated.normalized);

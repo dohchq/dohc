@@ -50,6 +50,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   MAX_HISTORY_TEXT_SNAPSHOT_BYTES,
   type ActiveAgentRun,
@@ -1195,10 +1196,30 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       throw error;
     }
   }
+  //   4. the path's REAL location must not be an area dohc reserves. Steps 1-3
+  //      prove the write stays INSIDE the root; they cannot prove it stays OUT
+  //      of `.dohc`. A symlinked ancestor (`notes -> .dohc`) resolves inside
+  //      the root and passes all three, so engine-owned text would land on the
+  //      workspace's own control plane. `assertEngineWritablePath` refuses that
+  //      spelling; this refuses it wherever the path leads.
+  //      Resolved as an ENTRY in every case: this writer never follows a leaf
+  //      link — step 3 refuses one, and rm removes one as a link — so only the
+  //      parent chain decides. It runs BEFORE mkdir, so a reserved ancestor
+  //      cannot have directories created through it either.
+  async function assertResolvedArea(absolutePath: string, label: string): Promise<void> {
+    await assertResolvedWorkspacePath({
+      rootPath,
+      absolutePath,
+      spelled: absolutePath,
+      label,
+      access: "entry",
+    });
+  }
   return {
     async writeTextFile(absolutePath, text) {
       const dir = dirname(absolutePath);
       await assertContainedNearestAncestor(dir);
+      await assertResolvedArea(absolutePath, "Engine write path");
       await mkdir(dir, { recursive: true });
       await assertContainedDir(dir);
       await assertLeafNotSymlink(absolutePath);
@@ -1207,6 +1228,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     async writeBinaryFile(absolutePath, bytes) {
       const dir = dirname(absolutePath);
       await assertContainedNearestAncestor(dir);
+      await assertResolvedArea(absolutePath, "Engine write path");
       await mkdir(dir, { recursive: true });
       await assertContainedDir(dir);
       await assertLeafNotSymlink(absolutePath);
@@ -1214,6 +1236,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     },
     async deletePath(absolutePath) {
       await assertContainedDir(dirname(absolutePath));
+      await assertResolvedArea(absolutePath, "Engine delete path");
       // rm on a symlink removes the link itself, never the target, so a
       // symlink leaf needs no extra handling here.
       await rm(absolutePath, { force: true });
