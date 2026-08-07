@@ -129,20 +129,22 @@ export const YDOC_OPEN_DEADLINE_MS = 5_000;
  */
 export class YdocOpenTimedOutError extends Error {
   readonly path: string;
-  readonly limitMs: number;
+  // The limit is the constant, never an argument: one number reaches the wire,
+  // the daemon and this message, and a caller cannot report a bound it did not
+  // send.
+  readonly limitMs = YDOC_OPEN_DEADLINE_MS;
   readonly waitedMs: number;
 
-  constructor(path: string, limitMs: number, waitedMs: number, cause: unknown) {
+  constructor(path: string, waitedMs: number, cause: unknown) {
     super(
       `Rust engine did not answer ydoc.open for ${path}. ` +
-        `The ydoc.open deadlineMs limit of ${limitMs}ms was reached: ` +
+        `The ydoc.open deadlineMs limit of ${YDOC_OPEN_DEADLINE_MS}ms was reached: ` +
         `the caller waited ${waitedMs}ms. ` +
         `The daemon may still hold this document; open it again.`,
       { cause },
     );
     this.name = "YdocOpenTimedOutError";
     this.path = path;
-    this.limitMs = limitMs;
     this.waitedMs = waitedMs;
   }
 }
@@ -1063,7 +1065,6 @@ export class YdocLiveAdapter {
       if (!isYdocOpenDeadlineFailure(error)) throw error;
       throw new YdocOpenTimedOutError(
         input.path,
-        YDOC_OPEN_DEADLINE_MS,
         Math.round(performance.now() - startedAtMs),
         error,
       );

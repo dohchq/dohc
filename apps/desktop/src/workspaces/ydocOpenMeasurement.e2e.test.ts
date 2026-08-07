@@ -51,8 +51,11 @@ const SLOWEST_HEALTHY_MACHINE_FACTOR = 40;
 // than the reason for its size.
 const LIVE_MEASUREMENT_FACTOR = 8;
 
+// One transport per measurement, and so one open per transport: `openMs` is
+// undefined until that open answers, and a second one would be a harness bug
+// rather than a sample to keep.
 class TimingTransport implements EngineTransport {
-  readonly opens: number[] = [];
+  openMs: number | undefined;
 
   constructor(private readonly inner: EngineTransport) {}
 
@@ -62,7 +65,7 @@ class TimingTransport implements EngineTransport {
       return await this.inner.sendRequest(request);
     } finally {
       if (request.method === "ydoc.open") {
-        this.opens.push(performance.now() - startedAt);
+        this.openMs = performance.now() - startedAt;
       }
     }
   }
@@ -71,10 +74,9 @@ class TimingTransport implements EngineTransport {
     return this.inner.onEvent(handler);
   }
 
-  lastOpenMs(): number {
-    const last = this.opens[this.opens.length - 1];
-    if (last === undefined) throw new Error("No ydoc.open was measured.");
-    return last;
+  requireOpenMs(): number {
+    if (this.openMs === undefined) throw new Error("No ydoc.open was measured.");
+    return this.openMs;
   }
 }
 
@@ -144,7 +146,9 @@ it.skipIf(engine.missing)(
       const measure = async (
         label: string,
         path: string,
-        after?: (session: Awaited<ReturnType<YdocLiveAdapter["openSession"]>>) => Promise<void>,
+        inspect?: (
+          session: Awaited<ReturnType<YdocLiveAdapter["openSession"]>>,
+        ) => Promise<void>,
       ): Promise<void> => {
         await sessions.run(
           { workspaceId: WORKSPACE_ID, rootPath: root },
@@ -157,9 +161,9 @@ it.skipIf(engine.missing)(
               path,
               contentKind: "richdoc",
             });
-            measured.push({ case: label, ms: timing.lastOpenMs() });
-            if (after) await after(session);
-            else await session.close({ settle: true });
+            measured.push({ case: label, ms: timing.requireOpenMs() });
+            await inspect?.(session);
+            await session.close({ settle: true });
             adapter.dispose();
           },
         );
@@ -225,7 +229,6 @@ it.skipIf(engine.missing)(
           // The typed text is really there: an open that answered an empty
           // document would be fast and would measure nothing.
           expect(bodyText(session.doc).length).toBeGreaterThan(appends * 3);
-          await session.close({ settle: true });
         },
       );
     } finally {
@@ -241,7 +244,7 @@ it.skipIf(engine.missing)(
       await lifecycle.stop().catch(() => undefined);
     }
 
-    expect(measured.map((entry) => entry.case)).toHaveLength(4);
+    expect(measured).toHaveLength(4);
     for (const entry of measured) {
       // MUTATION: tighten the bound under the measured range and every case
       // named here fails with the number it measured.
