@@ -408,7 +408,21 @@ export class EngineWorkspaceSessions {
           ) {
             entry.binding = null;
           }
-          const retryable = retryAfterReconnect || retryAfterTransport;
+          // The daemon's own "retry, but wait first", collected for EVERY
+          // method rather than for `workspace.open` alone. The engine answers
+          // `afterBackoff` for a busy store on any call, and a contract only
+          // three surfaces collected on left the rest reporting a kebab-case
+          // wire message to the user for a condition that clears by itself
+          // (#658, and #595 round 14's rule about advertising retries nobody
+          // performs).
+          //
+          // Safe for every method, including the non-idempotent ones: a busy
+          // store is raised by `BEGIN IMMEDIATE` or by the commit, so the
+          // transaction did NOT commit and a second attempt cannot apply
+          // anything twice.
+          const retryAfterBackoff = requiresBackoff(error);
+          const retryable =
+            retryAfterReconnect || retryAfterTransport || retryAfterBackoff;
           this.noteBudgetAttempt(error);
           // A failure this ladder will not retry never reaches the gates: a
           // permission refusal is not a timeout however long we waited.
@@ -419,7 +433,7 @@ export class EngineWorkspaceSessions {
             workspaceId: workspace.workspaceId,
             attempt,
             lastAttempt: attempt >= maxAttempts,
-            backoff: retryAfterTransport,
+            backoff: retryAfterTransport || retryAfterBackoff,
             cause: error,
           });
           if (next === "stop") throw error;

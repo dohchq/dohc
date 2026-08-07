@@ -669,17 +669,16 @@ function isTransientEngineCause(error: unknown): boolean {
  * contention gets no state of its own and no copy of its own, because there
  * is nothing to tell the user.
  *
- * A close is the exception, and the reason is the same fact read the other
- * way: `close()` disarms the provider's ladder before its pre-close settle
- * runs, and a busy store commits nothing. No retry is coming and no write is
- * pending, so the save really did stop and the user must hear it.
+ * A close used to be the exception, because it released the session and left
+ * nothing behind to retry. It no longer can: a teardown that meets a
+ * transient blocker either keeps the session and is retried by the close
+ * ladder, or releases only once the engine HAS the text and hands the
+ * artifact to the detached debt. Either way a retry is coming, so the answer
+ * no longer depends on where the failure was raised.
  */
-function settleFailureSaveState(
-  error: unknown,
-  closing: boolean,
-): EngineYDocSaveState {
+function settleFailureSaveState(error: unknown): EngineYDocSaveState {
   if (isFileLockedRefusal(error)) return "file-locked";
-  if (isEngineStoreBusyRefusal(error) && !closing) return "settling";
+  if (isEngineStoreBusyRefusal(error)) return "settling";
   return "error";
 }
 
@@ -2080,8 +2079,11 @@ export function createWorkspaceEngineCapture(
   ): Promise<void> {
     for (const entry of [...liveYDocSessions.values()]) {
       if (!match(entry.path)) continue;
-      // A healthy session flushes the CRDT to disk + projection first; a
-      // failing-close entry already attempted its flush, so just retry release.
+      // A healthy session flushes the CRDT to disk + projection first. A
+      // failing-close entry skips only the SETTLE — its flush was attempted
+      // and may have been refused — because the release below hands over
+      // anything the engine is still missing whatever `settle` says, and
+      // refuses to release while it is behind (ydocProviderSession `close`).
       if (entry.status === "live") {
         await entry.session.settleNow({ summary });
       }
@@ -3093,11 +3095,6 @@ export function createWorkspaceEngineCapture(
             // re-enter the session or wedge the settle chain.
           }
         };
-        // Set while this session's own teardown runs. The provider disarms its
-        // settle-retry ladder when `close()` begins, so a transient refusal
-        // raised from inside the teardown gets no retry — which is what makes
-        // it the end of a save rather than a pause in one.
-        let closingSession = false;
         // How many updates entered this document, and how many of them a
         // COMMITTED settle carried. The close downgrade below needs proof that
         // the text settled, and a successful RELEASE is not that proof:
@@ -3263,7 +3260,7 @@ export function createWorkspaceEngineCapture(
             settleFailureTokens.set(error, token);
           }
           onError(`ydoc settle of ${input.path}`, error);
-          reportSaveState(settleFailureSaveState(error, closingSession), token);
+          reportSaveState(settleFailureSaveState(error), token);
         };
         let entry: LiveYDocSession | null = null;
         const { session, head, lineage } = await openRestartSafeRustYDocSession({
@@ -3776,7 +3773,6 @@ export function createWorkspaceEngineCapture(
             liveEntry.orphaned
               ? { ...opts, settle: false, settleOnRefusal: false }
               : opts;
-          closingSession = true;
           try {
             await session.close(effective);
           } catch (error) {

@@ -564,6 +564,10 @@ export class YdocAdapterSession {
   private activeLocalRecordCapture: LocalRecordCapture | null = null;
   // Contract: an observer-detected local hazard is reject-and-quarantine.
   // Structured text edits reject before a transaction and do not quarantine.
+  // Whether a transient refusal left the engine behind this document. Owned
+  // by the session because the session is what the engine refused, and read
+  // by close() to decide whether releasing would discard the only copy.
+  private engineMissingLocalState = false;
   private quarantinedError: YdocSessionQuarantinedError | null = null;
   private staleError: YdocResyncNeededError | null = null;
   private droppedWhileStale = false;
@@ -705,12 +709,29 @@ export class YdocAdapterSession {
    * every operation queued behind it, and the rejection is claimed once here
    * so a caller that ignores it does not trip an unhandled rejection.
    */
-  private trackRecordOperation<T>(operation: Promise<T>): Promise<T> {
-    const guarded = operation.catch((error: unknown) => {
-      if (!isTransientEngineRefusal(error)) this.quarantine(error);
-      this.surfaceSessionError(error);
-      throw error;
-    });
+  private trackRecordOperation<T>(
+    operation: Promise<T>,
+    // Only a resend can clear the debt. An ordinary record carries the delta
+    // ONE transaction observed, so its success says nothing about an earlier
+    // update the engine still has not seen.
+    levelsTheEngine = false,
+  ): Promise<T> {
+    const guarded = operation.then(
+      (value) => {
+        if (levelsTheEngine) this.engineMissingLocalState = false;
+        return value;
+      },
+      (error: unknown) => {
+        // The engine refused this write cleanly, so it does NOT hold what
+        // this doc holds. Recorded HERE because this is the one place that
+        // sees both halves — the refusal and the resend that repairs it — and
+        // a caller tracking it separately can only ever be a stale copy.
+        if (isTransientEngineRefusal(error)) this.engineMissingLocalState = true;
+        else this.quarantine(error);
+        this.surfaceSessionError(error);
+        throw error;
+      },
+    );
     this.recordChain = guarded.then(
       () => undefined,
       () => undefined,
@@ -734,7 +755,20 @@ export class YdocAdapterSession {
    * missing", which durable state answers directly. That also makes one call
    * enough however many updates were refused.
    */
+  /**
+   * Whether a transient refusal left the engine behind this document.
+   *
+   * Read by a teardown, which must not release a session holding text the
+   * engine never received — the doc is where that text lives.
+   */
+  get missingLocalState(): boolean {
+    return this.engineMissingLocalState;
+  }
+
   resendMissingState(): Promise<void> {
+    // Cheap and exact: the debt is recorded where record operations are
+    // tracked, so a caller never has to know whether one is owed.
+    if (!this.engineMissingLocalState) return Promise.resolve();
     const operation = this.recordChain.then(async () => {
       this.assertOpen();
       const durableUpdate = await this.requestResyncUpdate();
@@ -754,7 +788,7 @@ export class YdocAdapterSession {
       if (missing.byteLength <= 2) return;
       await this.requestRecordUpdate(missing);
     });
-    return this.trackRecordOperation(operation);
+    return this.trackRecordOperation(operation, true);
   }
 
   private async requestRecordUpdate(

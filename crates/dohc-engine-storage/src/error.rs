@@ -204,6 +204,15 @@ impl StorageError {
     /// result code is unreadable, which is why every busy database used to
     /// reach callers as `persist-failed` or `state-corrupt` — both terminal,
     /// both wrong about a condition that clears by waiting (#658).
+    /// The same question for a caller holding a RAW `rusqlite::Error`.
+    ///
+    /// `SearchError::Storage` keeps the rusqlite failure rather than wrapping
+    /// it in this taxonomy, so it never reaches the constructors below and
+    /// would answer a busy index maintenance as a terminal search failure.
+    pub fn is_transient_lock(error: &rusqlite::Error) -> bool {
+        Self::is_busy(error)
+    }
+
     fn is_busy(source: &(dyn std::error::Error + 'static)) -> bool {
         source
             .downcast_ref::<rusqlite::Error>()
@@ -278,11 +287,17 @@ mod tests {
     /// by waiting.
     #[test]
     fn every_sqlite_wrapper_tells_a_busy_database_apart() {
-        let busy = rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(5), // SQLITE_BUSY
-            Some("database is locked".to_owned()),
-        );
-        assert_eq!(StorageError::migration(busy).code(), "file-locked");
+        let busy = || {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(5), // SQLITE_BUSY
+                Some("database is locked".to_owned()),
+            )
+        };
+        // The two on the read/write path, which the contention test exercises
+        // end to end but only through `persist`.
+        assert_eq!(StorageError::persist(busy()).code(), "file-locked");
+        assert_eq!(StorageError::corrupt(busy()).code(), "file-locked");
+        assert_eq!(StorageError::migration(busy()).code(), "file-locked");
 
         let locked = rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(6), // SQLITE_LOCKED

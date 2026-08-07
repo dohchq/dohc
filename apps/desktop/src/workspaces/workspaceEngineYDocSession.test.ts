@@ -456,12 +456,15 @@ it("stays on settling for a busy engine store, because the retry is coming", asy
   await session.close({ settle: false });
 });
 
-// The boundary of that quiet, and the fact that draws it: `close()` disarms
-// the provider's retry ladder before its pre-close settle runs, and a busy
-// store commits nothing. No retry is coming and no write is pending, so this
-// save really did stop — reporting it as still settling would leave the
-// document claiming forever that dohc was about to save it.
-it("reports an error when a busy store fails a close's settle", async () => {
+// A close is no longer the exception it once was. It used to release the
+// session and leave nothing to retry, so a busy pre-close settle really did
+// end the save. Now a teardown that meets a transient blocker either keeps
+// the session — when the engine is still missing text, so the close ladder
+// retries it — or releases only once the engine HAS the text and hands the
+// artifact to the detached debt. Here the journal landed and only the settle
+// was refused, so it takes the second path: the session goes, the debt owns
+// the write, and `settling` is what is true of the document.
+it("keeps saying settling when a busy store fails a close's settle", async () => {
   const states: string[] = [];
   const session = await capture.openYDocSession({
     path: PATH,
@@ -479,7 +482,12 @@ it("reports an error when a busy store fails a close's settle", async () => {
     /released, but its pre-close settle failed/,
   );
 
-  expect(states.at(-1)).toBe("error");
+  // A retry is coming, so no word but `settling` is honest — and `error`
+  // would send the user to try another edit for a database that is merely
+  // busy.
+  expect(states.at(-1)).toBe("settling");
+  expect(states).not.toContain("error");
+  // Still loud in the log: staying quiet on the chip is not going quiet.
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
 });
 

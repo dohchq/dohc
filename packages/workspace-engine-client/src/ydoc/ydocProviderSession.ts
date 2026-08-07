@@ -203,23 +203,6 @@ export async function openEngineYdocProviderSession(
     notifyError(options.onLocalEditError, error);
   }
 
-  // Whether a journal write was turned away by a transient refusal, leaving
-  // the engine without text this doc holds. It is a FLAG, not a queue of
-  // updates: the engine is missing a state, not a list of messages, and
-  // `resendMissingState` answers it from durable state in one call however
-  // many writes were refused.
-  let engineMissingLocalState = false;
-
-  // Bring the engine level with this doc, if a transient refusal left it
-  // behind. Every operation whose result depends on durable state runs this
-  // first — the settle, and the external-edit merge — because each of them
-  // would otherwise read a lineage missing text the user has already typed.
-  async function resendMissingLocalState(): Promise<void> {
-    if (!engineMissingLocalState) return;
-    await session.resendMissingState();
-    engineMissingLocalState = false;
-  }
-
   async function runSettle(summary?: string): Promise<YdocSettleResult> {
     // One identity per settle, echoed by whichever outcome this run produces.
     // Callers pair on it instead of on arrival order, which does NOT hold:
@@ -245,7 +228,7 @@ export async function openEngineYdocProviderSession(
       // BEFORE the settle, which must never commit a projection the engine is
       // still missing text for. A refusal here aborts this settle exactly as a
       // journal failure does, and the ladder tries again.
-      await resendMissingLocalState();
+      await session.resendMissingState();
     } catch (error) {
       notifySettleError(error, token);
       throw error;
@@ -364,10 +347,10 @@ export async function openEngineYdocProviderSession(
         .then(() => operation)
         .then(() => undefined);
       journalChain = journaled.catch((error: unknown) => {
-        if (isTransientEngineRefusal(error)) {
-          engineMissingLocalState = true;
-          return;
-        }
+        // The SESSION records the debt — it is what the engine refused, and
+        // its `resendMissingState` is a no-op when none is owed — so nothing
+        // here has to keep a copy that could go stale.
+        if (isTransientEngineRefusal(error)) return;
         rememberLocalEditError(error);
         throw error;
       });
@@ -401,7 +384,7 @@ export async function openEngineYdocProviderSession(
       // Send it first, exactly as a settle does, and for the same reason: no
       // operation that reads durable state may run while durable state is
       // known to be behind (#658).
-      await resendMissingLocalState();
+      await session.resendMissingState();
       return await session.applyExternalMarkdownEdit(markdown);
     },
 
@@ -427,16 +410,29 @@ export async function openEngineYdocProviderSession(
           preCloseError = error;
         }
       }
-      // Releasing now would DISCARD the only copy. The pre-close settle above
-      // was this session's last chance to hand the engine text it never
-      // received, and the doc holding that text goes away with the release —
-      // so a caller that saw a clean "released, settle failed" would arm a
-      // retry that reopens, settles what the lineage holds, and reports a save
-      // of a document missing the user's edit.
+      // Hand over anything the engine is still missing, whatever `settle`
+      // says. `settle: false` declines the ARTIFACT; it does not decline the
+      // user's text, and a caller that skips the settle above (a version
+      // switch, a rename, the vacate before a delete) would otherwise release
+      // a session holding the only copy of it.
+      if (preCloseError === undefined) {
+        try {
+          await session.resendMissingState();
+        } catch (error) {
+          preCloseError = error;
+        }
+      }
+      // Releasing while the engine is STILL behind discards that only copy:
+      // the doc holding the text goes away with the release, and a caller
+      // that saw a clean "released, settle failed" would arm a retry that
+      // reopens, settles what the lineage holds, and reports a save of a
+      // document missing the edit.
       //
-      // Refuse the teardown instead. The session stays alive, and the caller's
-      // close ladder retries the whole thing until the store frees (#658).
-      if (engineMissingLocalState && preCloseError !== undefined) {
+      // Only for a TRANSIENT failure, which is the one class the close ladder
+      // above retries. A terminal refusal cannot be waited out, so refusing
+      // the teardown for one would wedge the entry forever holding a lease
+      // nobody can release — worse than reporting the loss (#658).
+      if (session.missingLocalState && isTransientEngineRefusal(preCloseError)) {
         throw preCloseError;
       }
       try {

@@ -1078,6 +1078,118 @@ describe("YdocLiveAdapter", () => {
     await provider.close();
   });
 
+  it("refuses a settle:false release too, which is the path a vacate takes", async () => {
+    // THE substitution-review sequence. A busy journal is absorbed (no
+    // rebind), the user's close leaves the entry failing-close with a retry
+    // armed, and a rename or version switch inside that window calls
+    // `settleAndCloseLiveYDocSessions` — which closes a failing-close entry
+    // with `settle: false`.
+    //
+    // The guard used to hang off the pre-close settle's failure, and
+    // `settle: false` runs no settle, so it was skipped entirely: the session
+    // released, the canonical doc was discarded, and the edit was gone.
+    // `settle: false` declines the ARTIFACT, never the user's text.
+    //
+    // MUTATION: gate the release refusal on the pre-close settle again (or
+    // resend only when `settle !== false`) -> this close resolves and the
+    // text is lost.
+    const { provider, journaled } = await openAgainstABusyJournal(
+      "typed and never sent",
+      99,
+    );
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+
+    const outcome = await provider
+      .close({ settle: false })
+      .then(() => null)
+      .catch((error: unknown) => error);
+
+    expect(outcome).not.toBeNull();
+    expect(String(outcome)).toContain("engine-store-busy");
+  });
+
+  it("releases a terminal pre-close failure instead of wedging on it", async () => {
+    // The narrowness guard for the refusal above. Only a TRANSIENT failure is
+    // worth holding the session for, because only that class is retried. A
+    // terminal one cannot be waited out, so refusing the teardown would strand
+    // the entry forever holding a daemon lease nobody can release — worse than
+    // reporting the loss.
+    //
+    // MUTATION: drop `isTransientEngineRefusal` from the release guard -> this
+    // close never completes its release, and the lease leaks.
+    const engine = seedPlaintextEngine();
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      new Error("daemon response"),
+    );
+    const terminal = new DaemonRefusalError(
+      { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+      new Error("daemon response"),
+    );
+    // The journal is refused busy (leaving state unsent); every LATER record
+    // is refused terminally, so the close's resend cannot be waited out.
+    let records = 0;
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          records += 1;
+          throw records <= 2 ? busy : terminal;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleError: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+    await provider
+      .applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (body) => {
+          body.insert(0, "typed against a terminal engine");
+        }),
+      )
+      .catch(() => undefined);
+
+    // The release COMPLETES and reports, rather than holding the session.
+    const outcome = await provider
+      .close()
+      .then(() => null)
+      .catch((error: unknown) => error);
+    expect(outcome).toBeInstanceOf(YdocReleasedWithSettleFailureError);
+  });
+
+  it("releases an orphan that is holding nothing of the user's", async () => {
+    // The wedge guard the fold could have introduced: a doc that never took a
+    // local edit owes no debt, so nothing may hold up its teardown. Orphans
+    // are closed exactly this way (`settle: false, settleOnRefusal: false`).
+    const engine = seedPlaintextEngine();
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      sendRequest: (request) => engine.sendRequest(request),
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+    await provider.close({ settle: false, settleOnRefusal: false });
+  });
+
   it("keeps the session alive through a busy journal write", async () => {
     // The session used to be QUARANTINED by a busy refusal: `enqueueRecordUpdate`
     // quarantined on any failure of its record chain, so the first contention

@@ -11211,6 +11211,12 @@ fn now_ms() -> Result<i64, WireError> {
 /// database apart from a busy file.
 fn store_busy(error: &RuntimeError) -> bool {
     use dohc_engine_storage::StorageError;
+    // The search index keeps the RAW rusqlite failure instead of wrapping it
+    // in the storage taxonomy, so it carries no `FileLocked` to match on and
+    // has to be asked directly.
+    if let RuntimeError::Search(SearchError::Storage(sqlite)) = error {
+        return StorageError::is_transient_lock(sqlite);
+    }
     matches!(
         error,
         RuntimeError::Storage(StorageError::FileLocked)
@@ -11653,6 +11659,13 @@ mod tests {
             RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked)),
             RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked)),
             RuntimeError::Search(SearchError::Store(StorageError::FileLocked)),
+            // The search index's OTHER carrier: a raw rusqlite failure that
+            // never passed through this taxonomy, so it has no variant to
+            // match and is asked about its result code directly.
+            RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(5), // SQLITE_BUSY
+                Some("database is locked".to_owned()),
+            ))),
             // The relay route's own type. `RelayError` carries a relay
             // operation's local failures, so the busy store arrives typed
             // rather than as a storage variant — and used to fall through to
