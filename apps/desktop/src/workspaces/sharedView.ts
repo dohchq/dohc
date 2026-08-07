@@ -158,7 +158,11 @@ export async function materializeSharedViewPaths(
     // cursor -- wedging every later replay on the same path instead of
     // healing it. The PARENT chain still resolves in full, so an alias into a
     // reserved area is still refused.
-    await assertResolvedWorkspacePath({
+    //
+    // The prepare, the removal, and the write all run on the resolution this
+    // judged. Reusing the spelling would let a directory alias planted after
+    // the check take the relay's bytes somewhere the rule never saw.
+    const { resolvedAbsolute: resolvedTarget } = await assertResolvedWorkspacePath({
       rootPath: rootDir,
       absolutePath: target,
       spelled: change.path,
@@ -170,7 +174,7 @@ export async function materializeSharedViewPaths(
       // directory symlink must not route the unlink outside the root. The
       // final component is safe either way — rm without `recursive`
       // removes a link as a link, never through it.
-      const realParent = await realpath(dirname(target)).catch(() => null);
+      const realParent = await realpath(dirname(resolvedTarget)).catch(() => null);
       if (realParent === null) continue; // parent gone — nothing to delete
       if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
         throw new Error(`Shared view parent escapes the workspace: ${target}`);
@@ -178,7 +182,7 @@ export async function materializeSharedViewPaths(
       // recursive: a locally tampered DIRECTORY at the target must not
       // wedge the refresh with EISDIR. Node's rm removes a symlink as a
       // link either way — it never recurses through one.
-      await rm(target, { recursive: true, force: true });
+      await rm(resolvedTarget, { recursive: true, force: true });
       continue;
     }
     // Read the content BEFORE touching the projection. `preparedTarget`
@@ -199,10 +203,10 @@ export async function materializeSharedViewPaths(
               path: change.path,
             })
           )?.text ?? null;
-    await preparedTarget(target);
+    await preparedTarget(resolvedTarget);
     if (content === null) continue;
     await writeFile(
-      target,
+      resolvedTarget,
       content,
       typeof content === "string" ? { encoding: "utf8", flag: "wx" } : { flag: "wx" },
     );

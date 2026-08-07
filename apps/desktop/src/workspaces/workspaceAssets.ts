@@ -172,7 +172,7 @@ async function writeContainedFile(
   // the link and creates its target (measured, not assumed). So the exclusive
   // path must judge the leaf, and a planted `note.md -> .dohc/x` is refused
   // rather than followed. A live link there still answers EEXIST.
-  await assertResolvedWorkspacePath({
+  const { resolvedAbsolute: absolute } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: join(rootPath, validated.normalized),
     spelled: relativePath,
@@ -181,7 +181,9 @@ async function writeContainedFile(
   });
   const realRoot = await realpath(rootPath);
   assertWriteNotAborted(signal);
-  const absolute = join(rootPath, validated.normalized);
+  // Everything below works on the resolution the guard judged: the mkdir, the
+  // staging file, and the commit. Rebuilding the path from the spelling would
+  // let an ancestor alias swapped after the check redirect all three.
   const parent = dirname(absolute);
   if (!isInside(realRoot, await existingAncestor(parent))) {
     throw new Error(`${label} path escapes workspace: ${relativePath}`);

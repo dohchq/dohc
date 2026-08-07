@@ -226,7 +226,7 @@ export async function createFile(
   // Both questions get asked of the real path BEFORE mkdir, so a symlinked
   // ancestor can neither have directories created through it nor name a
   // reserved area under an ordinary name.
-  await assertResolvedWorkspacePath({
+  const { resolvedAbsolute: target } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absolute,
     spelled: relativePath,
@@ -234,16 +234,16 @@ export async function createFile(
     access: "write",
   });
   const realRoot = await realpath(rootPath);
-  if (!isInside(realRoot, await existingAncestor(dirname(absolute)))) {
+  if (!isInside(realRoot, await existingAncestor(dirname(target)))) {
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
-  await mkdir(dirname(absolute), { recursive: true });
+  await mkdir(dirname(target), { recursive: true });
   // Re-check after mkdir (the resolved parent now exists) as belt-and-braces;
   // wx + O_EXCL additionally prevents a final-segment symlink from escaping.
-  if (!isInside(realRoot, await realpath(dirname(absolute)))) {
+  if (!isInside(realRoot, await realpath(dirname(target)))) {
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
-  await writeFile(absolute, "", { flag: "wx" }).catch((error: unknown) => {
+  await writeFile(target, "", { flag: "wx" }).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   });
   return validated.normalized;
@@ -676,7 +676,7 @@ export async function createFolder(
     throw new Error(`Invalid folder path (${validated.reason}): ${relativePath}`);
   }
   const absolute = join(rootPath, validated.normalized);
-  await assertResolvedWorkspacePath({
+  const { resolvedAbsolute: target } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absolute,
     spelled: relativePath,
@@ -684,11 +684,11 @@ export async function createFolder(
     access: "write",
   });
   const realRoot = await realpath(rootPath);
-  if (!isInside(realRoot, await existingAncestor(absolute))) {
+  if (!isInside(realRoot, await existingAncestor(target))) {
     throw new Error(`Invalid folder path (escapes workspace): ${relativePath}`);
   }
-  await mkdir(absolute, { recursive: true });
-  if (!isInside(realRoot, await realpath(absolute))) {
+  await mkdir(target, { recursive: true });
+  if (!isInside(realRoot, await realpath(target))) {
     throw new Error(`Invalid folder path (escapes workspace): ${relativePath}`);
   }
   return validated.normalized;
@@ -717,56 +717,67 @@ export async function movePath(
   fromPath: string,
   toPath: string,
 ): Promise<string> {
-  const from = validateUserWritePath(fromPath);
-  if (!from.ok) {
-    throw new Error(`Invalid move source (${from.reason}): ${fromPath}`);
+  const fromValidated = validateUserWritePath(fromPath);
+  if (!fromValidated.ok) {
+    throw new Error(`Invalid move source (${fromValidated.reason}): ${fromPath}`);
   }
-  const to = validateUserMaterializePath(toPath);
-  if (!to.ok) {
-    throw new Error(`Invalid move destination (${to.reason}): ${toPath}`);
+  const toValidated = validateUserMaterializePath(toPath);
+  if (!toValidated.ok) {
+    throw new Error(`Invalid move destination (${toValidated.reason}): ${toPath}`);
   }
-  if (to.normalized === from.normalized || to.normalized.startsWith(`${from.normalized}/`)) {
+  if (
+    toValidated.normalized === fromValidated.normalized ||
+    toValidated.normalized.startsWith(`${fromValidated.normalized}/`)
+  ) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
   const realRoot = await realpath(rootPath);
-  const absFrom = join(rootPath, from.normalized);
-  const absTo = join(rootPath, to.normalized);
+  const absFrom = join(rootPath, fromValidated.normalized);
+  const absTo = join(rootPath, toValidated.normalized);
   // A move leaks BOTH ways through an alias: `meta/manifest.json -> leak.json`
   // (meta -> .dohc) lifts workspace state into the visible tree, and
-  // `notes.md -> meta/notes.md` buries a user file in it. The source resolves
-  // as an ENTRY -- a rename moves the link, it does not follow it -- so only
-  // its parent chain decides; the destination is created, so it follows.
-  await assertResolvedWorkspacePath({
+  // `notes.md -> meta/notes.md` buries a user file in it.
+  //
+  // BOTH ends are entries, because rename touches neither leaf: it moves the
+  // source entry, link and all, and it replaces whatever entry sits at the
+  // destination. Entry mode resolves each parent chain in full -- so an alias
+  // into a reserved area still refuses -- and holds the final name as SPELLED,
+  // which a rename needs: resolving the destination would answer with the
+  // existing file's casing on a case-insensitive filesystem and turn a
+  // case-only rename into a no-op.
+  //
+  // Every check and the rename itself then run on those two resolutions.
+  const { resolvedAbsolute: from } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absFrom,
     spelled: fromPath,
     label: "Move source",
     access: "entry",
   });
-  await assertResolvedWorkspacePath({
+  const { resolvedAbsolute: to } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absTo,
     spelled: toPath,
     label: "Move destination",
-    access: "write",
+    access: "entry",
   });
-  const realFromParent = await realpath(dirname(absFrom));
+  const realFromParent = await realpath(dirname(from));
   if (!isInside(realRoot, realFromParent)) {
     throw new Error(`Invalid move source (escapes workspace): ${fromPath}`);
   }
-  const sourceStat = await lstat(absFrom);
+  const sourceStat = await lstat(from);
   if (sourceStat.isSymbolicLink()) {
     throw new Error(`Refusing to move a symlink: ${fromPath}`);
   }
   // Canonical source — used both for the descendant guard below and the
   // case-only-rename carve-out. The symlink refusal above means realpath here
   // resolves only ancestor links, never the source itself.
-  const realFrom = await realpath(absFrom);
-  if (!isInside(realRoot, await existingAncestor(dirname(absTo)))) {
+  const realFrom = await realpath(from);
+  if (!isInside(realRoot, await existingAncestor(dirname(to)))) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
   }
-  await mkdir(dirname(absTo), { recursive: true });
-  const realDestParent = await realpath(dirname(absTo));
+  await mkdir(dirname(to), { recursive: true });
+  const realDestParent = await realpath(dirname(to));
   if (!isInside(realRoot, realDestParent)) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
   }
@@ -779,7 +790,7 @@ export async function movePath(
   if (isInside(realFrom, realDestParent)) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
-  const destExists = await lstat(absTo).then(
+  const destExists = await lstat(to).then(
     () => true,
     () => false,
   );
@@ -789,7 +800,7 @@ export async function movePath(
     // Compare REAL paths (never strings) so a genuinely distinct file that
     // case-collides still refuses — the carve-out must not reopen the
     // overwrite hole.
-    if (realFrom !== (await realpath(absTo))) {
+    if (realFrom !== (await realpath(to))) {
       throw new Error(`Destination already exists: ${toPath}`);
     }
   }
@@ -798,8 +809,8 @@ export async function movePath(
   // the destination in between, and POSIX rename clobbers); accepted because
   // main is the single writer on this path and Node exposes no renameat2
   // RENAME_NOREPLACE. The watcher records whatever actually landed.
-  await rename(absFrom, absTo);
-  return to.normalized;
+  await rename(from, to);
+  return toValidated.normalized;
 }
 
 // Deletes are always RECOVERABLE — never a hard delete:
@@ -832,7 +843,11 @@ export async function deletePath(
   // Resolved as an ENTRY: trashing a link removes the link, so where it points
   // is not the question. Its parent chain still decides the reserved rule, so
   // `meta/settings.json` (meta -> .dohc) cannot delete workspace state.
-  await assertResolvedWorkspacePath({
+  //
+  // Its resolution is what gets inspected and trashed. In entry mode that is
+  // the resolved parent plus the held-back name -- exactly the entry a delete
+  // removes -- so the symlink branch below no longer has to rebuild it.
+  const { resolvedAbsolute: resolvedTarget } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absTarget,
     spelled: relativePath,
@@ -846,16 +861,16 @@ export async function deletePath(
   // contain idiom; a symlinked ANCESTOR escape is caught either way (lstat
   // follows ancestor links, so realpath(absTarget) on a non-symlink leaf still
   // resolves an escaping ancestor and fails containment).
-  const linkStat = await lstat(absTarget);
+  const linkStat = await lstat(resolvedTarget);
   let target: string;
   if (linkStat.isSymbolicLink()) {
-    const realParent = await realpath(dirname(absTarget));
+    const realParent = await realpath(dirname(resolvedTarget));
     if (!isInside(realRoot, realParent)) {
       throw new Error(`Delete path escapes workspace: ${relativePath}`);
     }
-    target = join(realParent, basename(absTarget));
+    target = join(realParent, basename(resolvedTarget));
   } else {
-    target = await realpath(absTarget);
+    target = await realpath(resolvedTarget);
     if (!isInside(realRoot, target)) {
       throw new Error(`Delete path escapes workspace: ${relativePath}`);
     }

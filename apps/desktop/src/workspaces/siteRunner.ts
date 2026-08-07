@@ -230,10 +230,20 @@ export async function startStaticSitePreview(
       // swapped in between and served bytes nothing had checked.
       //
       // RESIDUAL, stated rather than papered over: this narrows the window to
-      // the single open() call, it does not close it. On POSIX O_NOFOLLOW makes
-      // even that refuse a leaf swapped for a symlink. On win32 Node exposes no
-      // O_NOFOLLOW and no fd->path affordance, so a swap landing between the
-      // guard and this open is still followed. Closing it needs an API Node
+      // the single open() call, it does not close it.
+      //
+      // The LEAF: on POSIX O_NOFOLLOW makes the open refuse a leaf swapped for
+      // a symlink. On win32 Node exposes no O_NOFOLLOW and no fd->path
+      // affordance, so a leaf swapped between the guard and this open is still
+      // followed.
+      //
+      // The ANCESTORS: O_NOFOLLOW never covered those on any platform. Binding
+      // each traversed component needs openat-style dirfd traversal, and Node's
+      // fs does not expose it -- no openat, no relative open on FileHandle, Dir
+      // hands out no fd, and O_DIRECTORY/O_PATH are undefined here. So a
+      // directory component swapped mid-traversal is followed everywhere.
+      //
+      // Both are left as residuals on purpose. Closing them needs an API Node
       // does not offer; an identity compare here would only be another
       // checkable proxy with its own window.
       const handle = await open(realTarget, READ_NO_FOLLOW);

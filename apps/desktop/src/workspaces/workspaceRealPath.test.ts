@@ -100,6 +100,18 @@ describe("workspaceFiles through an in-workspace alias", () => {
     );
   });
 
+  // Both ends of a move are entries, so both keep the name as SPELLED under a
+  // resolved parent. Resolving the destination instead would answer with the
+  // existing file's casing on a case-insensitive filesystem, and the rename
+  // would become a no-op that silently loses the user's capitalization.
+  it("renames through a benign alias without losing the destination spelling", async () => {
+    await symlink(join(root, "notes"), join(root, "inbox"), "dir");
+    await writeFile(join(root, "notes", "readme.md"), "body");
+    expect(await movePath(root, "inbox/readme.md", "inbox/plan.md")).toBe("inbox/plan.md");
+    expect(await readFile(join(root, "notes", "plan.md"), "utf8")).toBe("body");
+    expect(existsSync(join(root, "notes", "readme.md"))).toBe(false);
+  });
+
   it("keeps a benign alias to an ordinary folder working", async () => {
     await symlink(join(root, "notes"), join(root, "inbox"), "dir");
     expect(await createFile(root, "inbox/today.md")).toBe("inbox/today.md");
