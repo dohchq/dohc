@@ -42,7 +42,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { arch, platform, release, tmpdir } from "node:os";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
   classifyTreeProvenance,
@@ -141,13 +141,18 @@ let failed = false;
 // alone certify an interval nothing observed.
 //
 // Each reading is a `git rev-parse`, a `git status --untracked-files=all`, and
-// a `git reflog show`, all through a shell. Measured on this repo on Windows,
-// the slowest of the platforms the gate runs on: ~1s per reading, ~10s for the
-// ten a full run takes — under a percent of a gate that spends twenty minutes
-// in cargo.
-const readings = [{ step: "start", state: readTreeState(captureGit) }];
-const readTreeAfter = (step) =>
-  readings.push({ step, state: readTreeState(captureGit) });
+// three bounded reads of this checkout's HEAD reflog, all through a shell.
+// Measured on this repo on Windows, the slowest of the platforms the gate runs
+// on: ~1s per reading, ~10s for the ten a full run takes — under a percent of
+// a gate that spends twenty minutes in cargo.
+// `--git-path` answers relative to the repository when the run is in the main
+// worktree and absolutely when it is in a linked one, so the path is resolved
+// against the root the commands ran in.
+const hasFile = (path) => existsSync(resolve(repoRoot, path));
+const readTree = () => readTreeState(captureGit, hasFile);
+
+const readings = [{ step: "start", state: readTree() }];
+const readTreeAfter = (step) => readings.push({ step, state: readTree() });
 
 console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);

@@ -32,8 +32,10 @@ const WINDOWS_CLEANUP_DELAY_MS = 100;
 // directory somebody else left in the shared parent is not this sweep's to
 // remove. The Rust twin's `is_run_root_name` reads the same way.
 //
-// A root named by `DOHC_TEST_SCRATCH_RUN` is whatever the caller named it, so
-// it is not run-shaped and is never swept. Whoever named that root owns it.
+// A root named by `DOHC_TEST_SCRATCH_RUN` is never swept: whoever named it owns
+// it. `scratchRunId` refuses a configured id of this shape for that reason —
+// otherwise `ci-123-0123456789abcdef` would be deleted as one we generated, and
+// ownership would rest on a name rather than on who made the directory.
 const RUN_ROOT_NAME = /^.+-\d+-[0-9a-f]{16}$/u;
 
 const testScratch = new Set<string>();
@@ -178,6 +180,11 @@ function scratchRunId(): string {
     ) {
       throw new Error(
         "DOHC_TEST_SCRATCH_RUN must contain only ASCII letters, digits, periods, hyphens, or underscores",
+      );
+    }
+    if (RUN_ROOT_NAME.test(configured)) {
+      throw new Error(
+        `DOHC_TEST_SCRATCH_RUN must not end in \`-<digits>-<16 hex>\`, the shape of a generated run id: ${configured}. The sweep removes names of that shape as runs it created, and a root you named is yours to remove.`,
       );
     }
     return configured;

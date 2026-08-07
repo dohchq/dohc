@@ -15,12 +15,12 @@
 // Sampling alone cannot see a change made and undone INSIDE one step, and no
 // sample rate removes that — between any two readings there is an interval
 // nothing observes. For the founding case, git removes it instead: every HEAD
-// move is written to the HEAD reflog, so a run that checks out another commit
-// and restores it leaves two entries behind while `git rev-parse HEAD` reads
-// identical at both ends. A reading carries that log, and a step whose
-// bracketing readings agree on the commit but disagree on the reflog is
-// refused. The observation is exact and needs no watcher: the record is
-// already there when the step returns.
+// move is written to this checkout's HEAD reflog, so a run that checks out
+// another commit and restores it leaves two entries behind while
+// `git rev-parse HEAD` reads identical at both ends. A reading counts that
+// log, and a step whose bracketing readings agree on the commit but disagree
+// on the count is refused. The observation is exact and needs no watcher: the
+// record is already there when the step returns.
 //
 // What is left is a worktree edit made and undone inside one step, with no
 // HEAD move. Git keeps no record of that, and removing it needs isolation —
@@ -61,34 +61,27 @@ function changedEntries(before, after) {
 /**
  * Why the HEAD reflog is not the same in two readings, or null when it is.
  *
- * The log is newest first, so a run that only moved HEAD forward leaves the
- * earlier reading as the tail of the later one. Anything else — a shorter log,
- * or one whose tail no longer matches — is a rewritten record, and a rewritten
- * record cannot say what HEAD did.
+ * The log only ever grows, so more entries than the reading before means HEAD
+ * was updated inside that step. Fewer entries, or the same count with a
+ * different newest entry, is a rewritten record — `git gc` expires entries —
+ * and a rewritten record cannot say what HEAD did.
  */
 function reflogDrift(before, after, during) {
-  const gained = after.reflog.length - before.reflog.length;
-  const appended =
-    gained >= 0 &&
-    after.reflog
-      .slice(gained)
-      .every((entry, at) => entry === before.reflog[at]);
-  if (appended && gained === 0) return null;
+  const gained = after.reflog.count - before.reflog.count;
+  if (gained === 0 && after.reflog.top === before.reflog.top) return null;
   const head = short(before.head);
-  if (!appended) {
+  if (gained <= 0) {
     return (
       `the HEAD reflog was rewritten during \`${during}\` at ${head}: ` +
-      `${before.reflog.length} entries then ${after.reflog.length}, and the ` +
-      "later reading does not extend the earlier one; this run cannot say " +
-      "what HEAD did inside that step"
+      `${before.reflog.count} entries then ${after.reflog.count}; this run ` +
+      "cannot say what HEAD did inside that step"
     );
   }
-  const visited = [...new Set(after.reflog.slice(0, gained).map(short))];
   return (
     `HEAD was updated ${gained} ${gained === 1 ? "time" : "times"} during ` +
-    `\`${during}\` and read ${head} at both ends (${nameSome(visited)}); the ` +
-    "readings around that step agree about a commit the step did not hold " +
-    "throughout"
+    `\`${during}\` and read ${head} at both ends; the newest reflog entry is ` +
+    `${short(after.reflog.top)}, so the readings around that step agree ` +
+    "about a commit the step did not hold throughout"
   );
 }
 
@@ -117,7 +110,9 @@ function nameSome(entries) {
  *
  * A HEAD that moved and RETURNED inside one step is refused too. The two
  * readings around that step name the same commit, so only git's own record
- * shows it: the HEAD reflog gained entries while the commit stayed put.
+ * shows it: this checkout's HEAD reflog gained entries while the commit
+ * stayed put. A checkout with no HEAD log of its own is refused rather than
+ * read through the fallback git offers, which cannot see that switch.
  *
  * Three limits, and none is assumed away.
  *
@@ -168,15 +163,19 @@ export function classifyTreeProvenance(readings) {
         "moved and returned inside a step",
     );
   }
-  // An empty reflog beside a HEAD that resolves means this repository keeps no
-  // record of HEAD moves — `core.logAllRefUpdates` is off, or `.git/logs/HEAD`
-  // was removed. The check below would then read the same on every run, which
-  // is the shape of a check that is switched off rather than passing.
-  if (readings.some((reading) => reading.state.reflog.length === 0)) {
+  // This checkout has no HEAD log of its own: `core.logAllRefUpdates` is off,
+  // or `logs/HEAD` was removed. `git reflog show HEAD` still answers there —
+  // it falls back to the checked-out branch's log, which a checkout away and
+  // back leaves untouched — so the check would agree with itself across the
+  // switch it exists to catch. Both recovery steps are named: enabling the
+  // setting writes no entry, so the log stays absent until a ref update seeds
+  // it.
+  if (readings.some((reading) => !reading.state.reflog.present)) {
     return unattributable(
-      "this repository keeps no HEAD reflog, so a HEAD that moved and " +
-        "returned inside one step would leave no trace; turn the record on " +
-        "with `git config core.logAllRefUpdates true`",
+      "this checkout keeps no HEAD reflog, so a HEAD that moved and returned " +
+        "inside one step would leave no trace; run `git config " +
+        'core.logAllRefUpdates true` then `git update-ref -m "seed the HEAD ' +
+        'reflog" HEAD HEAD`',
     );
   }
 
@@ -234,11 +233,18 @@ export function formatTreeStamp(state, reads) {
 /**
  * Read `git rev-parse HEAD`, the porcelain status, and the HEAD reflog through
  * `capture`, which takes a command and returns its stdout, or null when it
- * could not run. A repo that cannot answer leaves a field null, which fails
- * the provenance row: unattributable evidence is the condition this exists to
- * name.
+ * could not run. `hasFile` answers whether a path git named exists. A repo
+ * that cannot answer leaves a field null, which fails the provenance row:
+ * unattributable evidence is the condition this exists to name.
+ *
+ * The reflog is read as a count and a newest entry, never as the whole log.
+ * A full read is one command whose output grows without bound — 41 bytes per
+ * entry, against the 1 MiB a captured command may return, so a checkout with
+ * about 25,000 entries would stop answering and every run in it would be
+ * refused. Counting is what the comparison needs. It cannot see a rewrite that
+ * preserves both the count and the newest entry, which `git gc` does not do.
  */
-export function readTreeState(capture) {
+export function readTreeState(capture, hasFile) {
   const head = capture("git rev-parse HEAD");
   if (head === null) return { head: null, dirty: null, reflog: null };
   // `--untracked-files=all`, because the default collapses an untracked
@@ -247,15 +253,36 @@ export function readTreeState(capture) {
   // the run. It also makes the recorded count a count of paths rather than of
   // entries, so `dirty(1)` cannot stand for five hundred files.
   const status = capture("git status --porcelain --untracked-files=all");
-  // One line per HEAD reflog entry, newest first, each the commit HEAD pointed
-  // at after that move. A checkout away and back reads identical through
-  // `rev-parse` and adds two lines here, which is the only trace it leaves.
-  const reflog = capture("git reflog show --format=%H HEAD");
   return {
     head: head.trim(),
     dirty: lines(status),
-    reflog: lines(reflog),
+    reflog: readHeadReflog(capture, hasFile),
   };
+}
+
+/**
+ * How many times HEAD has been updated in THIS checkout, and where it points
+ * now — or `{ present: false }` when this checkout keeps no HEAD log.
+ *
+ * The log file is checked first, because `HEAD` is not a reflog name git looks
+ * up literally: with `logs/HEAD` absent, `git reflog show HEAD` answers from
+ * the checked-out branch's log instead. That log does not move when HEAD is
+ * checked out elsewhere and back, so trusting the fallback would let the run
+ * pass over the switch this reads for. `--git-path` resolves the log of the
+ * worktree the run is in, not the main one.
+ */
+function readHeadReflog(capture, hasFile) {
+  const path = capture("git rev-parse --git-path logs/HEAD");
+  if (path === null) return null;
+  if (!hasFile(path.trim())) return { present: false, count: 0, top: null };
+  const count = capture("git rev-list --walk-reflogs --count HEAD");
+  const top = capture("git reflog show --format=%H -n 1 HEAD");
+  if (count === null || top === null) return null;
+  const entries = Number.parseInt(count.trim(), 10);
+  if (!Number.isInteger(entries)) return null;
+  // A log file with no entries records nothing, exactly as an absent one does.
+  if (entries === 0) return { present: false, count: 0, top: null };
+  return { present: true, count: entries, top: top.trim() };
 }
 
 /** A command's stdout as non-blank lines, or null when it did not answer. */

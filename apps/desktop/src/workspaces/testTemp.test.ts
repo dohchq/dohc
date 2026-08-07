@@ -187,6 +187,29 @@ describe("test scratch", () => {
     ).toBe(false);
   });
 
+  // Ownership is the contract, and a name is only allowed to stand for it
+  // because nothing else may take that shape. A configured id like
+  // `ci-123-0123456789abcdef` would otherwise be swept as one this module
+  // generated, which is the opposite of "a root you named is yours". The Rust
+  // twin refuses the same ids in `safe_component_checked`.
+  it("refuses a configured run id shaped like a generated one", () => {
+    const previous = process.env.DOHC_TEST_SCRATCH_RUN;
+    const root = process.env.DOHC_TEST_SCRATCH_ROOT;
+    delete process.env.DOHC_TEST_SCRATCH_ROOT;
+    try {
+      process.env.DOHC_TEST_SCRATCH_RUN = "ci-123-0123456789abcdef";
+      expect(() => testScratchRunRoot()).toThrow(/generated run id/);
+
+      // A name of the caller's own is still theirs to choose.
+      process.env.DOHC_TEST_SCRATCH_RUN = "ci-123";
+      expect(basename(testScratchRunRoot())).toBe("ci-123");
+    } finally {
+      if (previous === undefined) delete process.env.DOHC_TEST_SCRATCH_RUN;
+      else process.env.DOHC_TEST_SCRATCH_RUN = previous;
+      if (root !== undefined) process.env.DOHC_TEST_SCRATCH_ROOT = root;
+    }
+  });
+
   // The guard is only as good as its agreement with the name this module gives
   // its own run root. A run id that drifted out of the shape would leak every
   // run it named, silently — so the producer is checked through the sweep, not

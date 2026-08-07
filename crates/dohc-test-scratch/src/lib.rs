@@ -161,6 +161,18 @@ fn safe_component_checked(value: &str) -> io::Result<String> {
             "DOHC_TEST_SCRATCH_RUN must contain only ASCII letters, digits, periods, hyphens, or underscores",
         ));
     }
+    // Ownership is the contract; the name is only allowed to stand for it
+    // because nothing else may take that shape. `ci-123-0123456789abcdef` would
+    // otherwise be swept as a run this crate generated, which is the opposite
+    // of "a root you named is yours".
+    if is_run_root_name(OsStr::new(&safe)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "DOHC_TEST_SCRATCH_RUN must not end in `-<digits>-<16 hex>`, the shape of a generated run id: {safe}. The sweep removes names of that shape as runs it created, and a root you named is yours to remove."
+            ),
+        ));
+    }
     Ok(safe)
 }
 
@@ -216,8 +228,10 @@ fn managed_parent(current_run: &Path) -> Option<&Path> {
 /// delete, and neither is a parent a custom `DOHC_TEST_SCRATCH_ROOT` points
 /// into.
 ///
-/// A root named by `DOHC_TEST_SCRATCH_RUN` is whatever the caller named it, so
-/// it is not run-shaped and is never swept. Whoever named that root owns it.
+/// A root named by `DOHC_TEST_SCRATCH_RUN` is never swept: whoever named it owns
+/// it. `safe_component_checked` refuses a configured id of this shape for that
+/// reason, so a run-shaped name under the managed parent is always one this
+/// crate or its gate generated.
 fn is_run_root_name(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -419,6 +433,30 @@ mod tests {
                 "a scratch named {name:?} escaped the run root"
             );
         }
+    }
+
+    /// The sweep infers ownership from the run shape, so nothing a caller names
+    /// may take that shape. Without this, `DOHC_TEST_SCRATCH_RUN=ci-123-0123456789abcdef`
+    /// would be swept as a run this crate created. The JS twin refuses the same
+    /// ids in `scratchRunId`.
+    #[test]
+    fn a_configured_run_id_shaped_like_a_generated_one_is_refused() {
+        let temp = Path::new(if cfg!(windows) { r"C:\temp" } else { "/tmp" });
+        let error = resolve_run_root(None, Some("ci-123-0123456789abcdef"), temp)
+            .expect_err("a configured id that reads as generated is not the caller's to keep");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("DOHC_TEST_SCRATCH_RUN"),
+            "the refusal must name the variable, got: {error}"
+        );
+
+        // A name of the caller's own is still theirs to choose.
+        let kept = resolve_run_root(None, Some("ci-123"), temp).expect("a caller's own name");
+        assert_eq!(kept.file_name(), Some(OsStr::new("ci-123")));
+        assert!(
+            !is_run_root_name(OsStr::new("ci-123")),
+            "a name the sweep refuses to touch must not be run-shaped"
+        );
     }
 
     #[test]
