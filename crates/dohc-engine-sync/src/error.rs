@@ -242,9 +242,10 @@ impl RelayError {
             // It is also the one permanent class with a person who can act, so
             // it carries its own code rather than the generic one.
             RelayError::ShareBlobOverCeiling { .. } => Some(SHARE_BLOB_OVER_CEILING_CODE),
-            // PERMANENT. The op describes its own content wrongly. No blob the
-            // relay could serve makes it replayable, and nobody can repair it,
-            // so it keeps the generic code.
+            // PERMANENT. The op describes its own content wrongly, or names a
+            // path this recipient's store door will never accept. No blob the
+            // relay could serve makes either replayable, and nobody can repair
+            // it, so it keeps the generic code.
             RelayError::ShareOpInvalid { .. } => Some(GENERIC_REPLAY_REFUSAL_CODE),
             // REPAIRABLE. The relay served a body that is not the one this op
             // named. The op is fine; the relay's copy is wrong. Fix the blob
@@ -340,9 +341,10 @@ pub enum RelayError {
         limit_bytes: usize,
         observed_bytes: usize,
     },
-    /// A served share op that describes its own content wrongly: a blob
-    /// reference that is not a sha256, or a body that is authentically the
-    /// one the op named and still not the kind the op claimed.
+    /// A served share op this recipient can never replay: a blob reference
+    /// that is not a sha256, a body that is authentically the one the op
+    /// named and still not the kind the op claimed, or a path the store door
+    /// refuses.
     ///
     /// Deliberately NOT `BlobInvalid`. That one means the relay served a body
     /// which is not the one the op asked for — repairable at the relay, and

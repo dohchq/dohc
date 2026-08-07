@@ -3174,7 +3174,7 @@ fn replay_share_write<T: RelayTransport>(
                     },
                     faults,
                 )
-                .map_err(domain)?
+                .map_err(replayed_domain)?
                 .deduped
         } else {
             // These bytes already matched the sha the op named, so they ARE
@@ -3206,7 +3206,7 @@ fn replay_share_write<T: RelayTransport>(
                     },
                     faults,
                 )
-                .map_err(domain)?
+                .map_err(replayed_domain)?
                 .deduped
         }
     };
@@ -3319,6 +3319,35 @@ fn content_kind_name(value: Option<&serde_json::Value>) -> &'static str {
 
 fn domain(error: DomainError) -> RelayError {
     RelayError::Local(error.code().to_owned())
+}
+
+/// A domain failure a share-view REPLAY met, answered by the one question
+/// `share_replay_refusal_code` asks: can this op ever succeed?
+///
+/// PERMANENT for an invalid path. The path is fixed in the served op and the
+/// store door's rules are pure over it, so asking again returns the same
+/// refusal forever. Under the generic `domain` mapping it became
+/// `Local("invalid-path")`, which aborts the pull — the cursor never commits
+/// and every op behind the bad path never arrives (#571's failure mode, on a
+/// class that cannot be repaired).
+///
+/// Only a diverging relay produces one: the granter's own capture writes
+/// through this same door, so a path it refuses here was never storable
+/// there either. Nobody can act on it, which is why it takes the generic
+/// refusal code rather than one that would send the reader to the granter.
+///
+/// The verdict is NOT remembered in `blob_refusals`. That map is keyed by the
+/// bytes and the kind claimed for them, and this refusal belongs to the PATH:
+/// the same blob at a storable path must still apply.
+///
+/// Every other domain failure keeps the abort. A busy store or a corrupt
+/// read says nothing about the op, and skipping past it would drop content
+/// this recipient can still receive.
+pub(crate) fn replayed_domain(error: DomainError) -> RelayError {
+    match error {
+        DomainError::InvalidPath { reason } => RelayError::ShareOpInvalid { reason },
+        other => domain(other),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

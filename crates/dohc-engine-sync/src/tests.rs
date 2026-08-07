@@ -17795,3 +17795,142 @@ fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
         "the detail must stay inside what the recipient can persist"
     );
 }
+
+/// A path the store door will never accept must be SKIPPED, not held.
+///
+/// `classify_share_path` admits these — no segment is `.`, `..`, or empty —
+/// so the boundary passes them to replay, where `write_text` refuses them:
+/// `validate_path` rejects `..` anywhere in the path, and
+/// `validate_workspace_path` rejects an all-dot or all-space segment. Both
+/// arrive as `DomainError::InvalidPath`, which the generic `domain` mapping
+/// turned into `RelayError::Local("invalid-path")` — no refusal code, so the
+/// pull ABORTED. The cursor never committed and every op behind the bad path
+/// never arrived (#649, #571's failure mode).
+///
+/// The rules are pure over a path fixed in the served op, so asking again
+/// returns the same refusal forever: permanent, therefore skipped, and the
+/// cursor commits past it.
+///
+/// MUTATION: restore `.map_err(domain)` in `replay_share_write` and this pull
+/// returns `Local("invalid-path")` instead of an outcome. Drop the
+/// `InvalidPath` arm from `replayed_domain` and the same thing happens.
+#[test]
+fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
+    for (bad_path, reason) in [
+        ("docs/a..b.md", "path must not contain traversal segments"),
+        (
+            "docs/   /inner.md",
+            "path is not eligible for plaintext storage",
+        ),
+        (
+            "docs/.../inner.md",
+            "path is not eligible for plaintext storage",
+        ),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        seed_replication_version(&mut engine, "main", "main");
+        assert_eq!(
+            classify_share_path(bad_path),
+            PathClass::Tracked,
+            "the fixture only tests the store door if the boundary admits {bad_path}"
+        );
+
+        let refused = b"the body of the unusable path".to_vec();
+        let refused_sha = dohc_engine_storage::hex_sha256(&refused);
+        let later = b"the update behind the unusable path".to_vec();
+        let later_sha = dohc_engine_storage::hex_sha256(&later);
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new(
+                [],
+                [(
+                    0,
+                    ShareViewResponse {
+                        ops: vec![
+                            share_view_write_op(0, bad_path, &refused_sha),
+                            share_view_write_op(1, "docs/later.md", &later_sha),
+                        ],
+                        next_cursor: 2,
+                        has_more: false,
+                    },
+                )],
+            )
+            .with_view_blobs([(refused_sha, refused), (later_sha, later)]),
+        );
+
+        let outcome = client
+            .pull_share_view(
+                &mut engine,
+                "ws",
+                "share",
+                &tracked_grant(["docs"]),
+                &NoFaults,
+            )
+            .unwrap_or_else(|error| {
+                panic!("MUTATION: {bad_path} freezes the share forever: {error}")
+            });
+        assert_eq!(
+            (
+                outcome.fetched,
+                outcome.applied,
+                outcome.skipped,
+                outcome.pending_cursor.cursor
+            ),
+            (2, 1, 1, 2),
+            "the cursor must commit past {bad_path}"
+        );
+        assert_eq!(
+            VersionedTextStore::new(&mut engine)
+                .read_text("ws", "main", "docs/later.md")
+                .expect("share-view path read is answerable")
+                .map(|snapshot| snapshot.text),
+            Some("the update behind the unusable path".to_owned()),
+            "MUTATION: the op behind {bad_path} never arrives"
+        );
+        // The refusal NAMES the constraint and the file it cost, because the
+        // record is all the reader has once the cursor commits.
+        assert_eq!(
+            outcome
+                .refusals
+                .iter()
+                .map(|refusal| (refusal.origin_seq, refusal.code, refusal.detail.as_str()))
+                .collect::<Vec<_>>(),
+            [(
+                0,
+                "invalid-input",
+                format!("share op is not replayable: {reason} — {bad_path}").as_str()
+            )],
+            "MUTATION: the skip is counted but the reason never reaches the recipient"
+        );
+    }
+}
+
+/// The other half of the same answer: a domain failure that is NOT about the
+/// path keeps the pull's abort.
+///
+/// `replayed_domain` reclassifies exactly one class. A store that was busy or
+/// a read that came back corrupt says nothing about the op, and advancing the
+/// cursor past it would drop content this recipient can still receive — the
+/// dropped-data failure the skip rule exists to avoid.
+///
+/// MUTATION: widen `replayed_domain` to skip every `DomainError` and this
+/// pull reports success, committing the cursor past an op a retry would have
+/// applied.
+#[test]
+fn a_domain_failure_that_is_not_the_path_still_stops_the_pull() {
+    use dohc_engine_domain::DomainError;
+    use dohc_engine_storage::StorageError;
+
+    assert_eq!(
+        crate::relay::replayed_domain(DomainError::Storage(StorageError::FileLocked)),
+        RelayError::Local("file-locked".to_owned()),
+        "MUTATION: a busy store is skipped as if it were permanent"
+    );
+    assert_eq!(
+        crate::relay::replayed_domain(DomainError::Storage(StorageError::StateCorrupt {
+            source: None
+        }))
+        .share_replay_refusal_code(),
+        None,
+        "MUTATION: a corrupt read commits the cursor past content still coming"
+    );
+}
