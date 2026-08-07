@@ -1,7 +1,6 @@
 import type * as Y from "yjs";
 import {
   isEngineStoreBusyRefusal,
-  isFileLockedRefusal,
   isTransientEngineRefusal,
   isYdocSessionNotFoundRefusal,
 } from "../live/daemonLiveAdapter";

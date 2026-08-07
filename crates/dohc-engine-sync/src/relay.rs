@@ -3081,9 +3081,14 @@ fn replay_share_write<T: RelayTransport>(
     // kind ceiling, once per row — to reach a refusal the path alone had
     // already decided.
     //
-    // This is the SAME door `write_text`/`write_binary` use below, not a
-    // restatement of its rules, so the two cannot drift; the mapping there
-    // remains as the authority for anything this cannot see.
+    // The SAME door `write_text`/`write_binary` open with, not a restatement
+    // of its rules, so the two cannot drift — and this is the ONLY place the
+    // path class has to be classified. Everything that reaches replay has
+    // already passed `classify_share_path`, whose grammar admits no `%`, `\`,
+    // `.` or `..` segment, so normalization is the identity on it and the
+    // second `validate_path` inside `write_binary_file_in_tx` can no longer
+    // find anything this call did not. The writes below therefore keep the
+    // plain `domain` mapping.
     dohc_engine_domain::validate_plaintext_storable_path(path).map_err(replayed_domain)?;
     let key = replay_id(share_id, envelope, "write", path);
     let request_id = format!("share-view:{key}");
@@ -3187,7 +3192,7 @@ fn replay_share_write<T: RelayTransport>(
                     },
                     faults,
                 )
-                .map_err(replayed_domain)?
+                .map_err(domain)?
                 .deduped
         } else {
             // These bytes already matched the sha the op named, so they ARE
@@ -3219,7 +3224,7 @@ fn replay_share_write<T: RelayTransport>(
                     },
                     faults,
                 )
-                .map_err(replayed_domain)?
+                .map_err(domain)?
                 .deduped
         }
     };

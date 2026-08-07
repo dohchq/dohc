@@ -612,12 +612,13 @@ export interface EngineDiskWriter {
 
 const ENGINE_MAIN_VERSION_ID = "main";
 
-// The capture layer's schedule for retrying a teardown that met the file
-// lock (#595). Mirrors the provider's settle-retry posture: the delay
-// doubles up to the cap, which bounds how long the pending write stays on
-// disk-stale after the lock releases.
-const LOCKED_CLOSE_RETRY_INITIAL_MS = 1_000;
-const LOCKED_CLOSE_RETRY_CAP_MS = 10_000;
+// The capture layer's schedule for retrying a teardown blocked by something
+// that clears on its own (#595, #658). Mirrors the provider's settle-retry
+// posture: the delay doubles up to the cap, which bounds how long the pending
+// write stays disk-stale after the blocker lets go. Both teardown ladders —
+// the close retry and the detached debt's payment — start from it.
+const TEARDOWN_RETRY_INITIAL_MS = 1_000;
+const TEARDOWN_RETRY_CAP_MS = 10_000;
 
 // The lock can sit at any depth of a teardown failure: the escalated
 // settling close's own refusal, or the pre-close settle failure carried as
@@ -637,15 +638,6 @@ function hasRefusalInCauseChain(
 
 function isFileLockedCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isFileLockedRefusal);
-}
-
-// The OTHER transient contention, and it is dohc's own: writers met inside
-// SQLite and the store's bounded retry budget ran out. Nothing outside dohc
-// holds anything, so it must never be reported with `file-locked` copy — but
-// it clears by waiting exactly as a file lock does, so a ladder aimed at a
-// transient blocker re-arms on it too (#658).
-function isEngineStoreBusyCause(error: unknown): boolean {
-  return hasRefusalInCauseChain(error, isEngineStoreBusyRefusal);
 }
 
 // Blocked by something that clears on its own — a program outside dohc
@@ -3341,7 +3333,7 @@ export function createWorkspaceEngineCapture(
         // The payment is callable from the debt's own timer (wrapped in
         // `enqueue`) and inline by another chain task that must drain the debt
         // before touching the path — a rename, most of all.
-        let detachedRetryMs = LOCKED_CLOSE_RETRY_INITIAL_MS;
+        let detachedRetryMs = TEARDOWN_RETRY_INITIAL_MS;
         // One debt, one timer.
         let pendingRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -3687,7 +3679,7 @@ export function createWorkspaceEngineCapture(
           // proportional to the DEBT, not to how often something touched it.
           if (pendingRetryTimer !== null) clearTimeout(pendingRetryTimer);
           const delay = detachedRetryMs;
-          detachedRetryMs = Math.min(detachedRetryMs * 2, LOCKED_CLOSE_RETRY_CAP_MS);
+          detachedRetryMs = Math.min(detachedRetryMs * 2, TEARDOWN_RETRY_CAP_MS);
           pendingRetryTimer = setTimeout(() => {
             pendingRetryTimer = null;
             // Paid, transferred, or dropped by another edge while the timer
@@ -3736,26 +3728,26 @@ export function createWorkspaceEngineCapture(
         // teardown on a doubling delay until the lock releases — each retry
         // re-runs the pre-close settle — or a non-lock failure says retrying
         // cannot help. A paid debt removes the entry, which disarms this.
-        let lockedCloseRetryMs = LOCKED_CLOSE_RETRY_INITIAL_MS;
-        let lockedCloseRetryTimer: ReturnType<typeof setTimeout> | null = null;
-        const scheduleLockedCloseRetry = (
+        let transientCloseRetryMs = TEARDOWN_RETRY_INITIAL_MS;
+        let transientCloseRetryTimer: ReturnType<typeof setTimeout> | null = null;
+        const scheduleTransientCloseRetry = (
           error: unknown,
           opts?: WorkspaceEngineYDocCloseOptions,
         ): void => {
-          if (!isTransientEngineCause(error) || lockedCloseRetryTimer !== null)
+          if (!isTransientEngineCause(error) || transientCloseRetryTimer !== null)
             return;
           if (stopped || liveYDocSessions.get(input.path) !== entry) return;
-          const delay = lockedCloseRetryMs;
-          lockedCloseRetryMs = Math.min(
-            lockedCloseRetryMs * 2,
-            LOCKED_CLOSE_RETRY_CAP_MS,
+          const delay = transientCloseRetryMs;
+          transientCloseRetryMs = Math.min(
+            transientCloseRetryMs * 2,
+            TEARDOWN_RETRY_CAP_MS,
           );
-          lockedCloseRetryTimer = setTimeout(() => {
-            lockedCloseRetryTimer = null;
+          transientCloseRetryTimer = setTimeout(() => {
+            transientCloseRetryTimer = null;
             if (stopped || liveYDocSessions.get(input.path) !== entry) return;
             void closeEntry(opts).catch((retryError: unknown) => {
               if (isTransientEngineCause(retryError)) {
-                scheduleLockedCloseRetry(retryError, opts);
+                scheduleTransientCloseRetry(retryError, opts);
                 return;
               }
               // A non-lock failure is new information: the debt cannot be
@@ -3864,7 +3856,7 @@ export function createWorkspaceEngineCapture(
             // teardown). captureOnePath keeps deferring this path meanwhile.
             if (liveYDocSessions.get(input.path) === liveEntry) {
               liveEntry.status = "failing-close";
-              scheduleLockedCloseRetry(error, opts);
+              scheduleTransientCloseRetry(error, opts);
             }
             throw error;
           }

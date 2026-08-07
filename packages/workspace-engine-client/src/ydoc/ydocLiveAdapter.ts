@@ -687,29 +687,41 @@ export class YdocAdapterSession {
         }
       }
     });
-    const guardedOperation = operation.catch((error: unknown) => {
-      // Quarantine is for a session whose canonical state is no longer
-      // knowable — a partially applied update, a response that went missing.
-      // A busy engine refused the write CLEANLY and changed nothing, and the
-      // recovery above has already pulled this doc back to durable state, so
-      // the session is exactly as good as it was. Killing it for a condition
-      // that clears in milliseconds would turn a pause into a dead document
-      // (#658).
+    return this.trackRecordOperation(operation);
+  }
+
+  /**
+   * The policy every operation queued on the record chain answers to: what a
+   * failure means for the SESSION, and how the chain survives it.
+   *
+   * Quarantine is for a session whose canonical state is no longer knowable —
+   * a partially applied update, a response that went missing. A busy engine
+   * refused the write CLEANLY and changed nothing, and recovery has already
+   * pulled this doc back to durable state, so the session is exactly as good
+   * as it was. Killing it for a condition that clears in milliseconds would
+   * turn a pause into a dead document (#658).
+   *
+   * The chain is then neutralized either way, so one refusal cannot reject
+   * every operation queued behind it, and the rejection is claimed once here
+   * so a caller that ignores it does not trip an unhandled rejection.
+   */
+  private trackRecordOperation<T>(operation: Promise<T>): Promise<T> {
+    const guarded = operation.catch((error: unknown) => {
       if (!isTransientEngineRefusal(error)) this.quarantine(error);
       this.surfaceSessionError(error);
       throw error;
     });
-    this.recordChain = guardedOperation.then(
+    this.recordChain = guarded.then(
       () => undefined,
       () => undefined,
     );
-    void guardedOperation.catch(() => undefined);
-    return guardedOperation;
+    void guarded.catch(() => undefined);
+    return guarded;
   }
 
   /**
    * Send the engine everything this document holds that its durable state
-   * does not, and answer whether anything needed sending.
+   * does not.
    *
    * The resend for a journal write a transient refusal turned away. Replaying
    * the refused update's BYTES cannot do it: `applyLocalUpdate` records what a
@@ -722,9 +734,7 @@ export class YdocAdapterSession {
    * missing", which durable state answers directly. That also makes one call
    * enough however many updates were refused.
    */
-  resendMissingState(
-    options?: ApplyLocalUpdateOptions,
-  ): Promise<boolean> {
+  resendMissingState(): Promise<void> {
     const operation = this.recordChain.then(async () => {
       this.assertOpen();
       const durableUpdate = await this.requestResyncUpdate();
@@ -741,21 +751,10 @@ export class YdocAdapterSession {
       // The same empty-delta floor `recoverCanonicalState` uses: a two-byte
       // encoding is "nothing to send", which is what a resend finds when the
       // refused write had in fact committed and only its response was lost.
-      if (missing.byteLength <= 2) return false;
-      await this.requestRecordUpdate(missing, options);
-      return true;
+      if (missing.byteLength <= 2) return;
+      await this.requestRecordUpdate(missing);
     });
-    const guardedOperation = operation.catch((error: unknown) => {
-      if (!isTransientEngineRefusal(error)) this.quarantine(error);
-      this.surfaceSessionError(error);
-      throw error;
-    });
-    this.recordChain = guardedOperation.then(
-      () => undefined,
-      () => undefined,
-    );
-    void guardedOperation.catch(() => undefined);
-    return guardedOperation;
+    return this.trackRecordOperation(operation);
   }
 
   private async requestRecordUpdate(
