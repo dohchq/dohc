@@ -34,6 +34,25 @@
 
 const UNATTRIBUTABLE = "UNATTRIBUTABLE";
 
+/**
+ * What gives a checkout a HEAD reflog when it has none, in the order to run it.
+ *
+ * Enabling the setting writes no entry, so an instruction that stops there
+ * sends the reader back into the same refusal. A ref update seeds the log —
+ * but only one that CHANGES the value: `git update-ref HEAD <the commit it
+ * already names>` writes an entry on a symbolic HEAD and is a no-op on a
+ * detached one, which is the state a bisect or a CI checkout leaves. Moving
+ * HEAD one commit back and returning writes an entry either way, and
+ * `HEAD@{1}` names what HEAD held before the first update, so nothing here
+ * needs a shell variable to put it back. Both the refusal and the test that
+ * runs these commands read them from here.
+ */
+export const HEAD_REFLOG_RECOVERY = [
+  "git config core.logAllRefUpdates true",
+  'git update-ref -m "seed the HEAD reflog" HEAD HEAD~1',
+  'git update-ref -m "seed the HEAD reflog" HEAD HEAD@{1}',
+];
+
 const short = (head) => head.slice(0, 8);
 
 function unattributable(reason) {
@@ -77,11 +96,14 @@ function reflogDrift(before, after, during) {
       "cannot say what HEAD did inside that step"
     );
   }
+  // The entries themselves are not named: reading them back is the unbounded
+  // read this deliberately does not do, and the newest one is where HEAD
+  // RETURNED to, which the reader already has. The step and the count are what
+  // says which rows to re-run.
   return (
     `HEAD was updated ${gained} ${gained === 1 ? "time" : "times"} during ` +
-    `\`${during}\` and read ${head} at both ends; the newest reflog entry is ` +
-    `${short(after.reflog.top)}, so the readings around that step agree ` +
-    "about a commit the step did not hold throughout"
+    `\`${during}\` while both readings around it named ${head}, so that step ` +
+    "ran against a commit neither reading saw"
   );
 }
 
@@ -173,9 +195,8 @@ export function classifyTreeProvenance(readings) {
   if (readings.some((reading) => !reading.state.reflog.present)) {
     return unattributable(
       "this checkout keeps no HEAD reflog, so a HEAD that moved and returned " +
-        "inside one step would leave no trace; run `git config " +
-        'core.logAllRefUpdates true` then `git update-ref -m "seed the HEAD ' +
-        'reflog" HEAD HEAD`',
+        "inside one step would leave no trace; give it one with: " +
+        HEAD_REFLOG_RECOVERY.map((command) => `\`${command}\``).join(", then "),
     );
   }
 
@@ -214,7 +235,11 @@ export function classifyTreeProvenance(readings) {
  * empty one are not the same claim.
  */
 export function formatTreeState(state) {
-  if (!state?.head || !state.dirty || !state.reflog) return UNATTRIBUTABLE;
+  // A reading with no HEAD log of its own is as unread as one git refused: it
+  // cannot say whether HEAD moved and came back, so it may not print `clean`.
+  if (!state?.head || !state.dirty || !state.reflog?.present) {
+    return UNATTRIBUTABLE;
+  }
   const dirt = state.dirty.length ? `dirty(${state.dirty.length})` : "clean";
   return `${short(state.head)} ${dirt}`;
 }
@@ -233,7 +258,8 @@ export function formatTreeStamp(state, reads) {
 /**
  * Read `git rev-parse HEAD`, the porcelain status, and the HEAD reflog through
  * `capture`, which takes a command and returns its stdout, or null when it
- * could not run. `hasFile` answers whether a path git named exists. A repo
+ * could not run. `hasHeadLog` answers whether this checkout's HEAD log exists
+ * — true, false, or null when its path could not be resolved at all. A repo
  * that cannot answer leaves a field null, which fails the provenance row:
  * unattributable evidence is the condition this exists to name.
  *
@@ -244,7 +270,7 @@ export function formatTreeStamp(state, reads) {
  * refused. Counting is what the comparison needs. It cannot see a rewrite that
  * preserves both the count and the newest entry, which `git gc` does not do.
  */
-export function readTreeState(capture, hasFile) {
+export function readTreeState(capture, hasHeadLog) {
   const head = capture("git rev-parse HEAD");
   if (head === null) return { head: null, dirty: null, reflog: null };
   // `--untracked-files=all`, because the default collapses an untracked
@@ -256,7 +282,7 @@ export function readTreeState(capture, hasFile) {
   return {
     head: head.trim(),
     dirty: lines(status),
-    reflog: readHeadReflog(capture, hasFile),
+    reflog: readHeadReflog(capture, hasHeadLog),
   };
 }
 
@@ -264,17 +290,16 @@ export function readTreeState(capture, hasFile) {
  * How many times HEAD has been updated in THIS checkout, and where it points
  * now — or `{ present: false }` when this checkout keeps no HEAD log.
  *
- * The log file is checked first, because `HEAD` is not a reflog name git looks
- * up literally: with `logs/HEAD` absent, `git reflog show HEAD` answers from
- * the checked-out branch's log instead. That log does not move when HEAD is
- * checked out elsewhere and back, so trusting the fallback would let the run
- * pass over the switch this reads for. `--git-path` resolves the log of the
- * worktree the run is in, not the main one.
+ * The log's existence is checked first, because `HEAD` is not a reflog name
+ * git looks up literally: with `logs/HEAD` absent, `git reflog show HEAD`
+ * answers from the checked-out branch's log instead. That log does not move
+ * when HEAD is checked out elsewhere and back, so trusting the fallback would
+ * let the run pass over the switch this reads for.
  */
-function readHeadReflog(capture, hasFile) {
-  const path = capture("git rev-parse --git-path logs/HEAD");
-  if (path === null) return null;
-  if (!hasFile(path.trim())) return { present: false, count: 0, top: null };
+function readHeadReflog(capture, hasHeadLog) {
+  const present = hasHeadLog();
+  if (present === null) return null;
+  if (!present) return { present: false, count: 0, top: null };
   const count = capture("git rev-list --walk-reflogs --count HEAD");
   const top = capture("git reflog show --format=%H -n 1 HEAD");
   if (count === null || top === null) return null;

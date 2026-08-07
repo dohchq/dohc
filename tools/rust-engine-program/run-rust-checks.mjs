@@ -27,10 +27,10 @@
 // and so does the worktree changing under it, and so does a HEAD that moved
 // and returned inside one step — the reading carries the HEAD reflog, which
 // records that even when both ends name the same commit. A tree already dirty
-// when the run starts is recorded, not failed,
-// because running the gate over uncommitted work is the normal local loop and
-// a check that forbids it just gets removed. Recorded is the point: the
-// reader learns the sha does not describe everything that ran.
+// when the run starts is recorded, not failed, because running the gate over
+// uncommitted work is the normal local loop and a check that forbids it just
+// gets removed. Recorded is the point: the reader learns the sha does not
+// describe everything that ran.
 //
 // Usage:
 //   node tools/rust-engine-program/run-rust-checks.mjs
@@ -141,15 +141,21 @@ let failed = false;
 // alone certify an interval nothing observed.
 //
 // Each reading is a `git rev-parse`, a `git status --untracked-files=all`, and
-// three bounded reads of this checkout's HEAD reflog, all through a shell.
+// two bounded reads of this checkout's HEAD reflog, all through a shell.
 // Measured on this repo on Windows, the slowest of the platforms the gate runs
 // on: ~1s per reading, ~10s for the ten a full run takes — under a percent of
 // a gate that spends twenty minutes in cargo.
-// `--git-path` answers relative to the repository when the run is in the main
-// worktree and absolutely when it is in a linked one, so the path is resolved
-// against the root the commands ran in.
-const hasFile = (path) => existsSync(resolve(repoRoot, path));
-const readTree = () => readTreeState(captureGit, hasFile);
+
+// Where this checkout keeps its HEAD log. `--git-path` names the log of the
+// worktree the run is in, not the main one, and answers relatively there and
+// absolutely in a linked worktree — so it is resolved against the root the
+// commands ran in. The path cannot move under a run, so it is asked once; its
+// EXISTENCE is read at every reading, because a log removed mid-run is a run
+// that stopped being able to see a HEAD that moved and came back.
+const headLogPath = captureGit("git rev-parse --git-path logs/HEAD");
+const hasHeadLog = () =>
+  headLogPath === null ? null : existsSync(resolve(repoRoot, headLogPath.trim()));
+const readTree = () => readTreeState(captureGit, hasHeadLog);
 
 const readings = [{ step: "start", state: readTree() }];
 const readTreeAfter = (step) => readings.push({ step, state: readTree() });

@@ -11,11 +11,15 @@ import { describe, expect, it } from "vitest";
 import {
   cleanupSuiteTestScratch,
   createTestScratch,
+  isRunRootName,
   sweepScratchParent,
   testScratchRunRoot,
 } from "./testTemp";
 
 const HOUR_MS = 60 * 60 * 1_000;
+// The run doing the sweeping. Run-shaped, so the sweep's decision about
+// every other entry is about that entry, never about the current run's name.
+const THIS_RUN = "current-run-4821-0000000000000003";
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -40,7 +44,7 @@ describe("test scratch", () => {
     const parent = join(harness, "runs");
     const old = join(parent, "old-run-4821-0000000000000001");
     const live = join(parent, "live-run-4821-0000000000000002");
-    const current = join(parent, "current-run-4821-0000000000000003");
+    const current = join(parent, THIS_RUN);
     await Promise.all([
       mkdir(old, { recursive: true }),
       mkdir(live, { recursive: true }),
@@ -94,7 +98,7 @@ describe("test scratch", () => {
     await lutimes(link, when, when);
     await age(abandoned, nowMs, 49);
 
-    await sweepScratchParent(parent, join(parent, "current-run-4821-0000000000000003"), nowMs);
+    await sweepScratchParent(parent, join(parent, THIS_RUN), nowMs);
 
     expect(
       await pathExists(abandoned),
@@ -146,7 +150,7 @@ describe("test scratch", () => {
     await age(join(soak, "workspace"), nowMs, 49);
     await age(soak, nowMs, 49);
 
-    await sweepScratchParent(parent, join(parent, "current-run-4821-0000000000000003"), nowMs);
+    await sweepScratchParent(parent, join(parent, THIS_RUN), nowMs);
 
     expect(
       await pathExists(soak),
@@ -174,7 +178,7 @@ describe("test scratch", () => {
     await age(theirs, nowMs, 49);
     await age(mine, nowMs, 49);
 
-    await sweepScratchParent(parent, join(parent, "process-5678-0000000000000000"), nowMs);
+    await sweepScratchParent(parent, join(parent, THIS_RUN), nowMs);
 
     expect(
       await pathExists(theirFile),
@@ -185,6 +189,22 @@ describe("test scratch", () => {
       await pathExists(mine),
       "an aged run-shaped root must still be swept",
     ).toBe(false);
+  });
+
+  // Names both sweeps must agree about, and the answer. The Rust twin holds
+  // the same list in `TWIN_CORPUS`. A newline is a legal character in a name
+  // where the gate runs on Linux, and a component may hold hyphens of its own
+  // — the two are the cases the twins are most likely to read differently.
+  it.each([
+    ["process-4821-0f3a1c0d5e2b7648", true],
+    ["rust-gate-1180-3c2e9a1b7d4f0e65", true],
+    ["a-b-c-4821-0f3a1c0d5e2b7648", true],
+    ["a\nb-4821-0f3a1c0d5e2b7648", true],
+    ["notes-from-a-conference", false],
+    ["ci-123", false],
+    ["process-4821-0f3a1c0d", false],
+  ] as const)("reads %j as run-shaped: %s", (name, expected) => {
+    expect(isRunRootName(name)).toBe(expected);
   });
 
   // Ownership is the contract, and a name is only allowed to stand for it
@@ -224,7 +244,7 @@ describe("test scratch", () => {
     const nowMs = Date.now();
     await age(mine, nowMs, 49);
 
-    await sweepScratchParent(parent, join(parent, "current-run-4821-0000000000000003"), nowMs);
+    await sweepScratchParent(parent, join(parent, THIS_RUN), nowMs);
 
     expect(
       await pathExists(mine),

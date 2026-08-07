@@ -54,9 +54,9 @@ const cfgBlock = [
  *
  * `writes` is a path the stub creates the first time it runs — a tree change
  * made by something other than the gate, while the gate is between two
- * readings. `movesHead` updates HEAD to the commit it already points at, which
- * is the trace a `git checkout` away and back leaves and nothing else: a HEAD
- * reflog entry, with the commit, the worktree, and the index untouched.
+ * readings. `movesHead` moves HEAD one commit back and returns it, which
+ * leaves what a `git checkout` away and back leaves and nothing else: two HEAD
+ * reflog entries, with the commit, the worktree, and the index as they were.
  *
  * Both run through a helper script driven by `process.execPath` and an
  * absolute path, because `node` on PATH is one of the stubs.
@@ -98,11 +98,21 @@ function stubToolchain({ writes, movesHead } = {}) {
   return dir;
 }
 
-// Runs once per stub, from inside a gate step. `update-ref` to the commit HEAD
-// already names writes one HEAD reflog entry and changes nothing else, so the
-// readings on both sides of the step agree about the commit and the worktree,
-// exactly as they would around a checkout that was undone. The entry stays in
-// this checkout's reflog afterwards, which is what a reflog is for.
+// Runs once per stub, from inside a gate step: HEAD moves back one commit and
+// returns. That writes two HEAD reflog entries and changes nothing else, so
+// the readings on both sides of the step agree about the commit and the
+// worktree, exactly as they would around a checkout that was undone.
+//
+// It moves rather than rewriting HEAD with the value it already holds, because
+// that is a no-op on a DETACHED HEAD — `update-ref` writes an entry there only
+// when the value changes. A gate run in a detached checkout (a bisect, a CI
+// checkout of a sha) would have left this probe doing nothing and the test
+// asserting against a run that never had a defect.
+//
+// The two entries stay in this checkout's reflog afterwards, so `pnpm test`
+// adds two to whatever the developer's log already holds. Nothing else about
+// the checkout is touched: HEAD ends on the commit it started on, and the
+// restore runs even when the away step fails.
 const headProbe = `import { spawnSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 const [marker, repoRoot] = process.argv.slice(2);
@@ -111,7 +121,12 @@ writeFileSync(marker, "moved\\n");
 const git = (...args) =>
   spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" });
 const head = git("rev-parse", "HEAD").stdout.trim();
-git("update-ref", "-m", "rust-gate-artifact test probe", "HEAD", head);
+const message = "rust-gate-artifact test probe";
+try {
+  git("update-ref", "-m", message, "HEAD", head + "~1");
+} finally {
+  git("update-ref", "-m", message, "HEAD", head);
+}
 `;
 
 /**
@@ -354,16 +369,17 @@ test("a tree changed under the gate is refused, and never stamped", () => {
 });
 
 test("a HEAD moved and returned inside one step is refused", () => {
-  // The case a boundary reading cannot reach on its own: HEAD is updated while
-  // the step runs, and reads the same commit on both sides of it. `git status`
-  // is identical too, so the only witness is the HEAD reflog the gate now
-  // reads — and this run makes the same entry a checkout away and back would.
+  // The case a boundary reading cannot reach on its own: HEAD moves and comes
+  // back while the step runs, and reads the same commit on both sides of it.
+  // `git status` is identical too, so the only witness is the HEAD reflog the
+  // gate now reads. This holds on a detached HEAD as well as an attached one,
+  // which is why the probe moves HEAD instead of rewriting it in place.
   const stub = stubToolchain({ movesHead: true });
   try {
     const run = runGate(stub);
 
     assert.match(run.summary, /FAIL tree provenance/);
-    assert.match(run.summary, /HEAD was updated 1 time during `native target`/);
+    assert.match(run.summary, /HEAD was updated 2 times during `native target`/);
 
     // The stamp is the judgement's, and the verdict is the run's.
     assert.match(run.summary, /^== summary ==\r?\n {2}tree UNATTRIBUTABLE\r?\n/);

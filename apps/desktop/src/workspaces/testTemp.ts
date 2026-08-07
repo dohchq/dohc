@@ -36,7 +36,15 @@ const WINDOWS_CLEANUP_DELAY_MS = 100;
 // it. `scratchRunId` refuses a configured id of this shape for that reason —
 // otherwise `ci-123-0123456789abcdef` would be deleted as one we generated, and
 // ownership would rest on a name rather than on who made the directory.
-const RUN_ROOT_NAME = /^.+-\d+-[0-9a-f]{16}$/u;
+// `[\s\S]`, not `.`: a newline is a legal character in a name on Linux, and
+// `.` would not match one — the Rust twin accepts any non-empty component, so
+// a `.` here would make the two sweeps disagree about `a\nb-4821-<hex>`.
+const RUN_ROOT_NAME = /^[\s\S]+-\d+-[0-9a-f]{16}$/u;
+
+/** Whether a name is one a run root generator produced. Exported to be tested. */
+export function isRunRootName(name: string): boolean {
+  return RUN_ROOT_NAME.test(name);
+}
 
 const testScratch = new Set<string>();
 const suiteScratch = new Set<string>();
@@ -145,7 +153,7 @@ export async function sweepScratchParent(
   }
   for (const name of names) {
     const path = join(parent, name);
-    if (path === currentRun || !RUN_ROOT_NAME.test(name)) continue;
+    if (path === currentRun || !isRunRootName(name)) continue;
     let metadata;
     try {
       // `lstat` for the same reason `isIdleSince` uses it, and for one more: a
@@ -182,7 +190,7 @@ function scratchRunId(): string {
         "DOHC_TEST_SCRATCH_RUN must contain only ASCII letters, digits, periods, hyphens, or underscores",
       );
     }
-    if (RUN_ROOT_NAME.test(configured)) {
+    if (isRunRootName(configured)) {
       throw new Error(
         `DOHC_TEST_SCRATCH_RUN must not end in \`-<digits>-<16 hex>\`, the shape of a generated run id: ${configured}. The sweep removes names of that shape as runs it created, and a root you named is yours to remove.`,
       );

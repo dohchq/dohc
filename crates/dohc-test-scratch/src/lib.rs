@@ -350,6 +350,11 @@ mod tests {
     use super::*;
     use filetime::{FileTime, set_file_mtime};
 
+    /// The run doing the sweeping. Run-shaped, so the sweep's decision about
+    /// every other entry is about that entry, never about the current run's
+    /// name.
+    const THIS_RUN: &str = "current-run-4821-0000000000000003";
+
     #[test]
     fn drop_removes_the_scratch_directory() {
         let path = {
@@ -590,7 +595,7 @@ mod tests {
         let parent = harness.join("runs");
         let old = parent.join("old-run-4821-0000000000000001");
         let live = parent.join("live-run-4821-0000000000000002");
-        let current = parent.join("current-run-4821-0000000000000003");
+        let current = parent.join(THIS_RUN);
         fs::create_dir_all(&old).expect("old run");
         fs::create_dir_all(&live).expect("live run");
         fs::create_dir_all(&current).expect("current run");
@@ -628,7 +633,7 @@ mod tests {
         set_file_mtime(&theirs, stale).expect("age their directory");
         set_file_mtime(&mine, stale).expect("age the run");
 
-        sweep_managed_parent(&parent.join("process-5678-0000000000000000"), now);
+        sweep_managed_parent(&parent.join(THIS_RUN), now);
 
         assert!(
             their_file.exists(),
@@ -641,9 +646,40 @@ mod tests {
         );
     }
 
+    /// The name the Rust gate hands down, read out of the gate itself.
+    ///
+    /// The third producer of run roots is a JavaScript template this crate
+    /// cannot call, and a hand-copied example of its output proves only that
+    /// somebody once typed a matching string. Reading the template means a gate
+    /// that changes how it names its run root fails here instead of leaking
+    /// every root it creates.
+    fn gate_run_root_name() -> String {
+        let gate = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rust-engine-program/run-rust-checks.mjs");
+        let source = fs::read_to_string(&gate).expect("the gate script is readable");
+        const PREFIX: &str = "rust-gate-${process.pid}-${randomBytes(";
+        let after = source.split_once(PREFIX).map(|(_, rest)| rest).unwrap_or_else(|| {
+            panic!(
+                "{} no longer names its run root `{PREFIX}...`; the sweep's shape guard must be \
+                 checked against whatever it names them now",
+                gate.display()
+            )
+        });
+        let (bytes, rest) = after
+            .split_once(')')
+            .expect("the nonce width is parenthesised");
+        assert!(
+            rest.starts_with(".toString(\"hex\")}"),
+            "the gate's nonce is no longer hex; got `{}`",
+            &rest[..rest.len().min(24)]
+        );
+        let bytes: usize = bytes.parse().expect("the nonce width is a number");
+        format!("rust-gate-4821-{}", "0".repeat(bytes * 2))
+    }
+
     /// The guard is only as good as its agreement with the names this crate and
     /// its callers actually create. A producer that drifts out of the shape
-    /// would leak every run it makes, silently, so both producers are checked
+    /// would leak every run it makes, silently, so every producer is checked
     /// against the predicate rather than described in a comment.
     #[test]
     fn every_run_root_this_repo_creates_is_run_shaped() {
@@ -655,11 +691,11 @@ mod tests {
             "this crate's own run root is not run-shaped: {name:?}"
         );
 
-        // What `run-rust-checks.mjs` hands down:
-        // `rust-gate-${process.pid}-${randomBytes(8).toString("hex")}`.
-        assert!(is_run_root_name(OsStr::new(
-            "rust-gate-1180-3c2e9a1b7d4f0e65"
-        )));
+        let gate = gate_run_root_name();
+        assert!(
+            is_run_root_name(OsStr::new(&gate)),
+            "the Rust gate's run root is not run-shaped: {gate:?}"
+        );
 
         for refused in [
             "notes-from-a-conference",
@@ -679,6 +715,32 @@ mod tests {
             assert!(
                 !is_run_root_name(OsStr::new(refused)),
                 "{refused:?} is not a name this crate creates, so the sweep must refuse it"
+            );
+        }
+    }
+
+    /// Names both sweeps must agree about, and the answer. `apps/desktop/src/
+    /// workspaces/testTemp.test.ts` holds the same list. A newline is a legal
+    /// character in a name where the gate runs on Linux, and a component may
+    /// hold hyphens of its own — the two are the cases the twins are most
+    /// likely to read differently.
+    const TWIN_CORPUS: &[(&str, bool)] = &[
+        ("process-4821-0f3a1c0d5e2b7648", true),
+        ("rust-gate-1180-3c2e9a1b7d4f0e65", true),
+        ("a-b-c-4821-0f3a1c0d5e2b7648", true),
+        ("a\nb-4821-0f3a1c0d5e2b7648", true),
+        ("notes-from-a-conference", false),
+        ("ci-123", false),
+        ("process-4821-0f3a1c0d", false),
+    ];
+
+    #[test]
+    fn a_run_root_name_is_read_the_same_by_both_sweeps() {
+        for (name, expected) in TWIN_CORPUS {
+            assert_eq!(
+                is_run_root_name(OsStr::new(name)),
+                *expected,
+                "the shared corpus disagrees about {name:?}"
             );
         }
     }

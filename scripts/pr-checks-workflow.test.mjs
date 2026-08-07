@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
 import {
+  HEAD_REFLOG_RECOVERY,
   classifyTreeProvenance,
   formatTreeStamp,
   formatTreeState,
@@ -600,7 +601,6 @@ test("the tree state lists changed paths, and survives a silent git", () => {
   const answers = {
     "git rev-parse HEAD": "1f47af31ed00\n",
     "git status --porcelain --untracked-files=all": " M a.rs\n?? b.rs\n\n",
-    "git rev-parse --git-path logs/HEAD": ".git/logs/HEAD\n",
     "git rev-list --walk-reflogs --count HEAD": "2\n",
     "git reflog show --format=%H -n 1 HEAD": "1f47af31ed00\n",
   };
@@ -622,7 +622,6 @@ test("the tree state lists changed paths, and survives a silent git", () => {
     // `rev-parse` kept answering the same. It is read as a count and a newest
     // entry, never as the whole log: a full read grows without bound and stops
     // answering at about 25,000 entries.
-    "git rev-parse --git-path logs/HEAD",
     "git rev-list --walk-reflogs --count HEAD",
     "git reflog show --format=%H -n 1 HEAD",
   ]);
@@ -655,6 +654,9 @@ test("the tree state lists changed paths, and survives a silent git", () => {
   const missing = readTreeState(capture, () => false);
   assert.deepEqual(missing.reflog, { present: false, count: 0, top: null });
 
+  // And a log whose path git could not resolve at all is unread, not absent.
+  assert.equal(readTreeState(capture, () => null).reflog, null);
+
   // A count that is not a number is not a count.
   assert.equal(
     readTreeState(
@@ -668,13 +670,12 @@ test("the tree state lists changed paths, and survives a silent git", () => {
   );
 });
 
-test("the HEAD log is read from this checkout, never through git's fallback", () => {
-  // `HEAD` is not a reflog name git looks up literally. With `logs/HEAD` gone,
-  // `git reflog show HEAD` answers from the checked-out branch's log — and a
-  // checkout away and back does not touch that log. This runs the exact
-  // scenario against a real repository: the fallback reads IDENTICAL across
-  // the switch, which is why the reading may not trust it.
-  const repo = mkdtempSync(join(tmpdir(), "dohc-reflog-source-"));
+/**
+ * A throwaway repository with three commits, read the way the gate reads its
+ * own: the HEAD log path resolved once, its existence checked per reading.
+ */
+function scratchRepo(detached) {
+  const repo = mkdtempSync(join(tmpdir(), "dohc-reflog-"));
   const git = (...args) => {
     const run = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
     return (run.stdout ?? "").trim();
@@ -683,53 +684,134 @@ test("the HEAD log is read from this checkout, never through git's fallback", ()
     const run = spawnSync(cmd, { cwd: repo, shell: true, encoding: "utf8" });
     return run.error || run.status !== 0 ? null : run.stdout;
   };
-  const hasFile = (path) => existsSync(resolve(repo, path));
-  try {
-    git("init", "-q", "-b", "main");
-    git("config", "user.email", "gate@dohc.ai");
-    git("config", "user.name", "gate");
-    writeFileSync(join(repo, "a.txt"), "one\n");
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "gate@dohc.ai");
+  git("config", "user.name", "gate");
+  for (const body of ["one", "two", "three"]) {
+    writeFileSync(join(repo, "a.txt"), `${body}\n`);
     git("add", "a.txt");
-    git("commit", "-qm", "one");
-    const first = git("rev-parse", "HEAD");
-    writeFileSync(join(repo, "a.txt"), "two\n");
-    git("commit", "-qam", "two");
+    git("commit", "-qm", body);
+  }
+  if (detached) git("checkout", "-q", "--detach", "HEAD");
+
+  const logPath = capture("git rev-parse --git-path logs/HEAD");
+  const hasHeadLog = () =>
+    logPath === null ? null : existsSync(resolve(repo, logPath.trim()));
+  return {
+    repo,
+    git,
+    capture,
+    headLog: resolve(repo, (logPath ?? "").trim()),
+    read: () => readTreeState(capture, hasHeadLog),
+  };
+}
+
+test("the HEAD log is read from this checkout, never through git's fallback", () => {
+  // `HEAD` is not a reflog name git looks up literally. With `logs/HEAD` gone,
+  // `git reflog show HEAD` answers from the checked-out branch's log — and a
+  // checkout away and back does not touch that log. This runs the exact
+  // scenario against a real repository: the fallback reads IDENTICAL across
+  // the switch, which is why the reading may not trust it.
+  const { repo, git, capture, headLog, read } = scratchRepo(false);
+  try {
+    const first = git("rev-parse", "HEAD~2");
 
     // A checkout with a branch log but no HEAD log of its own.
-    rmSync(join(repo, ".git", "logs", "HEAD"), { force: true });
+    rmSync(headLog, { force: true });
     assert.equal(existsSync(join(repo, ".git", "logs", "refs", "heads", "main")), true);
 
-    const fallback = () => capture("git reflog show --format=%H HEAD");
-    const before = { fallback: fallback(), state: readTreeState(capture, hasFile) };
+    // Where `git reflog show HEAD` gets its answer with no HEAD log: the
+    // branch's log, to the byte.
+    const branchLog = () => capture("git reflog show --format=%H refs/heads/main");
+    assert.equal(capture("git reflog show --format=%H HEAD"), branchLog());
+
+    const wasBranchLog = branchLog();
+    const before = read();
     git("checkout", "-q", first);
     git("checkout", "-q", "main");
-    const after = { fallback: fallback(), state: readTreeState(capture, hasFile) };
+    const after = read();
 
-    // What the run would have read if it trusted `git reflog show HEAD`: the
-    // same answer on both sides of a switch that happened.
-    assert.equal(before.state.head, after.state.head);
-    assert.equal(before.fallback, after.fallback);
+    // And why that answer is worthless here: the branch never moved, so the
+    // log the fallback reads is the same on both sides of a switch that
+    // happened. HEAD reads the same too.
+    assert.equal(branchLog(), wasBranchLog);
+    assert.equal(before.head, after.head);
 
-    // What it reads instead: no HEAD log, so the run is refused rather than
-    // stamped over a switch it could not see.
-    assert.deepEqual(before.state.reflog, { present: false, count: 0, top: null });
+    // What the reading does instead: no HEAD log, so the run is refused rather
+    // than stamped over a switch it could not see.
+    assert.deepEqual(before.reflog, { present: false, count: 0, top: null });
     const refused = classifyTreeProvenance([
-      { step: "start", state: before.state },
-      { step: "test --workspace", state: after.state },
+      { step: "start", state: before },
+      { step: "test --workspace", state: after },
     ]);
     assert.equal(refused.status, "FAIL");
     assert.match(refused.reason, /keeps no HEAD reflog/);
     assert.equal(refused.stamp, "UNATTRIBUTABLE");
-
-    // And once the log exists, the same reading counts this checkout's own
-    // moves — the two checkouts above wrote it back.
-    const seeded = readTreeState(capture, hasFile);
-    assert.equal(seeded.reflog.present, true);
-    assert.equal(seeded.reflog.count > 0, true);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+for (const detached of [false, true]) {
+  const state = detached ? "detached" : "attached";
+  test(`the refusal's recovery gives a ${state} HEAD a log, and that log sees a move`, () => {
+    // Two things are only true if they are checked in BOTH states. A HEAD
+    // rewritten with the value it already holds writes a reflog entry when
+    // HEAD is symbolic and nothing at all when it is detached — so an
+    // instruction and a probe built on it work on a branch and quietly do
+    // nothing during a bisect or a CI checkout of a sha. The recovery is run
+    // here exactly as the refusal prints it.
+    const { repo, git, capture, headLog, read } = scratchRepo(detached);
+    try {
+      const head = git("rev-parse", "HEAD");
+      const symbolic = git("symbolic-ref", "-q", "HEAD");
+      git("config", "core.logAllRefUpdates", "false");
+      rmSync(headLog, { force: true });
+
+      const before = read();
+      assert.deepEqual(before.reflog, { present: false, count: 0, top: null });
+      const refused = classifyTreeProvenance(readingsOf(before, before));
+      assert.equal(refused.status, "FAIL");
+      // Every command the reader is told to run is in the refusal, in order.
+      for (const command of HEAD_REFLOG_RECOVERY) {
+        assert.ok(
+          refused.reason.includes(command),
+          `the refusal must name \`${command}\`, got: ${refused.reason}`,
+        );
+      }
+
+      for (const command of HEAD_REFLOG_RECOVERY) {
+        assert.notEqual(capture(command), null, `\`${command}\` must run here`);
+      }
+
+      // The log exists now, and the checkout is where it was: same commit,
+      // same branch or none, same worktree.
+      const seeded = read();
+      assert.equal(seeded.reflog.present, true);
+      assert.equal(git("rev-parse", "HEAD"), head);
+      assert.equal(git("symbolic-ref", "-q", "HEAD"), symbolic);
+      assert.deepEqual(seeded.dirty, []);
+      assert.equal(classifyTreeProvenance(readingsOf(seeded, seeded)).status, "PASS");
+
+      // And the seeded log does the job it was seeded for: HEAD moves away and
+      // back inside a step, both readings name one commit, and the run is
+      // refused anyway.
+      git("update-ref", "-m", "away", "HEAD", `${head}~1`);
+      git("update-ref", "-m", "back", "HEAD", head);
+      const moved = read();
+      assert.equal(moved.head, seeded.head);
+      const caught = classifyTreeProvenance([
+        { step: "start", state: seeded },
+        { step: "test --workspace", state: moved },
+      ]);
+      assert.equal(caught.status, "FAIL");
+      assert.match(caught.reason, /HEAD was updated 2 times during `test --workspace`/);
+      assert.equal(caught.stamp, "UNATTRIBUTABLE");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+}
 
 test("a HEAD that moved and came back inside one step is refused", () => {
   // The residual the boundary readings cannot reach: another run checks out a
@@ -786,12 +868,11 @@ test("a checkout that keeps no HEAD reflog is refused, not passed", () => {
   const refused = classifyTreeProvenance(readingsOf(unlogged, unlogged));
   assert.equal(refused.status, "FAIL");
   assert.match(refused.reason, /keeps no HEAD reflog/);
-  // The refusal names BOTH steps that fix it. Enabling the setting writes no
-  // entry, so an instruction that stops there sends the reader back into the
-  // same refusal on the next run.
-  assert.match(refused.reason, /git config core\.logAllRefUpdates true/);
-  assert.match(refused.reason, /git update-ref -m "seed the HEAD reflog" HEAD HEAD/);
   assert.equal(refused.stamp, "UNATTRIBUTABLE");
-  // And the reading itself is never printed as a clean tree.
+  // A reading with no log of its own is never printed as a clean tree either.
+  // The tests above it pass on the stamp the JUDGEMENT returns; this is the
+  // line the gate prints before its first step, from the reading itself.
+  assert.equal(formatTreeState(unlogged), "UNATTRIBUTABLE");
+  assert.equal(formatTreeStamp(unlogged, 10), "UNATTRIBUTABLE");
   assert.equal(formatTreeState({ ...A, reflog: null }), "UNATTRIBUTABLE");
 });
