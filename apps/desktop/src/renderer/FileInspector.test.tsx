@@ -1763,6 +1763,54 @@ describe("engine markdown source view", () => {
     expect(scrollTo).toHaveBeenCalledTimes(1);
   });
 
+  // codex round 12 on 0d498bcb. A heading is a destination too. Clicking one
+  // while a search jump is still waiting on the lazy editor makes the heading
+  // the reader's newest choice — and the older jump has to go, or it lands the
+  // moment that editor arrives and pulls them off the heading.
+  it("drops an unlanded search jump when a heading is chosen instead", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+
+    // No await between them: the editor's settle frames are 16ms timers, so
+    // the block target is set and unconsumed when the heading arrives.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        scrollTarget={{ path: "a.md", line: 11, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        headingTarget={{ anchor: "plan", nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    for (let settle = 0; settle < 2; settle += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+    }
+
+    // ONE reveal, the heading's. The flash cannot say this — it has faded by
+    // now, and both reveals draw the same class, so it reads `undefined`
+    // either way. The count is what separates them.
+    //
+    // MUTATION: drop the setJump(null) in the heading branch -> two reveals,
+    // the second dragging the reader off the heading they just chose.
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
   // codex round 2 on 9184cf04. Two results, clicked back to back: the body
   // jump is still waiting on the editor's settle frames when the frontmatter
   // one arrives. The newest click is the reader's answer, so the older target

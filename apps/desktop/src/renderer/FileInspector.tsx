@@ -1226,6 +1226,10 @@ function MarkdownView(props: {
       // the markdown cache below). Reveal it and let OutlinePanel resolve the
       // target against that live Y.Doc.
       setShowSource(false);
+      // The heading is the reader's newest destination, so a search jump that
+      // has not landed yet is over. Left pending it lands the moment the lazy
+      // editor arrives and pulls them off the heading they just chose.
+      setJump(null);
       return;
     }
     const source = surfaceMode === "source" ? latestDraft.current : savedBody;

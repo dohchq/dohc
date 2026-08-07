@@ -347,30 +347,33 @@ export function blockIndexForLine(body: string, line: number): number {
     // A table ROW is not paragraph text, so an indented line under one is a
     // code block rather than that paragraph's lazy continuation.
     const leavesTable = openKind === "table" && kind === "code";
-    // Blocks that do not wait for a blank line to start. A list, a quote or a
-    // table interrupts a PARAGRAPH (or a table) only — under an open list or
-    // quote the same line is that block's own next line, not a new one.
+    // Blocks that do not wait for a blank line to start. What each one may
+    // interrupt was measured per kind: a fence and a thematic break end
+    // anything, the rest are scoped below.
     const interrupts =
       !!opener ||
-      mathClose !== null ||
       kind === "break" ||
       leavesCode ||
       leavesTable ||
+      // A list, a table and display math interrupt a PARAGRAPH (or a table)
+      // and nothing else — under an open LIST the same lines are that item's.
       (open &&
         (openKind === "other" || openKind === "table") &&
-        (kind === "bullet" ||
+        (mathClose !== null ||
+          kind === "bullet" ||
           kind === "quote" ||
           kind === "table" ||
           (kind === "ordered" && INTERRUPTING_ORDERED_RE.test(text)))) ||
-      // Adjacent lists with no blank line between them. A changed marker or a
-      // changed kind starts a new list — unless the open one is `.`-ordered,
-      // which absorbs whatever list line follows it, the same leniency that
-      // gives it a one-column continuation indent.
+      // What ends an open LIST with no blank line: a quote, and a list whose
+      // marker or kind has changed. Not a `.`-ordered list, which absorbs
+      // whatever follows it — the same leniency that gives it a one-column
+      // continuation indent.
       (open &&
         listOpen &&
         openMarker !== "." &&
-        (kind === "bullet" || kind === "ordered") &&
-        (kind !== openKind || marker !== openMarker)) ||
+        (kind === "quote" ||
+          ((kind === "bullet" || kind === "ordered") &&
+            (kind !== openKind || marker !== openMarker)))) ||
       // Indented, but not far enough to reach the open item's content. Column
       // zero would be a lazy continuation of it; this is neither.
       (open && listOpen && indent > 0 && indent < openIndent);
@@ -390,12 +393,17 @@ export function blockIndexForLine(body: string, line: number): number {
         kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));
       quoteFence = null;
     }
-    // The ACTIVE item sets the continuation column, so a later item with a
-    // wider marker moves it. Only a real item does — content merely indented
-    // into this one keeps the column it has.
+    // The item at the TOP level of this list sets the continuation column, so
+    // a later sibling with a wider marker moves it. A NESTED item does not:
+    // it sits inside the open item's content, and the outer item still governs
+    // what continues the list.
     if (
       (kind === "bullet" || kind === "ordered") &&
-      (opens || (listOpen && kind === openKind && marker === openMarker))
+      (opens ||
+        (listOpen &&
+          kind === openKind &&
+          marker === openMarker &&
+          indent < openIndent))
     ) {
       openIndent = continuationIndent(text);
     }

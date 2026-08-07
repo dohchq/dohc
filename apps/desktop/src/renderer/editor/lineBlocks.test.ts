@@ -401,6 +401,32 @@ describe("blockIndexForLine", () => {
     expect(blockIndexForLine("- a\n\n-    b\n\n  para\n\nAfter", 5)).toBe(1);
   });
 
+  it("lets the OUTER item keep the continuation column past a nested one", () => {
+    // The nested item sits inside the outer item's content, so it must not
+    // raise the column the outer list continues at.
+    expect(blockIndexForLine("- outer\n  - nested\n\n  matched\n\nAfter", 4)).toBe(0);
+    expect(blockIndexForLine("- outer\n  - a\n    - b\n\n  matched\n\nAfter", 5)).toBe(0);
+    expect(blockIndexForLine("- outer\n  -    nested\n\n  matched\n\nAfter", 4)).toBe(0);
+    // The outer column still governs, so content short of it still breaks out.
+    expect(
+      blockIndexForLine("-    outer\n     - nested\n\n  matched\n\nAfter", 4),
+    ).toBe(1);
+    // A SIBLING at the top level does move it (round 7).
+    expect(blockIndexForLine("- a\n\n-    b\n\n  para\n\nAfter", 5)).toBe(1);
+  });
+
+  it("ends an open list at a quote, but not at a table or display math", () => {
+    expect(blockIndexForLine("- item\n> matched\n\nAfter", 2)).toBe(1);
+    // A `.`-ordered list absorbs the quote, as it absorbs a following list.
+    expect(blockIndexForLine("1. item\n> matched\n\nAfter", 2)).toBe(0);
+    // A table and display math interrupt a PARAGRAPH only.
+    expect(blockIndexForLine("- item\n$$x$$\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("- item\n| A |\n| --- |\n| r |\n\nAfter", 2)).toBe(0);
+    expect(blockIndexForLine("Intro\n$$x$$\nAfter", 2)).toBe(1);
+    // Indented, all three are the item's own content.
+    expect(blockIndexForLine("- item\n  > matched\n\nAfter", 2)).toBe(0);
+  });
+
   it("takes any indent for a `.`-ordered item, and the column for `)`", () => {
     // Measured, not derived: the tokenizer keeps a one-column continuation
     // inside `1. item` but wants the content column under `1) item`.
@@ -1212,6 +1238,49 @@ describe("blockIndexForLine agrees with the editor's own parse", () => {
       lands: [
         [6, "more"],
         [9, "After"],
+      ],
+    },
+    {
+      name: "a nested item does not move the outer continuation column",
+      body: "- outer\n  - nested\n\n  matched\n\nAfter",
+      lands: [
+        [4, "matched"],
+        [6, "After"],
+      ],
+    },
+    {
+      name: "two levels of nesting do not move it either",
+      body: "- outer\n  - a\n    - b\n\n  matched\n\nAfter",
+      lands: [
+        [5, "matched"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "a quote ends an open list",
+      body: "- item\n> matched\n\nAfter",
+      lands: [
+        [1, "item"],
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "a `.`-ordered list absorbs the quote under it",
+      body: "1. item\n> matched\n\nAfter",
+      lands: [
+        [2, "matched"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "display math does not interrupt an open list",
+      // The math lands INSIDE the list item, so line 2 belongs to the list —
+      // whose top-level text is the item's, the atom carrying its own.
+      body: "- item\n$$x$$\n\nAfter",
+      lands: [
+        [2, "item"],
+        [4, "After"],
       ],
     },
     {
