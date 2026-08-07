@@ -5922,6 +5922,157 @@ describe("history page", () => {
     );
     expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
   });
+
+  // #636: the opted-out refresh wrote both of its lanes with no request token
+  // at all. Nothing else in the shell writes a lane untimed, so the rule read
+  // as held everywhere — but these two lanes are shared, and an untimed write
+  // is ranked by ARRIVAL. A refresh issued before the run started could land
+  // after the refresh that saw it and turn the indicator back off, with
+  // nothing to correct it: the write moved no watermark, so the lane still
+  // believed nothing had answered.
+  it("keeps an older opted-out refresh from undoing a newer agent answer", async () => {
+    const idle: AgentRunStatusResult = {
+      mcpEnabled: false,
+      activeRun: null,
+      lastRun: null,
+    };
+    const running: AgentRunStatusResult = {
+      mcpEnabled: false,
+      activeRun: {
+        id: "run-1",
+        startedAt: 1,
+        agentId: "agent-1",
+        onBehalfOf: "ice",
+        status: "running",
+      },
+      lastRun: null,
+    };
+    const heldRead = deferred<AgentRunStatusResult>();
+    // Which read gets what is set by this test, not by a call count: the shell
+    // reads agent state more than once while a workspace opens.
+    let holdNextRead = false;
+    let runIsActive = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getAgentRunStatus = vi.fn(() => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        return heldRead.promise;
+      }
+      return Promise.resolve(runIsActive ? running : idle);
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalled());
+    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
+
+    // One refresh's agent read is still in flight.
+    holdNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(holdNextRead).toBe(false));
+
+    // The run starts, and a newer refresh answers it.
+    runIsActive = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(screen.getByTestId("agent-run-indicator")).toBeTruthy());
+
+    // The older read answers last, from before the run existed.
+    await act(async () => {
+      heldRead.resolve(idle);
+      await heldRead.promise;
+    });
+    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
+  });
+
+  // The same door, on the lane whose stale answer states a CAUSE. An older
+  // status saying the recorder is off, landing over a newer one that says
+  // nothing of the kind, makes the placeholder name a Settings toggle the
+  // workspace has not got — the false-statement class of #626, from a lane
+  // that never claimed its write.
+  it("keeps an older opted-out refresh from naming a cause the newest status refutes", async () => {
+    const recordingOff = { ...SYNC_STATUS, historyRecordingOff: true };
+    const heldRead = deferred<typeof SYNC_STATUS | typeof recordingOff>();
+    let holdNextRead = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(() => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        return heldRead.promise;
+      }
+      return Promise.resolve(SYNC_STATUS);
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    await waitFor(() =>
+      expect(placeholder.textContent).toContain("History is unavailable"),
+    );
+
+    // One refresh's status read is still in flight when a newer one answers.
+    holdNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(holdNextRead).toBe(false));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(3));
+
+    // The older read answers last, and it says the workspace opted out.
+    await act(async () => {
+      heldRead.resolve(recordingOff);
+      await heldRead.promise;
+    });
+    expect(placeholder.textContent).toContain("History is unavailable");
+    expect(placeholder.textContent).not.toContain("Settings");
+  });
+
+  // #636, the other untimed write: the workspace-open effect. It runs twice —
+  // the settings read changes refreshHistory's identity — and its status was
+  // written with no token, so it moved no watermark and any older read still
+  // in flight could land on top of the newer open's answer.
+  it("keeps an older status read from landing over the second open's status", async () => {
+    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
+    const conflictStatus = { ...SYNC_STATUS, state: "conflict" as const };
+    const heldRead = deferred<typeof SYNC_STATUS | typeof conflictStatus>();
+    let holdNextRead = true;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    // The first open answers before the settings read lands; the second one
+    // carries the workspace as it stands now.
+    let opens = 0;
+    bridge.openWorkspace = vi.fn(async () => {
+      opens += 1;
+      return opens === 1 ? SYNC_STATUS : syncingStatus;
+    });
+    bridge.getSyncStatus = vi.fn(() => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        return heldRead.promise;
+      }
+      return Promise.resolve(syncingStatus);
+    });
+    renderShell(bridge);
+
+    // Both opens have answered, and so has the refresh that followed the
+    // second one. Only the first refresh's status read is outstanding.
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+    );
+
+    // It answers last, describing a workspace both newer answers have left.
+    await act(async () => {
+      heldRead.resolve(conflictStatus);
+      await heldRead.promise;
+    });
+    expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing");
+  });
 });
 
 // #589: a shared view materializes no settings file, so the renderer's
