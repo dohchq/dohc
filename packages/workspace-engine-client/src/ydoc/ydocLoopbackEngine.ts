@@ -235,11 +235,36 @@ export class YdocLoopbackEngine implements EngineTransport {
   seedFile(input: SeedLoopbackFileInput): void {
     const key = fileKey(input.workspace, input.versionId, input.path);
     this.files.set(key, {
-      objectId: input.objectId ?? deriveObjectId(key),
+      objectId: input.objectId ?? this.resolveDefaultObjectId(key),
       contentKind: input.contentKind ?? "richdoc",
       markdown: input.markdown,
       head: input.head ?? "present",
     });
+  }
+
+  // Mirrors `resolve_capture_object`'s disambiguation branch
+  // (crates/dohc-engine-domain/src/store.rs): the plain derived id is safe
+  // to (re)use UNLESS it already has a LIVE ALIAS somewhere else — an
+  // object renamed away from this path and still referenced at its new
+  // one. Reusing it there would graft this capture onto the renamed
+  // object's own lineage. The daemon reads that signal off the persistent
+  // `path_aliases` table (`object_has_live_alias`); this loopback has no
+  // rename operation to maintain one, so it reads the same fact directly
+  // off `files`: any OTHER path currently holding this exact id.
+  private resolveDefaultObjectId(key: string): string {
+    const derived = deriveObjectId(key);
+    const takenElsewhere = (id: string): boolean =>
+      [...this.files.entries()].some(
+        ([otherKey, file]) => otherKey !== key && file.objectId === id,
+      );
+    if (!takenElsewhere(derived)) return derived;
+    let order = 2;
+    let disambiguated = `${derived}#recaptured-${order}`;
+    while (takenElsewhere(disambiguated)) {
+      order += 1;
+      disambiguated = `${derived}#recaptured-${order}`;
+    }
+    return disambiguated;
   }
 
   // Test-only seam for the sync-promotion the daemon does inside
@@ -530,8 +555,11 @@ export class YdocLoopbackEngine implements EngineTransport {
       // the last settle this lineage recorded, OR a CAPTURED head — the
       // `files` row IS this loopback's disk read, so a present head whose
       // markdown already matches the projection is the same proof
-      // `captured_head_sha` reads there (durable.rs:1278-1310). Absent means
-      // no snapshot for this path in this version, so it covers nothing,
+      // `captured_head_sha` reads there (durable.rs:1278-1310). The captured
+      // row's object id must also match THIS session's: `captured_head_sha`
+      // is scoped by object id in its query, so a path rebound to a
+      // DIFFERENT object with coincidentally identical markdown must never
+      // cover this session's own object. Absent head covers nothing either,
       // same as the daemon's read. A REPLICATED lineage never takes this
       // branch — its close compacts and keeps the rows regardless of settle
       // state (see `markSessionReplicated`).
@@ -542,6 +570,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       const coveredByCapture =
         capturedFile !== undefined &&
         capturedFile.head === "present" &&
+        capturedFile.objectId === session.objectId &&
         sha256(capturedFile.markdown) === currentSha;
       if (entry.lastSettledSha !== currentSha && !coveredByCapture) {
         throw unsettledCloseRefusal();
