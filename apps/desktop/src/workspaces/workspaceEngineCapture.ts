@@ -3968,18 +3968,13 @@ export function createWorkspaceEngineCapture(
         // settle:false close of that dirty lineage would be refused and strand
         // the lease. Read here, on the capture chain, so no version op can land
         // between the version binding above and this check.
-        if (head === "absent" && lineage === "absent") {
+        if (head === "absent") {
           const disk = await absentHeadDiskState(rootPath, input.path);
           // THREE RULES, IN THIS ORDER. They used to be tangled into one
           // condition, and the order is the whole correctness argument:
           //
-          //  1. Content on disk refuses, whatever else is true. This bind was
-          //     seeded from neither a head nor a snapshot, so its doc holds
-          //     only what replication delivered — settling it would write that
-          //     OVER uncaptured bytes the watcher has not ingested yet, while
-          //     this very chain is what is holding the watcher off. A peer
-          //     writing the same path does not make that safe, so this rule
-          //     wins over rule 2.
+          //  1. Content on disk always refuses a fresh bind. A resurrected
+          //     lineage refuses only where capture can eventually reach it.
           //  2. An update that reached the session means the document exists
           //     here: a peer is replicating it into this version, so refusing
           //     "not in this version" would be false. Bind it.
@@ -4029,10 +4024,16 @@ export function createWorkspaceEngineCapture(
             }
           };
           if (disk === "content") {
-            await releaseOrRefuse();
-            throw new YDocUncapturedArtifactError(input.path);
+            const captureWillReachPath =
+              lineage === "existing" &&
+              policyTracksPath(input.path, await readPolicyForTask()) &&
+              (await readDiskTextState(rootPath, input.path)).kind !== "untracked-content";
+            if (lineage === "absent" || captureWillReachPath) {
+              await releaseOrRefuse();
+              throw new YDocUncapturedArtifactError(input.path);
+            }
           }
-          if (disk === "missing" && updatesSeen === 0) {
+          if (lineage === "absent" && disk === "missing" && updatesSeen === 0) {
             // The count cannot be read atomically with the release: the close
             // defers through the operation chain, so its provider has not
             // unsubscribed at this line and an update can still arrive before

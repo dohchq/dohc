@@ -30,6 +30,7 @@ import {
   createWorkspaceEngineCapture,
   isYDocSessionUnreleasedError,
 } from "./workspaceEngineCapture";
+import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "./workspaceWatcher";
 
 // #564: one document open may not hold the capture chain for the whole
 // six-attempt transport ladder. The deadline lives in the sessions layer
@@ -737,7 +738,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       // paths a restart did not help either, because the reopen still found
       // no head.
       const root = await tempRoot();
-      const excluded = "a file .dohc/files.toml does not track\n";
+      const excluded = "x".repeat(MAX_HISTORY_TEXT_SNAPSHOT_BYTES + 1024) + "\n";
       await write(root, "note.md", excluded);
       const { sessions } = recordingSessions();
       const doc = new Y.Doc();

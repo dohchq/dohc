@@ -3487,4 +3487,75 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     );
     await engine.stop();
   });
+
+  it("refuses an uncaptured artifact again after orphan eviction resurrects its lineage", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "unrelated.md",
+      text: "main",
+    });
+    // The default policy tracks this short Markdown file, so capture will reach it.
+    const path = "resurrected.md";
+    const original = "already on disk, never captured";
+    const resurrected = "resurrected and settled";
+    await writeFile(join(root, path), original, "utf8");
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, resurrected);
+    const settled: string[] = [];
+    let opens = 0;
+    let evicts = 0;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        opens += 1;
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext",
+          path: options.path,
+          head: "absent" as const,
+          lineage: opens === 1 ? ("absent" as const) : ("existing" as const),
+          evict: async () => {
+            evicts += 1;
+          },
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            settled.push(resurrected);
+            await writeFile(join(root, path), resurrected, "utf8");
+            return { sha256: "7".repeat(64), markdown: resurrected } as never;
+          },
+          close: async () => {
+            throw new DaemonRefusalError(
+              {
+                code: "INVALID_PARAMS",
+                message: "ydoc-unsettled-close",
+                retry: "no",
+              },
+              undefined,
+            );
+          },
+        } as never;
+      },
+    });
+
+    await expect(
+      engine.openYDocSession({ path, onRemoteUpdate: () => undefined }),
+    ).rejects.toBeInstanceOf(YDocUncapturedArtifactError);
+    expect(evicts).toBe(1);
+    expect(await readFile(join(root, path), "utf8")).toBe(original);
+
+    // MUTATION: revert to `head === "absent" && lineage === "absent"` -> the
+    // second open binds the resurrected doc and its settle clobbers the file.
+    await expect(
+      engine.openYDocSession({ path, onRemoteUpdate: () => undefined }),
+    ).rejects.toBeInstanceOf(YDocUncapturedArtifactError);
+    expect(opens).toBe(2);
+    expect(evicts).toBe(2);
+    expect(settled).toEqual([]);
+    expect(await readFile(join(root, path), "utf8")).toBe(original);
+    await engine.stop();
+  });
 });
