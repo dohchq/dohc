@@ -50,6 +50,20 @@ describe("the shared-channel sync pass is bounded in production", () => {
     expect(syncCallSource).toContain("passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,");
   });
 
+  // The rotation resolves its cursor against the registry's own order, and that
+  // only works when the pass RECEIVES the unfiltered rows. main filters ended
+  // rows out of the work set, so handing the same filtered array for both makes
+  // the cursor lookup miss the moment its share is revoked — the exact case the
+  // unit pin covers, tested against inputs production would never send.
+  it("hands the pass the unfiltered registry, not the work set, for the rotation", () => {
+    expect(passSource).toContain("const registryOrder = entry?.sharedChannels ?? [];");
+    expect(passSource).toContain(
+      "const channels = registryOrder.filter((channel) => !channel.ended);",
+    );
+    expect(syncCallSource).toContain("registryOrder,");
+    expect(syncCallSource).toContain("channels: matching,");
+  });
+
   it("rotates the window: the cursor is both read and stored per workspace", () => {
     expect(syncCallSource).toContain(
       "resumeAfterShareId: sharedChannelSyncCursors.get(workspaceId),",
@@ -109,6 +123,21 @@ describe("the shared-channel sync pass is bounded in production", () => {
         "      notifyRenderer();\n" +
         "      activity.queueCloudSync(workspace.workspaceId);\n" +
         "      void syncSharedChannelsForChatTarget(workspace.workspaceId, target);",
+    );
+  });
+
+  // The DM poll runs every 4 s behind an open conversation. Unnamed, it starts a
+  // plain rotation, so above the window the conversation the user is READING can
+  // stay stale for many polls while the surface looks refreshed.
+  it("names the open DM so its own poll refreshes it", () => {
+    expect(handlerSource("syncDms")).toContain(
+      "await syncSharedChannelsForChatTarget(\n" +
+        "          workspace.workspaceId,\n" +
+        "          input.openChannelId ? { channelId: input.openChannelId } : undefined,\n" +
+        "        );",
+    );
+    expect(handlerSource("syncDms")).not.toContain(
+      "await syncWorkspaceSharedChannels(",
     );
   });
 });

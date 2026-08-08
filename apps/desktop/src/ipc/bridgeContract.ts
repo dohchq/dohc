@@ -1471,6 +1471,10 @@ export type DmRecord = z.infer<typeof DmRecord>;
 
 export const SyncDmsPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  // The DM the caller is reading, when it is reading one. The shared-channel
+  // pass is bounded, so a poll that names its open conversation keeps that one
+  // fresh instead of waiting for the rotation to reach it (#718).
+  openChannelId: CHAT_CHANNEL_ID.optional(),
 });
 export type SyncDmsPayload = z.infer<typeof SyncDmsPayload>;
 

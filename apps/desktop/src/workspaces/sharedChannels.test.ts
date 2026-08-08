@@ -77,6 +77,21 @@ function joined(overrides: Partial<JoinedSharedChannel> = {}): JoinedSharedChann
   };
 }
 
+// The desktop hands the pass two views of the registry, and every test uses the
+// same split: the FULL ordered rows fix the rotation's positions, and the work
+// set is what is left after ended rows drop out (main.ts:runSharedChannelSyncPass).
+// Passing one array for both is what let a cursor pin certify inputs production
+// never sends.
+function passOver(rows: readonly JoinedSharedChannel[]): {
+  channels: JoinedSharedChannel[];
+  registryOrder: readonly JoinedSharedChannel[];
+} {
+  return {
+    channels: rows.filter((row) => row.ended !== true),
+    registryOrder: rows,
+  };
+}
+
 function pullResult(applied = 0) {
   return { fetched: applied, applied, skipped: 0, nextCursor: applied };
 }
@@ -96,7 +111,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels,
+      ...passOver(channels),
       passRows: 2,
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
@@ -122,7 +137,7 @@ describe("syncJoinedSharedChannels", () => {
         rootDir: "/tmp/ws",
         workspaceId: "ws-1",
         relay: RELAY,
-        channels,
+        ...passOver(channels),
         passRows: 2,
         resumeAfterShareId,
         pull,
@@ -158,7 +173,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: rows,
+      ...passOver(rows),
       passRows: 16,
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
@@ -174,7 +189,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: afterRevoke,
+      ...passOver(afterRevoke),
       passRows: 16,
       resumeAfterShareId: first.resumeAfterShareId ?? undefined,
       pull,
@@ -207,7 +222,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels,
+      ...passOver(channels),
       passRows: 16,
       // Rotation alone would cover share-5 .. share-20 — never share-1.
       resumeAfterShareId: "share-4",
@@ -215,16 +230,52 @@ describe("syncJoinedSharedChannels", () => {
       pull,
       push,
     });
-    // The written share pushes in THIS pass, first, and it costs one window slot.
+    // The written share pushes in THIS pass, first, and it does NOT eat a
+    // rotation slot: the rotation still gets its full 16 rows.
     expect(calls.slice(0, 2)).toEqual(["push:share-1", "pull:share-1"]);
-    expect(calls).toHaveLength(32);
+    expect(calls).toHaveLength(34);
     expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual([
       "share-1",
-      ...Array.from({ length: 15 }, (_, index) => `share-${index + 5}`),
+      ...Array.from({ length: 16 }, (_, index) => `share-${index + 5}`),
     ]);
     // The cursor follows the rotation, not the out-of-order priority row.
-    expect(result.resumeAfterShareId).toBe("share-19");
-    expect(result.uncovered).toBe(4);
+    expect(result.resumeAfterShareId).toBe("share-20");
+    expect(result.uncovered).toBe(3);
+  });
+
+  // The coverage promise must not depend on write traffic. A share written on
+  // every pass would, if it spent a rotation slot each time, push the tail of
+  // the registry past ceil(live / passRows) forever.
+  it("keeps the rotation whole under a share written on every pass", async () => {
+    const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
+    const rows = Array.from({ length: 32 }, (_, index) =>
+      joined({
+        shareId: `share-${index + 1}`,
+        channelWireId: `wire-${index + 1}`,
+        access: "read-only",
+      }),
+    );
+    const covered: string[] = [];
+    let cursor: string | undefined;
+    for (let pass = 0; pass < 2; pass += 1) {
+      pull.mockClear();
+      const result = await syncJoinedSharedChannels({
+        rootDir: "/tmp/ws",
+        workspaceId: "ws-1",
+        relay: RELAY,
+        ...passOver(rows),
+        passRows: 16,
+        ...(cursor ? { resumeAfterShareId: cursor } : {}),
+        // The same share is written before every pass.
+        priorityShareId: "share-32",
+        pull,
+        push: vi.fn(async () => ({ pushed: 0 })),
+      });
+      cursor = result.resumeAfterShareId ?? undefined;
+      covered.push(...pull.mock.calls.map(([input]) => input.shareId));
+    }
+    // Two rotations of 16 reach every row, priority or no priority.
+    expect(new Set(covered).size).toBe(32);
   });
 
   it("never covers the triggering share twice when rotation already reaches it", async () => {
@@ -240,7 +291,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels,
+      ...passOver(channels),
       passRows: 3,
       // The cursor wraps the rotation to share-1, so its range (share-1 ..
       // share-3) CONTAINS the priority row — the case where a naive fill would
@@ -254,9 +305,10 @@ describe("syncJoinedSharedChannels", () => {
       "share-2",
       "share-1",
       "share-3",
+      "share-4",
     ]);
-    expect(result.uncovered).toBe(2);
-    expect(result.resumeAfterShareId).toBe("share-3");
+    expect(result.uncovered).toBe(1);
+    expect(result.resumeAfterShareId).toBe("share-4");
   });
 
   it("ignores a priority share this workspace holds no live row for", async () => {
@@ -265,11 +317,11 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: [
+      ...passOver([
         joined({ shareId: "share-1", access: "read-only" }),
         joined({ shareId: "share-2", access: "read-only" }),
         joined({ shareId: "share-gone", ended: true }),
-      ],
+      ]),
       passRows: 1,
       priorityShareId: "share-gone",
       pull,
@@ -284,7 +336,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: [joined(), joined({ shareId: "share-2" })],
+      ...passOver([joined(), joined({ shareId: "share-2" })]),
       passRows: 2,
       pull: vi.fn(async () => pullResult(0)),
       push: vi.fn(async () => ({ pushed: 0 })),
@@ -300,12 +352,12 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: [
+      ...passOver([
         joined({ shareId: "share-ended", ended: true }),
         joined({ shareId: "share-1", access: "read-only" }),
         joined({ shareId: "share-2", access: "read-only" }),
         joined({ shareId: "share-3", access: "read-only" }),
-      ],
+      ]),
       passRows: 2,
       resumeAfterShareId: "share-ended",
       pull,
@@ -322,13 +374,13 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: [
+      ...passOver([
         joined({ shareId: "share-ended-1", ended: true }),
         joined({ shareId: "share-1", access: "read-only" }),
         joined({ shareId: "share-ended-2", ended: true }),
         joined({ shareId: "share-2", access: "read-only" }),
         joined({ shareId: "share-3", access: "read-only" }),
-      ],
+      ]),
       passRows: 2,
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
@@ -348,10 +400,10 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: [
+      ...passOver([
         joined({ shareId: "share-flaky", access: "read-only" }),
         joined({ shareId: "share-next", access: "read-only" }),
-      ],
+      ]),
       passRows: 1,
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
@@ -377,7 +429,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: [joined(), joined({ shareId: "share-ro", access: "read-only" })],
+      ...passOver([joined(), joined({ shareId: "share-ro", access: "read-only" })]),
       passRows: 2,
       pull,
       push,
@@ -404,7 +456,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: [joined({ shareId: "share-revoked" }), joined({ shareId: "share-live" })],
+      ...passOver([joined({ shareId: "share-revoked" }), joined({ shareId: "share-live" })]),
       passRows: 2,
       pull,
       push,
@@ -425,7 +477,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: [joined()],
+      ...passOver([joined()]),
       passRows: 1,
       pull,
       push,
@@ -448,7 +500,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: [joined({ shareId: "share-flaky" }), joined({ shareId: "share-ok" })],
+      ...passOver([joined({ shareId: "share-flaky" }), joined({ shareId: "share-ok" })]),
       passRows: 2,
       pull,
       push,
@@ -473,7 +525,7 @@ describe("syncJoinedSharedChannels", () => {
       rootDir: "/tmp/ws",
       workspaceId: "ws-1",
       relay: RELAY,
-      channels: [joined({ ended: true })],
+      ...passOver([joined({ ended: true })]),
       passRows: 1,
       pull,
       push,

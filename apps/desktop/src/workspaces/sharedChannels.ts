@@ -207,7 +207,8 @@ export async function assertSharedChannelWritable(
 // push plus a paged pull at 500 ops a page (sync-relay/src/server.ts:87,
 // dohc-engine-sync/src/model.rs:7). Rows were the only unbounded multiplier.
 // Sixteen caps a pass near 32 requests: what the pass already spends on ONE
-// channel carrying an 8,000-op backlog.
+// channel carrying an 8,000-op backlog. A pass that a write triggered adds that
+// one share on top, so the true ceiling is 17 rows.
 export const SHARED_CHANNEL_SYNC_PASS_ROWS = 16;
 
 // A pass that left rows behind must say so, naming the constraint, the limit,
@@ -254,11 +255,17 @@ export async function syncJoinedSharedChannels(input: {
   rootDir: string;
   workspaceId: string;
   relay: SyncRelayConnection;
+  // The rows this pass may sync: live, and syncable by the current account.
   channels: readonly JoinedSharedChannel[];
+  // Every row the workspace has ever joined, in registry order, tombstones
+  // included. This fixes the rotation's positions; `channels` is the work set.
+  // The two are separate because a row can leave the work set — revoked, or
+  // joined under another account — while the rotation still needs its place.
+  registryOrder: readonly JoinedSharedChannel[];
   passRows: number;
   resumeAfterShareId?: string;
-  // The share whose write triggered this pass. It is always covered, whatever
-  // the rotation would have reached, and it counts against passRows.
+  // The share whose write triggered this pass. Always covered, and covered in
+  // ADDITION to the rotation's rows.
   priorityShareId?: string;
   // Required factory-selected operations prevent a rooted sync pass from
   // silently falling back to the legacy TypeScript relay client.
@@ -287,32 +294,33 @@ export async function syncJoinedSharedChannels(input: {
   // ceil(live / passRows) passes, and the caller is told how many it did not
   // reach — a partial pass never reads as a full refresh.
   const live = input.channels.filter((channel) => channel.ended !== true);
-  // The cursor is resolved against the FULL registry order, ended rows included.
-  // A share revoked between passes keeps its place, so the rotation steps past
-  // it; resolving against the live rows alone would lose the position and send
-  // the next pass back to the front, re-covering the prefix it just did.
-  const cursorOrder = input.resumeAfterShareId
-    ? input.channels.findIndex(
-        (channel) => channel.shareId === input.resumeAfterShareId,
-      )
+  // Rotation positions come from the registry, so a row that left the work set
+  // between passes keeps its place. Resolving the cursor inside the work set
+  // loses that place the moment the cursor's own share is revoked, and the next
+  // pass restarts at the front, re-covering the prefix it just did.
+  const registryPosition = new Map(
+    input.registryOrder.map((channel, index) => [channel.shareId, index] as const),
+  );
+  const cursorPosition = input.resumeAfterShareId
+    ? (registryPosition.get(input.resumeAfterShareId) ?? -1)
     : -1;
-  const liveThroughCursor =
-    cursorOrder < 0
-      ? 0
-      : input.channels
-          .slice(0, cursorOrder + 1)
-          .filter((channel) => channel.ended !== true).length;
-  const startIndex = live.length === 0 ? 0 : liveThroughCursor % live.length;
-  const budget = Math.min(Math.max(input.passRows, 0), live.length);
-  // A write's own share never waits for the rotation to reach it: without this,
-  // a one-shot trigger (a send, with Chats then closed) could be the last pass
-  // for minutes and the message would sit local.
-  const priority =
-    budget > 0 && input.priorityShareId
-      ? (live.find((channel) => channel.shareId === input.priorityShareId) ?? null)
-      : null;
+  const afterCursor =
+    cursorPosition < 0
+      ? -1
+      : live.findIndex(
+          (channel) => (registryPosition.get(channel.shareId) ?? -1) > cursorPosition,
+        );
+  const startIndex = afterCursor < 0 ? 0 : afterCursor;
+  // The rotation always gets the whole window. A write's own share is EXTRA
+  // work — it has to go out now, and charging it a rotation slot would make the
+  // coverage promise depend on write traffic: repeated writes to one channel
+  // would starve the tail of the registry forever. So a pass costs at most
+  // passRows + 1 rows, and ceil(live / passRows) holds whatever the writes do.
+  const rotationBudget = Math.min(Math.max(input.passRows, 0), live.length);
+  const priority = input.priorityShareId
+    ? (live.find((channel) => channel.shareId === input.priorityShareId) ?? null)
+    : null;
   const rotation: JoinedSharedChannel[] = [];
-  const rotationBudget = budget - (priority ? 1 : 0);
   for (let offset = 0; rotation.length < rotationBudget && offset < live.length; offset += 1) {
     const channel = live[(startIndex + offset) % live.length]!;
     if (channel.shareId === priority?.shareId) continue;

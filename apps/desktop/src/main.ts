@@ -1520,7 +1520,11 @@ async function runSharedChannelSyncPass(
 ): Promise<void> {
   try {
     const entry = findWorkspace(workspaceId);
-    const channels = (entry?.sharedChannels ?? []).filter((channel) => !channel.ended);
+    // The registry, unfiltered: the pass needs a row's PLACE even after the row
+    // stops being syncable, or a revoked cursor sends the rotation back to the
+    // front. Only `channels` below is filtered down to the work set.
+    const registryOrder = entry?.sharedChannels ?? [];
+    const channels = registryOrder.filter((channel) => !channel.ended);
     if (!entry || channels.length === 0) {
       reportSharedChannelPassCoveredEverything(workspaceId);
       return;
@@ -1552,6 +1556,7 @@ async function runSharedChannelSyncPass(
       workspaceId: entry.workspaceId,
       relay,
       channels: matching,
+      registryOrder,
       passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,
       resumeAfterShareId: sharedChannelSyncCursors.get(workspaceId),
       priorityShareId,
@@ -7183,9 +7188,14 @@ function registerIpcHandlers(
       try {
         // Born-shared auto-join: discover + join received DM grants.
         await autoJoinReceivedDms(workspace, relay);
-        // Push the member's local ops, pull everyone else's, for every joined
-        // DM (and any other joined shared channel).
-        await syncWorkspaceSharedChannels(workspace.workspaceId);
+        // Push the member's local ops, pull everyone else's, for the joined
+        // DMs (and other shared channels) this bounded pass reaches. The DM the
+        // caller has OPEN is named, so the 4 s poll behind an open conversation
+        // refreshes that conversation instead of only looking like it does.
+        await syncSharedChannelsForChatTarget(
+          workspace.workspaceId,
+          input.openChannelId ? { channelId: input.openChannelId } : undefined,
+        );
         // Owner-side liveness: members' ops land in THIS workspace's own relay
         // bucket; nudge the (debounced) sync engine so they arrive without
         // waiting for an unrelated file edit. No-op when the workspace has no
