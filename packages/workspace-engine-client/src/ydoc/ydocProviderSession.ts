@@ -134,6 +134,13 @@ export interface EngineYdocProviderSession {
     summary?: string;
     settleOnRefusal?: boolean;
   }): Promise<void>;
+  // End the session while writing NOTHING and discarding NOTHING: the daemon
+  // drops the session and its lease and leaves the durable lineage alone, so
+  // the next open resurrects this document's edits. The exit for a session
+  // that may not settle (the artifact is not this session's to write) and
+  // cannot prune (no artifact holds its CRDT's bytes), which would otherwise
+  // hold its lease until the daemon restarts (#665).
+  evict(): Promise<void>;
 }
 
 export async function openEngineYdocProviderSession(
@@ -471,6 +478,32 @@ export async function openEngineYdocProviderSession(
       if (preCloseError !== undefined) {
         throw new YdocReleasedWithSettleFailureError(options.path, preCloseError);
       }
+    },
+
+    async evict() {
+      if (closeComplete) return;
+      closed = true;
+      cancelSettle?.();
+      cancelSettle = null;
+      unsubscribeRemote();
+      unsubscribeRemoteError();
+      unsubscribeResync();
+      unsubscribeSessionError();
+      // No settle, and no `resendMissingState` either: an evict is what a
+      // caller reaches for when the engine has REFUSED this document's text,
+      // and re-offering it would only re-earn the refusal this exit exists to
+      // escape. What the engine already journaled is what survives.
+      await journalChain.catch(() => undefined);
+      await settleChain.catch(() => undefined);
+      try {
+        await session.evict();
+      } catch (error) {
+        closeError = error;
+        throw error;
+      }
+      if (ownsAdapter) adapter.dispose();
+      closeComplete = true;
+      closeError = null;
     },
   };
 }

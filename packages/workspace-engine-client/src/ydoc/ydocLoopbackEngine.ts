@@ -244,6 +244,8 @@ export class YdocLoopbackEngine implements EngineTransport {
         return this.applyExternalMarkdownEdit(request.params);
       case YDOC_METHOD.close:
         return this.close(request.params);
+      case YDOC_METHOD.evict:
+        return this.evict(request.params);
       case YDOC_METHOD.resync:
         return this.resync(request.params);
       default:
@@ -391,6 +393,17 @@ export class YdocLoopbackEngine implements EngineTransport {
     this.requireSession(sessionId);
     this.sessions.delete(sessionId);
     return { closed: true };
+  }
+
+  // The daemon drops the session and its lease and leaves the durable lineage
+  // alone. The loopback's session map IS its lease, and it keeps the file it
+  // holds — an evict writes nothing.
+  private evict(value: JsonValue): JsonValue {
+    const params = asObject(value, "ydoc.evict params");
+    const sessionId = requiredString(params, "sessionId", "ydoc.evict params");
+    this.requireSession(sessionId);
+    this.sessions.delete(sessionId);
+    return { evicted: true };
   }
 
   private resync(value: JsonValue): JsonValue {

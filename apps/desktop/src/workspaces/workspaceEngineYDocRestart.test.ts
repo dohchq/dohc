@@ -74,6 +74,7 @@ async function reconnectFailureCapture(prefix: string) {
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate() {
         throw Object.assign(new Error("control frame encoding failed"), {
           code: "transport-error",
@@ -247,6 +248,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
         if (generation === 2 && secondGenerationApplyCount++ === 0) {
@@ -504,6 +506,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate(update) {
         if (openedGeneration === 1) throw refusal;
         Y.applyUpdate(doc, update);
@@ -603,6 +606,7 @@ it("releases a close-latched failed generation with settle true before the next 
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate(update) {
         // Models the round-1 provider latch: once close starts, another apply
         // resolves without journaling. Capture must never leave this provider
@@ -731,6 +735,7 @@ it("defers a version switch behind a dead generation until release converges", a
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate() {
         applyCount += 1;
         throw refusal;
@@ -883,6 +888,7 @@ it("treats typed session-not-found during release-first rebind as already releas
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate(update) {
         if (openedGeneration === 1) throw new Error("record refusal");
         Y.applyUpdate(doc, update);
@@ -981,6 +987,7 @@ it("an over-cap settle (markdown omitted from the response) leaves the engine's 
       path: options.path,
       head: "present",
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
       },
@@ -1082,6 +1089,7 @@ it("a settle whose materialization was BLOCKED reports an error, never Saved", a
       path: options.path,
       head: "present",
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
       },
@@ -1179,6 +1187,7 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate() {
         throw refusal;
       },
@@ -1384,6 +1393,7 @@ async function daemonDeathCapture(
       // only once `head` is absent, which cannot happen here), so the fixture
       // is asserted on DIRECTLY instead; see `state.reportedLineage`.
       lineage: reportLineage(),
+      evict: async () => undefined,
       async applyLocalUpdate(update) {
         if (!state.daemonAlive) throw transportDeath();
         if (state.refuseApply) throw new Error("record-update-refused");
@@ -2169,6 +2179,7 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
+      evict: async () => undefined,
       applyLocalUpdate(update: Uint8Array): Promise<void> {
         // Generation 1 refuses SYNCHRONOUSLY — no settle is armed, so the
         // hand-over callback never runs on this path.
@@ -2316,6 +2327,7 @@ it("announces a recovered edit exactly once when both arm points run", async () 
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate(update: Uint8Array): Promise<void> {
         // Generation 1 arms its settle, THEN its journal rejects.
         if (opened === 1) throw new Error("record-update-refused");
@@ -2488,6 +2500,7 @@ async function lockedRebindCapture(prefix: string) {
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
+      evict: async () => undefined,
       async applyLocalUpdate(update) {
         // The provider's post-#658 contract for a transient journal refusal:
         // it KEEPS the update (its own ladder resends it from durable state)

@@ -514,6 +514,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: "note.md",
           head: "present" as const,
           lineage: "existing" as const,
+          evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), markdown: "" }) as never,
@@ -560,6 +561,7 @@ describe("workspaceEngineCapture batch capture", () => {
         // every drift case here.
         head: "present" as const,
         lineage: "existing" as const,
+        evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () => {
           await options.onSettled?.({ ...settled, materialized: true } as never, 1);
@@ -2763,6 +2765,7 @@ describe("Rust engine session selection", () => {
           path: "note.md",
           head: "present" as const,
           lineage: "existing" as const,
+          evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "b".repeat(64), markdown: "daemon" }) as never,
@@ -2828,6 +2831,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
         // absent-head refusal never ran in this test at all.
         head: "present" as const,
         lineage: "existing" as const,
+        evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () =>
           ({ sha256: "c".repeat(64), markdown: "" }) as never,
@@ -3063,6 +3067,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           // durable. The peer's update is still in flight behind it.
           head: "absent" as const,
           lineage: "absent" as const,
+          evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
@@ -3101,13 +3106,17 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     // closed itself and dropped every subscription) and cannot be reopened (a
     // refused close reinserts the daemon entry with its lease held).
     //
-    // So the answer is the UNRELEASED refusal, not a verdict about the disk.
-    // It used to be `YDocOpenRacedError`, which is true — something IS writing
-    // the path — but `main` answers it with a bare `available: false` and the
-    // renderer opens the writable plain editor over the session the daemon
-    // just kept (#564, codex r17). What is true of every refused release is
-    // that the engine may still own the document, and that is what has to
-    // reach the surface: read-only, with a retry that discharges the orphan.
+    // Two things must be true of the answer, and #665 changed which refusal
+    // carries them. It may never call the path missing — something IS writing
+    // it — and it may never leave the surface writable over a session the
+    // daemon still holds (#564, codex r17).
+    //
+    // The orphan now EVICTS when its close is refused, so the daemon no longer
+    // holds the session and the second hazard is gone with it. What remains is
+    // the first, and `YDocOpenRacedError` is exactly it: this open's answer is
+    // already stale, open it again — and the next open binds the lineage the
+    // eviction preserved. The path this test guards is that the refusal is
+    // decided by the REFUSED CLOSE, not by a second look at the disk.
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
@@ -3121,6 +3130,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     const peerUpdate = Y.encodeStateAsUpdate(doc);
     const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> = [];
     const settles: string[] = [];
+    let evicts = 0;
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
       openRustYDocProviderSession: async (options) => {
@@ -3132,6 +3142,9 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           path: options.path,
           head: "absent" as const,
           lineage: "absent" as const,
+          evict: async () => {
+            evicts += 1;
+          },
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
@@ -3161,16 +3174,15 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         (error: unknown) => error,
       );
 
-    // MUTATION: let an ordinary release refusal fall through to the disk
-    // verdict -> a raced/artifact refusal, a plain fallback, and two writers
-    // on one path.
-    expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
-    // The daemon's own words are kept as the cause, for whoever reads the log.
-    expect((refusal as Error).cause).toMatchObject({
-      message: "unsettled-close",
-    });
-    // It must NOT claim the version does not have a path something is writing.
+    // MUTATION: drop the `dischargedByEvict` arm (#665) -> the recheck finds
+    // the path still absent and the refusal claims the version does not have a
+    // file a peer is writing into it.
+    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
     expect(isYDocPathNotInVersionError(refusal)).toBe(false);
+    // The lease is gone, so the surface may fall back — that is what makes the
+    // raced refusal safe here where #564 needed the unreleased one.
+    expect(refusal).not.toBeInstanceOf(YDocSessionUnreleasedError);
+    expect(evicts).toBe(1);
     // And the release never escalated, so nothing was materialized.
     expect(closeCalls).toEqual([{ settle: false, settleOnRefusal: false }]);
     expect(settles).toEqual([]);
@@ -3205,6 +3217,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         path: options.path,
         head: "absent" as const,
         lineage: "absent" as const,
+        evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () => {
           settles.push("settle");
@@ -3269,6 +3282,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           path: options.path,
           head: "absent" as const,
           lineage: "absent" as const,
+          evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");

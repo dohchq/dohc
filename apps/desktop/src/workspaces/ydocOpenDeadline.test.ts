@@ -94,6 +94,7 @@ function captureWith(root: string, sessions: EngineWorkspaceSessions) {
       settleNow: async () => ({ sha256: "a".repeat(64), markdown: "" }) as never,
       applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
       close: async () => undefined,
+      evict: async () => undefined,
     }),
   });
 }
@@ -458,6 +459,13 @@ describe("the document open's capture-chain hold (#564)", () => {
           close: async () => {
             throw closeError;
           },
+          // The daemon this fake models is unreachable, so the evict the
+          // orphan tries next fails too and the session stays the daemon's.
+          // That is the precondition both tests below are about: while a
+          // session is unreleased, no refusal may describe the DISK.
+          evict: async () => {
+            throw new Error("evict failed: transport-error");
+          },
         }),
       });
     }
@@ -520,6 +528,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       const doc = new Y.Doc();
       let opens = 0;
       let closes = 0;
+      let evicts = 0;
       const engine = createWorkspaceEngineCapture({
         workspaceId: WORKSPACE_ID,
         rootPath: root,
@@ -558,6 +567,9 @@ describe("the document open's capture-chain hold (#564)", () => {
                 );
               }
             },
+            evict: async () => {
+              evicts += 1;
+            },
           };
         },
       });
@@ -579,6 +591,11 @@ describe("the document open's capture-chain hold (#564)", () => {
       expect(session.doc).toBe(doc);
       // The retry closed the stranded session before binding a new one.
       expect(closes).toBe(2);
+      // And it CLOSED it — a spent transport budget is waited out, never
+      // evicted. MUTATION: drop the `isEngineWorkspaceOpenRefusedError` arm
+      // from the evict condition (#665) -> the orphan is evicted over a
+      // transport hiccup that the very next attempt would have survived.
+      expect(evicts).toBe(0);
 
       await session.close({ settle: false });
       await engine.stop();
@@ -614,7 +631,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       expect(isYDocSessionUnreleasedError(refusal)).toBe(true);
     });
 
-    it("discharges a dirty orphan without settling it over the file", async () => {
+    it("evicts a dirty orphan instead of settling it over the file", async () => {
       // codex r20, and the last data-loss door. The discharge released on
       // easier terms than the release that orphaned the session: no
       // `settleOnRefusal: false`, so a repeated UnsettledClose escalated to a
@@ -622,6 +639,13 @@ describe("the document open's capture-chain hold (#564)", () => {
       // seeded from neither a head nor a snapshot — settling it writes what
       // replication delivered OVER bytes the watcher has not captured yet,
       // which is exactly what rule 1 refuses the open to prevent.
+      //
+      // #665 closed the other end. A close that keeps refusing used to leave
+      // the orphan retained, holding its lease, and on a path no capture will
+      // ever reach — policy-excluded, or over the 128 KiB capture limit — the
+      // document stayed read-only until the daemon restarted. The orphan now
+      // EVICTS: the daemon lets go of the session while its lineage stays
+      // durable, so nothing is written and nothing is discarded.
       const root = await tempRoot();
       const uncaptured = "bytes the watcher has not ingested yet\n";
       await write(root, "note.md", uncaptured);
@@ -629,6 +653,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       const doc = new Y.Doc();
       const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> =
         [];
+      let evicts = 0;
       const engine = createWorkspaceEngineCapture({
         workspaceId: WORKSPACE_ID,
         rootPath: root,
@@ -653,6 +678,9 @@ describe("the document open's capture-chain hold (#564)", () => {
             // would settle over is still uncaptured.
             throw new Error("unsettled-close");
           },
+          evict: async () => {
+            evicts += 1;
+          },
         }),
       });
       engine.start();
@@ -661,16 +689,22 @@ describe("the document open's capture-chain hold (#564)", () => {
       const first = await engine
         .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
         .catch((error: unknown) => error);
-      expect(first).toBeInstanceOf(YDocSessionUnreleasedError);
+      // The session is gone, so the refusal may describe the DISK again: the
+      // file is really there and the plain editor shows its real bytes.
+      // MUTATION: drop the evict fallback (#665) -> a
+      // YDocSessionUnreleasedError, an orphan holding its lease, and a path
+      // that stays read-only until the daemon restarts.
+      expect(first).toBeInstanceOf(YDocUncapturedArtifactError);
+      expect(evicts).toBe(1);
 
-      // "Try again" on the retained orphan.
+      // "Try again" binds a fresh session rather than discharging a retained
+      // orphan, and answers the same honest refusal.
       const retry = await engine
         .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
         .catch((error: unknown) => error);
+      expect(retry).toBeInstanceOf(YDocUncapturedArtifactError);
+      expect(evicts).toBe(2);
 
-      // It refuses again rather than forcing the release, and stays read-only
-      // with a retry — which converges once the watcher captures the file.
-      expect(retry).toBeInstanceOf(YDocSessionUnreleasedError);
       // MUTATION: discharge with `{ settle: false }` alone -> the provider
       // escalates the repeated refusal to a SETTLING close, and the doc lands
       // on top of the user's uncaptured bytes.
@@ -680,6 +714,79 @@ describe("the document open's capture-chain hold (#564)", () => {
       ]);
       // The bytes are still the user's.
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(uncaptured);
+      await engine.stop();
+    });
+
+    it("binds the lineage an evicted orphan left behind, with no restart", async () => {
+      // #665, the whole point. On a path no capture will ever reach — one
+      // `.dohc/files.toml` excludes, or a file between the 128 KiB capture
+      // limit and the 2 MiB editor limit — the orphan's close can never be
+      // satisfied, because only a captured or settled artifact can satisfy it.
+      // Evicting is what breaks that loop: the daemon lets go of the session
+      // and keeps the lineage, so the next open finds the resurrected draft
+      // (head absent, lineage EXISTING) and binds it. Before this, the answer
+      // was ydoc-session-busy until the daemon restarted — and on these two
+      // paths a restart did not help either, because the reopen still found
+      // no head.
+      const root = await tempRoot();
+      const excluded = "a file .dohc/files.toml does not track\n";
+      await write(root, "note.md", excluded);
+      const { sessions } = recordingSessions();
+      const doc = new Y.Doc();
+      let evicted = false;
+      let opens = 0;
+      const engine = createWorkspaceEngineCapture({
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        rustEngineSessions: sessions,
+        openRustYDocProviderSession: async () => {
+          opens += 1;
+          return {
+            doc,
+            initialUpdate: Y.encodeStateAsUpdate(doc),
+            contentKind: "plaintext" as const,
+            // The head stays absent forever: no capture will mint one here.
+            // The LINEAGE is what the evict preserves, and the daemon
+            // resurrects it on the next open (actor.rs).
+            head: "absent" as const,
+            path: "note.md",
+            lineage: evicted ? ("existing" as const) : ("absent" as const),
+            applyLocalUpdate: async () => undefined,
+            settleNow: async () =>
+              ({ sha256: "a".repeat(64), markdown: "" }) as never,
+            applyExternalMarkdownEdit: async () =>
+              ({ kind: "merged" }) as never,
+            close: async () => {
+              throw new Error("unsettled-close");
+            },
+            evict: async () => {
+              evicted = true;
+            },
+          };
+        },
+      });
+      engine.start();
+      await engine.flush();
+
+      const refusal = await engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(YDocUncapturedArtifactError);
+      expect(evicted).toBe(true);
+
+      // MUTATION: drop the evict fallback in `closeEntry` (#665) -> this open
+      // answers YDocSessionUnreleasedError from the retained orphan, and every
+      // later one does too.
+      const session = await engine.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+      });
+      expect(session.doc).toBe(doc);
+      expect(opens).toBe(2);
+      // Nothing was written on the way out.
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(excluded);
+
+      await session.close({ settle: false }).catch(() => undefined);
       await engine.stop();
     });
 
@@ -718,6 +825,12 @@ describe("the document open's capture-chain hold (#564)", () => {
           }) => {
             closeCalls.push({ ...closeOptions });
             throw new Error("unsettled-close");
+          },
+          // The evict fails too, which is what RETAINS the orphan — the
+          // precondition of this test. An orphan the daemon released is not
+          // registered, so no lifecycle sweep can reach it (#665).
+          evict: async () => {
+            throw new Error("evict failed: transport-error");
           },
         }),
       });
@@ -782,6 +895,12 @@ describe("the document open's capture-chain hold (#564)", () => {
               ({ kind: "merged" }) as never,
             close: async () => {
               if (!captured) throw new Error("unsettled-close");
+            },
+            // The evict fails, so the orphan is RETAINED and the capture
+            // exception below is what it still depends on. The daemon that
+            // lets go is the other test above (#665).
+            evict: async () => {
+              throw new Error("evict failed: transport-error");
             },
           };
         },
