@@ -309,8 +309,11 @@ function stubEditorGlobals() {
 /** jsdom implements neither scroll method, and the jump seams are only
  *  observable through them — so stub one on every element and hand back the
  *  spy the test asserts against. */
-function stubScrollSpy(method: "scrollIntoView" | "scrollTo") {
-  const spy = vi.fn();
+function stubScrollSpy(
+  method: "scrollIntoView" | "scrollTo",
+  implementation?: (this: HTMLElement) => void,
+) {
+  const spy = implementation ? vi.fn(implementation) : vi.fn();
   Object.defineProperty(HTMLElement.prototype, method, {
     configurable: true,
     value: spy,
@@ -2148,17 +2151,16 @@ describe("engine markdown source view", () => {
       flashed: boolean;
       text: string | null;
     }> = [];
-    const scrollIntoView = vi.fn(function (this: HTMLElement) {
-      revealedTargets.push({
-        connected: this.isConnected,
-        flashed: this.classList.contains("dohc-outline-target-flash"),
-        text: this.textContent,
-      });
-    });
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
+    const scrollIntoView = stubScrollSpy(
+      "scrollIntoView",
+      function (this: HTMLElement) {
+        revealedTargets.push({
+          connected: this.isConnected,
+          flashed: this.classList.contains("dohc-outline-target-flash"),
+          text: this.textContent,
+        });
+      },
+    );
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
     vi.stubGlobal("dohcDesktop", bridgeMock);
     const headingTarget = { anchor: "plan", nonce: 1 };
