@@ -2167,6 +2167,60 @@ describe("engine markdown source view", () => {
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
   });
 
+  // #685: unlike a consumed search jump, a heading target survives the editor
+  // remount a version switch causes. See HeadingNavigationTarget for why.
+  // Scope is that switch. Clicking another file tab and back does NOT replay:
+  // activateEditorTab routes a file path through openFile, which clears the
+  // target.
+  it("re-applies a heading navigation when the version switches under it", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const headingTarget = { anchor: "plan", nonce: 1 };
+
+    // Deliberately mounted WITHOUT the target, then given it. Mounting with it
+    // lets the pre-engine local editor reveal it once before the Y.Doc binds,
+    // and that extra reveal alone satisfies the count below — the consumable
+    // mutation passes. Delivering it to a bound engine editor is what makes
+    // the second reveal mean the remount.
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="a.md" headingTarget={headingTarget} />,
+    );
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1), {
+      timeout: 5_000,
+    });
+
+    // engineVersionKey reopens the session, so the editor unmounts and a fresh
+    // one binds. Nothing consumed the target, so it stands.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        headingTarget={headingTarget}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+
+    // MUTATION: give headingTarget the onBlockTargetConsumed shape -> one
+    // reveal, and the reader lands at the top of the new version.
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2), {
+      timeout: 5_000,
+    });
+    // WHICH heading, not just how many reveals: the count alone would accept a
+    // second reveal that landed somewhere else.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(flashedBlockText()).toBe("Plan");
+  });
+
   it("retires the jump after one landing, so a later re-read cannot replay it", async () => {
     const scrollIntoView = stubScrollSpy("scrollIntoView");
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
