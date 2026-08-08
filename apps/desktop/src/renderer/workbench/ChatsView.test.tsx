@@ -4519,6 +4519,88 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
+  // The joined lane orders per WIRE, and this is why. refreshOverview reads
+  // the channel list first, so it alone names a channel a sync just imported —
+  // but its share read is still in flight, and a refreshShares issued from the
+  // overview still on screen omits that channel and takes a newer ticket. One
+  // watermark for the whole lane then barred the overview's response outright,
+  // and the imported channel rendered with nothing answering for it: locked,
+  // until some later refresh. A newer claim outranks only what it answered.
+  it("answers a newly imported channel from the older read that alone named it", async () => {
+    let channelReads = 0;
+    bridgeMock.listChatChannels.mockImplementation(() => {
+      channelReads += 1;
+      return Promise.resolve({
+        channels:
+          channelReads === 1
+            ? [teamChannel()]
+            : [
+                teamChannel(),
+                channel({
+                  id: "channel-imported",
+                  name: "imported",
+                  slug: "imported",
+                  wireId: "wire-imported",
+                }),
+              ],
+        fileThreads: [],
+      });
+    });
+    let answerOverviewRead!: (value: ReturnType<typeof shareListing>) => void;
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 2) {
+        // The overview's read: it named both channels, and it stalls.
+        return new Promise((resolve) => {
+          answerOverviewRead = resolve;
+        });
+      }
+      return Promise.resolve(shareListing());
+    });
+    const navigator = (readRevision: number) => (
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        readRevision={readRevision}
+      />
+    );
+    const view = render(navigator(0));
+    await screen.findByTestId("chats-channel-name");
+
+    // The shell reports a landed read; the background overview refresh lists
+    // the imported channel and asks about both.
+    view.rerender(navigator(1));
+    await waitFor(() => expect(shareReads).toBe(2));
+    expect(
+      [...bridgeMock.listChatChannelShares.mock.calls[1]![0].channelWireIds].sort(),
+    ).toEqual(["wire-imported", "wire-team"]);
+
+    // A session revalidation refreshes the shares from what is on screen,
+    // which is still the channel list without the import.
+    act(() => emitCloudSessionChanged("session-a", "ready"));
+    await waitFor(() => expect(shareReads).toBe(3));
+    expect(bridgeMock.listChatChannelShares.mock.calls[2]![0].channelWireIds).toEqual([
+      "wire-team",
+    ]);
+
+    // The overview's older response lands. It is outranked for wire-team, and
+    // for wire-imported it is the only answer there has ever been.
+    await act(async () => {
+      answerOverviewRead(shareListing());
+      await Promise.resolve();
+    });
+
+    const names = await screen.findAllByTestId("chats-channel-name");
+    expect(names.map((element) => element.textContent)).toEqual(["team", "imported"]);
+    await userEvent.click(screen.getAllByTestId("chats-channel")[1]!);
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.getByTestId("chats-channel-title").textContent).toBe("imported");
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+  });
+
   // The one deliberately wire-id-less fixture. ChatChannelRecord.wireId is
   // nullable — a channel with no recorded wire mapping cannot carry a grant,
   // so it is not lockable and never reaches the joined lane. Every other

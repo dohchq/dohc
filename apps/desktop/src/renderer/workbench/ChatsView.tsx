@@ -183,28 +183,106 @@ type ShareReadFailure =
 //
 // Ordering is unaffected: claimLanes still decides who may write at all, and a
 // claim now writes only what it answered.
-function mergeJoinedAnswers(
+// Two different questions, and they must not be confused:
+//
+//  - MERGING is answer-driven. A read writes the channels it answered and
+//    leaves the rest, so a read that never named a channel cannot drop it.
+//  - EVICTION is view-driven. The newest read also discards answers for
+//    channels the view no longer shows — an invitation that was revoked or
+//    claimed by another workspace would otherwise sit in the map forever, and
+//    a cache that grows with history is the growth this whole change removes.
+//
+// `keep` is the newest read's view: its own scope plus anything answered
+// locally since it was issued. Older reads pass null and evict nothing — they
+// are not entitled to say what the view shows.
+export function applyJoinedAnswers(
   current: readonly JoinedChannelAnswer[],
-  next: readonly JoinedChannelAnswer[],
+  answers: readonly JoinedChannelAnswer[],
+  keep: ReadonlySet<string> | null,
 ): JoinedChannelAnswer[] {
   const byWire = new Map(current.map((answer) => [answer.channelWireId, answer]));
-  for (const answer of next) byWire.set(answer.channelWireId, answer);
-  return [...byWire.values()];
+  for (const answer of answers) byWire.set(answer.channelWireId, answer);
+  const merged = [...byWire.values()];
+  return keep === null ? merged : merged.filter((a) => keep.has(a.channelWireId));
+}
+
+// The joined lane's writer, or null when this read may write none of it. It
+// takes the cached answers because only the updater knows them.
+type JoinedWriter = (current: readonly JoinedChannelAnswer[]) => JoinedChannelAnswer[];
+
+// What the joined lane remembers between reads.
+export type JoinedLaneOrder = {
+  // The highest ticket that has ANSWERED each wire id. The lane orders per
+  // WIRE, not per lane: one watermark for the whole lane let a newer read
+  // outrank an older one for channels the newer read never mentioned. A
+  // refreshShares issuing from a stale overview took the watermark, and the
+  // overview response that alone knew about a freshly imported channel was
+  // then barred whole — leaving that channel unanswered, and therefore
+  // locked, until some later refresh. A newer claim outranks only what it
+  // answered.
+  answeredAt: Map<string, number>;
+  // Wire ids this surface answered ITSELF, with no read behind them — today
+  // just a channel it created. They survive eviction until a read names them,
+  // because every read now in flight was issued before they existed.
+  local: Set<string>;
+};
+
+export function emptyJoinedLaneOrder(): JoinedLaneOrder {
+  return { answeredAt: new Map(), local: new Set() };
+}
+
+// The one decision the joined lane makes: what this response may write, and
+// what the cache may still hold once it has. `newestForLane` is the lane
+// claim — only the newest read speaks for what the view shows, so only it may
+// evict.
+//
+// Exported with its state because the property this change exists for — a
+// cache bounded by the view rather than by history — is a property of these
+// two collections and of nothing on screen.
+export function planJoinedCommit(
+  order: JoinedLaneOrder,
+  ticket: number,
+  answers: readonly JoinedChannelAnswer[],
+  newestForLane: boolean,
+): JoinedWriter | null {
+  const writable = answers.filter(
+    (answer) => ticket > (order.answeredAt.get(answer.channelWireId) ?? 0),
+  );
+  for (const answer of writable) order.answeredAt.set(answer.channelWireId, ticket);
+  let keep: Set<string> | null = null;
+  if (newestForLane) {
+    // A channel this read named is answered by a read from now on.
+    for (const answer of answers) order.local.delete(answer.channelWireId);
+    keep = new Set([
+      ...answers.map((answer) => answer.channelWireId),
+      ...order.local,
+    ]);
+    // The watermarks are the same cache. Ordering kept for a channel the view
+    // no longer shows would grow exactly what evicting the answers stopped
+    // growing.
+    for (const wire of order.answeredAt.keys()) {
+      if (!keep.has(wire)) order.answeredAt.delete(wire);
+    }
+  }
+  if (writable.length === 0 && keep === null) return null;
+  return (current) => applyJoinedAnswers(current, writable, keep);
 }
 
 function mergeShareLanes(
   current: ShareListing | null,
   next: ShareListing,
-  lanes: { joined: boolean; relay: boolean },
+  lanes: { joined: JoinedWriter | null; relay: boolean },
 ): ShareListing | null {
   // "Unknown" fails closed in channelIsLocked. Only a reader that answers BOTH
   // questions may replace it; a partial answer would unlock what nothing has
   // vouched for.
-  if (current === null) return lanes.joined && lanes.relay ? next : current;
+  if (current === null) {
+    return lanes.joined !== null && lanes.relay
+      ? { ...next, joined: lanes.joined([]) }
+      : current;
+  }
   return {
-    joined: lanes.joined
-      ? mergeJoinedAnswers(current.joined, next.joined)
-      : current.joined,
+    joined: lanes.joined ? lanes.joined(current.joined) : current.joined,
     granted: lanes.relay ? next.granted : current.granted,
     received: lanes.relay ? next.received : current.received,
     sessionKey: lanes.relay ? next.sessionKey : current.sessionKey,
@@ -217,7 +295,7 @@ function mergeShareLanes(
 // Without this the new channel is unanswered, and unanswered locks: the user
 // creates a channel and lands in it with no composer.
 //
-// It writes ONE key, and mergeJoinedAnswers is what keeps it: a read issued
+// It writes ONE key, and applyJoinedAnswers is what keeps it: a read issued
 // before the create never named this channel, so when it lands it replaces the
 // channels it did name and leaves this entry alone. refreshShares is
 // deliberately not liveToken-guarded, so a token bump would not have been
@@ -1262,6 +1340,19 @@ export function ChatsView(props: {
     },
     [],
   );
+  const joinedOrder = useRef<JoinedLaneOrder>(emptyJoinedLaneOrder());
+  // The ONE path that writes joined answers: the lane claim decides who may
+  // evict, and planJoinedCommit decides everything else.
+  const planJoinedWrite = useCallback(
+    (ticket: number, answers: readonly JoinedChannelAnswer[]): JoinedWriter | null =>
+      planJoinedCommit(
+        joinedOrder.current,
+        ticket,
+        answers,
+        claimLanes(["joinedShares"], ticket),
+      ),
+    [claimLanes],
+  );
   // The cloud-session era share reads are issued under. A session change
   // bumps it, and the commit point refuses any response from an older era —
   // the same liveToken discipline the DM path uses. Defense in depth with
@@ -1409,9 +1500,9 @@ export function ChatsView(props: {
       // discard an older reached answer's authoritative relay rows. The
       // functional update sees a batch-mate's queued listing, so every
       // claimed lane is written.
-      const joined = claimLanes(["joinedShares"], ticket);
+      const joined = planJoinedWrite(ticket, value.joined);
       const relay = relayAuthoritative && claimLanes(["relayShares"], ticket);
-      if (!joined && !relay) return;
+      if (joined === null && !relay) return;
       setChannelShares((current) => {
         if (current !== null) {
           // The cached relay rows are account-scoped: they are preservable
@@ -1434,11 +1525,11 @@ export function ChatsView(props: {
         // rows may seed the listing — they decide channelIsLocked, and a
         // relay-only claim seeding stale joined rows would unlock what
         // nothing has vouched for.
-        return joined ? listing : current;
+        return joined ? { ...listing, joined: joined([]) } : current;
       });
       setSharesWorkspaceId(workspaceId);
     },
-    [claimLanes, workspaceId],
+    [claimLanes, planJoinedWrite, workspaceId],
   );
   const refreshOverview = useCallback(
     async (options?: { background?: boolean }): Promise<void> => {
@@ -1603,7 +1694,10 @@ export function ChatsView(props: {
             // ONLY the joined lane, which is all this read answers. Leaving the
             // relay-backed lane alone also lets a full share read still in
             // flight land its own rows.
-            if (isCurrent() && claimLanes(["joinedShares"], sharesTicket)) {
+            const joined = isCurrent()
+              ? planJoinedWrite(sharesTicket, refreshed.joined)
+              : null;
+            if (joined !== null) {
               setChannelShares((current) =>
                 mergeShareLanes(
                   current,
@@ -1615,7 +1709,7 @@ export function ChatsView(props: {
                     joined: refreshed.joined,
                     sessionKey: null,
                   },
-                  { joined: true, relay: false },
+                  { joined, relay: false },
                 ),
               );
             }
@@ -1633,7 +1727,7 @@ export function ChatsView(props: {
     } finally {
       if (badgeRead.current === mine) badgeRead.current = null;
     }
-  }, [claimLanes, takeCommitTicket, workspaceId]);
+  }, [planJoinedWrite, takeCommitTicket, workspaceId]);
 
   const refreshBookmarks = useCallback(async () => {
     const workspaceGeneration = bookmarkWorkspaceGeneration.current;
@@ -1764,6 +1858,9 @@ export function ChatsView(props: {
       relayShares: 0,
       relayReach: 0,
     };
+    // Per-wire ordering belongs to the workspace that produced it; another
+    // workspace's channels are not these.
+    joinedOrder.current = emptyJoinedLaneOrder();
     setSharePanelOpen(false);
     setShareEmail("");
     setShareReadOnly(false);
@@ -3321,7 +3418,10 @@ export function ChatsView(props: {
             : current,
         );
         // In the same update that shows the channel: a channel on screen with
-        // no answer in the lane is a locked channel.
+        // no answer in the lane is a locked channel. Registered as answered
+        // LOCALLY, so the read already in flight — issued before this channel
+        // existed, and therefore evicting to a view without it — keeps it.
+        if (result.channel.wireId) joinedOrder.current.local.add(result.channel.wireId);
         setChannelShares((current) => answerCreatedChannel(current, result.channel));
         // The completion is the user's command landing (see openConversation).
         props.onNavCommand?.({ level: "channel", channel: result.channel });
