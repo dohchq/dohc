@@ -263,6 +263,117 @@ fn local_only_close_prunes_the_cache() {
     );
 }
 
+/// Seed the head a capture writes: the version row, the text blob, and the
+/// `snapshots` row that points at it. This is the disk -> engine direction, so
+/// no settle runs and `last_settled_sha` stays NULL.
+fn seed_captured_head(store: &mut dohc_engine_storage::EngineStore, key: &DocKey, text: &str) {
+    store
+        .write_with(&NoFaults, |tx| {
+            let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+                rusqlite::params![sha, text.len() as i64, text],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO versions \
+                 (workspace_id, version_id, kind, name, created_at_ms) \
+                 VALUES (?1, ?2, 'main', 'main', 1)",
+                rusqlite::params![key.workspace_id, key.version_id],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO snapshots \
+                 (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
+                  latest_moment_id, metadata_origin) \
+                 VALUES (?1, ?2, ?3, 'notes/doc.md', ?4, 1, 'capture-moment', 'capture')",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id, sha],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("seed the captured head");
+}
+
+#[test]
+fn a_captured_head_lets_a_never_settled_local_close_prune() {
+    // #665. The prune guard asks one question — does the artifact already hold
+    // these bytes — and used to read one column, `last_settled_sha`, which only
+    // a SETTLE writes. A capture puts the document's own projection into the
+    // head and touches no column, so the guard refused a document that was
+    // already on disk, and capture -> discharge -> open never converged: every
+    // lap refused, and the file stayed read-only until the daemon restarted.
+    //
+    // MUTATION: drop the `head_content_sha` arm from the `covered` check in
+    // `close_session` — this close returns UnsettledClose and the expect below
+    // fails.
+    let mut ts = fresh_store("captured-head-prune");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    let delta = doc.plaintext_insert(0, "what the user typed");
+    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    seed_captured_head(&mut ts.store, &key, "what the user typed");
+
+    let out =
+        committed(close_session(&mut ts.store, &key, false, &NoFaults, 1_400).expect("close"));
+    assert!(
+        matches!(out, CloseOutcome::Pruned { .. }),
+        "a head that already holds the projection covers the prune: {out:?}"
+    );
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 0, "updates pruned");
+}
+
+#[test]
+fn a_head_holding_other_bytes_still_refuses_the_local_close() {
+    // The other half of the same rule, and the reason the fix is a COMPARISON
+    // rather than "a head exists". A file the user edited outside dohc has a
+    // head too, and pruning against it would discard the document's own text
+    // with nothing on disk holding it.
+    let mut ts = fresh_store("stale-head-refuses");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    let delta = doc.plaintext_insert(0, "what the user typed");
+    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    seed_captured_head(&mut ts.store, &key, "something else entirely");
+
+    assert!(
+        matches!(
+            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            Err(CollabError::UnsettledClose)
+        ),
+        "a head that holds OTHER bytes proves nothing about this document"
+    );
+    assert_eq!(
+        count(&ts.store, "ydoc_updates", &key),
+        1,
+        "the refused close kept the cache"
+    );
+}
+
 #[test]
 fn replicated_close_never_prunes_the_lineage() {
     let mut ts = fresh_store("repl-keep");
