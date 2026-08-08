@@ -241,13 +241,22 @@ describe("syncJoinedSharedChannels", () => {
       workspaceId: "ws-1",
       relay: RELAY,
       channels,
-      passRows: 2,
+      passRows: 3,
+      // The cursor wraps the rotation to share-1, so its range (share-1 ..
+      // share-3) CONTAINS the priority row — the case where a naive fill would
+      // spend two of the three slots on share-2.
+      resumeAfterShareId: "share-5",
       priorityShareId: "share-2",
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
     });
-    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-2", "share-1"]);
-    expect(result.uncovered).toBe(3);
+    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual([
+      "share-2",
+      "share-1",
+      "share-3",
+    ]);
+    expect(result.uncovered).toBe(2);
+    expect(result.resumeAfterShareId).toBe("share-3");
   });
 
   it("ignores a priority share this workspace holds no live row for", async () => {

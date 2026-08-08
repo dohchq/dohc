@@ -1486,10 +1486,13 @@ function syncWorkspaceSharedChannels(
 // gate uses. An unresolved target simply syncs without a priority.
 async function syncSharedChannelsForChatTarget(
   workspaceId: string,
-  target: { channelId: string } | { threadId: string },
+  target?: { channelId: string } | { threadId: string },
 ): Promise<void> {
   const entry = findWorkspace(workspaceId);
-  if (!entry) return;
+  if (!entry || !target) {
+    await syncWorkspaceSharedChannels(workspaceId);
+    return;
+  }
   const joinedChannel = await joinedSharedChannelForTarget({
     workspaceId,
     sharedChannels: entry.sharedChannels,
@@ -2609,10 +2612,10 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
         reactionAuthorId: localReactorFallbackId(),
       };
     },
-    onWrite: (workspace) => {
+    onWrite: (workspace, target) => {
       notifyRenderer();
       activity.queueCloudSync(workspace.workspaceId);
-      void syncWorkspaceSharedChannels(workspace.workspaceId);
+      void syncSharedChannelsForChatTarget(workspace.workspaceId, target);
       void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
         console.error("[desktop] CLI dispatch scan:", error);
       });

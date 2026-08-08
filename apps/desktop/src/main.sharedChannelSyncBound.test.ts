@@ -102,5 +102,13 @@ describe("the shared-channel sync pass is bounded in production", () => {
     expect(mainSource).toContain(
       "void syncSharedChannelsForChatTarget(workspaceId, { threadId });",
     );
+    // The CLI chat surface is message-bearing too. Asserted as its own block so
+    // another wired trigger cannot stand in for it.
+    expect(mainSource).toContain(
+      "onWrite: (workspace, target) => {\n" +
+        "      notifyRenderer();\n" +
+        "      activity.queueCloudSync(workspace.workspaceId);\n" +
+        "      void syncSharedChannelsForChatTarget(workspace.workspaceId, target);",
+    );
   });
 });
