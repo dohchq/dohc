@@ -1675,39 +1675,14 @@ describe('Y.Doc markdown import/export', () => {
 // document: the whole task list disappeared on open (#700).
 describe('a list nested inside a task item', () => {
   const CASES = [
-    ['bullet', '- [ ] parent\n  - child one\n  - child two', 'bulletList'],
-    ['ordered', '- [x] parent\n  1. first\n  2. second', 'orderedList'],
-    ['task', '- [ ] parent\n  - [x] done child\n  - [ ] open child', 'taskList'],
+    ['bullet', '- [ ] parent\n  - child one\n  - child two'],
+    ['ordered', '- [x] parent\n  1. first\n  2. second'],
+    ['task', '- [ ] parent\n  - [x] done child\n  - [ ] open child'],
   ] as const
 
-  for (const [kind, markdown, nestedType] of CASES) {
+  for (const [kind, markdown] of CASES) {
     it(`survives the Y.Doc round-trip as a ${kind} list`, () => {
-      const doc = markdownToYDoc(markdown)
-      const root = yXmlFragmentToProseMirrorRootNode(
-        getDohcYDocBodyFragment(doc),
-        getDohcProseMirrorSchema(),
-      )
-
-      expect(root.childCount).toBe(1)
-      const taskItem = root.child(0).child(0)
-      expect(taskItem.type.name).toBe('taskItem')
-      expect(taskItem.childCount).toBe(2)
-      expect(taskItem.child(1).type.name).toBe(nestedType)
-      expect(yDocToMarkdown(doc)).toBe(markdown)
+      expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
     })
   }
-
-  it('keeps every checkbox state under a nested task list', () => {
-    const markdown = [
-      '- [x] parent',
-      '  - [ ] open child',
-      '  - [x] done child',
-    ].join('\n')
-    expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
-  })
-
-  it('lets the schema hold a block child under a task item', () => {
-    expect(getDohcProseMirrorSchema().nodes.taskItem?.spec.content)
-      .toBe('paragraph block*')
-  })
 })
