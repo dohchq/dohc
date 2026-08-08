@@ -18,6 +18,7 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { dohcMarkdownExtensions } from "./extensions";
+import { markdownToYDoc } from "./import-export";
 import { MarkdownEditor } from "./MarkdownEditor";
 import {
   findEmptyListItemParagraph,
@@ -396,6 +397,43 @@ describe("MarkdownEditor empty list item focus", () => {
     ol.innerHTML = "<li><p>Test</p></li>";
 
     expect(findEmptyListItemParagraph(ol.querySelector("li"))).toBeNull();
+  });
+});
+
+// The live editor registers its own extension list, and the collaboration
+// binding converts the Y.Doc through THAT schema. A `paragraph+` task item
+// makes the indented list schema-invalid, so binding drops the whole task list
+// and the document opens empty (#700).
+describe("MarkdownEditor nested checklists", () => {
+  it("binds an indented list under a checkbox from the Y.Doc", async () => {
+    const markdown = ["- [ ] parent", "  - child one", "  - child two"].join("\n");
+    const ydoc = markdownToYDoc(markdown);
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: markdown,
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/checklist.md",
+        knownFiles: [],
+        collab: {
+          ydoc,
+          status: "connected",
+          peerCount: 0,
+          synced: true,
+        },
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(editor.textContent).toContain("parent"));
+      expect(editor.querySelector("li[data-checked] ul")).not.toBeNull();
+      expect(editor.textContent).toContain("child one");
+      expect(editor.textContent).toContain("child two");
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+    }
   });
 });
 

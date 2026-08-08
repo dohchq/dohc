@@ -1,5 +1,6 @@
 import { Extension, Mark, Node, markInputRule } from '@tiptap/core'
 import type { JSONContent } from '@tiptap/core'
+import { TaskItem } from '@tiptap/extension-list'
 import { makeImageNodeView, type ImageSrcContext } from './imageSrc'
 import { makeMathNodeView } from './mathRender'
 
@@ -994,6 +995,12 @@ export const DohcTableRowHeight = Extension.create({
     ]
   },
 })
+
+// A bare TaskItem takes `paragraph+`, which makes an indented list under a
+// checkbox schema-invalid — the Y.Doc conversion then drops the whole task
+// list (#700). `nested: true` widens it to `paragraph block*`. Every dohc
+// schema registers THIS extension so the editor and the conversions agree.
+export const DohcTaskItem = TaskItem.configure({ nested: true })
 
 export const dohcMarkdownExtensions = [
   DohcImage,

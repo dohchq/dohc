@@ -4,7 +4,7 @@ import { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
-import { TaskItem, TaskList } from '@tiptap/extension-list'
+import { TaskList } from '@tiptap/extension-list'
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
@@ -15,7 +15,11 @@ import {
   parseFrontmatter,
   stringifyFrontmatter,
 } from '../markdown/frontmatter'
-import { dohcMarkdownExtensions, escapeHighlightMarkdown } from './extensions'
+import {
+  DohcTaskItem,
+  dohcMarkdownExtensions,
+  escapeHighlightMarkdown,
+} from './extensions'
 
 const BODY_FIELD = 'body'
 const PLAIN_TEXT_FIELD = 'plainText'
@@ -28,7 +32,7 @@ const extensions: AnyExtension[] = [
   ...dohcMarkdownExtensions,
   StarterKit,
   TaskList,
-  TaskItem,
+  DohcTaskItem,
   TableKit,
 ]
 const markdownManager = new MarkdownManager({
