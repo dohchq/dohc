@@ -37,6 +37,7 @@ import {
   escapeHighlightMarkdown,
   type DohcImageStorage,
 } from "./extensions";
+import { FenceWideningCodeBlock } from "./import-export";
 import type { ImageSrcContext } from "./imageSrc";
 import {
   handleImageDrop,
@@ -208,14 +209,22 @@ const LINK_MARK_OPTIONS = { openOnClick: false, linkOnPaste: false };
 // clearly against warm paper and charcoal alike — the inline style resolves the
 // CSS variable against the editor's cascade.
 const DROP_CURSOR_OPTIONS = { color: "var(--dohc-accent)", width: 2 };
+// codeBlock: false on both starter kits hands the node to
+// FenceWideningCodeBlock below (in STATIC_EDITOR_EXTENSIONS, so it applies
+// regardless of which starter kit is active) instead of StarterKit's default,
+// which hardcodes a three-backtick fence and truncates a code block whose own
+// content contains a ``` line on export (#704) — the same rule import-export.ts
+// registers for engine-driven saves.
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
+  codeBlock: false,
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
 const COLLAB_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   undoRedo: false,
+  codeBlock: false,
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
@@ -260,6 +269,7 @@ const STATIC_EDITOR_EXTENSIONS = [
   ...dohcMarkdownExtensions,
   TaskList,
   DohcTaskItem,
+  FenceWideningCodeBlock,
   TABLE_KIT_EXTENSION,
   MARKDOWN_EXTENSION,
   findReplaceExtension,

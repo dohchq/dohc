@@ -31,8 +31,12 @@ const DOHC_SCHEMA_VERSION = 1
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 
 // Match packages/ydoc-projection's rewriteCodeBlockFences/backtickFence rule.
-// This prevents content from closing its own fence (#704).
-const DohcCodeBlock = CodeBlock.extend({
+// This prevents content from closing its own fence (#704). Exported so every
+// markdown-serializing editor surface (this module and MarkdownEditor.tsx's
+// live editor) registers the same widened fence instead of drifting again.
+// Named distinctly from extensions.ts's DohcCodeBlock, which parses the
+// `code` markdown token on import — this one only overrides export.
+export const FenceWideningCodeBlock = CodeBlock.extend({
   renderMarkdown: (node, helpers) => {
     let output = ''
     const language = node.attrs?.language || ''
@@ -51,7 +55,7 @@ const DohcCodeBlock = CodeBlock.extend({
 const extensions: AnyExtension[] = [
   ...dohcMarkdownExtensions,
   StarterKit.configure({ codeBlock: false }),
-  DohcCodeBlock,
+  FenceWideningCodeBlock,
   TaskList,
   DohcTaskItem,
   TableKit,
