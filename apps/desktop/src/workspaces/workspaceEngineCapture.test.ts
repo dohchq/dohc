@@ -3227,6 +3227,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
       undefined,
     );
     let opens = 0;
+    let evicts = 0;
     let reportedDeath = false;
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
@@ -3248,7 +3249,9 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
             return "absent" as const;
           },
           lineage: "absent" as const,
-          evict: async () => undefined,
+          evict: async () => {
+            evicts += 1;
+          },
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "f".repeat(64), markdown: "" }) as never,
@@ -3275,6 +3278,9 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     expect(refusal).toBeInstanceOf(YDocOpenRacedError);
     expect(opens).toBe(2);
     expect(outcomes).toEqual([false, true]);
+    // MUTATION: drop the `releaseObligation` branch from the wrapper's
+    // `evict()` -> the obligated session's lease remains held forever.
+    expect(evicts).toBe(1);
     await engine.stop();
   });
 

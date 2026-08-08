@@ -2016,11 +2016,15 @@ export function createWorkspaceEngineCapture(
       evict() {
         return append(async () => {
           if (closed) return;
-          // No revive, no settle, no release ladder — an evict writes nothing,
-          // so a dead generation has nothing left to carry and its lease went
-          // down with the daemon that held it. Only a LIVE generation still
-          // holds one, and letting go of it is the whole operation.
-          if (current !== null) await current.evict();
+          // No revive, no settle, no release ladder. Evict whichever
+          // generation still holds the lease, including a dead wrapper's
+          // retained release obligation.
+          if (current !== null) {
+            await current.evict();
+          } else if (releaseObligation !== null) {
+            await releaseObligation.evict();
+            releaseObligation = null;
+          }
           closed = true;
           current = null;
           clearDeadYDocSession(deadSessionToken);
