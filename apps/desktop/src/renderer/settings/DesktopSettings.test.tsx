@@ -567,6 +567,39 @@ describe("DesktopSettings", () => {
     expect(note.textContent).not.toContain("restart");
   });
 
+  // The third state (#687, codex round 6), and the one the live-setting gate
+  // got wrong: the session has NO recorder and the user has already followed
+  // the instruction, so the setting reads on. Main still holds the
+  // recorder-less activity — `runnerSelfTest` takes `prepareRunWorkspace`,
+  // which refuses without a capture — so enabling Test runner here would show
+  // a button known to fail and delete the restart instruction on the way.
+  it("keeps the restart visible after the setting is turned on without a recorder", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        sessionRecorderOn={false}
+        onClose={() => {}}
+      />,
+    );
+
+    // Configured, and the engine setting is ON (the schema default) — so the
+    // live-setting gate alone would enable this button.
+    await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toBe(
+        "The workspace engine starts when dohc starts. Restart dohc to test the runner.",
+      ),
+    );
+    const button = await screen.findByTestId("runner-self-test-button");
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    await user.click(button);
+    expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
+  });
+
   it("surfaces a failed runner self-test without enabling dispatch", async () => {
     bridge.runnerSelfTest.mockResolvedValueOnce({
       ok: false,

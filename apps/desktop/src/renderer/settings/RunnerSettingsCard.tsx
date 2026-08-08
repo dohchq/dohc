@@ -34,6 +34,30 @@ function runnerSettingsEqual(left: RunnerSettings, right: RunnerSettings): boole
   );
 }
 
+// What the self-test surface may offer, and what it must say (#687). The
+// SESSION decides, not the live setting: main builds the recorder when it
+// opens the workspace, so a workspace opened without one can only refuse a
+// self-test until dohc restarts — however the user sets the toggle now. The
+// setting chooses which instruction is left to give.
+// Unknown (undefined) reads as the old live-setting behavior: no answer from
+// main is not evidence of a missing recorder, and the restart it prescribes
+// is heavier than needed but never false.
+function runnerEngineNote(
+  engineEnabled: boolean,
+  sessionRecorderOn: boolean | undefined,
+): string | null {
+  if (!engineEnabled) {
+    return sessionRecorderOn
+      ? "The workspace engine is off, so there is no chat to test. Turn it on in Advanced to test the runner."
+      : "The workspace engine is off, so there is no chat to test. Turn it on in Advanced. Then restart dohc to test the runner.";
+  }
+  // Setting on, session without a recorder: the toggle is already where it
+  // needs to be, so the only step left is the restart that reads it.
+  return sessionRecorderOn === false
+    ? "The workspace engine starts when dohc starts. Restart dohc to test the runner."
+    : null;
+}
+
 export function RunnerSettingsCard(props: {
   workspaceId: string;
   runner: RunnerSettings;
@@ -41,11 +65,7 @@ export function RunnerSettingsCard(props: {
   // workspace records nothing, so the main process refuses it there.
   engineEnabled: boolean;
   // Whether main built a recorder for this workspace in THIS app session
-  // (#687). Undefined until its status arrives. The note below needs it
-  // because the two off states have different recoveries: a workspace opened
-  // with the engine off gets its recorder only from a restart, while one
-  // opened with the engine on still holds a live recorder the user can use
-  // the moment they switch the setting back on.
+  // (#687). Undefined until its status arrives. See `runnerEngineNote`.
   sessionRecorderOn: boolean | undefined;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
 }) {
@@ -139,6 +159,7 @@ export function RunnerSettingsCard(props: {
 
   const configured = commandDraft.trim().length > 0;
   const selfTestRunning = selfTest.status === "running";
+  const engineNote = runnerEngineNote(engineEnabled, sessionRecorderOn);
 
   return (
     <section
@@ -265,22 +286,27 @@ export function RunnerSettingsCard(props: {
             Enable the runner on one device per workspace — multiple enabled devices
             will each run tasks independently.
           </p>
-          {engineEnabled ? null : (
+          {engineNote ? (
             <p
               data-testid="runner-self-test-engine-note"
               className="m-0 mt-1 text-[10px] leading-relaxed text-subtle"
             >
-              The workspace engine is off, so there is no chat to test.{" "}
-              {sessionRecorderOn
-                ? "Turn it on in Advanced to test the runner."
-                : "Turn it on in Advanced. Then restart dohc to test the runner."}
+              {engineNote}
             </p>
-          )}
+          ) : null}
         </div>
         <button
           type="button"
           data-testid="runner-self-test-button"
-          disabled={!engineEnabled || !configured || selfTestRunning}
+          // A button that cannot succeed must not enable: the note above owes
+          // the user the restart, and enabling here would take that
+          // instruction away and hand them main's refusal instead.
+          disabled={
+            !engineEnabled ||
+            sessionRecorderOn === false ||
+            !configured ||
+            selfTestRunning
+          }
           onClick={() => void runSelfTest()}
           className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
