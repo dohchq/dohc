@@ -13,16 +13,22 @@ function answer(channelWireId: string): JoinedChannelAnswer {
   return { channelWireId, joined: null };
 }
 
-// One commit through the planner, applied to the cache it plans against.
+// One commit through the planner, applied to the cache it plans against. The
+// surface shows what the read named unless a test says otherwise.
 function commit(
   order: ReturnType<typeof emptyJoinedLaneOrder>,
   cache: JoinedChannelAnswer[],
   ticket: number,
   wireIds: readonly string[],
-  newestForLane = true,
+  options: { newestForLane?: boolean; shown?: readonly string[] | null } = {},
 ): JoinedChannelAnswer[] {
-  const write = planJoinedCommit(order, ticket, wireIds.map(answer), newestForLane);
-  return write === null ? cache : write(cache);
+  const write = planJoinedCommit(order, {
+    ticket,
+    answers: wireIds.map(answer),
+    newestForLane: options.newestForLane ?? true,
+    shown: options.shown === undefined ? wireIds : options.shown,
+  });
+  return write === null ? cache : write.write(cache);
 }
 
 describe("planJoinedCommit", () => {
@@ -46,6 +52,32 @@ describe("planJoinedCommit", () => {
     ]);
     // The per-wire ordering is the same cache and is bounded the same way.
     expect(order.answeredAt.size).toBe(3);
+  });
+
+  it("keeps a channel the view shows that this read did not name", () => {
+    const order = emptyJoinedLaneOrder();
+    // The overview answered both channels, and both are on screen.
+    let cache = commit(order, [], 6, ["wire-team", "wire-imported"]);
+    // A read issued from the older render names only wire-team, and it carries
+    // the newer ticket. Its own scope is not the view: evicting to it takes
+    // the answer away from a channel the user is looking at, which locks it.
+    cache = commit(order, cache, 7, ["wire-team"], {
+      shown: ["wire-team", "wire-imported"],
+    });
+    expect(cache.map((entry) => entry.channelWireId).sort()).toEqual([
+      "wire-imported",
+      "wire-team",
+    ]);
+  });
+
+  it("evicts nothing while the surface cannot say what it shows", () => {
+    const order = emptyJoinedLaneOrder();
+    let cache = commit(order, [], 1, ["wire-a", "wire-b"]);
+    cache = commit(order, cache, 2, ["wire-a"], { shown: null });
+    expect(cache.map((entry) => entry.channelWireId).sort()).toEqual([
+      "wire-a",
+      "wire-b",
+    ]);
   });
 
   it("keeps a channel this surface answered itself until a read names it", () => {
@@ -78,7 +110,9 @@ describe("planJoinedCommit", () => {
     // The overview's own response is older, and it alone knows about the
     // channel a sync just imported. Barring it whole left that channel
     // unanswered, and unanswered locks.
-    cache = commit(order, cache, 6, ["wire-team", "wire-imported"], false);
+    cache = commit(order, cache, 6, ["wire-team", "wire-imported"], {
+      newestForLane: false,
+    });
     expect(cache.map((entry) => entry.channelWireId).sort()).toEqual([
       "wire-imported",
       "wire-team",
@@ -87,14 +121,18 @@ describe("planJoinedCommit", () => {
 
   it("refuses an older response for a wire a newer read already answered", () => {
     const order = emptyJoinedLaneOrder();
-    const write = planJoinedCommit(order, 7, [answer("wire-team")], true);
-    const cache = write === null ? [] : write([]);
+    const write = planJoinedCommit(order, {
+      ticket: 7,
+      answers: [answer("wire-team")],
+      newestForLane: true,
+      shown: ["wire-team"],
+    });
+    const cache = write === null ? [] : write.write([]);
     // The same channel, answered by a read that is older. Ordering per wire is
     // still ordering: it may not repaint a fresher answer.
-    const stale = planJoinedCommit(
-      order,
-      6,
-      [
+    const stale = planJoinedCommit(order, {
+      ticket: 6,
+      answers: [
         {
           channelWireId: "wire-team",
           joined: {
@@ -106,8 +144,9 @@ describe("planJoinedCommit", () => {
           },
         },
       ],
-      false,
-    );
+      newestForLane: false,
+      shown: ["wire-team"],
+    });
     expect(stale).toBeNull();
     expect(cache).toEqual([answer("wire-team")]);
   });
@@ -117,7 +156,7 @@ describe("planJoinedCommit", () => {
     let cache = commit(order, [], 5, ["wire-a", "wire-b"]);
     // An older response names a narrower scope. It does not speak for what the
     // view shows, so wire-b stays.
-    cache = commit(order, cache, 4, ["wire-c"], false);
+    cache = commit(order, cache, 4, ["wire-c"], { newestForLane: false });
     expect(cache.map((entry) => entry.channelWireId).sort()).toEqual([
       "wire-a",
       "wire-b",

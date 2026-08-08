@@ -4601,6 +4601,251 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
+  const importedChannel = () =>
+    channel({
+      id: "channel-imported",
+      name: "imported",
+      slug: "imported",
+      wireId: "wire-imported",
+    });
+
+  // Eviction is view-driven, and a read's own scope is not the view. The
+  // overview finds the imported channel and answers for it; a share read
+  // issued from the render BEFORE that names only the old channel, and it
+  // carries the newer ticket. Evicting to that scope took the answer away
+  // from a channel that was already on screen — which locks it. Driven by
+  // the substitution reviewer; adopted as the pin.
+  it("keeps the imported channel answered when the stale newer read lands last", async () => {
+    let channelReads = 0;
+    bridgeMock.listChatChannels.mockImplementation(() => {
+      channelReads += 1;
+      return Promise.resolve({
+        channels:
+          channelReads === 1
+            ? [teamChannel()]
+            : [
+                teamChannel(),
+                channel({
+                  id: "channel-imported",
+                  name: "imported",
+                  slug: "imported",
+                  wireId: "wire-imported",
+                }),
+              ],
+        fileThreads: [],
+      });
+    });
+    let answerOverviewRead!: (value: ReturnType<typeof shareListing>) => void;
+    let answerSessionRead!: (value: ReturnType<typeof shareListing>) => void;
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 2) {
+        return new Promise((resolve) => {
+          answerOverviewRead = resolve;
+        });
+      }
+      if (shareReads === 3) {
+        return new Promise((resolve) => {
+          answerSessionRead = resolve;
+        });
+      }
+      return Promise.resolve(shareListing());
+    });
+    const navigator = (readRevision: number) => (
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        readRevision={readRevision}
+      />
+    );
+    const view = render(navigator(0));
+    await screen.findByTestId("chats-channel-name");
+
+    view.rerender(navigator(1));
+    await waitFor(() => expect(shareReads).toBe(2));
+    expect(
+      [...bridgeMock.listChatChannelShares.mock.calls[1]![0].channelWireIds].sort(),
+    ).toEqual(["wire-imported", "wire-team"]);
+
+    act(() => emitCloudSessionChanged("session-a", "ready"));
+    await waitFor(() => expect(shareReads).toBe(3));
+    expect(bridgeMock.listChatChannelShares.mock.calls[2]![0].channelWireIds).toEqual([
+      "wire-team",
+    ]);
+
+    // The overview's older response lands first: it alone names wire-imported,
+    // and it puts the channel on screen.
+    await act(async () => {
+      answerOverviewRead(shareListing());
+      await Promise.resolve();
+    });
+    const shown = await screen.findAllByTestId("chats-channel-name");
+    expect(shown.map((element) => element.textContent)).toEqual(["team", "imported"]);
+
+    // Then the newer read lands, naming only the channel the stale view showed.
+    await act(async () => {
+      answerSessionRead(shareListing());
+      await Promise.resolve();
+    });
+
+    await userEvent.click(screen.getAllByTestId("chats-channel")[1]!);
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.getByTestId("chats-channel-title").textContent).toBe("imported");
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+  });
+
+  // A badge pass settles the surface while the first share lookup is still in
+  // flight, and that lookup was scoped before this list existed. So the pass
+  // that shows the list has to ask about the list: otherwise the channel it
+  // just added gets no answer from anyone, and unanswered locks it.
+  it("answers the channels a badge pass shows before the first share lookup returns", async () => {
+    let channelReads = 0;
+    bridgeMock.listChatChannels.mockImplementation(() => {
+      channelReads += 1;
+      return Promise.resolve({
+        channels:
+          channelReads === 1 ? [teamChannel()] : [teamChannel(), importedChannel()],
+        fileThreads: [],
+      });
+    });
+    let answerFirstLookup!: (value: ReturnType<typeof shareListing>) => void;
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      // The mount's lookup stalls; nothing has answered the share lanes.
+      if (shareReads === 1) {
+        return new Promise((resolve) => {
+          answerFirstLookup = resolve;
+        });
+      }
+      return Promise.resolve(shareListing());
+    });
+    renderView();
+    await waitFor(() => expect(shareReads).toBe(1));
+
+    // Activity: the pass lists a channel a sync just pulled and shows it.
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(shareReads).toBe(2));
+    expect(
+      [...bridgeMock.listChatChannelShares.mock.calls[1]![0].channelWireIds].sort(),
+    ).toEqual(["wire-imported", "wire-team"]);
+
+    // The mount's lookup finally answers, for the list as it was.
+    await act(async () => {
+      answerFirstLookup(shareListing());
+      await Promise.resolve();
+    });
+
+    await userEvent.click(screen.getAllByTestId("chats-channel")[1]!);
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.getByTestId("chats-channel-title").textContent).toBe("imported");
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+  });
+
+  // A read that lost the relay lane may still answer the joined lane for a
+  // channel nothing newer covered. That must not let it SEED the listing: a
+  // newer lookup that failed established "unknown" on purpose, and the older
+  // read's relay rows are exactly what that unknown replaced.
+  it("does not re-seed stale invitations under an unknown a newer read established", async () => {
+    let answerStaleRead!: (value: ReturnType<typeof shareListing>) => void;
+    let shareReads = 0;
+    const invitation = {
+      shareId: "share-invite",
+      channelWireId: "wire-invite",
+      access: "read-write" as const,
+      granterEmail: "owner@example.com",
+    };
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) {
+        return Promise.resolve(shareListing({ received: [invitation] }));
+      }
+      // The read that will land last, carrying the invitation it read then.
+      if (shareReads === 2) {
+        return new Promise((resolve) => {
+          answerStaleRead = resolve;
+        });
+      }
+      return Promise.reject(new Error("signed out"));
+    });
+    renderView();
+    await screen.findByTestId("chats-join-shared");
+
+    act(() => emitCloudSessionChanged("session-a", "ready"));
+    await waitFor(() => expect(shareReads).toBe(2));
+    // A newer revalidation fails: dohc has no listing it can stand behind.
+    act(() => emitCloudSessionChanged("session-a", "ready"));
+    await waitFor(() => expect(shareReads).toBe(3));
+    await screen.findByTestId("chats-shares-unreadable");
+
+    await act(async () => {
+      answerStaleRead(shareListing({ received: [invitation] }));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("chats-shares-unreadable")).toBeTruthy();
+    expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+    await userEvent.click(screen.getByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(screen.getByTestId("chats-readonly-note").textContent).toContain(
+      "read-only for you",
+    );
+  });
+
+  // The badge pass reads the joined lane only. It speaks for no relay lane, so
+  // it can correct a listing but never establish one — and a failure the user
+  // asked for may have nulled the listing while its read was in flight.
+  it("keeps a badge read from establishing a listing a failure cleared", async () => {
+    let answerBadgeRead!: (value: { joined: never[] }) => void;
+    let shareReads = 0;
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) return Promise.resolve(shareListing());
+      return Promise.reject(new Error("signed out"));
+    });
+    bridgeMock.listJoinedSharedChannels.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answerBadgeRead = resolve;
+        }),
+    );
+    renderView();
+    await screen.findByTestId("chats-channel-name");
+
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(bridgeMock.listJoinedSharedChannels).toHaveBeenCalled());
+    // The user's own revalidation fails while that read is in flight, so the
+    // listing is unknown on purpose.
+    act(() => emitCloudSessionChanged("session-a", "ready"));
+    await screen.findByTestId("chats-shares-unreadable");
+
+    await act(async () => {
+      answerBadgeRead({ joined: [] });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("chats-shares-unreadable")).toBeTruthy();
+    await userEvent.click(screen.getByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(screen.getByTestId("chats-readonly-note").textContent).toContain(
+      "read-only for you",
+    );
+  });
+
   // The one deliberately wire-id-less fixture. ChatChannelRecord.wireId is
   // nullable — a channel with no recorded wire mapping cannot carry a grant,
   // so it is not lockable and never reaches the joined lane. Every other
