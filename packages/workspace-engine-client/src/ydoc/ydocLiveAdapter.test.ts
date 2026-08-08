@@ -2519,4 +2519,50 @@ describe("the ydoc.open deadline (#616)", () => {
     ).rejects.toBe(dropped);
     adapter.dispose();
   });
+
+  it("evicts without settling, closing, or handing the text over again", async () => {
+    // #665. An evict is what a caller reaches for when the engine has REFUSED
+    // this document's text. Settling it, closing it, or re-offering it would
+    // only re-earn that refusal — the session must simply end, with the
+    // durable lineage left exactly as it stands.
+    const engine = seedPlaintextEngine("on disk");
+    const methods: string[] = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request: Request) {
+        methods.push(request.method);
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+    });
+    await provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (text) => {
+        text.insert(0, "typed and never settled");
+      }),
+    );
+    methods.length = 0;
+
+    await provider.evict();
+
+    // MUTATION: route `evict` through the close ladder -> ydoc.settle and
+    // ydoc.close appear here, and the refusal the evict escapes comes back.
+    expect(methods).toEqual([YDOC_METHOD.evict]);
+    // The lease is gone, so the path binds again.
+    const reopened = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+    });
+    await reopened.close({ settle: false });
+  });
 });

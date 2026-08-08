@@ -3804,29 +3804,20 @@ export function createWorkspaceEngineCapture(
           try {
             await session.close(effective);
           } catch (error) {
-            // RECONCILE BEFORE DISCHARGE (#665). An orphan can neither settle
-            // — the artifact is not this session's to write — nor prune, while
-            // the daemon's guard says no artifact holds its CRDT's bytes. Both
-            // exits closed, the refused close reinserts the session, and the
-            // lease it keeps answers every later open of this path with
-            // `ydoc-session-busy` until the daemon restarts.
+            // THE ORPHAN'S THIRD EXIT (#665). It may not settle — the rule
+            // above — and its prune-close refuses while no artifact holds its
+            // CRDT's bytes. On a policy-excluded path, or a file over the
+            // 128 KiB capture limit, no capture will ever mint that artifact,
+            // so the refused close's reinserted lease answered every later
+            // open with `ydoc-session-busy` until the daemon restarted.
             //
-            // Evicting is the third exit, and it is the daemon's own teardown
-            // narrowed to one session: it writes nothing and discards nothing,
-            // so the durable lineage keeps every update this document
-            // journaled and the next open resurrects them. Two populations
-            // reach it and cannot leave any other way — a policy-excluded path
-            // and a file between the 128 KiB capture limit and the 2 MiB
-            // editor limit — because no capture will ever mint their head.
+            // An evict writes nothing and discards nothing: the daemon lets go
+            // of the session and keeps the lineage, so the next open
+            // resurrects this document's edits.
             //
-            // ONLY an orphan. A session someone HOLDS is converged by its
-            // holder, and evicting it would take a live editor's session away
-            // while its text is still unsettled.
-            //
-            // And only a TERMINAL refusal. A busy store or a spent transport
-            // budget can be waited out — the close ladder above and the
-            // caller's own retry already do — and evicting for one would end a
-            // session that had nothing wrong with it.
+            // ONLY an orphan — a session someone HOLDS is converged by its
+            // holder. And only a TERMINAL refusal: a busy store or a spent
+            // budget is waited out by the ladders that already exist.
             if (
               liveEntry.orphaned &&
               !isTransientEngineCause(error) &&
