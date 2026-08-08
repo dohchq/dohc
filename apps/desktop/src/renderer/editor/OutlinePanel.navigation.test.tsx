@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { MarkdownEditor } from "./MarkdownEditor";
+import * as intraBlock from "./intraBlock";
 import {
   resolveOutlineHeadingTarget,
   revealDocPosition,
@@ -20,7 +21,7 @@ vi.mock("./OutlinePanel", async (importActual) => {
     ...actual,
     revealDocPosition: (
       editor: Parameters<typeof actual.revealDocPosition>[0],
-      pos: number,
+      pos: Parameters<typeof actual.revealDocPosition>[1],
       resolveElement: () => HTMLElement | null,
       moveCursorTo?: number,
     ) => {
@@ -256,6 +257,141 @@ describe("MarkdownEditor block navigation", () => {
     revealDocPosition(editor, 20, () => null, 20);
     expect(editor.state.selection.from).toBe(20);
     editor.destroy();
+  });
+
+  // #688: the block a search result lands on can be a hundred items long.
+  // The target carries the block's own source, and the reveal lands the line
+  // inside it — proven here through the DOM the reader would be looking at.
+  describe("landing inside a long block", () => {
+    // Every element the reveal scrolled, and the flashed text it drew.
+    function revealDom(view: { container: HTMLElement }) {
+      const flashed = Array.from(
+        view.container.querySelectorAll<HTMLElement>(".dohc-outline-target-flash"),
+      );
+      return {
+        elements: flashed,
+        text: flashed.map((node) => node.textContent).join(""),
+      };
+    }
+
+    function renderJump(value: string, line: number) {
+      const scrollIntoView = vi.fn();
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true,
+        value: scrollIntoView,
+      });
+      const view = render(
+        createElement(MarkdownEditor, {
+          value,
+          onDirty: vi.fn(),
+          workspaceId: "workspace-1",
+          path: "notes/plan.md",
+          knownFiles: [],
+          // The mapping the shell sends, not a hand-written one.
+          blockTarget: { ...intraBlock.blockTargetForLine(value, line), nonce: 1 },
+        }),
+      );
+      return { view, scrollIntoView };
+    }
+
+    it("scrolls the matched item of a long list, not the list", async () => {
+      const value = Array.from({ length: 60 }, (_, item) => `- Item ${item + 1}`)
+        .join("\n");
+      const { view, scrollIntoView } = renderJump(value, 47);
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+      // MUTATION: return null from intraBlockRange -> the flash covers the
+      // whole <ul> and the scrolled element is the list, so the reader lands
+      // on "Item 1" with the match 46 items below the fold.
+      const { elements, text } = revealDom(view);
+      expect(text).toBe("Item 47");
+      expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);
+      expect(elements[0]?.closest("li")?.textContent).toBe("Item 47");
+    });
+
+    it("scrolls a formatted list item by its rendered text", async () => {
+      const value = "- alpha first\n- **beta** second\n- gamma third";
+      const { view, scrollIntoView } = renderJump(value, 2);
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+      // Pin the formatting-aware renderer wiring in scrollToBlock.
+      const { elements, text } = revealDom(view);
+      expect(text).toBe("beta second");
+      expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);
+      expect(elements[0]?.closest("li")?.textContent).toBe("beta second");
+    });
+
+    it("scrolls the matched line of a long fenced block", async () => {
+      const value = [
+        "```",
+        ...Array.from({ length: 80 }, (_, line) => `line ${line + 1}`),
+        "```",
+      ].join("\n");
+      const { view, scrollIntoView } = renderJump(value, 65);
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+      const { elements, text } = revealDom(view);
+      expect(text).toBe("line 64");
+      expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);
+      expect(elements[0]?.closest("pre")).toBeTruthy();
+    });
+
+    it("scrolls the block itself when the inner mapping is unsure", async () => {
+      // A quote: it has children, and no rule maps a source line onto them.
+      const value = ["> one", "> two", "> three", "> four"].join("\n");
+      const { view, scrollIntoView } = renderJump(value, 3);
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+      const { elements } = revealDom(view);
+      expect(elements).toHaveLength(1);
+      expect(elements[0]?.tagName).toBe("BLOCKQUOTE");
+      expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);
+    });
+
+    it("drops the inner match when the block index is clamped", async () => {
+      const value = "- First\n- Shared\n\nMiddle\n\nLast paragraph";
+      const target = {
+        ...intraBlock.blockTargetForLine(value, 2),
+        index: 99,
+        nonce: 1,
+      };
+      const refine = vi
+        .spyOn(intraBlock, "intraBlockRange")
+        .mockImplementation((_container, containerPos) => ({
+          from: containerPos + 1,
+          to: containerPos + 5,
+        }));
+      const scrollIntoView = vi.fn();
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true,
+        value: scrollIntoView,
+      });
+      const view = render(
+        createElement(MarkdownEditor, {
+          value,
+          onDirty: vi.fn(),
+          workspaceId: "workspace-1",
+          path: "notes/plan.md",
+          knownFiles: [],
+          blockTarget: target,
+        }),
+      );
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+      await waitFor(() => expect(revealDom(view).elements).toHaveLength(1));
+
+      const { elements, text } = revealDom(view);
+      expect(refine).not.toHaveBeenCalled();
+      expect(text).toBe("Last paragraph");
+      expect(elements).toHaveLength(1);
+      expect(elements[0]?.tagName).toBe("P");
+      expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);
+    });
   });
 
   it("reveals a block without asking for a cursor move", async () => {
