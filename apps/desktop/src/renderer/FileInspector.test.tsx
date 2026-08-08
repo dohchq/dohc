@@ -2138,10 +2138,10 @@ describe("engine markdown source view", () => {
   });
 
   // #685: unlike a consumed search jump, a heading target survives the editor
-  // remount a version switch causes. See HeadingNavigationTarget for why. A
-  // tab switch away and back replays it too — the shell withholds delivery
-  // while another tab is active (headingTarget?.path === wb.activeTab) rather
-  // than clearing it — and that is the same rule, not a second one.
+  // remount a version switch causes. See HeadingNavigationTarget for why.
+  // Scope is that switch. Clicking another file tab and back does NOT replay:
+  // activateEditorTab routes a file path through openFile, which clears the
+  // target.
   it("re-applies a heading navigation when the version switches under it", async () => {
     const scrollIntoView = stubScrollSpy("scrollIntoView");
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
