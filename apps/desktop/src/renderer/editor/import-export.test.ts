@@ -49,6 +49,48 @@ function expectStableMarkdownRoundTrip(
 // frontmatter ordering, and custom-node preservation. Inline fixtures keep the
 // suite self-contained.
 describe('desktop editor markdown round-trip', () => {
+  it('widens a code fence when the block content contains a fence', () => {
+    const content = 'before\n```\nafter'
+    const doc = yDocFromBody([
+      {
+        type: 'codeBlock',
+        attrs: { language: 'js' },
+        content: [{ type: 'text', text: content }],
+      },
+    ])
+
+    const once = yDocToMarkdown(doc)
+    expect(once).toMatch(/^`{4,}js$/m)
+
+    const roundTripped = markdownToYDoc(once)
+    const roundTrippedBody = yXmlFragmentToProseMirrorRootNode(
+      getDohcYDocBodyFragment(roundTripped),
+      getDohcProseMirrorSchema(),
+    ).toJSON() as JSONContent
+    const codeBlock = roundTrippedBody.content?.[0]
+    expect(codeBlock?.type).toBe('codeBlock')
+    expect(codeBlock?.content?.map(child => child.text ?? '').join('')).toBe(content)
+    expect(yDocToMarkdown(roundTripped)).toBe(once)
+  })
+
+  it('matches the projection exporter for collision-free code delimiters', () => {
+    const doc = yDocFromBody([
+      {
+        type: 'codeBlock',
+        attrs: { language: 'js' },
+        content: [{ type: 'text', text: 'before\n```\nafter' }],
+      },
+    ])
+
+    expect(yDocToMarkdown(doc)).toBe([
+      '````js',
+      'before',
+      '```',
+      'after',
+      '````',
+    ].join('\n'))
+  })
+
   it('keeps malformed frontmatter visible instead of dropping it', () => {
     const input = ['---', 'id: atom_1', 'bad: [unclosed', '---', '# Body'].join('\n')
 

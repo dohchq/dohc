@@ -1,5 +1,7 @@
 import type { AnyExtension, JSONContent } from '@tiptap/core'
 import { getHTMLFromFragment, getSchema } from '@tiptap/core'
+import { backtickFence } from '@dohc/ydoc-projection'
+import { CodeBlock } from '@tiptap/extension-code-block'
 import { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
@@ -28,9 +30,28 @@ const META_FIELD = 'meta'
 const DOHC_SCHEMA_VERSION = 1
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 
+// Match packages/ydoc-projection's rewriteCodeBlockFences/backtickFence rule.
+// This prevents content from closing its own fence (#704).
+const DohcCodeBlock = CodeBlock.extend({
+  renderMarkdown: (node, helpers) => {
+    let output = ''
+    const language = node.attrs?.language || ''
+    const content = helpers.renderChildren(node.content ?? [])
+    const fence = backtickFence(content, 3)
+    if (!node.content) {
+      output = `${fence}${language}\n\n${fence}`
+    } else {
+      const lines = [`${fence}${language}`, content, fence]
+      output = lines.join('\n')
+    }
+    return output
+  },
+})
+
 const extensions: AnyExtension[] = [
   ...dohcMarkdownExtensions,
-  StarterKit,
+  StarterKit.configure({ codeBlock: false }),
+  DohcCodeBlock,
   TaskList,
   DohcTaskItem,
   TableKit,
