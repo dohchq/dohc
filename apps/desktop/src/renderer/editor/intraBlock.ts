@@ -25,10 +25,10 @@
 //    does a Y.Doc that has drifted from the artifact search numbered.
 //  - A code block whose matched line is empty: an empty inline range renders
 //    no element to scroll to.
-//  - A list whose counted items disagree with the items the editor built.
-//    The count is the oracle, the same way lineBlocks.test.ts holds the block
-//    rules against the real parse: a drifted document, and any list shape the
-//    marker rule below does not model, are rejected rather than guessed at.
+//  - A list whose counted items disagree with the items the editor built, or
+//    whose counted child's rendered text does not contain the matched line's
+//    rendered text. The count rejects drift and unmodeled shapes; because it
+//    can agree by coincidence, the text check rejects the wrong child.
 //  - A list whose matched line belongs to its FIRST item, nested lines
 //    included — that item starts where the block does.
 
@@ -135,9 +135,11 @@ function codeLineRange(
   return to > from ? { from, to } : null;
 }
 
-/** The item holding the matched line, by counting the item starts above it —
- *  and only when that counting produces the number of items the editor built.
- *  The item's CONTENT is the range, so the reveal has text to render. */
+/** The item holding the matched line, found by counting item starts above it
+ *  only when the count equals childCount and the child's rendered text contains
+ *  the matched line's rendered text. The text check rejects a wrong child when
+ *  the counts agree by coincidence. The item's CONTENT is the range, so the
+ *  reveal has text to render. */
 function listItemRange(
   container: ProseMirrorNode,
   containerPos: number,

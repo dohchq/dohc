@@ -310,6 +310,19 @@ describe("MarkdownEditor block navigation", () => {
       expect(elements[0]?.closest("li")?.textContent).toBe("Item 47");
     });
 
+    it("scrolls a formatted list item by its rendered text", async () => {
+      const value = "- alpha first\n- **beta** second\n- gamma third";
+      const { view, scrollIntoView } = renderJump(value, 2);
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+      // Pin the formatting-aware renderer wiring in scrollToBlock.
+      const { elements, text } = revealDom(view);
+      expect(text).toBe("beta second");
+      expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);
+      expect(elements[0]?.closest("li")?.textContent).toBe("beta second");
+    });
+
     it("scrolls the matched line of a long fenced block", async () => {
       const value = [
         "```",

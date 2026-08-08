@@ -303,17 +303,11 @@ export type LineBlock = {
   endLine: number;
 };
 
-/** PURE: the index of the top-level block holding 1-based `line` of `body`.
- *  A line in the gap between blocks resolves to the block above it; a line
- *  past the end resolves to the last block. Returns 0 for an empty body. */
-export function blockIndexForLine(body: string, line: number): number {
-  return blockForLine(body, line).index;
-}
-
 /** PURE: the top-level block holding 1-based `line` of `body`, with the line
  *  span it covers — which is what lets a caller slice the block's own source
- *  and refine a landing inside it (intraBlock.ts). Same walk, same rules;
- *  `blockIndexForLine` is this without the span. */
+ *  and refine a landing inside it (intraBlock.ts). A line in the gap between
+ *  blocks resolves to the block above it; a line past the end resolves to the
+ *  last block. Returns index 0 for an empty body. */
 export function blockForLine(body: string, line: number): LineBlock {
   const lines = body.split(/\r?\n/);
   // Blocks opened so far, and the one holding `line` with its first line.
