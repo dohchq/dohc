@@ -414,7 +414,7 @@ function message(threadId: string, id: string, body: string, agent = false) {
 // ignored the caller's scope would model less than production and lock every
 // demo channel the moment demo channels carry wire ids.
 export function answerDemoJoinedLane(
-  channelWireIds: readonly string[] = [],
+  channelWireIds: readonly string[],
 ): Array<{ channelWireId: string; joined: null }> {
   return channelWireIds.map((channelWireId) => ({ channelWireId, joined: null }));
 }
@@ -630,14 +630,14 @@ const demoBridge = {
       ],
     };
   },
-  async listChatChannelShares(payload: { channelWireIds?: readonly string[] }) {
+  async listChatChannelShares(payload: { channelWireIds: readonly string[] }) {
     return {
       joined: answerDemoJoinedLane(payload.channelWireIds),
       sessionKey: null,
       relay: { state: "answered" as const, granted: [], received: [] },
     };
   },
-  async listJoinedSharedChannels(payload: { channelWireIds?: readonly string[] }) {
+  async listJoinedSharedChannels(payload: { channelWireIds: readonly string[] }) {
     return { joined: answerDemoJoinedLane(payload.channelWireIds) };
   },
   async syncDms() {

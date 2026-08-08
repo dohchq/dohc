@@ -81,6 +81,5 @@ describe("answerDemoJoinedLane", () => {
 
   it("answers nothing for a caller that named nothing", () => {
     expect(answerDemoJoinedLane([])).toEqual([]);
-    expect(answerDemoJoinedLane()).toEqual([]);
   });
 });
