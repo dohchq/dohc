@@ -33,7 +33,9 @@ from each other inside one OS user. This matches every file-on-disk peer
 the user's files first. A Chrome profile does not protect its folder from
 the other profiles either — any process the OS user runs can read them all.
 Per-account encryption or per-store account gates are declined; do not
-build them.
+build them. Declined means encryption as an isolation boundary between
+accounts. Secret storage is untouched: credentials stay sealed at rest
+(Electron `safeStorage`), as they are today.
 
 **The dohc account is the organizational boundary, implemented as
 profiles.** Each account gets its own profile: its own data directory
@@ -46,6 +48,9 @@ window.
 Consequence: today's behavior — switch accounts and still see the previous
 account's whole workspace list — is wrong by design, not by taste. The fix
 is the profile switcher, not credential filters bolted onto shared stores.
+Profiles replace list filtering only. Remote-to-session authorization
+checks — such as the credential match a workspace remote must pass before
+a token attaches — remain.
 
 ## What this settles
 
@@ -58,7 +63,10 @@ is the profile switcher, not credential filters bolted onto shared stores.
   sphere question is already answered by which account the sender wrote
   to, as with email. An account-level DM inbox that lives outside every
   workspace is worth real consideration — evaluate it inside the sync
-  program (#356), where chat storage is rethought anyway.
+  program (#356), where chat storage is rethought anyway. Today every
+  chat is scoped to a workspace; adopting that inbox means either
+  revising that invariant explicitly or keeping the inbox to request
+  metadata while chat state stays in a workspace.
 - **#646 / #356** — sharing across spheres is ordinary sharing to another
   account, like sending a Google Doc to an outside address. No
   cross-sphere machinery inside one account.
