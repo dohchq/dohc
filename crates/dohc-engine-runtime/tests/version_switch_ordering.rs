@@ -1,10 +1,11 @@
+use dohc_engine_collab::{ContentKind, Regime, Ydoc};
 use dohc_engine_crypto::create_key_file;
 use dohc_engine_domain::{
     CreateNamedVersion, SecretDelete, SecretDiskIntent, SecretWrite, WriteText,
 };
 use dohc_engine_runtime::{
-    ActiveVersionSwitch, CancellationToken, NoFaults, RuntimeError, SelfWriteRecorder,
-    WorkspaceSupervisor,
+    ActiveVersionSwitch, CancellationToken, CaptureIngestBinary, NoFaults, RuntimeError,
+    SelfWriteRecorder, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
 use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults};
@@ -48,6 +49,86 @@ fn write_for(
         now_ms,
         request_id: None,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_head_is_reported_as_unsettled_instead_of_failing_internally() {
+    const WS: &str = "ws-binary-unsettled";
+    const PATH: &str = "notes/binary.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = scratch.engine_db_path().expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WS.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    let open = actor
+        .ydoc_open_state(
+            WS.to_owned(),
+            2,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open ydoc");
+    actor
+        .ydoc_record_update(
+            open.key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            Ydoc::wire().plaintext_insert(0, "durable text"),
+            None,
+            true,
+            None,
+            3,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record ydoc update");
+    actor
+        .capture_ingest_binary(
+            CaptureIngestBinary {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                bytes: vec![0xff, 0xfe, 0x00],
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture binary head");
+
+    let content_kind = actor
+        .ydoc_version_unsettled_content_kind(
+            WS.to_owned(),
+            "main".to_owned(),
+            Vec::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("binary head must produce an honest unsettled result");
+    assert_eq!(content_kind, Some(ContentKind::Plaintext));
+    supervisor.close(&database).expect("close actor");
 }
 
 struct RewriteAtJobStart {

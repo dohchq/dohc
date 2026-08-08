@@ -2660,11 +2660,44 @@ describe("the ydoc.open deadline (#616)", () => {
     await reseeded.close({ settle: false });
   });
 
+  it("resurrects a remote update after eviction", async () => {
+    const engine = seedPlaintextEngine("on disk");
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      sendRequest: (request) => engine.sendRequest(request),
+    };
+    const open = async () =>
+      await openEngineYdocProviderSession({
+        transport,
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+        onRemoteUpdate: () => undefined,
+        scheduleSettle: () => () => undefined,
+      });
+
+    const first = await open();
+    engine.applyRemoteUpdate(
+      engine.activeSessionIds()[0]!,
+      plaintextUpdate(first.initialUpdate, (text) => {
+        text.insert(0, "remote: ");
+      }),
+    );
+    await first.evict();
+
+    const reopened = await open();
+    expect(reopened.lineage).toBe("existing");
+    expect(reopened.doc.getText("plainText").toString()).toBe(
+      "remote: on disk",
+    );
+    await reopened.close({ settle: false });
+  });
+
   it("evicts without settling, closing, or handing the text over again", async () => {
-    // #665. An evict is what a caller reaches for when the engine has REFUSED
-    // this document's text. Settling it, closing it, or re-offering it would
-    // only re-earn that refusal — the session must simply end, with the
-    // durable lineage left exactly as it stands.
+    // #665. Evict does not SETTLE or CLOSE. When nothing is owed,
+    // `resendMissingState` is a no-op, so the provider hands over no text again
+    // and sends only `ydoc.evict`.
     const engine = seedPlaintextEngine("on disk");
     const methods: string[] = [];
     const transport: EngineTransport = {

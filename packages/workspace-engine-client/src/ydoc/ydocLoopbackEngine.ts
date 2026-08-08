@@ -225,6 +225,7 @@ export class YdocLoopbackEngine implements EngineTransport {
   ): void {
     const session = this.requireSession(sessionId);
     Y.applyUpdate(session.doc, update);
+    this.journalSessionState(session);
     this.emitRemoteUpdate(sessionId, update, options);
   }
 
@@ -348,18 +349,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     Y.applyUpdate(validationDoc, Y.encodeStateAsUpdate(session.doc));
     Y.applyUpdate(validationDoc, update);
     Y.applyUpdate(session.doc, update);
-    // Journaled DURABLY, not into the session: this is the row the daemon
-    // keeps when the session goes away.
-    //
-    // The session's WHOLE state, not the delta alone. A delta is positioned
-    // against the state its own session was seeded from, so replaying it onto
-    // a doc seeded again from the file would leave it unintegrated. The daemon
-    // has no such gap — its seed and its rows are one durable object — so the
-    // fake stores what that object holds.
-    const key = fileKey(session.workspace, session.versionId, session.path);
-    const lineage = this.lineages.get(key) ?? declaredDoc();
-    Y.applyUpdate(lineage, Y.encodeStateAsUpdate(session.doc));
-    this.lineages.set(key, lineage);
+    this.journalSessionState(session);
     this.recordedUpdates.push(update);
     session.updateSeq += 1;
     return { seq: session.updateSeq };
@@ -418,6 +408,7 @@ export class YdocLoopbackEngine implements EngineTransport {
         }
       }
     });
+    this.journalSessionState(session);
     this.emitRemoteUpdate(
       session.sessionId,
       Y.encodeStateAsUpdate(session.doc, before),
@@ -451,6 +442,15 @@ export class YdocLoopbackEngine implements EngineTransport {
     this.requireSession(sessionId);
     this.sessions.delete(sessionId);
     return { evicted: true };
+  }
+
+  private journalSessionState(session: LoopbackSession): void {
+    // Journal the session's whole state because each delta depends on the
+    // state that seeded its session.
+    const key = fileKey(session.workspace, session.versionId, session.path);
+    const lineage = this.lineages.get(key) ?? declaredDoc();
+    Y.applyUpdate(lineage, Y.encodeStateAsUpdate(session.doc));
+    this.lineages.set(key, lineage);
   }
 
   private resync(value: JsonValue): JsonValue {

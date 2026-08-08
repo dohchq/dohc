@@ -3083,13 +3083,9 @@ export function createWorkspaceEngineCapture(
         // materializes the Y.Doc over the user's uncaptured file (#564, codex
         // r20).
         //
-        // A discharge that refuses now EVICTS instead, so the usual outcome is
-        // that the session ends here and the next open binds the lineage the
-        // eviction preserved (#665). An orphan is only retained when the evict
-        // fails too — the daemon still holds it, the open refuses as
-        // unreleased, and that state converges the old way: once the watcher
-        // captures the file, the lineage is no longer dirty against it and the
-        // next discharge releases cleanly.
+        // A terminal refusal on an orphan now EVICTS, so the next open binds
+        // the preserved lineage (#665). A transient or workspace-open refusal
+        // retains the orphan and waits it out through the existing ladders.
         //
         // Only an orphan. A failing-close session someone still HOLDS is
         // converged by its holder and by the version ops, and a second open
