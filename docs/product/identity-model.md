@@ -38,13 +38,22 @@ the user's files first. A Chrome profile does not protect its folder from
 the other profiles either — any process the OS user runs can read them all.
 Per-account encryption or per-store account gates are declined; do not
 build them. Declined means encryption as an isolation boundary between
-accounts. Secret storage is untouched: credentials stay sealed at rest
-(Electron `safeStorage`), as they are today.
+accounts. Secret storage is untouched: where the OS keychain is available,
+credentials stay sealed at rest through Electron `safeStorage`; where it
+is not (a Linux box without a secret service, CI), the store already
+falls back to marked plaintext. Profiles change neither half of that
+contract.
 
 **The dohc account is the organizational boundary, implemented as
 profiles.** Each account gets its own profile: its own data directory
-holding that account's workspace list, credentials, drafts, ui-state, and
-DM home map. Signing into an account means being in its profile. Another
+holding that account's workspace list, credentials, drafts, app-level UI
+state, and DM home map. Workspace-owned restoration
+(`<workspace>/.dohc/ui-state.json`) stays with its workspace and travels
+with it; the profile holds only the app-level remainder. A profile is
+keyed by the account's server plus its stable user id, never by email
+alone — the same address on dohc Cloud and on a self-hosted deployment
+is two accounts and two profiles. Signing into an account means being in
+its profile. Another
 account's workspaces are not hidden by security — they are simply not part
 of this profile, the way another Chrome profile's tabs are not in this
 window.
