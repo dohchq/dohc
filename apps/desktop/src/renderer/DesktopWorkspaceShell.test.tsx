@@ -3034,6 +3034,29 @@ describe("history page", () => {
     });
   });
 
+  // The Next has to be the one that works (#687). Main decides the recorder
+  // once per workspace per app session — `openWorkspaceActivity` retains every
+  // workspace it opens and `workspaceActivity.open` no-ops for one it already
+  // watches — so leaving the workspace and coming back re-reads the flag
+  // nowhere. Same instruction the Chats surface gives, for the same cause.
+  it("tells the user to restart, not to reopen the workspace", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
+    bridge.openWorkspace = vi.fn(async () => offStatus);
+    bridge.getSyncStatus = vi.fn(async () => offStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    await waitFor(() =>
+      expect(placeholder.textContent).toContain(
+        "Turn it on. Then restart dohc to record history.",
+      ),
+    );
+    expect(placeholder.textContent).not.toContain("reopen");
+  });
+
   // #542: the renderer's own settings read failed, and main has NOT said
   // recording is off — it may be recording right now. The placeholder must
   // not blame Settings, and must not promise "not recorded": either would be
@@ -6456,6 +6479,17 @@ describe("version-compare off copy", () => {
     expect(copy).toContain("Versions are off for this workspace.");
     expect(copy).toContain("Settings → Advanced");
     expect(copy).not.toContain("no versions");
+  });
+
+  // The Next has to be the one that works (#687). Main decides the recorder
+  // once per workspace per app session — `openWorkspaceActivity` retains every
+  // workspace it opens and `workspaceActivity.open` no-ops for one it already
+  // watches — so leaving the workspace and coming back re-reads the flag
+  // nowhere. Same instruction the Chats surface gives, for the same cause.
+  it("tells the user to restart, not to reopen the workspace", () => {
+    const copy = versionCompareOffCopy({ ...base, historyRecordingOff: true });
+    expect(copy).toContain("Turn it on. Then restart dohc to compare versions.");
+    expect(copy).not.toContain("reopen");
   });
 
   it("names the unreadable settings file instead of blaming the toggle", () => {
