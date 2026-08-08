@@ -2,7 +2,6 @@ import type * as Y from "yjs";
 import {
   isEngineStoreBusyRefusal,
   isTransientEngineRefusal,
-  isYdocSessionNotFoundRefusal,
 } from "../live/daemonLiveAdapter";
 import {
   RemoteYdocApplyError,
@@ -439,27 +438,19 @@ export async function openEngineYdocProviderSession(
         try {
           await session.close({ settle: false });
         } catch (error) {
-          if (!isYdocSessionNotFoundRefusal(error)) {
-            // The escalation preserves pending edits through a transient
-            // failure, and it is right for every ordinary teardown. It is
-            // WRONG for a caller releasing a session it is about to declare
-            // absent: the daemon refuses the release precisely BECAUSE the
-            // lineage holds content, and settling it writes the file that
-            // caller is about to say does not exist. `settleOnRefusal: false`
-            // hands the refusal back instead, and the daemon keeps the session
-            // (ydoc_close_inner reinserts it), so the caller still has a live
-            // session to decide about.
-            if (closeOptions?.settleOnRefusal === false) throw error;
-            try {
-              // Escalate to a settling close after a transient failure so
-              // pending edits are preserved.
-              await session.close({ settle: true });
-            } catch (settlingCloseError) {
-              if (!isYdocSessionNotFoundRefusal(settlingCloseError)) {
-                throw settlingCloseError;
-              }
-            }
-          }
+          // The escalation preserves pending edits through a transient
+          // failure, and it is right for every ordinary teardown. It is
+          // WRONG for a caller releasing a session it is about to declare
+          // absent: the daemon refuses the release precisely BECAUSE the
+          // lineage holds content, and settling it writes the file that
+          // caller is about to say does not exist. `settleOnRefusal: false`
+          // hands the refusal back instead, and the daemon keeps the session
+          // (ydoc_close_inner reinserts it), so the caller still has a live
+          // session to decide about.
+          if (closeOptions?.settleOnRefusal === false) throw error;
+          // Escalate to a settling close after a transient failure so
+          // pending edits are preserved.
+          await session.close({ settle: true });
         }
         if (ownsAdapter) adapter.dispose();
         closeComplete = true;

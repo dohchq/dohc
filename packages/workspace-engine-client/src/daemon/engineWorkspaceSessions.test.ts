@@ -739,6 +739,41 @@ describe("EngineWorkspaceSessions", () => {
     expect(clientLookups).toBeGreaterThanOrEqual(3);
   });
 
+  // The pacing tests above pin the GROWTH of the transport backoff; nothing
+  // pinned its ceiling, so the delay could double without limit and the whole
+  // suite stayed green (#678). Three capped delays distinguish a ceiling from
+  // a slower uncapped curve, and eight attempts is what it takes to see them.
+  it("stops doubling the transport backoff at its ceiling", async () => {
+    const workspace = await tempWorkspace("workspace-backoff-ceiling");
+    const client = new MockClient("handle-backoff-ceiling");
+    const delays: number[] = [];
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      {
+        transportRebindAttempts: 8,
+        sleep: async (delayMs) => {
+          delays.push(delayMs);
+        },
+      },
+    );
+
+    await expect(
+      sessions.run(
+        workspace,
+        async () => {
+          throw transportFailure();
+        },
+        { retryTransportErrors: true },
+      ),
+    ).rejects.toMatchObject({ code: "transport-error" });
+
+    // Literals, not the exported constant: an expectation that reads the value
+    // it pins moves with it, and ships green for any ceiling at all.
+    // MUTATION: raise the clamp -> the tail reads 1600, 3200, 6400 and this
+    // fails. Nothing else in the suite notices.
+    expect(delays).toEqual([100, 200, 400, 800, 1_000, 1_000, 1_000]);
+  });
+
   // #564: the retry deadline bounds how long one run may keep WAITING on
   // transport recovery. It gates retries only — a healthy first attempt is
   // never rejected, however small the deadline.
