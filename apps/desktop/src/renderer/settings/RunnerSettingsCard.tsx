@@ -263,7 +263,7 @@ export function RunnerSettingsCard(props: {
               className="m-0 mt-1 text-[10px] leading-relaxed text-subtle"
             >
               The workspace engine is off, so there is no chat to test. Turn it on
-              in Advanced.
+              in Advanced. Then restart dohc to test the runner.
             </p>
           )}
         </div>

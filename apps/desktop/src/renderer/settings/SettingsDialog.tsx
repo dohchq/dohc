@@ -813,9 +813,10 @@ export function SettingsDialog(props: {
                 // RESTART, not the next workspace open (#687): main decides
                 // the recorder once per workspace per app session, and
                 // `openWorkspaceActivity` retains every workspace it opens, so
-                // reopening the workspace re-reads this flag nowhere. Same
-                // instruction the History, versions and chats surfaces give.
-                description="The workspace engine records this workspace's history, versions, and chats. Turning it off is an escape hatch: no history is recorded while it is off. After you change this setting, restart dohc."
+                // reopening the workspace re-reads this flag nowhere. The last
+                // line is what keeps the one above it true — the retained
+                // capture keeps recording after a mid-session turn-off.
+                description="The workspace engine records this workspace's history, versions, and chats. Turning it off is an escape hatch. Restart dohc after you change this setting. Until you restart, recording does not change."
                 modified={isModified(
                   workspaceSettings.experimental.workspaceEngineAlpha,
                   DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,

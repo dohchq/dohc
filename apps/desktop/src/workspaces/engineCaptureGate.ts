@@ -13,7 +13,11 @@ import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daem
 // when the per-workspace flag is on, the engine store under .dohc/engine/ is
 // the workspace's SOLE history recorder — watcher batches become engine
 // moments and no legacy .dohc/history change set is written. The flag is read
-// at open; toggling it takes effect on the next open of the workspace.
+// once per workspace per APP SESSION, not per open: `openWorkspaceActivity`
+// retains every workspace it opens and `workspaceActivity.open` runs this gate
+// only for a workspace it does not already watch. Toggling the flag takes
+// effect after a dohc restart, and reopening the workspace re-reads nothing
+// (#687 — every surface that states the recovery path says restart).
 //
 // The daemon is REQUIRED, not optional: `startRustEngineDaemon` quits the app
 // when it cannot start, before any window exists, so no running workspace can

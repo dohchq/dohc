@@ -507,6 +507,36 @@ describe("DesktopSettings", () => {
     expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
   });
 
+  // #687 on this surface: the note's gate is the RENDERER's live settings
+  // value, so turning the engine on in Advanced hides the note and enables
+  // Test runner in the same session — but main built no capture for this
+  // workspace and cannot until a restart, so the click can only fail. The
+  // note owes the restart, like every other surface that names this cause.
+  it("tells the user to restart, not just to turn the engine on", async () => {
+    bridge.getWorkspaceSettings.mockResolvedValueOnce({
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: { workspaceEngineAlpha: false },
+      },
+      source: "default" as const,
+    });
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toContain(
+        "Turn it on in Advanced. Then restart dohc to test the runner.",
+      ),
+    );
+  });
+
   it("surfaces a failed runner self-test without enabling dispatch", async () => {
     bridge.runnerSelfTest.mockResolvedValueOnce({
       ok: false,
@@ -1097,10 +1127,14 @@ describe("DesktopSettings", () => {
     const row = await screen.findByTestId("settings-row-workspace-engine-alpha");
     await waitFor(() =>
       expect(row.textContent).toContain(
-        "After you change this setting, restart dohc.",
+        "Restart dohc after you change this setting.",
       ),
     );
     expect(row.textContent).not.toContain("next time the workspace is opened");
+    // And the row may not claim the turn-off is immediate: the retained
+    // capture keeps recording until that restart.
+    expect(row.textContent).toContain("Until you restart, recording does not change.");
+    expect(row.textContent).not.toContain("no history is recorded while it is off");
   });
 
   // #589: a shared view is fed by the share's pull and gets no capture, so it
