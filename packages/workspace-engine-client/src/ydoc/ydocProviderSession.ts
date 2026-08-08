@@ -319,6 +319,20 @@ export async function openEngineYdocProviderSession(
     notifyError(options.onSessionError, error);
   });
 
+  async function beginTeardown(): Promise<boolean> {
+    if (closeComplete) return true;
+    closed = true;
+    cancelSettle?.();
+    cancelSettle = null;
+    unsubscribeRemote();
+    unsubscribeRemoteError();
+    unsubscribeResync();
+    unsubscribeSessionError();
+    await journalChain.catch(() => undefined);
+    await settleChain.catch(() => undefined);
+    return false;
+  }
+
   return {
     doc: session.doc,
     initialUpdate: session.initialUpdate,
@@ -396,16 +410,7 @@ export async function openEngineYdocProviderSession(
     },
 
     async close(closeOptions) {
-      if (closeComplete) return;
-      closed = true;
-      cancelSettle?.();
-      cancelSettle = null;
-      unsubscribeRemote();
-      unsubscribeRemoteError();
-      unsubscribeResync();
-      unsubscribeSessionError();
-      await journalChain.catch(() => undefined);
-      await settleChain.catch(() => undefined);
+      if (await beginTeardown()) return;
       let preCloseError: unknown;
       if (
         closeOptions?.settle !== false &&
@@ -481,16 +486,7 @@ export async function openEngineYdocProviderSession(
     },
 
     async evict() {
-      if (closeComplete) return;
-      closed = true;
-      cancelSettle?.();
-      cancelSettle = null;
-      unsubscribeRemote();
-      unsubscribeRemoteError();
-      unsubscribeResync();
-      unsubscribeSessionError();
-      await journalChain.catch(() => undefined);
-      await settleChain.catch(() => undefined);
+      if (await beginTeardown()) return;
       // No settle: an evict declines the ARTIFACT. It does not decline the
       // user's text, and the durable lineage is the only place that text
       // survives the teardown — so hand over anything the engine is still

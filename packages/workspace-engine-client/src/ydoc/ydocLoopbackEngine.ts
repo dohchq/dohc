@@ -16,13 +16,8 @@ interface LoopbackFile {
   objectId: string;
   contentKind: YdocContentKind;
   markdown: string;
-  // The daemon reports these INDEPENDENTLY (actor.rs ydoc_open_state_on_store),
-  // so the loopback must too. head-absent + lineage-existing is the
-  // crash-orphaned draft the daemon resurrects: no snapshot in the version,
-  // but durable CRDT rows that hold the only copy of the user's edits. A
-  // loopback that coupled them could not stage that case at all.
+  // Whether this version has a file snapshot.
   head: "present" | "absent";
-  lineage: "existing" | "absent";
 }
 
 interface LoopbackSession {
@@ -49,10 +44,8 @@ export interface SeedLoopbackFileInput {
   markdown: string;
   contentKind?: YdocContentKind;
   objectId?: string;
-  // Defaults model an ordinary captured file: the version has the snapshot,
-  // no CRDT lineage has been built yet.
+  // The default models an ordinary captured file with a version snapshot.
   head?: "present" | "absent";
-  lineage?: "existing" | "absent";
 }
 
 function fileKey(workspace: string, versionId: string, path: string): string {
@@ -189,7 +182,6 @@ export class YdocLoopbackEngine implements EngineTransport {
       contentKind: input.contentKind ?? "richdoc",
       markdown: input.markdown,
       head: input.head ?? "present",
-      lineage: input.lineage ?? "existing",
     });
   }
 
@@ -325,7 +317,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       path,
       contentKind,
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(doc)),
-      lineage: lineage ? "existing" : file ? file.lineage : "absent",
+      lineage: lineage ? "existing" : "absent",
       head: file ? file.head : "absent",
     };
   }

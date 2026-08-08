@@ -4,6 +4,7 @@ import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
+  DaemonRefusalError,
   VersionedLoopbackEngine,
   YDOC_OPEN_DEADLINE_MS,
   YdocOpenTimedOutError,
@@ -676,7 +677,14 @@ describe("the document open's capture-chain hold (#564)", () => {
             closeCalls.push({ ...closeOptions });
             // The daemon keeps refusing: the lineage is dirty and the file it
             // would settle over is still uncaptured.
-            throw new Error("unsettled-close");
+            throw new DaemonRefusalError(
+              {
+                code: "INVALID_PARAMS",
+                message: "ydoc-unsettled-close",
+                retry: "no",
+              },
+              undefined,
+            );
           },
           evict: async () => {
             evicts += 1;
@@ -757,7 +765,14 @@ describe("the document open's capture-chain hold (#564)", () => {
             applyExternalMarkdownEdit: async () =>
               ({ kind: "merged" }) as never,
             close: async () => {
-              throw new Error("unsettled-close");
+              throw new DaemonRefusalError(
+                {
+                  code: "INVALID_PARAMS",
+                  message: "ydoc-unsettled-close",
+                  retry: "no",
+                },
+                undefined,
+              );
             },
             evict: async () => {
               evicted = true;

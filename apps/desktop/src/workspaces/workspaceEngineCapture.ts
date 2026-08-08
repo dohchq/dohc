@@ -36,6 +36,7 @@ import {
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
+  isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
@@ -3817,11 +3818,7 @@ export function createWorkspaceEngineCapture(
             // ONLY an orphan — a session someone HOLDS is converged by its
             // holder. And only a TERMINAL refusal: a busy store or a spent
             // budget is waited out by the ladders that already exist.
-            if (
-              liveEntry.orphaned &&
-              !isTransientEngineCause(error) &&
-              !isEngineWorkspaceOpenRefusedError(error)
-            ) {
+            if (liveEntry.orphaned && isYdocUnsettledCloseRefusal(error)) {
               try {
                 await session.evict();
                 dischargedByEvict = true;

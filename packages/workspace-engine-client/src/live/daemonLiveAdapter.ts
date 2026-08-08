@@ -129,6 +129,10 @@ export function isYdocSessionNotFoundRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-session-not-found";
 }
 
+export function isYdocUnsettledCloseRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "ydoc-unsettled-close";
+}
+
 // A live session already holds this document's lease, so the daemon refuses to
 // bind a second one (`ydoc-session-busy`, dohc-workspace-engine/src/lib.rs).
 //

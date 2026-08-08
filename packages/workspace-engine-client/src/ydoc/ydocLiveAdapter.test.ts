@@ -575,6 +575,50 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  it("journals a pending record before eviction reaches the transport", async () => {
+    const engine = seedPlaintextEngine();
+    const methods: string[] = [];
+    let releaseRecord = (): void => {
+      throw new Error("The record gate was not installed.");
+    };
+    const recordHeld = new Promise<void>((resolve) => {
+      releaseRecord = resolve;
+    });
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        methods.push(request.method);
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          await recordHeld;
+          return { id: request.id, result: { seq: 1 } };
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    methods.length = 0;
+
+    const journaled = session.applyLocalUpdate(
+      plaintextUpdate(session.initialUpdate, (text) => {
+        text.insert(0, "journal before eviction");
+      }),
+    );
+    const evicted = session.evict();
+    await drain();
+    releaseRecord();
+    await Promise.all([journaled, evicted]);
+
+    // MUTATION: drop the record-chain drain from `evict` -> eviction reaches the transport before the queued record.
+    expect(methods).toEqual([YDOC_METHOD.recordUpdate, YDOC_METHOD.evict]);
+    adapter.dispose();
+  });
+
   it("preserves reconnect classification when record recovery also loses transport", async () => {
     const engine = seedPlaintextEngine();
     const recordFailure = Object.assign(new Error("record transport restarted"), {
@@ -1257,6 +1301,53 @@ describe("YdocLiveAdapter", () => {
       YDOC_METHOD.recordUpdate,
       YDOC_METHOD.evict,
     ]);
+  });
+
+  it("evicts after a terminal resend failure instead of wedging on it", async () => {
+    // MUTATION: widen the evict guard to any resend failure -> the terminal refusal strands the lease.
+    const engine = seedPlaintextEngine();
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      new Error("daemon response"),
+    );
+    const terminal = new DaemonRefusalError(
+      { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+      new Error("daemon response"),
+    );
+    let records = 0;
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          records += 1;
+          throw records <= 2 ? busy : terminal;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleError: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+    await provider
+      .applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (body) => {
+          body.insert(0, "typed against a terminal engine");
+        }),
+      )
+      .catch(() => undefined);
+
+    await expect(provider.evict()).resolves.toBeUndefined();
   });
 
   it("releases an orphan that is holding nothing of the user's", async () => {
@@ -2655,7 +2746,7 @@ describe("the ydoc.open deadline (#616)", () => {
     // CLOSE prunes those rows, so the next open reseeds from the file.
     await resurrected.close({ settle: false });
     const reseeded = await open();
-    expect(reseeded.lineage).toBe("existing");
+    expect(reseeded.lineage).toBe("absent");
     expect(reseeded.doc.getText("plainText").toString()).toBe("on disk");
     await reseeded.close({ settle: false });
   });
@@ -2690,6 +2781,35 @@ describe("the ydoc.open deadline (#616)", () => {
     expect(reopened.lineage).toBe("existing");
     expect(reopened.doc.getText("plainText").toString()).toBe(
       "remote: on disk",
+    );
+    await reopened.close({ settle: false });
+  });
+
+  it("resurrects an external markdown edit after eviction", async () => {
+    const engine = seedPlaintextEngine("on disk");
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      sendRequest: (request) => engine.sendRequest(request),
+    };
+    const open = async () =>
+      await openEngineYdocProviderSession({
+        transport,
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+        onRemoteUpdate: () => undefined,
+        scheduleSettle: () => () => undefined,
+      });
+
+    const first = await open();
+    await first.applyExternalMarkdownEdit("edited from outside: on disk");
+    await first.evict();
+
+    const reopened = await open();
+    expect(reopened.lineage).toBe("existing");
+    expect(reopened.doc.getText("plainText").toString()).toBe(
+      "edited from outside: on disk",
     );
     await reopened.close({ settle: false });
   });

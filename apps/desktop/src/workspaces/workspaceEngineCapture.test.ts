@@ -28,6 +28,7 @@ import {
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import {
+  DaemonRefusalError,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   VERSIONED_METHOD,
@@ -3160,7 +3161,14 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
             if (deliver) {
               deliver();
               deliver = null;
-              throw new Error("unsettled-close");
+              throw new DaemonRefusalError(
+                {
+                  code: "INVALID_PARAMS",
+                  message: "ydoc-unsettled-close",
+                  retry: "no",
+                },
+                undefined,
+              );
             }
           },
         } as never;
@@ -3189,6 +3197,165 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     await expect(readFile(join(root, "peer-created.md"), "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
+    await engine.stop();
+  });
+
+  it("clears dead-session health when orphan eviction discharges it", async () => {
+    // A handed-out session can never become an orphan: only the absent-head
+    // refusal below sets that state, before open returns. Stage daemon death at
+    // that boundary through the provider's real reconnect callback instead.
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "unrelated.md",
+      text: "main",
+    });
+    const doc = new Y.Doc();
+    const outcomes: boolean[] = [];
+    const reconnectFailure = Object.assign(new Error("daemon exited"), {
+      code: "transport-error",
+    });
+    const replacementFailure = new Error("replacement daemon unavailable");
+    const unsettled = new DaemonRefusalError(
+      {
+        code: "INVALID_PARAMS",
+        message: "ydoc-unsettled-close",
+        retry: "no",
+      },
+      undefined,
+    );
+    let opens = 0;
+    let reportedDeath = false;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      onError: () => undefined,
+      openRustYDocProviderSession: async (options) => {
+        opens += 1;
+        if (opens > 1) throw replacementFailure;
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext",
+          path: options.path,
+          get head() {
+            if (!reportedDeath) {
+              reportedDeath = true;
+              options.onSessionError?.(reconnectFailure);
+            }
+            return "absent" as const;
+          },
+          lineage: "absent" as const,
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () =>
+            ({ sha256: "f".repeat(64), markdown: "" }) as never,
+          applyExternalMarkdownEdit: async (markdown: string) =>
+            ({ kind: "merged", markdown }) as const,
+          close: async () => {
+            throw unsettled;
+          },
+        };
+      },
+    });
+
+    const refusal = await engine
+      .openYDocSession({
+        path: "peer-created.md",
+        onRemoteUpdate: () => undefined,
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    // MUTATION: delete `clearDeadYDocSession` from the orphan evict -> the last outcome stays false.
+    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
+    expect(opens).toBe(2);
+    expect(outcomes).toEqual([false, true]);
+    await engine.stop();
+  });
+
+  it("does not evict an orphan when its close fails for an unrelated reason", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "unrelated.md",
+      text: "main",
+    });
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "arrived from a peer");
+    const peerUpdate = Y.encodeStateAsUpdate(doc);
+    const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> = [];
+    const settles: string[] = [];
+    let evicts = 0;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        let deliver: (() => void) | null = () =>
+          options.onRemoteUpdate(peerUpdate);
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext",
+          path: options.path,
+          head: "absent" as const,
+          lineage: "absent" as const,
+          evict: async () => {
+            evicts += 1;
+          },
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            settles.push("settle");
+            return {
+              sha256: "f".repeat(64),
+              markdown: "arrived from a peer",
+            } as never;
+          },
+          close: async (closeOptions?: {
+            settle?: boolean;
+            settleOnRefusal?: boolean;
+          }) => {
+            closeCalls.push({ ...closeOptions });
+            if (deliver) {
+              deliver();
+              deliver = null;
+              throw new DaemonRefusalError(
+                {
+                  code: "INVALID_PARAMS",
+                  message: "ydoc-something-else",
+                  retry: "no",
+                },
+                undefined,
+              );
+            }
+          },
+        } as never;
+      },
+    });
+
+    const refusal = await engine
+      .openYDocSession({
+        path: "peer-created.md",
+        onRemoteUpdate: () => undefined,
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
+    expect(refusal).not.toBeInstanceOf(YDocOpenRacedError);
+    expect(evicts).toBe(0);
+    expect(closeCalls).toEqual([{ settle: false, settleOnRefusal: false }]);
+    expect(settles).toEqual([]);
+    await expect(
+      readFile(join(root, "peer-created.md"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
     await engine.stop();
   });
 

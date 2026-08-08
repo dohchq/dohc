@@ -118,12 +118,17 @@ materialization job is outstanding (`durable.rs`).
 Two things cover it, and they answer the same question. A **settle** records
 itself in `last_settled_sha`. A **capture** reads the file and moves the head to
 those bytes without touching any marker column, so the head's own sha is equally
-good proof — `ydoc_apply::project_and_write_in_tx` applies that rule on the sync
-side, and the local close applies it too (#665). Reading the marker alone
-refused a document that was already on disk, and the retry loop that depends on
-that close never converged. It is a comparison, not "a head exists": a file
-edited outside dohc has a head too, and pruning against that one would discard
-the document's own text.
+good proof for the local close (#665). Reading the marker alone refused a
+document that was already on disk, and the retry loop that depends on that close
+never converged. It is a comparison, not "a head exists": a file edited outside
+dohc has a head too, and pruning against that one would discard the document's
+own text.
+
+The sync-side `ydoc_apply::project_and_write_in_tx` check is weaker and narrower.
+It compares only the current head snapshot's sha with the projection's sha to
+dedupe a redelivered or converged envelope. It does not accept
+`last_settled_sha`, check for pending materialization jobs, or gate a destructive
+prune.
 
 **A session that can be covered by neither ends without pruning.** `ydoc.evict`
 drops the session and its lease and leaves the lineage exactly as it stands —

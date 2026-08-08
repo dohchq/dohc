@@ -1065,8 +1065,9 @@ pub fn close_session(
         // disk, so a matching captured head IS the proof this guard asks for.
         // Reading the marker alone refuses a document whose own projection is
         // already the head, and capture -> discharge -> open never converges
-        // (#665). `ydoc_apply::project_and_write_in_tx` applies the same rule
-        // on the sync side.
+        // (#665). The sync-side `ydoc_apply::project_and_write_in_tx` uses a
+        // narrower head/projection match to dedupe a converged envelope; it
+        // does not gate this prune.
         let covered = store.read_with(|conn| -> Result<bool, CollabError> {
             Ok(
                 last_settled_sha(conn, key)?.as_deref() == Some(content_sha.as_str())
