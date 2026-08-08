@@ -3,7 +3,7 @@
 // surfaces' ends of that contract: the loaded window paints, "Show more
 // files" fetches the NEXT page with the continuation, and the count copy
 // never states a number that could be under the truth.
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
 import {
@@ -25,6 +25,15 @@ function conflict(id: string): WorkspaceVersionConflict {
     incomingText: "feature side\n",
     baseText: null,
   };
+}
+
+// #691: findBy/waitFor deadlines are wall-clock, so a loaded machine can spend
+// them before the event loop returns to the render. Every async path here is a
+// mocked bridge call, so drive it to its end instead of waiting on a clock:
+// this drains the pending answers and React's work, and every assertion after
+// it is synchronous.
+async function settle() {
+  await act(async () => {});
 }
 
 const bridgeMock = {
@@ -78,13 +87,17 @@ describe("ConflictReviewDialog paging", () => {
         onClose={() => {}}
       />,
     );
-    await screen.findByText("More than one file has two copies.", {
-      exact: false,
-    });
+    await settle();
+    expect(
+      screen.getByText("More than one file has two copies.", { exact: false }),
+    ).toBeTruthy();
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
 
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
-    await screen.findByText("2 files have two copies.", { exact: false });
+    await settle();
+    expect(
+      screen.getByText("2 files have two copies.", { exact: false }),
+    ).toBeTruthy();
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
     // The window is complete now: the affordance goes away.
     expect(screen.queryByTestId("conflict-list-show-more")).toBeNull();
@@ -110,11 +123,14 @@ describe("ConflictReviewDialog paging", () => {
         onClose={() => {}}
       />,
     );
-    await screen.findAllByTestId("version-conflict");
+    await settle();
     fireEvent.click(
       screen.getAllByTestId("version-conflict-keep-current")[0]!,
     );
-    await screen.findByText("One file has two copies.", { exact: false });
+    await settle();
+    expect(
+      screen.getByText("One file has two copies.", { exact: false }),
+    ).toBeTruthy();
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
   });
 
@@ -152,12 +168,15 @@ describe("ConflictReviewDialog paging", () => {
         onClose={() => {}}
       />,
     );
-    await screen.findAllByTestId("version-conflict");
+    await settle();
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
     fireEvent.click(
       screen.getAllByTestId("version-conflict-keep-current")[0]!,
     );
-    await screen.findByText("One file has two copies.", { exact: false });
+    await settle();
+    expect(
+      screen.getByText("One file has two copies.", { exact: false }),
+    ).toBeTruthy();
 
     resolveStalePage!({
       conflicts: [conflict("c-3")],
@@ -165,9 +184,7 @@ describe("ConflictReviewDialog paging", () => {
     });
     // Let the stale answer's whole continuation run before asserting — a
     // waitFor here would pass on the first paint and never see the append.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
+    await settle();
     // MUTATION: drop the window-generation guard -> c-3 (a row of the
     // replaced window) appends to the remaining page.
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
@@ -201,25 +218,24 @@ describe("ConflictReviewDialog paging", () => {
         onClose={() => {}}
       />,
     );
-    await screen.findAllByTestId("version-conflict");
+    await settle();
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
     fireEvent.click(
       screen.getAllByTestId("version-conflict-keep-current")[0]!,
     );
-    await screen.findByText("More than one file has two copies.", {
-      exact: false,
-    });
+    await settle();
+    expect(
+      screen.getByText("More than one file has two copies.", { exact: false }),
+    ).toBeTruthy();
 
     // MUTATION: clear loadingMore only in the abandoned request's finally ->
     // the button reads "Loading…", disabled, forever (the request never
-    // settles) and this wait times out.
-    await waitFor(() => {
-      const showMore = screen.getByTestId(
-        "conflict-list-show-more",
-      ) as HTMLButtonElement;
-      expect(showMore.textContent).toBe("Show more files");
-      expect(showMore.disabled).toBe(false);
-    });
+    // settles) and this assertion fails.
+    const showMore = screen.getByTestId(
+      "conflict-list-show-more",
+    ) as HTMLButtonElement;
+    expect(showMore.textContent).toBe("Show more files");
+    expect(showMore.disabled).toBe(false);
   });
 
   it("says what failed when the next page does not load, and keeps the retry", async () => {
@@ -238,9 +254,10 @@ describe("ConflictReviewDialog paging", () => {
         onClose={() => {}}
       />,
     );
-    await screen.findAllByTestId("version-conflict");
+    await settle();
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
-    await screen.findByRole("alert");
+    await settle();
+    expect(screen.getByRole("alert")).toBeTruthy();
     // The window is unchanged and the button remains for a retry.
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
     expect(screen.getByTestId("conflict-list-show-more")).toBeTruthy();
@@ -282,7 +299,8 @@ describe("VersionMergeDialog conflict paging", () => {
     });
     renderMerge();
     fireEvent.click(screen.getByTestId("version-merge-confirm"));
-    await screen.findByText("Merged 2 files into Main.");
+    await settle();
+    expect(screen.getByText("Merged 2 files into Main.")).toBeTruthy();
   });
 
   it("pages the conflicts stage through the open-conflict listing", async () => {
@@ -299,13 +317,17 @@ describe("VersionMergeDialog conflict paging", () => {
     });
     renderMerge();
     fireEvent.click(screen.getByTestId("version-merge-confirm"));
-    await screen.findByText("More than one file has two copies.", {
-      exact: false,
-    });
+    await settle();
+    expect(
+      screen.getByText("More than one file has two copies.", { exact: false }),
+    ).toBeTruthy();
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
 
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
-    await screen.findByText("2 files have two copies.", { exact: false });
+    await settle();
+    expect(
+      screen.getByText("2 files have two copies.", { exact: false }),
+    ).toBeTruthy();
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
     expect(bridgeMock.listWorkspaceVersionConflicts.mock.calls).toEqual([
       [{ workspaceId: "ws-1", afterConflictId: "c-1" }],
@@ -325,7 +347,10 @@ describe("VersionMergeDialog conflict paging", () => {
     });
     renderMerge();
     fireEvent.click(screen.getByTestId("version-merge-confirm"));
-    await screen.findByText("All conflicts are resolved. Main is up to date.");
+    await settle();
+    expect(
+      screen.getByText("All conflicts are resolved. Main is up to date."),
+    ).toBeTruthy();
     expect(screen.queryByTestId("version-conflict")).toBeNull();
   });
 
@@ -359,12 +384,15 @@ describe("VersionMergeDialog conflict paging", () => {
     });
     renderMerge();
     fireEvent.click(screen.getByTestId("version-merge-confirm"));
-    await screen.findAllByTestId("version-conflict");
+    await settle();
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
     fireEvent.click(
       screen.getAllByTestId("version-conflict-keep-current")[0]!,
     );
-    await screen.findByText("One file has two copies.", { exact: false });
+    await settle();
+    expect(
+      screen.getByText("One file has two copies.", { exact: false }),
+    ).toBeTruthy();
 
     resolveStalePage!({
       conflicts: [conflict("c-3")],
@@ -372,9 +400,7 @@ describe("VersionMergeDialog conflict paging", () => {
     });
     // Let the stale answer's whole continuation run before asserting — a
     // waitFor here would pass on the first paint and never see the append.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
+    await settle();
     // MUTATION: drop this dialog's window-generation guard -> c-3 (a row of
     // the replaced window) appends to the remaining page.
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
@@ -399,13 +425,16 @@ describe("VersionComparePage paging", () => {
           : { files: [compareRow("b.md")], nextAfterPath: null },
     );
     render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
-    await screen.findByTestId("version-compare-file");
+    await settle();
     expect(
       screen.getByText("More than one file differs between Feature and Main."),
     ).toBeTruthy();
 
     fireEvent.click(screen.getByTestId("version-compare-show-more"));
-    await screen.findByText("2 files differ between Feature and Main.");
+    await settle();
+    expect(
+      screen.getByText("2 files differ between Feature and Main."),
+    ).toBeTruthy();
     expect(screen.getAllByTestId("version-compare-file")).toHaveLength(2);
     expect(screen.queryByTestId("version-compare-show-more")).toBeNull();
     expect(bridgeMock.compareWorkspaceVersions.mock.calls).toEqual([
@@ -434,10 +463,11 @@ describe("VersionComparePage paging", () => {
       },
     );
     render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
-    await screen.findByTestId("version-compare-file");
+    await settle();
     fireEvent.click(screen.getByTestId("version-compare-show-more"));
     fireEvent.click(screen.getByTestId("version-compare-refresh"));
-    await screen.findByTestId("version-compare-file");
+    await settle();
+    expect(screen.getByTestId("version-compare-file")).toBeTruthy();
 
     // The replaced window must not inherit the abandoned page's pending
     // flag: the stale request is STILL unsettled here, and the button must
@@ -453,9 +483,7 @@ describe("VersionComparePage paging", () => {
     resolveStalePage!({ files: [compareRow("b.md")], nextAfterPath: null });
     // Let the stale answer's whole continuation run before asserting — a
     // waitFor here would pass on the first paint and never see the append.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
+    await settle();
     // MUTATION: drop the window-generation guard -> the old generation's page
     // appends to the refreshed window (the cursor matches, so a cursor check
     // alone cannot reject it).
@@ -473,9 +501,10 @@ describe("VersionComparePage paging", () => {
       },
     );
     render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
-    await screen.findByTestId("version-compare-file");
+    await settle();
     fireEvent.click(screen.getByTestId("version-compare-show-more"));
-    await screen.findByRole("alert");
+    await settle();
+    expect(screen.getByRole("alert")).toBeTruthy();
     expect(screen.getAllByTestId("version-compare-file")).toHaveLength(1);
     expect(screen.getByTestId("version-compare-show-more")).toBeTruthy();
   });
