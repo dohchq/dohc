@@ -2980,6 +2980,175 @@ describe("the ydoc.open deadline (#616)", () => {
     adapter.dispose();
   });
 
+  // Codex P2 on #728. Both the daemon's absent-head open and its capture
+  // ingestion resolve an unrecorded path to the SAME derived object id
+  // (actor.rs, store.rs) — `seedFile`'s default must match the id `open()`
+  // already derives for a path capture has not ingested yet.
+  it("a capture that seeds a path after it was already opened finds the same object identity", async () => {
+    const engine = new YdocLoopbackEngine();
+    const adapter = new YdocLiveAdapter(engine);
+
+    // Opened BEFORE capture ever ingests this path: no `files` row yet, so
+    // the object id is DERIVED (the absent-head open path).
+    const first = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(first.lineage).toBe("absent");
+    await first.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "typed before capture ever saw this file: ",
+    });
+    await first.evict();
+
+    // Capture ingests the file for the first time now, AFTER the open
+    // already derived an object id for it.
+    // MUTATION: default `seedFile`'s objectId to an unrelated counter
+    // instead of the SAME derivation the absent-head open used -> this
+    // reopen resurrects nothing, because the file's object id does not
+    // match the lineage the first open's derived id already created.
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      markdown: "captured now",
+      contentKind: "plaintext",
+    });
+
+    const reopened = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(reopened.lineage).toBe("existing");
+    expect(reopened.doc.getText("plainText").toString()).toBe(
+      "typed before capture ever saw this file: ",
+    );
+    await reopened.close({ settle: true });
+    adapter.dispose();
+  });
+
+  // Codex P2 on #728. `markSessionReplicated` used to seed a FRESH lineage
+  // entry from an empty `declaredDoc()`, so promoting a session to
+  // replicated before it ever recorded an update durably discarded whatever
+  // the session's own document already held (a seed, or a resurrection).
+  it("markSessionReplicated seeds the lineage from the session's live content, not an empty doc", async () => {
+    const engine = seedPlaintextEngine("seeded before any edit");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    // Marked replicated BEFORE any recordUpdate/remote update: there is no
+    // lineage row yet, so this call is the one that creates it.
+    engine.markSessionReplicated(session.sessionId);
+
+    // MUTATION: seed the fresh entry's doc from `declaredDoc()` instead of
+    // the session's live content -> the replicated close below still
+    // resolves (a replicated close never refuses), but preserves an EMPTY
+    // document, and the reopen below finds nothing instead of the seeded
+    // text.
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+
+    const reopened = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(reopened.lineage).toBe("existing");
+    expect(reopened.doc.getText("plainText").toString()).toBe(
+      "seeded before any edit",
+    );
+    await reopened.close({ settle: true });
+    adapter.dispose();
+  });
+
+  // Codex P2 on #728, the safe-direction limit's positive half. A CAPTURED
+  // head covers the local-only close guard exactly as a settle does
+  // (durable.rs's `captured_head_sha`, the disk -> engine direction) —
+  // covered by the SAME `files` row `open()` already reads as the disk
+  // state, so no new tracking was needed to add this arm.
+  it("a captured head covers the close guard the same way a settle does", async () => {
+    const engine = seedPlaintextEngine("captured text");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    // Two recorded edits that net back to EXACTLY the captured file's
+    // bytes: never settled, but capture already put this content on the
+    // artifact. The insert-then-revert is what proves the guard reads the
+    // CURRENT projection, not merely "no update ever happened".
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "X",
+    });
+    await session.applyLocalEdit((doc) => {
+      doc.getText("plainText").delete(0, 1);
+    });
+    expect(session.doc.getText("plainText").toString()).toBe(
+      "captured text",
+    );
+
+    // MUTATION: drop the captured_head_sha arm from the close guard -> this
+    // refuses with ydoc-unsettled-close even though the artifact already
+    // holds this exact text.
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+    adapter.dispose();
+  });
+
+  // Certification round on #728. No test drove a wire `ydoc.close` with the
+  // `settle` flag omitted entirely THROUGH the loopback — mutating the
+  // default to `?? false` left the rest of the suite green. Driven at the
+  // raw adapter layer: `YdocAdapterSession.close()` with no options omits
+  // the `settle` key from the wire params outright.
+  it("close() with the settle flag omitted follows the daemon's implicit-settle default", async () => {
+    const engine = seedPlaintextEngine("on disk");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "typed, closed with no settle flag at all: ",
+    });
+
+    // MUTATION: default the omitted flag to `false` instead of mirroring
+    // `!(session.lineage_absent && session.first_update_pending)`
+    // (crates/dohc-workspace-engine/src/lib.rs) -> this settles nothing,
+    // and the close below refuses with ydoc-unsettled-close instead of
+    // resolving.
+    await expect(session.close()).resolves.toBeUndefined();
+
+    const reopened = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    // Pruned: the implicit settle covered the content, so the local-only
+    // close went on to prune the lineage exactly as an explicit
+    // settle:true close would.
+    expect(reopened.lineage).toBe("absent");
+    await reopened.close({ settle: true });
+    adapter.dispose();
+  });
+
   it("evicts without settling, closing, or handing the text over again", async () => {
     // #665. Evict does not SETTLE or CLOSE. When nothing is owed,
     // `resendMissingState` is a no-op, so the provider hands over no text again
