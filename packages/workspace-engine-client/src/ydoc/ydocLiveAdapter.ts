@@ -18,6 +18,7 @@ import {
   YDOC_EVENT,
   YDOC_METHOD,
   decodeYdocCloseResult,
+  decodeYdocEvictResult,
   decodeYdocExternalEditResult,
   decodeYdocOpenResult,
   decodeYdocRecordUpdateResult,
@@ -27,6 +28,7 @@ import {
   type YdocApplyExternalMarkdownEditResult,
   type YdocCloseParams,
   type YdocContentKind,
+  type YdocEvictParams,
   type YdocOpenParams,
   type YdocRecordUpdateParams,
   type YdocRecordUpdateResult,
@@ -1027,6 +1029,25 @@ export class YdocAdapterSession {
     try {
       decodeYdocCloseResult(
         await this.adapter.request(this.workspace, YDOC_METHOD.close, params),
+      );
+    } catch (error) {
+      if (!isYdocSessionNotFoundRefusal(error)) throw error;
+    }
+    this.closed = true;
+    this.doc.off("update", this.handleDocUpdate);
+    this.adapter.releaseSession(this.sessionId);
+  }
+
+  // End the session without settling and without pruning. The daemon drops
+  // the session and its lease; the durable lineage keeps every update this
+  // document journaled, so the next open resurrects them.
+  async evict(): Promise<void> {
+    if (this.closed) return;
+    await this.recordChain.catch(() => undefined);
+    const params: YdocEvictParams = { sessionId: this.sessionId };
+    try {
+      decodeYdocEvictResult(
+        await this.adapter.request(this.workspace, YDOC_METHOD.evict, params),
       );
     } catch (error) {
       if (!isYdocSessionNotFoundRefusal(error)) throw error;

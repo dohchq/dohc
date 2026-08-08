@@ -25,6 +25,7 @@ import {
   dohcMarkdownExtensions,
   escapeHighlightMarkdown,
 } from './dohc-markdown-extensions.js'
+import { backtickFence } from './markdown-fence.js'
 
 const BODY_FIELD = 'body'
 const PLAIN_TEXT_FIELD = 'plainText'
@@ -403,12 +404,6 @@ function continuationPrefixForListMarker(prefix: string): string | null {
   const listItem = /^(.*?)([-+*]|\d+[.)]) $/.exec(prefix)
   if (!listItem) return null
   return `${listItem[1]}${' '.repeat(listItem[2].length + 1)}`
-}
-
-function backtickFence(value: string, minimum: number): string {
-  const longest = Array.from(value.matchAll(/`+/g))
-    .reduce((max, match) => Math.max(max, match[0].length), 0)
-  return '`'.repeat(Math.max(minimum, longest + 1))
 }
 
 function reserveInlineCodeEntitySentinel(

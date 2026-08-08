@@ -39,7 +39,7 @@ import type {
   MarkdownEditorHandle,
   MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
-import { blockIndexForLine } from "./editor/lineBlocks";
+import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
@@ -1312,9 +1312,13 @@ function MarkdownView(props: {
       // The line BECOMES the block, which is what retires it: a jump still
       // waiting on the lazy editor names the result before this one, and
       // would land the moment that editor arrives.
+      //
+      // The target carries the block's own source with it, so the editor can
+      // land the matched line inside a long list or fence rather than at its
+      // top (#688) — one target, retired once, either way.
       setJump({
         kind: "block",
-        index: blockIndexForLine(body, bodyLine),
+        ...blockTargetForLine(body, bodyLine),
         nonce: ++jumpNonce.current,
       });
     }

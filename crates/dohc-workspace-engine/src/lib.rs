@@ -980,6 +980,10 @@ impl EngineService {
                 self.ydoc_close(&ctx, request.workspace, request.params)
                     .await?
             }
+            "ydoc.evict" => {
+                self.ydoc_evict(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "ydoc.resync" => {
                 self.ydoc_resync(&ctx, request.workspace, request.params)
                     .await?
@@ -7574,6 +7578,39 @@ impl EngineService {
             .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }
 
+    /// End one session without settling and without pruning: the entry — and
+    /// with it the lease — is dropped, and the durable lineage is left exactly
+    /// as it stands. This is the per-session form of what `workspace.close`
+    /// does to every session, and it is the only exit for a session that can
+    /// neither settle (nothing may write this artifact) nor prune (the guard
+    /// refuses while no artifact holds the CRDT's bytes). Nothing is discarded,
+    /// so the next open resurrects the lineage with its edits (#665).
+    async fn ydoc_evict(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: YdocEvictParams = parse(params)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
+        let _serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("ydoc.evict (queued)"));
+            }
+            serial = open.session_ops.lock() => serial,
+        };
+        // Refuse an unknown id for the same reason `ydoc.close` does: a caller
+        // holding a session the daemon does not have must learn that, not read
+        // a success. The removal below is the WHOLE operation — no await, no
+        // actor round trip — so no cancellation can land between the two.
+        self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        lock(&self.sessions).remove(&params.session_id);
+        serde_json::to_value(YdocEvictResult { evicted: true })
+            .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+    }
+
     async fn ydoc_resync(
         &self,
         ctx: &RequestContext,
@@ -9186,6 +9223,18 @@ struct YdocCloseParams {
 #[serde(rename_all = "camelCase")]
 struct YdocCloseResult {
     closed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct YdocEvictParams {
+    session_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YdocEvictResult {
+    evicted: bool,
 }
 
 #[derive(Deserialize)]

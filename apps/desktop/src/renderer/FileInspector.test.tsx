@@ -1648,6 +1648,36 @@ describe("engine markdown source view", () => {
     expect(flashedBlockText()).toBe("Third paragraph.");
   });
 
+  // #688. One top-level block can be a hundred items long, and revealing its
+  // start leaves the match offscreen. The target carries the block's own
+  // source lines with it, so the reveal lands the matched one — and it is
+  // still ONE target, retired once, which the test below this one holds.
+  it("lands a search jump on the matched item deep inside a long list", async () => {
+    const items = Array.from({ length: 40 }, (_, item) => `- Item ${item + 1}`);
+    const { bridgeMock } = makeEngineBridge(
+      `---\ntitle: Plan\n---\n\n# Plan\n\n${items.join("\n")}\n`,
+    );
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        // The first item is file line 7, so "Item 30" is line 36.
+        scrollTarget={{ path: "a.md", line: 36, nonce: 1 }}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+    // MUTATION: drop `match` from the block target the shell sends, or return
+    // null from intraBlockRange -> "Item 1" flashes and the reader lands 29
+    // items above what they searched for.
+    await waitFor(() => expect(flashedBlockText()).toBe("Item 30"), {
+      timeout: 5_000,
+    });
+  });
+
   // codex on 76298ccd. The source projection HIDES the editor pane, so a jump
   // applied while it is up reveals a block nobody can see. A reader who
   // clicked a search result asked for the match; give them the document.

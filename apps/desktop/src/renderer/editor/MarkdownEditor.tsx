@@ -37,6 +37,7 @@ import {
   escapeHighlightMarkdown,
   type DohcImageStorage,
 } from "./extensions";
+import { FenceWideningCodeBlock } from "./import-export";
 import type { ImageSrcContext } from "./imageSrc";
 import {
   handleImageDrop,
@@ -106,11 +107,13 @@ import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
 import { makeMermaidPreviewPlugin } from "./mermaidRender";
 import {
+  FLASH_CLASS,
   OutlinePanel,
   makeHeadingFlashPlugin,
   revealDocPosition,
   type HeadingNavigationTarget,
 } from "./OutlinePanel";
+import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
 
 export type MarkdownEditorHandle = {
@@ -140,10 +143,17 @@ export type MarkdownEditorPendingUndo = {
 /** A one-shot request to reveal a top-level block, by its index in document
  * order. `nonce` lets a caller repeat the same block. This is the seam a
  * search line jump lands on: the caller maps its Markdown line to a block
- * (renderer/editor/lineBlocks.ts) and the editor reveals it. */
+ * (renderer/editor/lineBlocks.ts) and the editor reveals it.
+ *
+ * `match` carries the block's own source lines and which of them matched, so
+ * a hundred-item list or a long fence reveals the matched line rather than
+ * its top (#688). The refinement is resolved against the live nodes at reveal
+ * time and drops to the block start whenever it cannot be proven — the same
+ * one-shot target either way. */
 export type BlockNavigationTarget = {
   index: number;
   nonce: number;
+  match?: IntraBlockMatch;
 };
 
 export type MarkdownEditorProps = {
@@ -208,14 +218,22 @@ const LINK_MARK_OPTIONS = { openOnClick: false, linkOnPaste: false };
 // clearly against warm paper and charcoal alike — the inline style resolves the
 // CSS variable against the editor's cascade.
 const DROP_CURSOR_OPTIONS = { color: "var(--dohc-accent)", width: 2 };
+// codeBlock: false on both starter kits hands the node to
+// FenceWideningCodeBlock below (in STATIC_EDITOR_EXTENSIONS, so it applies
+// regardless of which starter kit is active) instead of StarterKit's default,
+// which hardcodes a three-backtick fence and truncates a code block whose own
+// content contains a ``` line on export (#704) — the same rule import-export.ts
+// registers for engine-driven saves.
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
+  codeBlock: false,
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
 const COLLAB_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   undoRedo: false,
+  codeBlock: false,
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
@@ -260,6 +278,7 @@ const STATIC_EDITOR_EXTENSIONS = [
   ...dohcMarkdownExtensions,
   TaskList,
   DohcTaskItem,
+  FenceWideningCodeBlock,
   TABLE_KIT_EXTENSION,
   MARKDOWN_EXTENSION,
   findReplaceExtension,
@@ -284,21 +303,52 @@ function BubbleButton(props: {
   );
 }
 
-/** Reveal the top-level block at `index`, clamped to the last block — the
- *  caller's index comes from Markdown that can have drifted from the live
- *  document, and the nearest block is the honest answer. No cursor move: an
- *  external jump reveals the passage, it does not take over the caret (the
- *  heading seam navigates the same way). */
-function scrollToBlock(editor: Editor, index: number): (() => void) | undefined {
+/** Reveal the block `target` names, clamped to the last block — the caller's
+ *  index comes from Markdown that can have drifted from the live document,
+ *  and the nearest block is the honest answer. No cursor move: an external
+ *  jump reveals the passage, it does not take over the caret (the heading
+ *  seam navigates the same way).
+ *
+ *  A matched line inside the block is revealed instead when intraBlock.ts can
+ *  prove where it sits (#688). Two ways that refinement is dropped: it says
+ *  so, or it resolved to a range that rendered nothing to scroll. Both leave
+ *  the block start, which is what this did before it could refine anything. */
+function scrollToBlock(
+  editor: Editor,
+  target: BlockNavigationTarget,
+): (() => void) | undefined {
   const doc = editor.state.doc;
   if (doc.childCount === 0) return;
-  const child = Math.min(Math.max(index, 0), doc.childCount - 1);
+  const child = Math.min(Math.max(target.index, 0), doc.childCount - 1);
   let pos = 0;
   for (let before = 0; before < child; before += 1) pos += doc.child(before).nodeSize;
+  // A CLAMPED index is a different block from the one the lines were sliced
+  // from, so the refinement no longer speaks for it.
+  const range =
+    target.match && child === target.index
+      ? intraBlockRange(doc.child(child), pos, target.match, (source) =>
+          renderInlineText(editor, source),
+        )
+      : null;
+  if (range) {
+    const revealed = revealDocPosition(editor, range, () =>
+      editor.view.dom.querySelector<HTMLElement>(`.${FLASH_CLASS}`),
+    );
+    if (revealed) return revealed;
+  }
   return revealDocPosition(editor, pos, () => {
     const dom = editor.view.nodeDOM(pos);
     return dom instanceof HTMLElement ? dom : null;
   });
+}
+
+function renderInlineText(editor: Editor, source: string): string {
+  if (!editor.markdown) return source;
+  try {
+    return editor.schema.nodeFromJSON(editor.markdown.parse(source)).textContent;
+  } catch {
+    return source;
+  }
 }
 
 const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInnerProps>(
@@ -803,7 +853,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       let firstFrame = 0;
       let secondFrame = 0;
       const applyTarget = () => {
-        if (!scrollToBlock(editor, blockTarget.index)) return;
+        if (!scrollToBlock(editor, blockTarget)) return;
         applied = true;
         editor.off("update", applyTarget);
         onBlockTargetConsumed?.(blockTarget.nonce);

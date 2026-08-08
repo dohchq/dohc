@@ -107,14 +107,38 @@ Prune-on-close is correct **only** here. A document that never replicated cannot
 diverge a peer. Do not generalise the pruning path to replicated documents — that
 is the same forked-lineage bug arriving by another route.
 
-**And even here, pruning is conditional on a durable settle.** "Reopening reseeds
-from the file with zero loss" is only true once the file actually holds the latest
-edits. If the settle failed, or its materialization job is still pending, then
-pruning discards the only copy of those edits and the reopen reads an older file —
-lossy, quietly. Rust encodes this: `close_session` returns `UnsettledClose` until
-the projected sha matches and no materialization job is outstanding
-(`durable.rs`). So local-only pruning is permitted only **after the projection is
-durably materialized**, never merely because the session is closing.
+**And even here, pruning is conditional on the artifact holding the bytes.**
+"Reopening reseeds from the file with zero loss" is only true once the file
+actually holds the latest edits. If the settle failed, or its materialization job
+is still pending, then pruning discards the only copy of those edits and the
+reopen reads an older file — lossy, quietly. Rust encodes this: `close_session`
+returns `UnsettledClose` until the projection's sha is covered and no
+materialization job is outstanding (`durable.rs`).
+
+Two things cover it, and they answer the same question. A **settle** records
+itself in `last_settled_sha`. A **capture** reads the file and moves the head to
+those bytes without touching any marker column, so the head's own sha is equally
+good proof for the local close (#665). Reading the marker alone refused a
+document that was already on disk, and the retry loop that depends on that close
+never converged. It is a comparison, not "a head exists": a file edited outside
+dohc has a head too, and pruning against that one would discard the document's
+own text.
+
+The sync-side `ydoc_apply::project_and_write_in_tx` check is weaker and narrower.
+It compares only the current head snapshot's sha with the projection's sha to
+dedupe a redelivered or converged envelope. It does not accept
+`last_settled_sha`, check for pending materialization jobs, or gate a destructive
+prune.
+
+**A session that can be covered by neither ends without pruning.** `ydoc.evict`
+drops the session and its lease and leaves the lineage exactly as it stands —
+the per-session form of what a workspace teardown does. It writes nothing and
+discards nothing, so the next open resurrects the draft. It is the only exit for
+an orphan on a path capture will never reach, which would otherwise hold its
+lease until the daemon restarted (#665).
+
+So local-only pruning is permitted only **after the artifact holds the
+projection**, never merely because the session is closing.
 
 The storage is deliberately additive-compatible: flipping
 `persistClosedSessionState` makes even a local-only close keep its CRDT bytes,

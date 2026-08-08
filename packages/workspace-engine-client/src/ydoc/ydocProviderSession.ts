@@ -133,6 +133,13 @@ export interface EngineYdocProviderSession {
     summary?: string;
     settleOnRefusal?: boolean;
   }): Promise<void>;
+  // End the session while writing NOTHING and discarding NOTHING: the daemon
+  // drops the session and its lease and leaves the durable lineage alone, so
+  // the next open resurrects this document's edits. The exit for a session
+  // that may not settle (the artifact is not this session's to write) and
+  // cannot prune (no artifact holds its CRDT's bytes), which would otherwise
+  // hold its lease until the daemon restarts (#665).
+  evict(): Promise<void>;
 }
 
 export async function openEngineYdocProviderSession(
@@ -311,6 +318,20 @@ export async function openEngineYdocProviderSession(
     notifyError(options.onSessionError, error);
   });
 
+  async function beginTeardown(): Promise<boolean> {
+    if (closeComplete) return true;
+    closed = true;
+    cancelSettle?.();
+    cancelSettle = null;
+    unsubscribeRemote();
+    unsubscribeRemoteError();
+    unsubscribeResync();
+    unsubscribeSessionError();
+    await journalChain.catch(() => undefined);
+    await settleChain.catch(() => undefined);
+    return false;
+  }
+
   return {
     doc: session.doc,
     initialUpdate: session.initialUpdate,
@@ -388,16 +409,7 @@ export async function openEngineYdocProviderSession(
     },
 
     async close(closeOptions) {
-      if (closeComplete) return;
-      closed = true;
-      cancelSettle?.();
-      cancelSettle = null;
-      unsubscribeRemote();
-      unsubscribeRemoteError();
-      unsubscribeResync();
-      unsubscribeSessionError();
-      await journalChain.catch(() => undefined);
-      await settleChain.catch(() => undefined);
+      if (await beginTeardown()) return;
       let preCloseError: unknown;
       if (
         closeOptions?.settle !== false &&
@@ -462,6 +474,39 @@ export async function openEngineYdocProviderSession(
       if (preCloseError !== undefined) {
         throw new YdocReleasedWithSettleFailureError(options.path, preCloseError);
       }
+    },
+
+    async evict() {
+      if (await beginTeardown()) return;
+      // No settle: an evict declines the ARTIFACT. It does not decline the
+      // user's text, and the durable lineage is the only place that text
+      // survives the teardown — so hand over anything the engine is still
+      // missing, exactly as a close does. A transient refusal is what leaves
+      // a debt here, and `resendMissingState` is a no-op when none is owed.
+      let resendError: unknown;
+      try {
+        await session.resendMissingState();
+      } catch (error) {
+        resendError = error;
+      }
+      // Evicting while the engine is STILL behind discards the only copy: the
+      // doc holding the text goes away with the session. Refuse only for a
+      // TRANSIENT failure, the one class a retry can clear — a terminal
+      // refusal cannot be waited out, and wedging the entry forever holding a
+      // lease nobody can release is worse than reporting the loss (#658).
+      if (session.missingLocalState && isTransientEngineRefusal(resendError)) {
+        closeError = resendError;
+        throw resendError;
+      }
+      try {
+        await session.evict();
+      } catch (error) {
+        closeError = error;
+        throw error;
+      }
+      if (ownsAdapter) adapter.dispose();
+      closeComplete = true;
+      closeError = null;
     },
   };
 }

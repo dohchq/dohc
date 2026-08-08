@@ -36,6 +36,7 @@ import {
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
+  isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
@@ -335,6 +336,11 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   | "applyLocalUpdate"
   | "applyExternalMarkdownEdit"
   | "close"
+  // Deliberately NOT handed out. An evict takes a daemon session away without
+  // settling it, which is right for an orphan nobody holds and wrong for a
+  // document a caller is editing. Only this layer's own teardown may reach it
+  // (#665) — see `RestartSafeYDocSession`.
+  | "evict"
 > & {
   // `onArmed` fires when THIS update has reached the provider — journaled onto
   // the session's journal chain and counted by the settle it arms. The call is
@@ -344,6 +350,11 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   applyLocalUpdate(update: Uint8Array, onArmed?: () => void): void;
   applyExternalMarkdownEdit(markdown: string): Promise<{ supported: boolean }>;
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
+};
+
+// The session THIS layer holds, which keeps the evict the public one drops.
+type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
+  evict(): Promise<void>;
 };
 
 export interface WorkspaceEngineCapture {
@@ -1377,7 +1388,7 @@ export function createWorkspaceEngineCapture(
     // The version active when the session opened. A version op invalidates it,
     // which is exactly why every version op must vacate live sessions first.
     versionId: string;
-    session: WorkspaceEngineYDocProviderSession;
+    session: RestartSafeYDocSession;
     // "live": healthy; sha-precise suppression, external edits captured.
     // "dead-generation": the daemon generation died; the canonical doc still
     // holds the user's text and a later op can rebuild a generation around it.
@@ -1544,7 +1555,7 @@ export function createWorkspaceEngineCapture(
     // `WorkspaceEngineCapture.openYDocSession`) is decided by the caller, not
     // here: later generations reopen an already-admitted document.
   }): Promise<{
-    session: WorkspaceEngineYDocProviderSession;
+    session: RestartSafeYDocSession;
     head: "present" | "absent";
     lineage: "existing" | "absent";
   }> {
@@ -1908,7 +1919,7 @@ export function createWorkspaceEngineCapture(
     const openedHead = current.head;
     const openedLineage = current.lineage;
 
-    const restartSafeSession: WorkspaceEngineYDocProviderSession = {
+    const restartSafeSession: RestartSafeYDocSession = {
       doc: canonicalDoc,
       initialUpdate,
       contentKind,
@@ -2000,6 +2011,23 @@ export function createWorkspaceEngineCapture(
             await session.applyExternalMarkdownEdit(markdown),
           );
           return { supported: result.kind === "merged" };
+        });
+      },
+      evict() {
+        return append(async () => {
+          if (closed) return;
+          // No revive, no settle, no release ladder. Evict whichever
+          // generation still holds the lease, including a dead wrapper's
+          // retained release obligation.
+          if (current !== null) {
+            await current.evict();
+          } else if (releaseObligation !== null) {
+            await releaseObligation.evict();
+            releaseObligation = null;
+          }
+          closed = true;
+          current = null;
+          clearDeadYDocSession(deadSessionToken);
         });
       },
       close(closeOptions) {
@@ -3060,10 +3088,9 @@ export function createWorkspaceEngineCapture(
         // materializes the Y.Doc over the user's uncaptured file (#564, codex
         // r20).
         //
-        // A discharge that refuses again leaves the orphan retained and
-        // refuses the open as unreleased — read-only, with a retry. It
-        // converges: once the watcher captures the file, the lineage is no
-        // longer dirty against it and the next discharge releases cleanly.
+        // A terminal refusal on an orphan now EVICTS, so the next open binds
+        // the preserved lineage (#665). A transient or workspace-open refusal
+        // retains the orphan and waits it out through the existing ladders.
         //
         // Only an orphan. A failing-close session someone still HOLDS is
         // converged by its holder and by the version ops, and a second open
@@ -3753,6 +3780,11 @@ export function createWorkspaceEngineCapture(
             });
           }, delay);
         };
+        // The close was REFUSED and an evict discharged it instead. Only the
+        // absent-head refusals below read it, and what it tells them is that
+        // the lineage holds content: the daemon refuses a prune-close for no
+        // other reason (#665).
+        let dischargedByEvict = false;
         const closeEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
@@ -3776,6 +3808,35 @@ export function createWorkspaceEngineCapture(
           try {
             await session.close(effective);
           } catch (error) {
+            // THE ORPHAN'S THIRD EXIT (#665). It may not settle — the rule
+            // above — and its prune-close refuses while no artifact holds its
+            // CRDT's bytes. On a policy-excluded path, or a file over the
+            // 128 KiB capture limit, no capture will ever mint that artifact,
+            // so the refused close's reinserted lease answered every later
+            // open with `ydoc-session-busy` until the daemon restarted.
+            //
+            // An evict writes nothing and discards nothing: the daemon lets go
+            // of the session and keeps the lineage, so the next open
+            // resurrects this document's edits.
+            //
+            // ONLY an orphan — a session someone HOLDS is converged by its
+            // holder. And only a TERMINAL refusal: a busy store or a spent
+            // budget is waited out by the ladders that already exist.
+            if (liveEntry.orphaned && isYdocUnsettledCloseRefusal(error)) {
+              try {
+                await session.evict();
+                dischargedByEvict = true;
+                if (liveYDocSessions.get(input.path) === liveEntry) {
+                  liveYDocSessions.delete(input.path);
+                }
+                return;
+              } catch (evictError) {
+                // The daemon kept the session, so the retain below is still
+                // the honest outcome. Report the eviction failure, because it
+                // is the reason this path stays reserved.
+                onError(`ydoc evict of ${input.path}`, evictError);
+              }
+            }
             if (error instanceof YdocReleasedWithSettleFailureError) {
               // A transient settle failure under a SUCCEEDED release is the
               // replicated shape: this error is the last time anyone hears
@@ -3907,18 +3968,13 @@ export function createWorkspaceEngineCapture(
         // settle:false close of that dirty lineage would be refused and strand
         // the lease. Read here, on the capture chain, so no version op can land
         // between the version binding above and this check.
-        if (head === "absent" && lineage === "absent") {
+        if (head === "absent") {
           const disk = await absentHeadDiskState(rootPath, input.path);
           // THREE RULES, IN THIS ORDER. They used to be tangled into one
           // condition, and the order is the whole correctness argument:
           //
-          //  1. Content on disk refuses, whatever else is true. This bind was
-          //     seeded from neither a head nor a snapshot, so its doc holds
-          //     only what replication delivered — settling it would write that
-          //     OVER uncaptured bytes the watcher has not ingested yet, while
-          //     this very chain is what is holding the watcher off. A peer
-          //     writing the same path does not make that safe, so this rule
-          //     wins over rule 2.
+          //  1. Content on disk always refuses a fresh bind. A resurrected
+          //     lineage refuses only where capture can eventually reach it.
           //  2. An update that reached the session means the document exists
           //     here: a peer is replicating it into this version, so refusing
           //     "not in this version" would be false. Bind it.
@@ -3968,10 +4024,16 @@ export function createWorkspaceEngineCapture(
             }
           };
           if (disk === "content") {
-            await releaseOrRefuse();
-            throw new YDocUncapturedArtifactError(input.path);
+            const captureWillReachPath =
+              lineage === "existing" &&
+              policyTracksPath(input.path, await readPolicyForTask()) &&
+              (await readDiskTextState(rootPath, input.path)).kind !== "untracked-content";
+            if (lineage === "absent" || captureWillReachPath) {
+              await releaseOrRefuse();
+              throw new YDocUncapturedArtifactError(input.path);
+            }
           }
-          if (disk === "missing" && updatesSeen === 0) {
+          if (lineage === "absent" && disk === "missing" && updatesSeen === 0) {
             // The count cannot be read atomically with the release: the close
             // defers through the operation chain, so its provider has not
             // unsubscribed at this line and an update can still arrive before
@@ -3986,6 +4048,15 @@ export function createWorkspaceEngineCapture(
             // one: nothing here may claim the path is missing while something
             // is writing it.
             await releaseOrRefuse();
+            // A discharge that needed an EVICT was refused first, and the
+            // prune-close refuses for one reason: the lineage holds content.
+            // The eviction released the lease, so this is no longer the
+            // unreleased refusal — but the path is still one something is
+            // writing, and calling it missing would be as false as before
+            // (#665).
+            if (dischargedByEvict) {
+              throw new YDocOpenRacedError(input.path);
+            }
             // RECHECKED immediately before the claim. The release above
             // awaited a daemon round trip, and this chain serializes engine
             // work, not the filesystem — an agent or an external editor can
