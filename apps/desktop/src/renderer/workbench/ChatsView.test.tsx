@@ -399,8 +399,15 @@ describe("ChatsView channels", () => {
 
   it("creates a channel inline and opens it", async () => {
     const user = userEvent.setup();
+    // Production shape: main mints the new channel's wire id from its own
+    // local id, so this is never null.
     bridgeMock.createChatChannel.mockResolvedValue({
-      channel: channel({ id: "channel-9", name: "launch", slug: "launch" }),
+      channel: channel({
+        id: "channel-9",
+        name: "launch",
+        slug: "launch",
+        wireId: "channel-9",
+      }),
     });
     renderView();
 
@@ -417,6 +424,39 @@ describe("ChatsView channels", () => {
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
       "launch",
     );
+  });
+
+  // #640: a channel on screen with no answer in the joined lane is a LOCKED
+  // channel, and the create put one on screen. main mints the wire id from the
+  // channel's own local id, so no grant can exist for it and the answer is
+  // known without asking — which it has to be, because the user is already
+  // inside the channel by the time any read could reply.
+  it("leaves a freshly created channel writable without another share read", async () => {
+    const user = userEvent.setup();
+    bridgeMock.createChatChannel.mockResolvedValue({
+      channel: channel({
+        id: "channel-9",
+        name: "launch",
+        slug: "launch",
+        wireId: "channel-9",
+      }),
+    });
+    renderView();
+    await screen.findByTestId("chats-channel");
+    const sharesReadsBefore = bridgeMock.listChatChannelShares.mock.calls.length;
+    const joinedReadsBefore = bridgeMock.listJoinedSharedChannels.mock.calls.length;
+
+    await user.click(screen.getByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
+      "launch",
+    );
+
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+    // And it did not take a second read to get there.
+    expect(bridgeMock.listChatChannelShares.mock.calls.length).toBe(sharesReadsBefore);
+    expect(bridgeMock.listJoinedSharedChannels.mock.calls.length).toBe(joinedReadsBefore);
   });
 
   it("lists file-linked Chats under Files and cross-links to the rail", async () => {

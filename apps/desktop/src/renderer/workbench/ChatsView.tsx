@@ -192,6 +192,34 @@ function mergeShareLanes(
   };
 }
 
+// A channel this workspace just created answers itself. main mints the new
+// channel's wire id from its own local id, so no grant can exist for it — and
+// the caller could not have named it in the read that is already on screen.
+// Without this the new channel is unanswered, and unanswered locks: the user
+// creates a channel and lands in it with no composer.
+//
+// It writes ONE key. A share read issued before the create replaces the whole
+// lane when it lands, which drops this entry, but openChannel moves liveToken
+// first — so that read can no longer commit, and the next one declares the
+// channel like any other.
+function answerCreatedChannel(
+  current: ShareListing | null,
+  channel: ChatChannelRecord,
+): ShareListing | null {
+  // Nothing has vouched for the lane yet, and one local fact does not make it
+  // an answer. channelIsLocked keeps failing closed until a read settles it.
+  if (current === null) return current;
+  if (!channel.wireId) return current;
+  const wireId = channel.wireId;
+  return {
+    ...current,
+    joined: [
+      ...current.joined.filter((answer) => answer.channelWireId !== wireId),
+      { channelWireId: wireId, joined: null },
+    ],
+  };
+}
+
 // Exported for the shell's expand-to-tab seam: the panel reports where it is
 // (onNavChange) and a freshly expanded tab starts there (initialNav).
 export type ChatsNav =
@@ -3260,6 +3288,9 @@ export function ChatsView(props: {
             ? { ...current, channels: [...current.channels, result.channel] }
             : current,
         );
+        // In the same update that shows the channel: a channel on screen with
+        // no answer in the lane is a locked channel.
+        setChannelShares((current) => answerCreatedChannel(current, result.channel));
         // The completion is the user's command landing (see openConversation).
         props.onNavCommand?.({ level: "channel", channel: result.channel });
         void openChannel(result.channel);
