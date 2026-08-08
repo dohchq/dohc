@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { JSONContent } from '@tiptap/core'
-import { prosemirrorJSONToYXmlFragment } from 'y-prosemirror'
+import {
+  prosemirrorJSONToYXmlFragment,
+  yXmlFragmentToProseMirrorRootNode,
+} from 'y-prosemirror'
 import * as Y from 'yjs'
 import {
   getDohcProseMirrorSchema,
@@ -820,4 +823,114 @@ describe('a list nested inside a task item', () => {
       expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
     })
   }
+})
+
+// CommonMark lets a fenced code block's opener carry up to three leading
+// spaces. Four or more make an indented code block instead, which is a
+// different construct. The import path used to drop a top-level fence indented
+// 1-3 spaces together with its whole body, so opening such a document and
+// letting it settle wrote the deletion back to disk (#695).
+describe('desktop editor markdown import: indented code fences', () => {
+  function bodyBlocks(markdown: string): JSONContent[] {
+    const root = yXmlFragmentToProseMirrorRootNode(
+      getDohcYDocBodyFragment(markdownToYDoc(markdown)),
+      getDohcProseMirrorSchema(),
+    ).toJSON() as JSONContent
+    return root.content ?? []
+  }
+
+  function codeText(node: JSONContent | undefined): string {
+    return (node?.content ?? []).map((child) => child.text ?? '').join('')
+  }
+
+  for (const indent of [1, 2, 3]) {
+    for (const fence of ['```', '~~~']) {
+      for (const info of ['', 'ts']) {
+        const opener = `${' '.repeat(indent)}${fence}${info}`
+        const label = `a ${indent}-space ${fence} fence ${info ? `with the info string "${info}"` : 'with no info string'}`
+
+        it(`keeps ${label}`, () => {
+          const input = [
+            'Para',
+            '',
+            opener,
+            'const a = 1',
+            `${' '.repeat(indent)}${fence}`,
+            '',
+            'After',
+          ].join('\n')
+
+          const blocks = bodyBlocks(input)
+          expect(blocks.map((block) => block.type)).toEqual([
+            'paragraph',
+            'codeBlock',
+            'paragraph',
+          ])
+          expect(codeText(blocks[1])).toBe('const a = 1')
+          expect(blocks[1]?.attrs?.language ?? null).toBe(info || null)
+        })
+      }
+    }
+  }
+
+  it('keeps every body line, stripping only the opener indent', () => {
+    const input = [
+      '  ```md',
+      '  first',
+      '',
+      '# not a heading',
+      '   deeper',
+      '  ```',
+    ].join('\n')
+    const blocks = bodyBlocks(input)
+    expect(blocks.map((block) => block.type)).toEqual(['codeBlock'])
+    expect(codeText(blocks[0])).toBe('first\n\n# not a heading\n deeper')
+    expect(blocks[0]?.attrs?.language).toBe('md')
+  })
+
+  it('normalizes an indented fence to column 0 on export', () => {
+    const once = yDocToMarkdown(markdownToYDoc(' ```js\ncode\n ```'))
+    expect(once).toBe('```js\ncode\n```')
+  })
+
+  // An empty fence has no body. The codeBlock must be built with no content at
+  // all: a text node holding '' is schema-invalid, so markdownToYDoc would
+  // throw `RangeError: Empty text nodes are not allowed` and the document would
+  // fail to open.
+  it('imports an empty indented fence as a codeBlock with no text node', () => {
+    const input = ' ```js\n ```'
+    const blocks = bodyBlocks(input)
+    expect(blocks.map((block) => block.type)).toEqual(['codeBlock'])
+    expect(blocks[0]?.attrs?.language).toBe('js')
+    expect(codeText(blocks[0])).toBe('')
+
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toBe('```js\n\n```')
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
+  })
+
+  // Boundary: four spaces is an indented code block, NOT a fence.
+  it('treats a 4-space-indented backtick run as code content, not a fence', () => {
+    const blocks = bodyBlocks('    ```\nParagraph')
+    expect(blocks.map((block) => block.type)).toEqual(['codeBlock', 'paragraph'])
+    expect(codeText(blocks[0])).toBe('```')
+    expect(blocks[0]?.attrs?.language ?? null).toBeNull()
+  })
+
+  // Boundary: fences that already worked must keep working.
+  it('keeps a fence indented inside a list item nested in that item', () => {
+    const blocks = bodyBlocks(['- item', '', '  ```', '  code', '  ```', '', 'After'].join('\n'))
+    expect(blocks.map((block) => block.type)).toEqual(['bulletList', 'paragraph'])
+    const itemBlocks = blocks[0]?.content?.[0]?.content ?? []
+    expect(itemBlocks.map((block) => block.type)).toEqual(['paragraph', 'codeBlock'])
+    expect(codeText(itemBlocks[1])).toBe('code')
+  })
+
+  // The suite above covers a fence inside a callout, whose tokenizer strips the
+  // `>` prefix itself. This is the only case that reaches marked's blockquote
+  // tokenizer with a fence inside it.
+  it('keeps a fence inside a plain blockquote quoted', () => {
+    const input = ['> ```', '> code', '> ```'].join('\n')
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+  })
 })

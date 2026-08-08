@@ -951,6 +951,25 @@ export const DohcTableRowHeight = Extension.create({
 // schema registers THIS extension so the editor and the conversions agree.
 export const DohcTaskItem = TaskItem.configure({ nested: true })
 
+// dohc owns the `code` token instead of StarterKit's CodeBlock, whose
+// parseMarkdown accepts a token only when its raw text starts at column 0 with
+// ``` or ~~~. CommonMark allows a fence opener indented up to 3 spaces, so that
+// test rejects a legal fence — and because no other handler claims `code`, the
+// whole block (fence and body) is dropped from the document.
+export const DohcCodeBlock = Extension.create({
+  name: 'dohcCodeBlock',
+  priority: 1000,
+
+  markdownTokenName: 'code',
+
+  parseMarkdown: (token, helpers) =>
+    helpers.createNode(
+      'codeBlock',
+      { language: token.lang || null },
+      token.text ? [helpers.createTextNode(token.text)] : [],
+    ),
+})
+
 export const dohcMarkdownExtensions = [
   DohcImage,
   DohcEscapedPunctuation,
@@ -961,4 +980,5 @@ export const dohcMarkdownExtensions = [
   DohcMathInline,
   DohcMathBlock,
   DohcTableRowHeight,
+  DohcCodeBlock,
 ]
