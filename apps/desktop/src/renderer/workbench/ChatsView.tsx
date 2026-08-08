@@ -1264,16 +1264,11 @@ export function ChatsView(props: {
   // that just read one (refreshOverview, refreshChannelBadges) declare from
   // that instead — it is newer, and a channel this surface is about to show
   // must be in the scope or channelIsLocked locks it.
-  const shownWireIds = useMemo(
-    () =>
-      shownChannelWireIds(
-        overview.status === "ready" ? overview.channels : [],
-        channelShares?.received ?? [],
-      ),
-    [overview, channelShares],
+  const latestShownWireIds = useRef<string[]>([]);
+  latestShownWireIds.current = shownChannelWireIds(
+    overview.status === "ready" ? overview.channels : [],
+    channelShares?.received ?? [],
   );
-  const latestShownWireIds = useRef(shownWireIds);
-  latestShownWireIds.current = shownWireIds;
   const commitShareListing = useCallback(
     (
       ticket: number,
@@ -2072,13 +2067,14 @@ export function ChatsView(props: {
       if (channelShares === null) return true;
       // A channel with no wire identity cannot carry a grant at all.
       if (!channel.wireId) return false;
-      // The joined lane answers the channels this surface declared. One that
-      // was not declared — a channel the list gained since the last read —
-      // has no answer, and an unanswered channel fails closed exactly like an
-      // unresolved listing. The next refresh declares it and unlocks it.
-      if (!joinedByWire.has(channel.wireId)) return true;
-      const joined = joinedByWire.get(channel.wireId) ?? null;
-      return joined !== null && (joined.access === "read-only" || joined.ended);
+      const answer = joinedByWire.get(channel.wireId);
+      // Not declared, so not answered — a channel the list gained since the
+      // last read. Unanswered fails closed exactly like an unresolved
+      // listing; the next refresh declares it and unlocks it.
+      if (answer === undefined) return true;
+      // Answered, and this workspace holds no grant: a plain local channel.
+      if (answer === null) return false;
+      return answer.access === "read-only" || answer.ended;
     },
     [channelShares, joinedByWire],
   );

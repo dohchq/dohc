@@ -4595,13 +4595,11 @@ function registerIpcHandlers(
       relayUrl: joinedRelayUrl,
       recipientUserId: joinedRecipientUserId,
     };
-    // RESERVE the slot before the pull, not after it. A separate check ahead
-    // of an awaited pull is not a gate: two joins can both pass it at the
-    // limit, both pull, and the loser's merge then throws with its channel
-    // already durably imported and no registry row to gate it — the read-only
-    // channel reads as locally owned again. The reservation IS the merge, and
-    // the merge is synchronous over the cached registry, so two callers cannot
-    // interleave inside it: the loser refuses having pulled nothing.
+    // Record the row BEFORE the pull. The row is the write gate, and a pull
+    // is durable: a pull that ran first would leave imported channel data with
+    // no row to gate it, and no row is what joinedSharedChannelForTarget
+    // answers null for — so a read-only shared channel would read as one this
+    // workspace owns and may write into.
     //
     // Dedup by shareId AND channelWireId (CodeRabbit Data Integrity): a
     // re-join of the same channel under a NEW share id (revoked + re-granted)
@@ -4635,24 +4633,17 @@ function registerIpcHandlers(
         }
       });
     } catch (error) {
-      // The reservation STAYS. A pull is multi-page and durable, so a failure
-      // proves nothing about what already landed: an earlier page can be
-      // applied before a later one times out, and a rejoin's merge may already
-      // have displaced an ended or read-only row. Removing the row in either
-      // case leaves channel data with no registry row — and no row is what
-      // joinedSharedChannelForTarget answers null for, so the channel reads as
-      // locally owned and writable. That is the defect the reservation exists
-      // to prevent, arriving through the cleanup path.
+      // The row STAYS. A pull is multi-page and durable, so a failure proves
+      // nothing about what already landed: an earlier page can be applied
+      // before a later one times out, and a rejoin's merge may already have
+      // displaced an ended or read-only row. Removing the row in either case
+      // leaves channel data with no write gate — the defect this ordering
+      // exists to prevent, arriving through the cleanup path.
       //
-      // The row is the write gate; it must never be absent while channel data
-      // exists locally. A leaked reservation costs capacity, which the user
-      // can recover by leaving a channel. A released one costs authority,
-      // which nobody can recover.
-      //
-      // It is not really leaked either: syncJoinedSharedChannels pulls every
-      // LIVE row on each pass, so this one either completes on a later pass or
-      // — if the share is genuinely gone — is marked ended and becomes the
-      // tombstone that gates it.
+      // Nothing is stranded by keeping it: syncJoinedSharedChannels pulls
+      // every LIVE row on each pass, so this one either completes on a later
+      // pass or — if the share is genuinely gone — is marked ended and becomes
+      // the tombstone that gates it.
       if (error instanceof ShareUnavailableError) {
         throw new Error("That shared channel isn't available anymore.");
       }
@@ -7053,8 +7044,9 @@ function registerIpcHandlers(
           relayUrl,
           recipientUserId,
         };
-        // RESERVE before the pull, for the reason joinSharedChannel states:
-        // the refusal has to land while this path still owns nothing durable.
+        // Record the row BEFORE the pull, for the reason joinSharedChannel
+        // states: the row is the write gate, and it must never be absent while
+        // channel data exists locally.
         // Rows read fresh — every await above could have changed them.
         setWorkspaceSharedChannels(
           workspace.workspaceId,

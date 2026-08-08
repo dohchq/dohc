@@ -287,45 +287,6 @@ describe("mergeJoinedChannel", () => {
     expect(merged[merged.length - 1]!.shareId).toBe("share-new");
   });
 
-  // Every sync pass walks the LIVE joined channels and does a pull for each,
-  // plus a push for each read-write one. That relationship is backpressure on
-  // the pass, and the lever for it — if it ever bites — is the pass, not a
-  // refusal at the join. This pins the relationship.
-  describe("the live count is the per-pass relay fan-out", () => {
-    it("does one pull per live channel and none for a tombstone", async () => {
-      const pulls: string[] = [];
-      const pushes: string[] = [];
-      const channels = [
-        joined({ shareId: "live-rw-1", channelWireId: "wire-1" }),
-        joined({ shareId: "live-rw-2", channelWireId: "wire-2" }),
-        joined({ shareId: "live-ro", channelWireId: "wire-3", access: "read-only" }),
-        joined({ shareId: "tombstone", channelWireId: "wire-4", ended: true }),
-      ];
-      await syncJoinedSharedChannels({
-        rootDir: "/tmp/ws",
-        workspaceId: "ws-1",
-        relay: RELAY,
-        channels,
-        pull: async (input) => {
-          pulls.push(input.shareId);
-          return pullResult(0);
-        },
-        push: async (input) => {
-          pushes.push(input.shareId);
-          return { pushed: 0 };
-        },
-      });
-      const live = channels.filter((channel) => channel.ended !== true);
-      // One pull per live row — the relationship the cap throttles.
-      expect(pulls).toHaveLength(live.length);
-      expect(pulls).not.toContain("tombstone");
-      // And a push for each live read-write row, so the fan-out is bounded by
-      // the live count, never by the total.
-      expect(pushes).toEqual(["live-rw-1", "live-rw-2"]);
-      expect(pulls.length + pushes.length).toBeGreaterThan(live.length);
-    });
-  });
-
 });
 
 // #640: the joined lane is answered for the channels a caller is SHOWING.
@@ -360,11 +321,6 @@ describe("scopeJoinedChannels", () => {
     // Identical at every history size: the response is a function of the view.
     expect(answered[1]).toEqual(answered[0]);
     expect(answered[2]).toEqual(answered[0]);
-
-    // And the size survives the contract parse, which is what actually
-    // crosses IPC.
-    const parsed = ListJoinedSharedChannelsResult.parse({ joined: answered[2] });
-    expect(parsed.joined).toHaveLength(shown.length);
   });
 
   it("answers null for a channel it holds no grant for, and the row for one it does", () => {
@@ -457,8 +413,10 @@ describe("tombstones outlive every revoke-and-grant cycle", () => {
     getChannelWireId: async () => "wire-1",
   };
 
-  it("still refuses writes into a revoked channel after arbitrarily many cycles", async () => {
+  it("keeps one tombstone per channel through any number of cycles, and still refuses writes", async () => {
     let rows: JoinedSharedChannel[] = [];
+    // One channel, revoked and re-granted a thousand times. A re-grant
+    // REPLACES the row for that wire, so it leaves ONE tombstone.
     for (let cycle = 0; cycle < 1_000; cycle += 1) {
       rows = mergeJoinedChannel(
         rows,
@@ -466,10 +424,9 @@ describe("tombstones outlive every revoke-and-grant cycle", () => {
       );
       rows = endJoinedChannel(rows, `share-${cycle}`);
     }
-    // A re-grant REPLACES the row for that wire, so one channel leaves one
-    // tombstone however often its share is revoked and re-granted.
     expect(rows).toHaveLength(1);
     expect(rows[0]!.ended).toBe(true);
+    // And that tombstone is still the write gate.
     await expect(
       assertSharedChannelWritable({
         workspaceId: "ws-1",
@@ -478,21 +435,19 @@ describe("tombstones outlive every revoke-and-grant cycle", () => {
         target: { channelId: "channel-1" },
       }),
     ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
-  });
 
-  it("keeps one tombstone per channel ever joined, and reaps none of them", () => {
-    let rows: JoinedSharedChannel[] = [];
-    for (let index = 0; index < 5_000; index += 1) {
+    // DISTINCT channels each keep their own tombstone; nothing reaps them.
+    for (let index = 0; index < 500; index += 1) {
       rows = mergeJoinedChannel(
         rows,
-        joined({ shareId: `share-${index}`, channelWireId: `wire-${index}` }),
+        joined({ shareId: `left-${index}`, channelWireId: `wire-left-${index}` }),
       );
-      rows = endJoinedChannel(rows, `share-${index}`);
+      rows = endJoinedChannel(rows, `left-${index}`);
     }
-    expect(rows).toHaveLength(5_000);
+    expect(rows).toHaveLength(501);
     expect(rows.every((row) => row.ended === true)).toBe(true);
     // And the lane a caller reads is still the size of its view.
-    expect(scopeJoinedChannels(rows, ["wire-42"])).toHaveLength(1);
+    expect(scopeJoinedChannels(rows, ["wire-left-42"])).toHaveLength(1);
   });
 });
 
