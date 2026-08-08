@@ -35,7 +35,6 @@ import {
   isFileLockedRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
-  isYdocSessionNotFoundRefusal,
   isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
   type EngineYdocProviderSession,
@@ -1610,19 +1609,21 @@ export function createWorkspaceEngineCapture(
       input.onAlive();
     };
 
+    // #710. `generation` is always the `openEngineYdocProviderSession` ladder
+    // (production never overrides the DI seam), whose raw adapter layer
+    // already swallows `ydoc-session-not-found` before it can reach here
+    // (`YdocAdapterSession.close`, packages/workspace-engine-client/src/ydoc/
+    // ydocLiveAdapter.ts) — and neither call below passes
+    // `settleOnRefusal: false`, the ladder's only rethrow path, so the error
+    // that DOES escape is by construction never that refusal. A settle:false
+    // release retries once, settling, before giving up.
     const releaseGeneration = async (
       generation: EngineYdocProviderSession,
     ): Promise<void> => {
       try {
         await generation.close({ settle: false });
-      } catch (error) {
-        if (isYdocSessionNotFoundRefusal(error)) return;
-        try {
-          await generation.close({ settle: true });
-        } catch (settlingCloseError) {
-          if (isYdocSessionNotFoundRefusal(settlingCloseError)) return;
-          throw settlingCloseError;
-        }
+      } catch {
+        await generation.close({ settle: true });
       }
     };
 
@@ -3982,15 +3983,18 @@ export function createWorkspaceEngineCapture(
           //     version. Refuse — and release without ever settling.
           //
           // The ADMIT paths (1's inverse, and 2) deliberately do not recheck
-          // the artifact. Nothing awaits between this read and the admission —
-          // the registration below is straight-line — so there is no window to
-          // narrow. A writer that fills the file AFTER admission is the
-          // open-ended case no open-time check can bound, and it is bounded
-          // instead where it has to be: the settle refuses to materialize over
-          // a file that drifted from what it settled (digestSettledFile here,
-          // the materialized-sha comparison in actor.rs). Before this change
-          // the open admitted every absent-head bind unconditionally, so these
-          // rules only ever narrow that surface.
+          // the artifact after deciding to admit. Rule 2's admit is
+          // straight-line to the registration below — no window there. Rule
+          // 1's inverse is not: `captureWillReachPath` below reads the
+          // policy and the disk again, so a writer can land inside that
+          // read. That window, and the open-ended one after admission (a
+          // writer that fills the file once this call has already
+          // returned), are both bounded the same way: the settle refuses to
+          // materialize over a file that drifted from what it settled
+          // (digestSettledFile here, the materialized-sha comparison in
+          // actor.rs). Before this change the open admitted every
+          // absent-head bind unconditionally, so these rules only ever
+          // narrow that surface.
           // Both rules below release the session and then describe the DISK.
           // A release the BUDGET refused describes neither: nothing was
           // released, the daemon still holds the restart-safe session, and a

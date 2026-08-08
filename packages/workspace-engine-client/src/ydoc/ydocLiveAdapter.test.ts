@@ -4,7 +4,10 @@ import {
   EngineRequestDeadlineError,
   EngineRequestError,
 } from "../daemon/engineClient";
-import { DaemonRefusalError } from "../live/daemonLiveAdapter";
+import {
+  DaemonRefusalError,
+  isYdocUnsettledCloseRefusal,
+} from "../live/daemonLiveAdapter";
 import type { Request } from "./generated/Request";
 import {
   IllFormedUtf16EditError,
@@ -204,7 +207,7 @@ describe("YdocLiveAdapter", () => {
     expect(engine.sessionText(session.sessionId)).toBe("😀");
     expect(engine.recordedUpdates).toHaveLength(1);
 
-    await session.close({ settle: false });
+    await session.close({ settle: true });
     adapter.dispose();
   });
 
@@ -257,7 +260,7 @@ describe("YdocLiveAdapter", () => {
     expect(session.doc.getText("plainText").toString()).toBe("xabc");
     expect(engine.recordedUpdates).toHaveLength(1);
 
-    await session.close({ settle: false });
+    await session.close({ settle: true });
     adapter.dispose();
   });
 
@@ -287,7 +290,7 @@ describe("YdocLiveAdapter", () => {
       session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "Y" }),
     ).toThrow(YdocSessionQuarantinedError);
 
-    await session.close({ settle: false });
+    await session.close({ settle: true });
     adapter.dispose();
   });
 
@@ -339,7 +342,7 @@ describe("YdocLiveAdapter", () => {
       ).toThrow(IllFormedUtf16EditError);
       expect(engine.recordedUpdates).toHaveLength(1);
 
-      await session.close({ settle: false });
+      await session.close({ settle: true });
       adapter.dispose();
     }
   });
@@ -407,7 +410,7 @@ describe("YdocLiveAdapter", () => {
       Array.from(Y.encodeStateVector(source)),
     );
 
-    await session.close({ settle: false });
+    await session.close({ settle: true });
     adapter.dispose();
   });
 
@@ -441,7 +444,7 @@ describe("YdocLiveAdapter", () => {
     expect(() => engine.applyRemoteUpdate(session.sessionId, second)).not.toThrow();
     expect(delivered).toEqual(["A", "AB"]);
 
-    await session.close({ settle: false });
+    await session.close({ settle: true });
     adapter.dispose();
   });
 
@@ -2207,7 +2210,7 @@ describe("YdocLiveAdapter", () => {
       session.applyLocalTextEdit({ root: "plainText", index: 2, insert: "C" }),
     ).resolves.toBeDefined();
 
-    await session.close({ settle: false });
+    await session.close({ settle: true });
     adapter.dispose();
   });
 
@@ -2248,7 +2251,7 @@ describe("YdocLiveAdapter", () => {
     expect(resyncCalls).toHaveLength(2);
     expect(session.doc.getText("plainText").toString()).toBe("ABC");
 
-    await session.close({ settle: false });
+    await session.close({ settle: true });
     adapter.dispose();
   });
 
@@ -2349,8 +2352,8 @@ describe("YdocLiveAdapter", () => {
     expect(secondRecord?.seq).toBe(1);
     expect(engine.events.map((event) => event.seq)).toEqual([1, 1]);
 
-    await firstSession.close({ settle: false });
-    await secondSession.close({ settle: false });
+    await firstSession.close({ settle: true });
+    await secondSession.close({ settle: true });
     adapter.dispose();
   });
 
@@ -2373,7 +2376,12 @@ describe("YdocLiveAdapter", () => {
     provider.applyLocalUpdate(update);
     const settled = await provider.settleNow({ summary: "manual settle" });
     const external = await provider.applyExternalMarkdownEdit("external edit");
-    await provider.close({ settle: false });
+    // `settle: true` (not `false`): the external edit left the projection
+    // past the manual settle's `last_settled_sha`, and a local-only close
+    // refuses a prune the artifact does not already cover (durable.rs
+    // close_session, #721). `settle: true` runs the ladder's normal pre-close
+    // settle first, which is what covers it.
+    await provider.close({ settle: true });
 
     expect(settled.markdown).toBe("seed local");
     expect(settled.projection).toEqual({
@@ -2391,6 +2399,7 @@ describe("YdocLiveAdapter", () => {
       YDOC_METHOD.recordUpdate,
       YDOC_METHOD.settle,
       YDOC_METHOD.applyExternalMarkdownEdit,
+      YDOC_METHOD.settle,
       YDOC_METHOD.close,
     ]);
     expect(engine.responses.map((response) => response.id)).toEqual(
@@ -2418,6 +2427,10 @@ describe("YdocLiveAdapter", () => {
       markdown: "external edit",
     });
     expect(engine.requests[4]?.params).toEqual({
+      sessionId: "session-1",
+      summary: "session close",
+    });
+    expect(engine.requests[5]?.params).toEqual({
       sessionId: "session-1",
       settle: false,
     });
@@ -2812,6 +2825,159 @@ describe("the ydoc.open deadline (#616)", () => {
       "edited from outside: on disk",
     );
     await reopened.close({ settle: false });
+  });
+
+  // #721. The loopback used to prune on every local-only close, where the
+  // daemon refuses one that would discard a lineage the artifact never
+  // received (durable.rs close_session). Driven at the RAW adapter layer —
+  // not through `openEngineYdocProviderSession`'s ladder, which retries a
+  // refused settle:false close as settle:true and would hide this.
+  it("refuses a local-only close over content the artifact never received", async () => {
+    const engine = seedPlaintextEngine("on disk");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "typed, never settled: ",
+    });
+
+    // MUTATION: prune unconditionally instead of refusing -> this resolves
+    // instead of rejecting, and the reopen below would find the lineage
+    // pruned even though nothing ever settled or captured its content.
+    const refusal = await session
+      .close({ settle: false })
+      .then(() => null, (error: unknown) => error);
+    expect(isYdocUnsettledCloseRefusal(refusal)).toBe(true);
+
+    // The refusal did not silently prune: the lease stayed reserved and the
+    // lineage is intact, so a settling close over the SAME session covers it
+    // and succeeds.
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
+  // #721 follow-up 1. A REPLICATED lineage's close compacts and KEEPS the
+  // CRDT rows regardless of settle state (durable.rs close_session) — the
+  // opposite of the local-only guard the test above pins.
+  it("keeps a replicated lineage across a settle:false close instead of pruning it", async () => {
+    const engine = seedPlaintextEngine("on disk");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "typed and unsettled: ",
+    });
+    engine.markSessionReplicated(session.sessionId);
+
+    // MUTATION: delete every lineage on a local-only close (ignore regime) ->
+    // this still resolves, but the reopen below would find the lineage gone.
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+
+    const reopened = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(reopened.lineage).toBe("existing");
+    expect(reopened.doc.getText("plainText").toString()).toBe(
+      "typed and unsettled: on disk",
+    );
+    await reopened.close({ settle: true });
+    adapter.dispose();
+  });
+
+  // #721 follow-up 2. The daemon's `ydoc_docs` row is keyed by (workspace,
+  // version, objectId) (durable.rs), not by path. A path-keyed lineage would
+  // let a reused path inherit a stranger's edits and lose a renamed
+  // object's, which is exactly what the two probes below pin.
+  it("keys the lineage by object identity, so a rename resurrects it and a reused path does not", async () => {
+    const OLD_PATH = "notes/original.md";
+    const NEW_PATH = "notes/renamed.md";
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: OLD_PATH,
+      markdown: "original content",
+      contentKind: "plaintext",
+      objectId: "object-original",
+    });
+    const adapter = new YdocLiveAdapter(engine);
+
+    const first = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: OLD_PATH,
+      contentKind: "plaintext",
+    });
+    await first.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "typed, never settled: ",
+    });
+    await first.evict();
+
+    // A DIFFERENT object lands at the old path (delete + unrelated
+    // recreate). MUTATION: key the lineage by path -> this open resurrects
+    // "object-original"'s edits under a document that never saw them.
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: OLD_PATH,
+      markdown: "a completely different file",
+      contentKind: "plaintext",
+      objectId: "object-new",
+    });
+    const reusedPath = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: OLD_PATH,
+      contentKind: "plaintext",
+    });
+    expect(reusedPath.lineage).toBe("absent");
+    expect(reusedPath.doc.getText("plainText").toString()).toBe(
+      "a completely different file",
+    );
+    await reusedPath.close({ settle: true });
+
+    // The SAME object, renamed to a NEW path. MUTATION: key the lineage by
+    // path -> this open seeds fresh from the file instead of resurrecting
+    // "object-original"'s unsettled edit.
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: NEW_PATH,
+      markdown: "original content",
+      contentKind: "plaintext",
+      objectId: "object-original",
+    });
+    const renamed = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: NEW_PATH,
+      contentKind: "plaintext",
+    });
+    expect(renamed.lineage).toBe("existing");
+    expect(renamed.doc.getText("plainText").toString()).toBe(
+      "typed, never settled: original content",
+    );
+    await renamed.close({ settle: true });
+    adapter.dispose();
   });
 
   it("evicts without settling, closing, or handing the text over again", async () => {
