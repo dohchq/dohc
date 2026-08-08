@@ -22,7 +22,7 @@ describe("releaseEngineYDocSession", () => {
 
     const released = await releaseEngineYDocSession({
       sessions,
-      sessionId: "s1",
+      sessionKey: "s1",
       entry,
       reason: "stale session replaced",
       onCloseFailed,
@@ -48,7 +48,7 @@ describe("releaseEngineYDocSession", () => {
     expect(
       await releaseEngineYDocSession({
         sessions,
-        sessionId: "s1",
+        sessionKey: "s1",
         entry,
         reason: "renderer closed the document",
         onCloseFailed: () => undefined,
@@ -60,7 +60,7 @@ describe("releaseEngineYDocSession", () => {
     expect(
       await releaseEngineYDocSession({
         sessions,
-        sessionId: "s1",
+        sessionKey: "s1",
         entry,
         reason: "unreleased session retried by a new open",
         onCloseFailed: () => undefined,
@@ -83,7 +83,7 @@ describe("releaseEngineYDocSession", () => {
 
     const released = await releaseEngineYDocSession({
       sessions,
-      sessionId: "s1",
+      sessionKey: "s1",
       entry,
       reason: "stale session replaced",
       onCloseFailed: () => undefined,
@@ -104,7 +104,7 @@ describe("releaseEngineYDocSession", () => {
 
     const released = await releaseEngineYDocSession({
       sessions,
-      sessionId: "s1",
+      sessionKey: "s1",
       entry,
       reason: "kind-mismatched lineage",
       onCloseFailed: () => undefined,
@@ -126,7 +126,7 @@ describe("releaseEngineYDocSession", () => {
 
     await releaseEngineYDocSession({
       sessions,
-      sessionId: "s1",
+      sessionKey: "s1",
       entry,
       reason: "kind-mismatched lineage",
       onCloseFailed,
@@ -152,7 +152,7 @@ describe("releaseEngineYDocSession", () => {
 
     const released = await releaseEngineYDocSession({
       sessions,
-      sessionId: "s1",
+      sessionKey: "s1",
       entry: stale,
       reason: "stale session replaced",
       onCloseFailed: () => undefined,
@@ -172,7 +172,7 @@ describe("releaseEngineYDocSession", () => {
 
     const released = await releaseEngineYDocSession({
       sessions,
-      sessionId: "s1",
+      sessionKey: "s1",
       entry: stale,
       reason: "stale session replaced",
       onCloseFailed: () => undefined,
@@ -201,7 +201,7 @@ describe("releaseEngineYDocSession", () => {
 
     await releaseEngineYDocSession({
       sessions,
-      sessionId: "s1",
+      sessionKey: "s1",
       entry: stale,
       reason: "stale session replaced",
       onCloseFailed: () => undefined,
@@ -213,10 +213,10 @@ describe("releaseEngineYDocSession", () => {
       Promise.all(
         [...sessions]
           .filter(([, entry]) => entry.closeFailed && entry.path === "notes/a.md")
-          .map(([sessionId, entry]) =>
+          .map(([sessionKey, entry]) =>
             releaseEngineYDocSession({
               sessions,
-              sessionId,
+              sessionKey,
               entry,
               reason: "renderer teardown",
               onCloseFailed: () => undefined,

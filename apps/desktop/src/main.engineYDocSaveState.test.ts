@@ -59,6 +59,52 @@ describe("engine Y.Doc save-state reporting in main", () => {
     );
   });
 
+  it("reports each settle against the seq state of ITS OWN open", () => {
+    // The reporter used to find its entry by session id. A refused open whose
+    // close FAILED keeps reporting — its session is still the daemon's — and
+    // that lookup then moved the save sequence of whichever open owns the id
+    // now: a settle vouching for edits it never carried, over another
+    // document (#683). The state is made before the session so the callback
+    // closes over it, and the entry carries that same object.
+    const handler = handlerSource("engineYDocOpen");
+    const saveSeqAt = handler.indexOf("const saveSeq = createEngineYDocSaveSeqState();");
+    expect(saveSeqAt).toBeGreaterThan(-1);
+    expect(saveSeqAt).toBeLessThan(handler.indexOf("capture.openYDocSession"));
+    const reporter = handler.slice(
+      handler.indexOf("onSaveState:"),
+      handler.indexOf("onRemoteUpdate:"),
+    );
+    expect(reporter).not.toContain("engineYDocSessions.get(");
+    expect(reporter).toMatch(/noteSettleStart\(saveSeq,/);
+    expect(reporter).toMatch(/noteSettleOutcome\(saveSeq,/);
+    // The entry shares that object, so an update counted through the entry and
+    // a settle counted through the reporter meet in one state.
+    expect(handler.slice(handler.indexOf("const entry: EngineYDocSessionEntry"))).toContain(
+      "        saveSeq,\n",
+    );
+  });
+
+  it("stops reporting and stops forwarding once the open is refused", () => {
+    // The renderer keys both events by the session id it minted. After a
+    // refusal that id belongs to another document: a report would move that
+    // document's save indicator, and a delta would be applied to its Y.Doc.
+    // A refused session whose close FAILED still hears its own document.
+    const handler = handlerSource("engineYDocOpen");
+    const reporter = handler.slice(
+      handler.indexOf("onSaveState:"),
+      handler.indexOf("onRemoteUpdate:"),
+    );
+    const forwarder = handler.slice(
+      handler.indexOf("onRemoteUpdate:"),
+      handler.indexOf("} catch (error) {"),
+    );
+    expect(reporter).toContain("if (refused) return;");
+    expect(forwarder).toContain("refused ||");
+    // One flag, set where every post-open refusal already goes.
+    const releaseAt = handler.indexOf("const release = (reason: string)");
+    expect(handler.slice(releaseAt)).toContain("refused = true;");
+  });
+
   // The defaulted seq is pinned BEHAVIORALLY in ipc/bridgeContract.test.ts
   // ("accepts a payload with no seq, defaulting it") — parsing a real payload,
   // not matching the schema's source text. A source-echo assertion here would

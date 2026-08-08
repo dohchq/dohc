@@ -83,7 +83,7 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     expect(retryAt).toBeGreaterThan(-1);
     expect(retryAt).toBeLessThan(handler.indexOf("capture.openYDocSession"));
     const retry = handler.slice(
-      handler.lastIndexOf("for (const [sessionId, entry]", retryAt),
+      handler.lastIndexOf("for (const [failedKey, entry]", retryAt),
       handler.indexOf("let session:"),
     );
     // Marked entries only: a LIVE session for this path belongs to whoever
@@ -129,6 +129,40 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     expect(hookAt).toBeGreaterThan(-1);
     expect(kindCheckAt).toBeGreaterThan(-1);
     expect(hookAt).toBeLessThan(kindCheckAt);
+  });
+});
+
+describe("engine Y.Doc registry: a registration never replaces a live session", () => {
+  // What the claim and the key DO is proved behaviorally in
+  // workspaces/engineYDocSessionRegistry.test.ts. What is only checkable here
+  // is that the handlers use them: the unconditional `set` they replace, and
+  // the by-id lookups they replace, are one-token regressions (#683).
+  it("claims the slot after the open instead of setting it", () => {
+    const handler = handlerSource("engineYDocOpen");
+    expect(handler).not.toContain("engineYDocSessions.set(");
+    const claimAt = handler.indexOf("claimEngineYDocSessionSlot(");
+    expect(claimAt).toBeGreaterThan(handler.indexOf("capture.openYDocSession"));
+    const claim = handler.slice(claimAt);
+    // The refused open releases ITS OWN session through the same helper as
+    // every other post-open refusal, and answers read-only unless that release
+    // happened.
+    expect(claim).toContain("release,");
+    expect(claim).toContain(
+      "...(claim.released ? {} : { engineMayHoldDocument: true }),",
+    );
+  });
+
+  it("keys every session by its SENDER and the renderer's id", () => {
+    // A renderer-minted id alone lets two windows collide in one registry.
+    for (const channel of [
+      "engineYDocOpen",
+      "engineYDocApplyUpdate",
+      "engineYDocClose",
+    ]) {
+      const handler = handlerSource(channel);
+      expect(handler).toContain("engineYDocSessionKey(");
+      expect(handler).not.toContain("engineYDocSessions.get(input.sessionId)");
+    }
   });
 });
 
