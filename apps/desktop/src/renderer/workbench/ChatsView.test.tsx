@@ -4846,6 +4846,36 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
   });
 
+  // A create is one local fact, and one local fact is not an answer for the
+  // lane. While the share lookup has failed there is no listing to write into,
+  // so the new channel fails closed with every other channel on the surface —
+  // and the surface says why. Seeding a listing from the create instead would
+  // put "no invitations, no members" over a lookup that never answered, which
+  // is #618.
+  it("fails a created channel closed while nothing has answered the share lanes", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockRejectedValue(new Error("signed out"));
+    bridgeMock.createChatChannel.mockResolvedValue({
+      channel: channel({ id: "channel-9", name: "launch", slug: "launch" }),
+    });
+    renderView();
+    await screen.findByTestId("chats-shares-unreadable");
+
+    await user.click(screen.getByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
+      "launch",
+    );
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(screen.getByTestId("chats-readonly-note").textContent).toContain(
+      "read-only for you",
+    );
+  });
+
   // The one deliberately wire-id-less fixture. ChatChannelRecord.wireId is
   // nullable — a channel with no recorded wire mapping cannot carry a grant,
   // so it is not lockable and never reaches the joined lane. Every other
