@@ -150,6 +150,24 @@ describe("the shared-channel sync pass is bounded in production", () => {
     );
   });
 
+  // A channel view has no poll at all, so its snapshot is whatever the last
+  // pass happened to leave. Above the window, an untargeted sync can refresh
+  // sixteen other channels and serve the opened one stale — and nothing comes
+  // along later to correct it.
+  it("names the opened channel, and syncs it BEFORE serving its threads", () => {
+    const handler = handlerSource("listChannelThreads");
+    const sync = handler.indexOf(
+      "await syncSharedChannelsForChatTarget(workspace.workspaceId, {\n" +
+        "      channelId: input.channelId,\n" +
+        "    });",
+    );
+    const read = handler.indexOf("listChannelThreads({");
+    expect(sync, "the opened channel must be named").toBeGreaterThan(-1);
+    expect(read).toBeGreaterThan(-1);
+    // A refresh after the read is a refresh the caller never sees.
+    expect(sync).toBeLessThan(read);
+  });
+
   // The DM poll runs every 4 s behind an open conversation. Unnamed, it starts a
   // plain rotation, so above the window the conversation the user is READING can
   // stay stale for many polls while the surface looks refreshed.

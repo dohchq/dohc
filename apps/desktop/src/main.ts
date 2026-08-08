@@ -6795,6 +6795,17 @@ function registerIpcHandlers(
           })
         ).authorUserId,
     });
+    // MU-C4: refresh before reading, the way listChatChannels does. A channel
+    // view has no poll of its own, and the pass is bounded, so an untargeted
+    // sync could leave the channel the user just opened waiting for the
+    // rotation. Naming it puts it in THIS pass (#718).
+    // MU-C4: refresh before reading, the way listChatChannels does. A channel
+    // view has no poll of its own, and the pass is bounded, so an untargeted
+    // sync could leave the channel the user just opened waiting for the
+    // rotation. Naming it puts it in THIS pass (#718).
+    await syncSharedChannelsForChatTarget(workspace.workspaceId, {
+      channelId: input.channelId,
+    });
     const threads = await linkedChatStoreFor(workspace).listChannelThreads({
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,

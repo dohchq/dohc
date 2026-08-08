@@ -583,8 +583,21 @@ describe("createPassCoverageReporter", () => {
     reportCoverage({ workspaceId: "ws-1", live: 40, uncovered: 24, passRows: 16 });
     expect(lines).toEqual([
       "[desktop] shared channel sync covered 16 of 40 joined channels this pass " +
-        "(limit SHARED_CHANNEL_SYNC_PASS_ROWS=16 rows/pass); 24 resume on the next pass.",
+        "(limit SHARED_CHANNEL_SYNC_PASS_ROWS=16 rotation rows/pass, plus 1 row for a channel " +
+        "a write named); 24 resume on the next pass.",
     ]);
+  });
+
+  // A write's channel is covered ON TOP of the rotation, so a pass can report 17
+  // covered against a limit of 16. The line has to name both numbers or it reads
+  // as a limit the pass just broke.
+  it("names the additive row, so covering 17 against a limit of 16 still adds up", () => {
+    const lines: string[] = [];
+    const reportCoverage = createPassCoverageReporter((message) => lines.push(message));
+    reportCoverage({ workspaceId: "ws-1", live: 40, uncovered: 23, passRows: 16 });
+    expect(lines[0]).toContain("covered 17 of 40 joined channels");
+    expect(lines[0]).toContain("16 rotation rows/pass");
+    expect(lines[0]).toContain("plus 1 row for a channel a write named");
   });
 
   it("repeats only when the remainder changes (the DM poll runs every 5 s)", () => {

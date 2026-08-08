@@ -249,7 +249,8 @@ export function createPassCoverageReporter(
     reported.set(workspaceId, uncovered);
     report(
       `[desktop] shared channel sync covered ${live - uncovered} of ${live} joined channels this pass ` +
-        `(limit SHARED_CHANNEL_SYNC_PASS_ROWS=${passRows} rows/pass); ${uncovered} resume on the next pass.`,
+        `(limit SHARED_CHANNEL_SYNC_PASS_ROWS=${passRows} rotation rows/pass, plus 1 row for a channel ` +
+        `a write named); ${uncovered} resume on the next pass.`,
     );
   };
 }
