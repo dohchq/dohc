@@ -12,12 +12,16 @@ import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daem
 // THE captureFor gate (single owner). Workspace-engine alpha (PR 0M-3/0M-5):
 // when the per-workspace flag is on, the engine store under .dohc/engine/ is
 // the workspace's SOLE history recorder — watcher batches become engine
-// moments and no legacy .dohc/history change set is written. The flag is read
-// once per workspace per APP SESSION, not per open: `openWorkspaceActivity`
-// retains every workspace it opens and `workspaceActivity.open` runs this gate
-// only for a workspace it does not already watch. Toggling the flag takes
-// effect after a dohc restart, and reopening the workspace re-reads nothing
-// (#687 — every surface that states the recovery path says restart).
+// moments and no legacy .dohc/history change set is written.
+//
+// WHEN the flag is read: on every fresh entry to this gate. A RETAINED session
+// gets exactly one — `openWorkspaceActivity` retains what it opens,
+// `workspaceActivity.open` skips a workspace it already watches, and nothing
+// closes a retained entry — so every window surface sees one decision per app
+// session, and only a restart re-reads the flag (#687: that is why their copy
+// says restart). Transient entries re-read without one: a tray scoped sync
+// calls this gate per scan, and a released dispatch entry rebuilds its capture
+// on the next attempt (see `EngineOffRecovery` below).
 //
 // The daemon is REQUIRED, not optional: `startRustEngineDaemon` quits the app
 // when it cannot start, before any window exists, so no running workspace can
