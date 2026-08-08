@@ -188,8 +188,12 @@ function scrollToHeading(
   );
 }
 
-/** A one-shot navigation request. `nonce` lets callers repeat a jump to the
- * same heading without changing the stable anchor identity. */
+/** Where the reader is in the document. `nonce` lets callers repeat a jump to
+ * the same heading without changing the stable anchor identity.
+ *
+ * Deliberately not consumable, unlike `BlockNavigationTarget` (#680, #685): a
+ * remount re-applies it, so a version switch returns the reader to their
+ * heading rather than to the top of the document. */
 export type HeadingNavigationTarget = {
   anchor: string;
   occurrence?: number;
