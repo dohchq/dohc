@@ -320,14 +320,32 @@ describe("main-process chat authorization", () => {
       // The pull happens INSIDE the serialized run, not beside it.
       expect(serializeAt, label).toBeLessThan(pullAt);
     }
+  });
 
-    // The cheap early-out still runs ahead of the DM home claim: a claim left
-    // behind for a join that never happened pins the share to a workspace that
-    // holds no row for it, and every other workspace then skips it for good.
-    const autoJoin = mainSource.slice(autoJoinStart, autoJoinEnd);
-    const autoRefusalAt = autoJoin.indexOf("joinedSharedChannelLimitRefusal(");
-    expect(autoRefusalAt).toBeGreaterThan(-1);
-    expect(autoRefusalAt).toBeLessThan(autoJoin.indexOf("claimDmHome("));
+  // #640: the joined lane crosses IPC scoped to the channels the caller
+  // named. The registry array grows with every channel this workspace has
+  // ever joined, so a handler that answered it whole would put that history
+  // in the response — the growth the deleted join gate used to bound.
+  it("answers the joined lane only for the channels the caller named", () => {
+    // listJoinedSharedChannels goes through the shared factory, whose scoping
+    // is pinned BEHAVIOURALLY in mainChatIpcHandlers.test.ts — a source pin
+    // cannot observe a response size. This one covers the wiring.
+    expect(handlerSource("listJoinedSharedChannels")).toContain(
+      "answerJoinedChannels: joinedChannelAnswers",
+    );
+    const listing = handlerSource("listChatChannelShares");
+    expect(listing).toContain("joinedChannelAnswers(");
+    expect(listing).toContain("input.channelWireIds");
+    // And the scope is a required argument of the one projection, so a third
+    // caller cannot answer the lane without naming one.
+    expect(mainSource).toContain(
+      "function joinedChannelAnswers(workspaceId: string, channelWireIds: readonly string[])",
+    );
+    // The write gate is unaffected: it reads the WHOLE registry array, in
+    // main, and never crosses IPC at all.
+    expect(mainSource).toContain(
+      "sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,",
+    );
   });
 
   // #627 deleted the read-only chat plumbing because these five handlers sit

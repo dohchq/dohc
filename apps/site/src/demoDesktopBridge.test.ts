@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  answerDemoJoinedLane,
   searchDemoDocuments,
   type DemoBridgeDocument,
 } from "./demoDesktopBridge";
@@ -56,5 +57,29 @@ describe("searchDemoDocuments", () => {
     expect(
       searchDemoDocuments(documents, { query: "[", regex: true }),
     ).toEqual([]);
+  });
+});
+
+// The renderer reads the joined lane as one answer per channel it NAMED, and
+// treats a wire id the lane left out as unknown — which locks that channel.
+// A demo bridge that answered a fixed empty array modelled less than main and
+// would lock every demo channel that carried a wire identity.
+describe("answerDemoJoinedLane", () => {
+  it("answers exactly the wire ids the caller named", () => {
+    expect(answerDemoJoinedLane(["wire-general", "wire-projects"])).toEqual([
+      { channelWireId: "wire-general", joined: null },
+      { channelWireId: "wire-projects", joined: null },
+    ]);
+  });
+
+  it("answers no grant, which is what makes an owned local channel writable", () => {
+    // null is "asked, and this workspace holds no grant". Absent would be
+    // "nobody asked", and that fails closed.
+    const [answer] = answerDemoJoinedLane(["wire-general"]);
+    expect(answer).toHaveProperty("joined", null);
+  });
+
+  it("answers nothing for a caller that named nothing", () => {
+    expect(answerDemoJoinedLane([])).toEqual([]);
   });
 });

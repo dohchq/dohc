@@ -5,7 +5,7 @@ import {
   type PushSharedChannelResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-import { MAX_CHAT_CHANNEL_SHARE_ROWS } from "../ipc/bridgeContract";
+import type { JoinedChannelAnswer } from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 
 // MU-C4 shared channels — the desktop's refresh pass over every shared
@@ -54,84 +54,71 @@ export function relayFetchWithTimeout(
     baseFetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) });
 }
 
-// The joined lane is relay-fed: autoJoinReceivedDms appends a row per received
-// DM grant on every syncDms, with no user action on this machine. So it needs
-// a bound, and the bound counts only LIVE rows (#617).
+// The joined lane, answered for the channels a caller is SHOWING (#640).
 //
-// Ended rows do not count, and are not reaped either. An ended row is the
-// write gate: assertSharedChannelWritable reads it to keep a revoked channel's
-// local copy read-only, and receivedNotJoined reads it to keep the invitation
-// on offer so Leave has a reverse path. So the user cannot delete one — which
-// means counting it would make the refusal's own instruction impossible to
-// act on: leaving a channel only marks it ended, and the lane would stay full
-// for good. Live rows are the set the user can actually shrink.
+// The registry array holds one row per channel this workspace ever joined,
+// including a tombstone per channel it has left. Returning all of it made the
+// IPC response grow with history, and that growth was the only thing a join
+// refusal ever bounded. So the read is scoped instead: name the channels, get
+// one answer each. Nothing about the size of the array reaches the caller.
 //
-// Growth past the bound therefore costs one deliberate Leave per extra row.
-// The relay alone can never buy that: it can fill the live budget and then
-// every further grant is refused.
-function liveJoinedChannels(rows: readonly JoinedSharedChannel[]): number {
-  return rows.filter((channel) => channel.ended !== true).length;
-}
-
-// The rows a merge of `incoming` would leave in place. Shared by the
-// pre-flight check and the merge itself, so the two can never disagree about
-// what the merge does.
-function joinedChannelsAfterMerge(
-  existing: readonly JoinedSharedChannel[],
-  incoming: { shareId: string; channelWireId: string },
-): JoinedSharedChannel[] {
-  return existing.filter(
-    (channel) =>
-      channel.shareId !== incoming.shareId &&
-      channel.channelWireId !== incoming.channelWireId,
-  );
-}
-
-export class JoinedSharedChannelLimitError extends Error {
-  constructor(message: string) {
-    super(message);
+// Tombstones therefore stay. An ended row is the write gate —
+// assertSharedChannelWritable reads it to keep a revoked channel's local copy
+// read-only, and the sharing surface reads it to keep the invitation on offer
+// so Leave has a reverse path. Reaping one would re-open writes into a channel
+// whose share is gone.
+//
+// A named channel with no row answers null, which is "this workspace holds no
+// grant for it". That is a different fact from a channel the caller did not
+// name, which stays absent and reads as unknown.
+export function scopeJoinedChannels(
+  rows: readonly JoinedSharedChannel[],
+  channelWireIds: readonly string[],
+): JoinedChannelAnswer[] {
+  const wanted = new Set(channelWireIds);
+  const byWire = new Map<string, JoinedSharedChannel>();
+  for (const channel of rows) {
+    // Last write wins, matching how the renderer resolves a wire id to the
+    // one canonical grant row.
+    if (wanted.has(channel.channelWireId)) byWire.set(channel.channelWireId, channel);
   }
-}
-
-// THE pre-flight check, and the reason it is separate from the merge: both
-// join paths pull the share's log into this workspace's chat store BEFORE
-// they record the grant, and autoJoinReceivedDms claims the DM home first.
-// A refusal raised at the merge would leave the pulled messages behind with
-// no registry row — and no row means joinedSharedChannelForTarget answers
-// null, so assertSharedChannelWritable and channelIsLocked read a READ-ONLY
-// shared channel as a local one the user may write into. Ask here, before any
-// durable mutation, and never start work the registry cannot record.
-//
-// Answers the refusal message, or null when the join fits.
-export function joinedSharedChannelLimitRefusal(
-  existing: readonly JoinedSharedChannel[],
-  incoming: { shareId: string; channelWireId: string },
-): string | null {
-  const live = liveJoinedChannels(existing);
-  // The incoming row is always live, and it replaces every row it matches.
-  const liveAfter = liveJoinedChannels(joinedChannelsAfterMerge(existing, incoming)) + 1;
-  // Only a join that GROWS the live set past the bound is refused. A re-join
-  // that replaces a row leaves the count where it was, so a lane already at
-  // (or over) the bound can still repair its own rows.
-  if (liveAfter <= MAX_CHAT_CHANNEL_SHARE_ROWS || liveAfter <= live) return null;
-  return `This workspace has ${live} shared chat channels; the limit is ${MAX_CHAT_CHANNEL_SHARE_ROWS}. Leave a shared channel, then join this one.`;
+  return [...wanted].map((channelWireId) => {
+    const channel = byWire.get(channelWireId);
+    return {
+      channelWireId,
+      joined: channel
+        ? {
+            shareId: channel.shareId,
+            channelWireId: channel.channelWireId,
+            access: channel.access,
+            granterEmail: channel.granterEmail,
+            ended: channel.ended === true,
+          }
+        : null,
+    };
+  });
 }
 
 // Registry merge for the join flow (CodeRabbit Data Integrity): a re-join of
 // the SAME channel under a NEW share id (revoked + re-granted) must replace
 // the stale row, not sit beside it — matching on shareId alone left the
 // channel listed and synced twice.
+//
+// It refuses nothing. The join gate this used to carry existed to bound the
+// joined-lane response, and the scoped read bounds that now (#640). A desktop
+// that refused a join could not stop the relay granting one either — it could
+// only make the user's own channel unreachable, which is how the same cap
+// produced three permanent-refusal defects in one review cycle.
 export function mergeJoinedChannel(
   existing: readonly JoinedSharedChannel[],
   joined: JoinedSharedChannel,
 ): JoinedSharedChannel[] {
-  // The backstop, not the gate: the callers ask joinedSharedChannelLimitRefusal
-  // before they pull. This catches a lane that filled up between that question
-  // and this write, and it must stay — a durable row past the bound is the one
-  // outcome neither layer may produce.
-  const refusal = joinedSharedChannelLimitRefusal(existing, joined);
-  if (refusal) throw new JoinedSharedChannelLimitError(refusal);
-  return [...joinedChannelsAfterMerge(existing, joined), joined];
+  const kept = existing.filter(
+    (channel) =>
+      channel.shareId !== joined.shareId &&
+      channel.channelWireId !== joined.channelWireId,
+  );
+  return [...kept, joined];
 }
 
 // Member leave stops sync but keeps a durable provenance tombstone. The local

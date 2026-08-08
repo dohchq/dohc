@@ -482,11 +482,14 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
     bridgeMock.listChatChannelShares.mockResolvedValue({
       joined: [
         {
-          shareId: "share-1",
           channelWireId: "wire-joined",
-          access: "read-write",
-          granterEmail: null,
-          ended: false,
+          joined: {
+            shareId: "share-1",
+            channelWireId: "wire-joined",
+            access: "read-write",
+            granterEmail: null,
+            ended: false,
+          },
         },
       ],
       sessionKey: "session-a",
@@ -552,11 +555,14 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
     bridgeMock.listChatChannelShares.mockResolvedValue({
       joined: [
         {
-          shareId: "share-1",
           channelWireId: "wire-joined",
-          access: "read-write",
-          granterEmail: null,
-          ended: false,
+          joined: {
+            shareId: "share-1",
+            channelWireId: "wire-joined",
+            access: "read-write",
+            granterEmail: null,
+            ended: false,
+          },
         },
       ],
       sessionKey: "session-a",
@@ -757,11 +763,14 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
     bridgeMock.listChatChannelShares.mockResolvedValue({
       joined: [
         {
-          shareId: "share-1",
           channelWireId: "wire-joined",
-          access: "read-write",
-          granterEmail: null,
-          ended: false,
+          joined: {
+            shareId: "share-1",
+            channelWireId: "wire-joined",
+            access: "read-write",
+            granterEmail: null,
+            ended: false,
+          },
         },
       ],
       sessionKey: "session-a",

@@ -97,7 +97,10 @@ async function grantedShare(
     const api = (
       window as unknown as {
         dohcDesktop: {
-          listChatChannelShares(payload: { workspaceId: string }): Promise<{
+          listChatChannelShares(payload: {
+            workspaceId: string;
+            channelWireIds: string[];
+          }): Promise<{
             relay:
               | {
                   state: "answered";
@@ -113,7 +116,11 @@ async function grantedShare(
         };
       }
     ).dohcDesktop;
-    const shares = await api.listChatChannelShares({ workspaceId: id }).catch(() => null);
+    // This probe reads the GRANTED relay lane only, so it names no channel:
+    // the joined lane is answered per channel a caller is showing (#640).
+    const shares = await api
+      .listChatChannelShares({ workspaceId: id, channelWireIds: [] })
+      .catch(() => null);
     const live =
       shares?.relay.state === "answered"
         ? shares.relay.granted.find((row) => row.revokedAtMs === null) ?? null
