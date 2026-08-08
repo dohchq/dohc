@@ -825,7 +825,7 @@ export function SettingsDialog(props: {
                 // reopening the workspace re-reads this flag nowhere. The last
                 // line is what keeps the one above it true — the retained
                 // capture keeps recording after a mid-session turn-off.
-                description="The workspace engine records this workspace's history, versions, and chats. Turning it off is an escape hatch. Restart dohc after you change this setting. Until you restart, recording does not change."
+                description="The workspace engine records this workspace's history, versions, and chats. Restart dohc after you change this setting. Until you restart, recording does not change."
                 modified={isModified(
                   workspaceSettings.experimental.workspaceEngineAlpha,
                   DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
