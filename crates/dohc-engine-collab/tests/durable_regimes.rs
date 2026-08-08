@@ -263,10 +263,20 @@ fn local_only_close_prunes_the_cache() {
     );
 }
 
-/// Seed the head a capture writes: the version row, the text blob, and the
-/// `snapshots` row that points at it. This is the disk -> engine direction, so
-/// no settle runs and `last_settled_sha` stays NULL.
-fn seed_captured_head(store: &mut dohc_engine_storage::EngineStore, key: &DocKey, text: &str) {
+/// Seed a head for the object: the version row, the text blob, and the
+/// `snapshots` row that points at it.
+///
+/// `engine_write_status` is what separates the two directions. `None` is the
+/// disk -> engine direction — a capture read the file, so no materialization
+/// job exists and the bytes are the disk's. `Some(status)` is the engine ->
+/// disk direction: a job was minted to put these bytes on the file, and only
+/// that job's outcome says whether the disk ever received them.
+fn seed_head(
+    store: &mut dohc_engine_storage::EngineStore,
+    key: &DocKey,
+    text: &str,
+    engine_write_status: Option<&str>,
+) {
     store
         .write_with(&NoFaults, |tx| {
             let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
@@ -286,13 +296,24 @@ fn seed_captured_head(store: &mut dohc_engine_storage::EngineStore, key: &DocKey
                 "INSERT OR REPLACE INTO snapshots \
                  (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
                   latest_moment_id, metadata_origin) \
-                 VALUES (?1, ?2, ?3, 'notes/doc.md', ?4, 1, 'capture-moment', 'capture')",
+                 VALUES (?1, ?2, ?3, 'notes/doc.md', ?4, 1, 'head-moment', 'capture')",
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id, sha],
             )
             .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            if let Some(status) = engine_write_status {
+                let binary_sha = dohc_engine_storage::put_binary_blob(tx, text.as_bytes())?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO materialization_jobs \
+                     (job_id, workspace_id, target_path, content_sha256, preimage_present, \
+                      target_generation, status, created_at_ms, operation) \
+                     VALUES ('ydoc-mat_head-moment', ?1, 'notes/doc.md', ?2, 0, 1, ?3, 1, 'write')",
+                    rusqlite::params![key.workspace_id, binary_sha, status],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            }
             Ok::<_, dohc_engine_storage::StorageError>(())
         })
-        .expect("seed the captured head");
+        .expect("seed the head");
 }
 
 #[test]
@@ -324,7 +345,7 @@ fn a_captured_head_lets_a_never_settled_local_close_prune() {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
     committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
-    seed_captured_head(&mut ts.store, &key, "what the user typed");
+    seed_head(&mut ts.store, &key, "what the user typed", None);
 
     let out =
         committed(close_session(&mut ts.store, &key, false, &NoFaults, 1_400).expect("close"));
@@ -358,7 +379,7 @@ fn a_head_holding_other_bytes_still_refuses_the_local_close() {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
     committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
-    seed_captured_head(&mut ts.store, &key, "something else entirely");
+    seed_head(&mut ts.store, &key, "something else entirely", None);
 
     assert!(
         matches!(
@@ -371,6 +392,162 @@ fn a_head_holding_other_bytes_still_refuses_the_local_close() {
         count(&ts.store, "ydoc_updates", &key),
         1,
         "the refused close kept the cache"
+    );
+}
+
+#[test]
+fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
+    // #713 review, P1-a. A settle advances the head AND writes
+    // `last_settled_sha`, then its materialization job finds newer bytes on
+    // the file. `ydoc_settle_on_store` marks that job terminal and NULLs
+    // `last_settled_sha` — its own comment says why: "so close(settle:false)
+    // refuses UnsettledClose instead of pruning"
+    // (crates/dohc-engine-runtime/src/actor.rs).
+    //
+    // The head still holds the projection and the job is no longer pending,
+    // so a fallback that asked only "do the head's bytes match" would call
+    // this covered and prune the CRDT while the FILE holds someone else's
+    // content. Everything typed into the session would be gone.
+    //
+    // The direction is what the fallback reads, not the bytes. A capture is
+    // disk -> engine and mints no job, so its head IS the file. A head the
+    // engine wrote has a job, and only that job says whether the file ever
+    // received it — `last_settled_sha` is the proof for that direction, and
+    // this state is exactly the one where it was withdrawn.
+    //
+    // MUTATION: drop the `NOT EXISTS (materialization_jobs …)` clause from
+    // `captured_head_sha` — this close prunes and the assert below fails.
+    let mut ts = fresh_store("engine-head-never-landed");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    let delta = doc.plaintext_insert(0, "what the user typed");
+    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    seed_head(&mut ts.store, &key, "what the user typed", Some("conflict"));
+
+    assert!(
+        matches!(
+            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            Err(CollabError::UnsettledClose)
+        ),
+        "a head whose materialization conflicted is not on disk, whatever it holds"
+    );
+    assert_eq!(
+        count(&ts.store, "ydoc_updates", &key),
+        1,
+        "the refused close kept the cache"
+    );
+
+    // A COMPLETED job is the same direction and refuses here too. That path
+    // has its own proof — `last_settled_sha`, which a completed settle keeps
+    // — and this fallback deliberately answers for captures only.
+    let mut settled = fresh_store("engine-head-that-landed");
+    let key2 = test_key();
+    seed_parents(&mut settled.store, &key2, 1_000);
+    committed(
+        ensure_marker(
+            &mut settled.store,
+            &key2,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc2 = Ydoc::wire();
+    let delta2 = doc2.plaintext_insert(0, "what the user typed");
+    committed(
+        record_local_update(&mut settled.store, &key2, &delta2, &NoFaults, 1_100).expect("rec"),
+    );
+    seed_head(
+        &mut settled.store,
+        &key2,
+        "what the user typed",
+        Some("complete"),
+    );
+    assert!(
+        matches!(
+            close_session(&mut settled.store, &key2, false, &NoFaults, 1_400),
+            Err(CollabError::UnsettledClose)
+        ),
+        "an engine-written head answers through the settle marker, not this fallback"
+    );
+}
+
+#[test]
+fn a_binary_head_refuses_the_close_by_name_instead_of_failing_internally() {
+    // #713 substitution review. `snapshots.blob_sha256` is NULL for a BINARY
+    // head (schema v10), which a live path reaches: write bytes that stop
+    // round-tripping as UTF-8 and capture flips the head's kind. Reading that
+    // column as a non-optional String makes rusqlite raise InvalidColumnType,
+    // and `.optional()` absorbs only QueryReturnedNoRows — so the close
+    // answered `Internal: workspace operation failed`.
+    //
+    // It failed CLOSED, so nothing was lost. It was still the wrong answer:
+    // an agent reading that cannot tell a corrupt store from a document it
+    // simply has to settle first (AGENTS.md: show agents the limits they
+    // hit). A NULL head sha covers nothing, and saying so is the whole fix.
+    //
+    // MUTATION: read the column as `String` again -> this close returns
+    // Storage/Corrupt and the match below fails.
+    let mut ts = fresh_store("binary-head-refusal");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    let delta = doc.plaintext_insert(0, "what the user typed");
+    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO versions \
+                 (workspace_id, version_id, kind, name, created_at_ms) \
+                 VALUES (?1, ?2, 'main', 'main', 1)",
+                rusqlite::params![key.workspace_id, key.version_id],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            let binary_sha = dohc_engine_storage::put_binary_blob(tx, &[0xff, 0xfe, 0x00])?;
+            tx.execute(
+                "INSERT OR REPLACE INTO snapshots \
+                 (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
+                  latest_moment_id, metadata_origin, content_kind, binary_sha256) \
+                 VALUES (?1, ?2, ?3, 'notes/doc.md', NULL, 1, 'binary-moment', 'capture', \
+                         'binary', ?4)",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id, binary_sha],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("seed the binary head");
+
+    assert!(
+        matches!(
+            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            Err(CollabError::UnsettledClose)
+        ),
+        "a binary head holds none of this document's text, and the refusal must say so"
     );
 }
 

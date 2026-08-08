@@ -489,12 +489,28 @@ export async function openEngineYdocProviderSession(
       unsubscribeRemoteError();
       unsubscribeResync();
       unsubscribeSessionError();
-      // No settle, and no `resendMissingState` either: an evict is what a
-      // caller reaches for when the engine has REFUSED this document's text,
-      // and re-offering it would only re-earn the refusal this exit exists to
-      // escape. What the engine already journaled is what survives.
       await journalChain.catch(() => undefined);
       await settleChain.catch(() => undefined);
+      // No settle: an evict declines the ARTIFACT. It does not decline the
+      // user's text, and the durable lineage is the only place that text
+      // survives the teardown — so hand over anything the engine is still
+      // missing, exactly as a close does. A transient refusal is what leaves
+      // a debt here, and `resendMissingState` is a no-op when none is owed.
+      let resendError: unknown;
+      try {
+        await session.resendMissingState();
+      } catch (error) {
+        resendError = error;
+      }
+      // Evicting while the engine is STILL behind discards the only copy: the
+      // doc holding the text goes away with the session. Refuse only for a
+      // TRANSIENT failure, the one class a retry can clear — a terminal
+      // refusal cannot be waited out, and wedging the entry forever holding a
+      // lease nobody can release is worse than reporting the loss (#658).
+      if (session.missingLocalState && isTransientEngineRefusal(resendError)) {
+        closeError = resendError;
+        throw resendError;
+      }
       try {
         await session.evict();
       } catch (error) {

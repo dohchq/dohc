@@ -1062,15 +1062,15 @@ pub fn close_session(
         // TWO ways the artifact can already hold these bytes, and both count.
         // A settle records itself in `last_settled_sha`. A CAPTURE of the file
         // moves the HEAD to them and touches no marker column — it reads the
-        // disk, so a matching head IS the proof this guard asks for. Reading
-        // the marker alone refuses a document whose own projection is already
-        // the head, and capture -> discharge -> open never converges (#665).
-        // `ydoc_apply::project_and_write_in_tx` applies the same rule on the
-        // sync side.
+        // disk, so a matching captured head IS the proof this guard asks for.
+        // Reading the marker alone refuses a document whose own projection is
+        // already the head, and capture -> discharge -> open never converges
+        // (#665). `ydoc_apply::project_and_write_in_tx` applies the same rule
+        // on the sync side.
         let covered = store.read_with(|conn| -> Result<bool, CollabError> {
             Ok(
                 last_settled_sha(conn, key)?.as_deref() == Some(content_sha.as_str())
-                    || head_content_sha(conn, key)?.as_deref() == Some(content_sha.as_str()),
+                    || captured_head_sha(conn, key)?.as_deref() == Some(content_sha.as_str()),
             )
         })?;
         if !covered {
@@ -1274,17 +1274,38 @@ fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, C
     .ok_or(CollabError::NoMarker)
 }
 
-/// The sha of the artifact this version currently holds for the object: the
-/// head a capture ingested, or a settle materialized.
-fn head_content_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
+/// The object's head sha, but ONLY when a capture put it there.
+///
+/// The DIRECTION decides, not the bytes. A capture is disk -> engine: it reads
+/// the file, mints no materialization job, and its head therefore IS what the
+/// file holds. A head the engine wrote is engine -> disk, and its job is the
+/// only thing that says whether the file ever received it — a job that
+/// conflicted leaves the head holding bytes the file never had, and
+/// `ydoc_settle_on_store` withdraws `last_settled_sha` for exactly that case.
+/// Answering "covered" from such a head would prune the CRDT over a file that
+/// disagrees with it.
+///
+/// Matched on content and path rather than on a job-id prefix, so a job kind
+/// added later cannot slip past this by being spelled differently.
+fn captured_head_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
     conn.query_row(
-        "SELECT blob_sha256 FROM snapshots \
-         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        "SELECT s.blob_sha256 FROM snapshots s \
+         WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM materialization_jobs j \
+             WHERE j.content_sha256 = s.blob_sha256 \
+               AND j.target_path = s.path \
+               AND (j.workspace_id = ?1 OR j.workspace_id = ''))",
         rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-        |r| r.get::<_, String>(0),
+        // NULL for a BINARY head (schema v10), which a path whose bytes stop
+        // round-tripping as UTF-8 becomes. It covers nothing, and reading it
+        // as a plain String would raise InvalidColumnType instead —
+        // `.optional()` absorbs only QueryReturnedNoRows.
+        |r| r.get::<_, Option<String>>(0),
     )
     .optional()
     .map_err(map_sql)
+    .map(Option::flatten)
 }
 
 pub(crate) fn head_of(conn: &Connection, key: &DocKey) -> Result<(i64, i64, bool), CollabError> {

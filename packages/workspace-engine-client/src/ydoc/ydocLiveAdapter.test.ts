@@ -1169,6 +1169,96 @@ describe("YdocLiveAdapter", () => {
     expect(outcome).toBeInstanceOf(YdocReleasedWithSettleFailureError);
   });
 
+  it("refuses to evict a session the engine is still behind", async () => {
+    // #713 review, P1-b. An evict declines the ARTIFACT and the prune. It does
+    // not decline the user's text — and a transiently refused `recordUpdate`
+    // leaves that text in this doc alone, with the durable lineage behind it.
+    // Dropping the session there loses the edit permanently, which is the one
+    // thing an evict is supposed to make impossible.
+    //
+    // `close` already refuses in exactly this state. So does this now: hand
+    // the engine what it is missing first, and refuse while the debt is one a
+    // retry can still pay.
+    //
+    // MUTATION: drop the `missingLocalState` guard from `evict` (or its
+    // `resendMissingState` call) -> this resolves and "typed and never sent"
+    // exists nowhere but a doc about to be discarded.
+    const { provider, journaled } = await openAgainstABusyJournal(
+      "typed and never sent",
+      99,
+    );
+    await expect(journaled).rejects.toThrow("engine-store-busy");
+
+    const outcome = await provider
+      .evict()
+      .then(() => null)
+      .catch((error: unknown) => error);
+
+    expect(outcome).not.toBeNull();
+    expect(String(outcome)).toContain("engine-store-busy");
+    // Still the caller's to retry: the refusal kept the session rather than
+    // trading the edit for a released lease.
+    expect(provider.doc.getText("plainText").toString()).toContain(
+      "typed and never sent",
+    );
+  });
+
+  it("evicts once the resend clears the debt the refusal left", async () => {
+    // The narrowness guard for the refusal above. A debt that CAN be paid is
+    // paid, and then the evict proceeds — otherwise the orphan this exit
+    // exists for would be wedged by a refusal that has already cleared.
+    const engine = seedPlaintextEngine();
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      new Error("daemon response"),
+    );
+    // Busy until the contention clears, so the debt is still outstanding when
+    // the evict runs — a fixed refusal count cannot stage that, because the
+    // provider's own ladder may already have paid it.
+    let contended = true;
+    const methods: string[] = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate && contended) throw busy;
+        methods.push(request.method);
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSettleError: () => undefined,
+      scheduleSettle: () => () => undefined,
+    });
+    await provider
+      .applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (body) => {
+          body.insert(0, "typed and finally sent");
+        }),
+      )
+      .catch(() => undefined);
+    methods.length = 0;
+    contended = false;
+
+    await provider.evict();
+
+    // The resend went first, and the evict followed it.
+    expect(methods).toEqual([
+      YDOC_METHOD.resync,
+      YDOC_METHOD.recordUpdate,
+      YDOC_METHOD.evict,
+    ]);
+  });
+
   it("releases an orphan that is holding nothing of the user's", async () => {
     // The wedge guard the fold could have introduced: a doc that never took a
     // local edit owes no debt, so nothing may hold up its teardown. Orphans
@@ -2518,6 +2608,56 @@ describe("the ydoc.open deadline (#616)", () => {
       }),
     ).rejects.toBe(dropped);
     adapter.dispose();
+  });
+
+  it("resurrects an evicted lineage, and prunes a closed one", async () => {
+    // #713 review, P2. The loopback used to keep the CRDT rows inside the
+    // session, so an evict took the document with it and the reopen found the
+    // file. That models LESS than the daemon — which keeps the lineage across
+    // an eviction and resurrects it — so any test driving it would certify a
+    // convergence that never happens. Mirrors
+    // `an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it`
+    // in crates/dohc-workspace-engine/tests/rpc_ydoc.rs.
+    const engine = seedPlaintextEngine("on disk");
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      sendRequest: (request) => engine.sendRequest(request),
+    };
+    const open = async () =>
+      await openEngineYdocProviderSession({
+        transport,
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+        onRemoteUpdate: () => undefined,
+        scheduleSettle: () => () => undefined,
+      });
+
+    const first = await open();
+    await first.applyLocalUpdate(
+      plaintextUpdate(first.initialUpdate, (text) => {
+        text.insert(0, "typed and never settled: ");
+      }),
+    );
+    await first.evict();
+
+    // MUTATION: delete the lineage in `evict` too -> this open seeds "on disk"
+    // and reports lineage "absent", and the desktop's #665 convergence test
+    // would be passing against a fake that cannot lose the document.
+    const resurrected = await open();
+    expect(resurrected.lineage).toBe("existing");
+    expect(resurrected.doc.getText("plainText").toString()).toBe(
+      "typed and never settled: on disk",
+    );
+
+    // The other half, and the reason evict is a separate verb: a local-only
+    // CLOSE prunes those rows, so the next open reseeds from the file.
+    await resurrected.close({ settle: false });
+    const reseeded = await open();
+    expect(reseeded.lineage).toBe("existing");
+    expect(reseeded.doc.getText("plainText").toString()).toBe("on disk");
+    await reseeded.close({ settle: false });
   });
 
   it("evicts without settling, closing, or handing the text over again", async () => {
