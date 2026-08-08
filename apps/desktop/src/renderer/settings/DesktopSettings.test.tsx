@@ -1078,6 +1078,31 @@ describe("DesktopSettings", () => {
     ).toBe("global-folder");
   });
 
+  // #687: the recovery path this row prescribes has to be the one that works.
+  // Main decides the recorder once per workspace per app session —
+  // `openWorkspaceActivity` retains every workspace it opens and
+  // `workspaceActivity.open` no-ops for one it already watches — so reopening
+  // the workspace re-reads this flag nowhere. Same instruction the History,
+  // versions and chats surfaces give, for the same cause.
+  it("tells the user to restart, not to reopen the workspace", async () => {
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-workspace-engine-alpha");
+    await waitFor(() =>
+      expect(row.textContent).toContain(
+        "After you change this setting, restart dohc.",
+      ),
+    );
+    expect(row.textContent).not.toContain("next time the workspace is opened");
+  });
+
   // #589: a shared view is fed by the share's pull and gets no capture, so it
   // records nothing. It also materializes no settings file, so this read
   // returns the schema default — ON. The toggle would assert both a choice

@@ -810,7 +810,12 @@ export function SettingsDialog(props: {
             ) : (
               <SettingRow
                 title="Use the workspace engine (default on)"
-                description="The workspace engine records this workspace's history, versions, and chats. Turning it off is an escape hatch: no history is recorded while it is off. Takes effect the next time the workspace is opened."
+                // RESTART, not the next workspace open (#687): main decides
+                // the recorder once per workspace per app session, and
+                // `openWorkspaceActivity` retains every workspace it opens, so
+                // reopening the workspace re-reads this flag nowhere. Same
+                // instruction the History, versions and chats surfaces give.
+                description="The workspace engine records this workspace's history, versions, and chats. Turning it off is an escape hatch: no history is recorded while it is off. After you change this setting, restart dohc."
                 modified={isModified(
                   workspaceSettings.experimental.workspaceEngineAlpha,
                   DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
