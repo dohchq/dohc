@@ -28,6 +28,12 @@ type LineageRegime = "local-only" | "replicated";
 interface Lineage {
   doc: Y.Doc;
   regime: LineageRegime;
+  // The content kind the lineage was created under. `ydoc_open_state_on_store`
+  // reads this off the persisted marker whenever durable state exists,
+  // never off the reopen's request — a plaintext lineage resurrected under
+  // a richdoc request would settle the EMPTY `body` fragment instead of the
+  // `plainText` content it actually holds.
+  contentKind: YdocContentKind;
   // The content sha the last settle over this lineage materialized, or
   // `null` if it was never settled — mirrors `ydoc_docs.last_settled_sha`,
   // the durable close guard's coverage check.
@@ -229,6 +235,7 @@ export class YdocLoopbackEngine implements EngineTransport {
   private readonly eventHandlers = new Set<(event: Event) => void>();
   private nextSessionId = 1;
   private nextMomentId = 1;
+  private nextRecaptureOrder = 2;
 
   constructor(private readonly options: YdocLoopbackEngineOptions = {}) {}
 
@@ -243,28 +250,16 @@ export class YdocLoopbackEngine implements EngineTransport {
   }
 
   // Mirrors `resolve_capture_object`'s disambiguation branch
-  // (crates/dohc-engine-domain/src/store.rs): the plain derived id is safe
-  // to (re)use UNLESS it already has a LIVE ALIAS somewhere else — an
-  // object renamed away from this path and still referenced at its new
-  // one. Reusing it there would graft this capture onto the renamed
-  // object's own lineage. The daemon reads that signal off the persistent
-  // `path_aliases` table (`object_has_live_alias`); this loopback has no
-  // rename operation to maintain one, so it reads the same fact directly
-  // off `files`: any OTHER path currently holding this exact id.
+  // (crates/dohc-engine-domain/src/store.rs): a path's default id must not
+  // collide with an object that renamed away and is still live elsewhere.
   private resolveDefaultObjectId(key: string): string {
     const derived = deriveObjectId(key);
-    const takenElsewhere = (id: string): boolean =>
-      [...this.files.entries()].some(
-        ([otherKey, file]) => otherKey !== key && file.objectId === id,
-      );
-    if (!takenElsewhere(derived)) return derived;
-    let order = 2;
-    let disambiguated = `${derived}#recaptured-${order}`;
-    while (takenElsewhere(disambiguated)) {
-      order += 1;
-      disambiguated = `${derived}#recaptured-${order}`;
-    }
-    return disambiguated;
+    const liveElsewhere = [...this.files.entries()].some(
+      ([otherKey, file]) => otherKey !== key && file.objectId === derived,
+    );
+    return liveElsewhere
+      ? `${derived}#recaptured-${this.nextRecaptureOrder++}`
+      : derived;
   }
 
   // Test-only seam for the sync-promotion the daemon does inside
@@ -284,6 +279,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     const entry = this.lineages.get(key) ?? {
       doc: resurrectedDoc(session.doc),
       regime: "local-only" as LineageRegime,
+      contentKind: session.contentKind,
       lastSettledSha: null,
     };
     entry.regime = "replicated";
@@ -389,12 +385,6 @@ export class YdocLoopbackEngine implements EngineTransport {
     }
     const fileLookupKey = fileKey(request.workspace, versionId, path);
     const file = this.files.get(fileLookupKey);
-    // NO HEAD in this version. The daemon does NOT refuse here — it derives an
-    // object id and binds an EMPTY doc, which is how a just-created file
-    // becomes editable before capture ingests it (actor.rs
-    // ydoc_open_state_on_store, head == None). A loopback that threw instead
-    // modelled less than the daemon and hid every consumer bug on that branch.
-    const contentKind = requestedKind ?? file?.contentKind ?? "richdoc";
     const sessionId = `session-${this.nextSessionId++}`;
     const objectId = file?.objectId ?? deriveObjectId(fileLookupKey);
     // A surviving lineage RESURRECTS: it is the document's own state, and it
@@ -404,6 +394,20 @@ export class YdocLoopbackEngine implements EngineTransport {
     // occupies does not inherit its predecessor's edits.
     const lineageMapKey = lineageKey(request.workspace, versionId, objectId);
     const lineage = this.lineages.get(lineageMapKey);
+    // NO HEAD in this version. The daemon does NOT refuse here — it derives an
+    // object id and binds an EMPTY doc, which is how a just-created file
+    // becomes editable before capture ingests it (actor.rs
+    // ydoc_open_state_on_store, head == None). A loopback that threw instead
+    // modelled less than the daemon and hid every consumer bug on that branch.
+    //
+    // A RESURRECTION uses the lineage's OWN stored kind, never the reopen's
+    // request: ydoc_open_state_on_store reads the persisted marker's
+    // content_kind whenever durable state exists. Binding a plaintext
+    // lineage as richdoc would settle the empty `body` fragment instead of
+    // the `plainText` content it actually holds.
+    const contentKind = lineage
+      ? lineage.contentKind
+      : (requestedKind ?? file?.contentKind ?? "richdoc");
     const doc = lineage
       ? resurrectedDoc(lineage.doc)
       : file
@@ -545,7 +549,12 @@ export class YdocLoopbackEngine implements EngineTransport {
     // (crates/dohc-workspace-engine/src/lib.rs).
     const shouldSettle =
       settleFlag ?? !(session.lineageAbsentAtOpen && session.firstUpdatePending);
-    if (shouldSettle) this.settleSession(session);
+    // Threaded through instead of recomputed below: when this settled, its
+    // digest IS what `settleSession` just wrote to `lastSettledSha`, so the
+    // coverage check a settling close can never refuse is stated here, not
+    // left to fall out of two separate `sha256(project(session))` calls
+    // agreeing.
+    const settled = shouldSettle ? this.settleSession(session) : null;
 
     const entry = this.lineages.get(key);
     if (entry && entry.regime === "local-only") {
@@ -555,22 +564,22 @@ export class YdocLoopbackEngine implements EngineTransport {
       // the last settle this lineage recorded, OR a CAPTURED head — the
       // `files` row IS this loopback's disk read, so a present head whose
       // markdown already matches the projection is the same proof
-      // `captured_head_sha` reads there (durable.rs:1278-1310). The captured
-      // row's object id must also match THIS session's: `captured_head_sha`
-      // is scoped by object id in its query, so a path rebound to a
-      // DIFFERENT object with coincidentally identical markdown must never
-      // cover this session's own object. Absent head covers nothing either,
-      // same as the daemon's read. A REPLICATED lineage never takes this
-      // branch — its close compacts and keeps the rows regardless of settle
-      // state (see `markSessionReplicated`).
-      const currentSha = sha256(project(session));
-      const capturedFile = this.files.get(
-        fileKey(session.workspace, session.versionId, session.path),
-      );
+      // `captured_head_sha` reads there (durable.rs:1278-1310). That query
+      // is scoped by (workspace, version, object_id) with NO path
+      // restriction — a rename does not mint a new object — so the lookup
+      // here resolves by object identity too, never by this session's own
+      // path: a renamed object captured at its NEW path still covers the
+      // OLD session's close, and a path rebound to a DIFFERENT object with
+      // coincidentally identical markdown never covers this one. Absent
+      // head covers nothing either, same as the daemon's read. A
+      // REPLICATED lineage never takes this branch — its close compacts
+      // and keeps the rows regardless of settle state (see
+      // `markSessionReplicated`).
+      const currentSha = settled?.sha256 ?? sha256(project(session));
+      const capturedFile = this.capturedFileFor(session.objectId);
       const coveredByCapture =
         capturedFile !== undefined &&
         capturedFile.head === "present" &&
-        capturedFile.objectId === session.objectId &&
         sha256(capturedFile.markdown) === currentSha;
       if (entry.lastSettledSha !== currentSha && !coveredByCapture) {
         throw unsettledCloseRefusal();
@@ -601,6 +610,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     const entry = this.lineages.get(key) ?? {
       doc: declaredDoc(),
       regime: "local-only" as LineageRegime,
+      contentKind: session.contentKind,
       lastSettledSha: null,
     };
     Y.applyUpdate(entry.doc, Y.encodeStateAsUpdate(session.doc));
@@ -624,6 +634,17 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   private lineageKeyFor(session: LoopbackSession): string {
     return lineageKey(session.workspace, session.versionId, session.objectId);
+  }
+
+  // The daemon's `captured_head_sha` query is scoped by object id, not by
+  // path (durable.rs) — the loopback's disk read must resolve the same
+  // way, so a renamed object's capture at its NEW path is still found for
+  // an OLD session still bound to it.
+  private capturedFileFor(objectId: string): LoopbackFile | undefined {
+    for (const file of this.files.values()) {
+      if (file.objectId === objectId) return file;
+    }
+    return undefined;
   }
 
   private requireSession(sessionId: string): LoopbackSession {

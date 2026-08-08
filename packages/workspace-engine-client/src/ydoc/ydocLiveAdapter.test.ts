@@ -3290,6 +3290,95 @@ describe("the ydoc.open deadline (#616)", () => {
     adapter.dispose();
   });
 
+  // Codex P2 on #728 head 787993c6, FALSE-GREEN direction. Resurrection kept
+  // the REOPEN's requested content kind instead of the lineage's own stored
+  // kind. `ydoc_open_state_on_store` reads the persisted marker's
+  // content_kind whenever durable state exists, never the request — a
+  // plaintext lineage bound as richdoc settles the empty `body` fragment
+  // instead of the `plainText` content it actually holds, a silent
+  // Markdown-loss shape production never allows.
+  it("resurrection uses the lineage's STORED content kind, not the reopen's request", async () => {
+    const engine = seedPlaintextEngine("plain text content");
+    const adapter = new YdocLiveAdapter(engine);
+    const first = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await first.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "typed, never settled: ",
+    });
+    await first.evict();
+
+    // MUTATION: keep the REQUEST's kind on a resurrection instead of the
+    // lineage's stored kind -> this session comes up richdoc over a
+    // plaintext lineage, and its `doc.getText("plainText")` (below) is
+    // empty because the content actually lives in a fragment this reopen
+    // never reads.
+    const reopened = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "richdoc",
+    });
+    expect(reopened.contentKind).toBe("plaintext");
+    expect(reopened.doc.getText("plainText").toString()).toBe(
+      "typed, never settled: plain text content",
+    );
+    const settled = await reopened.settle();
+    expect(settled.markdown).toBe(
+      "typed, never settled: plain text content",
+    );
+    await reopened.close({ settle: true });
+    adapter.dispose();
+  });
+
+  // Codex P2 on #728 head 787993c6. The captured-head coverage lookup read
+  // the session's OWN path, but the daemon's `captured_head_sha` query is
+  // scoped by (workspace, version, object_id) with NO path restriction — a
+  // rename does not mint a new object. A rename followed by a capture at
+  // the object's NEW path must still cover an OLD session still bound to
+  // it, the same way it would in production.
+  it("captured-head coverage resolves by object identity, not the session's own path", async () => {
+    const PATH1 = "notes/original.md";
+    const PATH2 = "notes/renamed.md";
+    const engine = new YdocLoopbackEngine();
+    const adapter = new YdocLiveAdapter(engine);
+
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH1,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "typed, never settled: ",
+    });
+
+    // The object is renamed to PATH2 (re-keying the `files` row) and
+    // captured there with bytes matching this session's own content.
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH2,
+      markdown: "typed, never settled: ",
+      contentKind: "plaintext",
+      objectId: session.objectId,
+    });
+
+    // MUTATION: resolve the captured head by the session's own PATH instead
+    // of its object identity -> this close refuses with
+    // ydoc-unsettled-close, because the file record now lives at PATH2 and
+    // a path-first lookup at PATH1 finds nothing.
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+    adapter.dispose();
+  });
+
   it("evicts without settling, closing, or handing the text over again", async () => {
     // #665. Evict does not SETTLE or CLOSE. When nothing is owed,
     // `resendMissingState` is a no-op, so the provider hands over no text again
