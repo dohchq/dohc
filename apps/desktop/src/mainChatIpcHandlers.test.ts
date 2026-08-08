@@ -9,6 +9,7 @@ import {
   chatViewerAuthorId,
   handleRelayUnauthorized,
   createChatChannelIpcHandler,
+  createListJoinedSharedChannelsIpcHandler,
   createSharedChannelWritableChatIpcHandler,
   createSetChatReactionIpcHandler,
   reactionsForViewer,
@@ -19,6 +20,7 @@ import {
   writeChatMessageFromMain,
   type MainChatIpcHandler,
 } from "./mainChatIpcHandlers";
+import { scopeJoinedChannels } from "./workspaces/sharedChannels";
 
 interface TestEvent {
   trusted: boolean;
@@ -1174,5 +1176,93 @@ describe("readRelayChatShareLanes session classification", () => {
       remoteWorkspaceId: "remote-1",
     });
     expect(badEmail).toEqual({ state: "unreachable" });
+  });
+});
+
+// #640 acceptance: the joined-lane response size must be independent of how
+// many channels the account has ever joined. A source-text pin cannot observe
+// a response size, so this drives the real handler — parse, scope, and the
+// contract parse the answer actually crosses IPC through.
+describe("createListJoinedSharedChannelsIpcHandler", () => {
+  // The registry as main holds it: one row per channel ever joined, most of
+  // them tombstones from channels the workspace has left.
+  function registry(size: number) {
+    return Array.from({ length: size }, (_, index) => ({
+      shareId: `share-${index}`,
+      channelWireId: `wire-${index}`,
+      access: "read-write" as const,
+      granterEmail: null,
+      ended: index % 2 === 0,
+    }));
+  }
+
+  function handlerOver(rows: ReturnType<typeof registry>) {
+    return createListJoinedSharedChannelsIpcHandler<TestEvent>({
+      assertTrustedSender: () => undefined,
+      answerJoinedChannels: (_workspaceId, channelWireIds) =>
+        scopeJoinedChannels(
+          rows.map((row) => ({
+            ...row,
+            relayUrl: "http://relay.test",
+            recipientUserId: "member-1",
+          })),
+          channelWireIds,
+        ),
+    });
+  }
+
+  // THE MUTATION TEST at the layer that crosses IPC. Make the handler answer
+  // from the full registry and this fails on the response size.
+  it("answers a small named scope out of a huge registry, at the size of the scope", async () => {
+    const shown = ["wire-3", "wire-7", "wire-9"];
+    const answered = [];
+    for (const size of [10, 1_000, 20_000]) {
+      const result = await handlerOver(registry(size))(
+        { trusted: true },
+        { workspaceId: "ws-1", channelWireIds: shown },
+      );
+      expect(result.joined).toHaveLength(shown.length);
+      expect(result.joined.map((answer) => answer.channelWireId)).toEqual(shown);
+      answered.push(result.joined);
+      // The serialized payload is what actually crosses IPC, and it does not
+      // grow with the registry either.
+      expect(JSON.stringify(result).length).toBeLessThan(1_000);
+    }
+    expect(answered[1]).toEqual(answered[0]);
+    expect(answered[2]).toEqual(answered[0]);
+  });
+
+  it("names a channel it holds no row for, rather than omitting it", async () => {
+    const result = await handlerOver(registry(4))(
+      { trusted: true },
+      { workspaceId: "ws-1", channelWireIds: ["wire-1", "wire-local"] },
+    );
+    expect(result.joined).toEqual([
+      {
+        channelWireId: "wire-1",
+        joined: {
+          shareId: "share-1",
+          channelWireId: "wire-1",
+          access: "read-write",
+          granterEmail: null,
+          ended: false,
+        },
+      },
+      { channelWireId: "wire-local", joined: null },
+    ]);
+  });
+
+  it("refuses an untrusted sender before it reads anything", async () => {
+    const handler = createListJoinedSharedChannelsIpcHandler<TestEvent>({
+      assertTrustedSender: (event) => {
+        if (!event.trusted) throw new Error("untrusted");
+      },
+      answerJoinedChannels: () => {
+        throw new Error("must not read");
+      },
+    });
+    await expect(
+      handler({ trusted: false }, { workspaceId: "ws-1", channelWireIds: [] }),
+    ).rejects.toThrow("untrusted");
   });
 });

@@ -5,7 +5,10 @@
 import {
   ChatChannelShareGrantRow,
   ChatChannelShareReceivedRow,
+  ListJoinedSharedChannelsPayload,
+  ListJoinedSharedChannelsResult,
   MAX_CHAT_CHANNEL_SHARE_ROWS,
+  type JoinedChannelAnswer,
 } from "./ipc/bridgeContract";
 
 interface WorkspacePayload {
@@ -42,6 +45,27 @@ export function createWritableChatIpcHandler<
     const result = await input.run(context, payload);
     for (const effect of input.afterWrite ?? []) effect(context, payload, result);
     return result;
+  };
+}
+
+// The joined lane's read, as a handler a test can drive without booting
+// Electron. It exists as a seam because the scoping is the whole contract of
+// #640: the registry array grows with every channel the workspace has ever
+// joined, and the response must not. Source-text pins cannot show a response
+// size, so this is the layer the size test drives.
+export function createListJoinedSharedChannelsIpcHandler<Event>(input: {
+  assertTrustedSender: (event: Event) => void;
+  answerJoinedChannels: (
+    workspaceId: string,
+    channelWireIds: readonly string[],
+  ) => JoinedChannelAnswer[];
+}): MainChatIpcHandler<Event, ListJoinedSharedChannelsResult> {
+  return async (event, rawPayload) => {
+    input.assertTrustedSender(event);
+    const payload = ListJoinedSharedChannelsPayload.parse(rawPayload);
+    return ListJoinedSharedChannelsResult.parse({
+      joined: input.answerJoinedChannels(payload.workspaceId, payload.channelWireIds),
+    });
   };
 }
 

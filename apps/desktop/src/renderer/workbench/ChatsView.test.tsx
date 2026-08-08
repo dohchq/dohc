@@ -22,9 +22,14 @@ import {
 
 const NOW = 1_700_000_000_000;
 
+// Production shape: every channel main lists carries a wire identity — a
+// locally created one gets its own id (see createChatChannel in main.ts). A
+// fixture without one takes channelIsLocked's no-wire-id early-out and never
+// exercises the joined lane at all, so it is opt-IN here, not the default.
 function channel(overrides: Partial<ChatChannelRecord> = {}): ChatChannelRecord {
+  const id = overrides.id ?? "channel-1";
   return {
-    id: "channel-1",
+    id,
     name: "general",
     slug: "general",
     kind: "channel",
@@ -32,6 +37,7 @@ function channel(overrides: Partial<ChatChannelRecord> = {}): ChatChannelRecord 
     updatedAtMs: NOW,
     threadCount: 0,
     unreadCount: 0,
+    wireId: id,
     ...overrides,
   };
 }
@@ -158,21 +164,24 @@ Element.prototype.scrollIntoView = vi.fn();
 // empty listing — and a missing session resolves `{ state: "signed-out" }`
 // (#551).
 // The joined lane the way main answers it (#640): one entry per channel the
-// caller named, carrying the registry row for that channel or null. `local`
-// names channels the caller shows that hold no grant — an answer of null is
-// what keeps them unlocked, because a channel with NO answer is unknown and
-// channelIsLocked fails closed on it.
-function joinedLane(
-  rows: readonly unknown[] = [],
-  local: readonly string[] = [],
+// CALLER NAMED, carrying the registry row for that channel or null. The fake
+// below applies this to every joined-lane read, so a fixture states what the
+// registry holds and the scoping is exercised rather than assumed. A fixture
+// that answered its own rows regardless of the payload would certify a
+// scoping no test ever drove.
+function scopeJoinedLane(
+  rows: readonly unknown[],
+  channelWireIds: readonly string[],
+  receivedWireIds: readonly string[] = [],
 ): Array<{ channelWireId: string; joined: unknown }> {
-  return [
-    ...rows.map((row) => ({
-      channelWireId: (row as { channelWireId: string }).channelWireId,
-      joined: row,
-    })),
-    ...local.map((channelWireId) => ({ channelWireId, joined: null })),
-  ];
+  const byWire = new Map(
+    rows.map((row) => [(row as { channelWireId: string }).channelWireId, row]),
+  );
+  const named = new Set([...channelWireIds, ...receivedWireIds]);
+  return [...named].map((channelWireId) => ({
+    channelWireId,
+    joined: byWire.get(channelWireId) ?? null,
+  }));
 }
 
 function shareListing(
@@ -180,12 +189,17 @@ function shareListing(
     granted?: unknown[];
     received?: unknown[];
     joined?: unknown[];
-    local?: string[];
+    // Answer for exactly these wire ids, whatever the caller named. It models
+    // main and the renderer disagreeing about the scope, which is the only
+    // condition under which a shown channel goes unanswered — and therefore
+    // the only way to observe channelIsLocked's fail-closed rule from outside.
+    answerOnly?: string[];
     sessionKey?: string | null;
   } = {},
 ) {
   return {
-    joined: joinedLane(rows.joined, rows.local),
+    joined: rows.joined ?? [],
+    ...(rows.answerOnly ? { answerOnly: rows.answerOnly } : {}),
     sessionKey: rows.sessionKey !== undefined ? rows.sessionKey : "session-a",
     relay: {
       state: "answered" as const,
@@ -347,7 +361,42 @@ beforeEach(() => {
   });
   // Solo default (collaboration off): the DM surface stays invisible.
   bridgeMock.syncDms.mockResolvedValue({ available: false, dms: [] });
-  vi.stubGlobal("dohcDesktop", bridgeMock);
+  // main scopes the joined lane to what the caller named; so does this. The
+  // underlying mocks still record every call, so payload assertions and
+  // mockImplementation stay exactly as they were.
+  vi.stubGlobal("dohcDesktop", {
+    ...bridgeMock,
+    listChatChannelShares: async (payload: {
+      workspaceId: string;
+      channelWireIds: string[];
+    }) => {
+      const listing = await bridgeMock.listChatChannelShares(payload);
+      if (!listing || !Array.isArray(listing.joined)) return listing;
+      const received =
+        listing.relay?.state === "answered" ? listing.relay.received ?? [] : [];
+      return {
+        ...listing,
+        joined: listing.answerOnly
+          ? scopeJoinedLane(listing.joined, listing.answerOnly)
+          : scopeJoinedLane(
+              listing.joined,
+              payload.channelWireIds,
+              received.map((row: { channelWireId: string }) => row.channelWireId),
+            ),
+      };
+    },
+    listJoinedSharedChannels: async (payload: {
+      workspaceId: string;
+      channelWireIds: string[];
+    }) => {
+      const listing = await bridgeMock.listJoinedSharedChannels(payload);
+      if (!listing || !Array.isArray(listing.joined)) return listing;
+      return {
+        ...listing,
+        joined: scopeJoinedLane(listing.joined, payload.channelWireIds),
+      };
+    },
+  });
 });
 
 afterEach(() => {
@@ -2896,7 +2945,7 @@ describe("ChatsView live activity refresh", () => {
     });
     // The badge pass's local read, issued later: the sync recorded the revoke.
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({
-      joined: joinedLane([{ ...joinedRow, ended: true }]),
+      joined: [{ ...joinedRow, ended: true }],
     });
     const navigator = (readRevision: number) => (
       <ChatsView
@@ -3004,9 +3053,7 @@ describe("ChatsView live activity refresh", () => {
         fileThreads: [],
       }),
     );
-    bridgeMock.listJoinedSharedChannels.mockResolvedValue({
-      joined: joinedLane([joinedRow]),
-    });
+    bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: [joinedRow] });
     renderView();
     await screen.findByTestId("chats-channel-shared");
 
@@ -3050,7 +3097,7 @@ describe("ChatsView live activity refresh", () => {
     // channel is pulled locally. This view hears about it as workspace activity.
     channelsIncludeShared = true;
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({
-      joined: joinedLane([
+      joined: [
         {
           shareId: "share-joined",
           channelWireId: "wire-shared",
@@ -3058,7 +3105,7 @@ describe("ChatsView live activity refresh", () => {
           access: "read-only" as const,
           ended: false,
         },
-      ]),
+      ],
     });
     act(() => emitWorkspaceActivity());
 
@@ -3299,7 +3346,7 @@ describe("ChatsView live activity refresh", () => {
     // The pass finishes. Its queued successor belongs to the era before the
     // navigation, so it does not run.
     await act(async () => {
-      answerCorrection({ joined: joinedLane([joinedRow]) });
+      answerCorrection({ joined: [joinedRow] });
       await Promise.resolve();
     });
     expect(bridgeMock.listChatChannels.mock.calls.length).toBe(
@@ -3423,7 +3470,7 @@ describe("ChatsView live activity refresh", () => {
     });
     // The badge pass's local read, issued later: the sync recorded the revoke.
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({
-      joined: joinedLane([{ ...joinedRow, ended: true }]),
+      joined: [{ ...joinedRow, ended: true }],
     });
     const user = userEvent.setup();
     renderView();
@@ -3525,7 +3572,7 @@ describe("ChatsView live activity refresh", () => {
     // The sync finds the grant revoked and records it in the registry, which
     // is what the local read reports.
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({
-      joined: joinedLane([{ ...joinedRow, ended: true }]),
+      joined: [{ ...joinedRow, ended: true }],
     });
     act(() => emitWorkspaceActivity());
 
@@ -4338,10 +4385,9 @@ describe("ChatsView shared channels (MU-C4)", () => {
             granterEmail: "owner@example.com",
           },
         ],
-        local: ["wire-team"],
       }),
     );
-    bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: joinedLane() });
+    bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: [] });
     renderView();
     await screen.findByTestId("chats-join-shared");
 
@@ -4372,7 +4418,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     });
     // An answer that covers a different channel entirely.
     bridgeMock.listChatChannelShares.mockResolvedValue(
-      shareListing({ local: ["wire-other"] }),
+      shareListing({ answerOnly: ["wire-other"] }),
     );
     renderView();
 
@@ -4386,6 +4432,105 @@ describe("ChatsView shared channels (MU-C4)", () => {
 
   it("keeps an owned local channel writable after authoritative empty share metadata", async () => {
     bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+  });
+
+  // A session change on mount fires refreshShares while the overview is still
+  // loading, so that reader cannot say what this surface shows. Asking anyway
+  // claimed the lane with an answer covering NO channel, and the overview's
+  // own fully-scoped answer was then refused for being older — every channel
+  // the user owns read unanswered, which locks it. An empty lane used to mean
+  // "no grants", and a local channel stayed writable.
+  it("keeps a local channel writable when a session change lands before the channel list", async () => {
+    let releaseChannels!: (value: {
+      channels: ChatChannelRecord[];
+      fileThreads: never[];
+    }) => void;
+    bridgeMock.listChatChannels.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseChannels = resolve;
+        }),
+    );
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
+    renderView();
+    // The relay rejected the session while the first channel list is in flight.
+    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalled());
+    act(() => emitCloudSessionChanged("session-b"));
+
+    await act(async () => {
+      releaseChannels({ channels: [channel()], fileThreads: [] });
+      await Promise.resolve();
+    });
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+  });
+
+  // refreshShares is deliberately NOT liveToken-guarded, so a share read
+  // issued before a channel was created lands after it. It never named that
+  // channel, so it must not drop its answer — replacing the whole lane made
+  // the composer vanish under the user.
+  it("keeps a created channel answered when an older share read lands after it", async () => {
+    const user = userEvent.setup();
+    let answerOldShareRead!: (value: ReturnType<typeof shareListing>) => void;
+    let shareReads = 0;
+    bridgeMock.listChatChannelShares.mockImplementation(() => {
+      shareReads += 1;
+      if (shareReads === 1) return Promise.resolve(shareListing());
+      // The second read is the one refreshShares issued before the create.
+      return new Promise((resolve) => {
+        answerOldShareRead = resolve;
+      });
+    });
+    bridgeMock.createChatChannel.mockResolvedValue({
+      channel: channel({ id: "channel-9", name: "launch", slug: "launch" }),
+    });
+    renderView();
+    await screen.findByTestId("chats-channel");
+
+    // Something share-shaped happens (a session revalidation), so a full read
+    // goes out naming only the channels that exist right now.
+    act(() => emitCloudSessionChanged("session-b"));
+    await waitFor(() => expect(shareReads).toBe(2));
+
+    // The user creates a channel and lands in it while that read is in flight.
+    await user.click(screen.getByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
+      "launch",
+    );
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+
+    // The older read lands. It never named channel-9, so it says nothing
+    // about it — and the composer stays.
+    await act(async () => {
+      answerOldShareRead(shareListing({ sessionKey: "session-b" }));
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+  });
+
+  // The one deliberately wire-id-less fixture. ChatChannelRecord.wireId is
+  // nullable — a channel with no recorded wire mapping cannot carry a grant,
+  // so it is not lockable and never reaches the joined lane. Every other
+  // fixture carries a wire id, because every channel main lists does.
+  it("never locks a channel that has no wire identity at all", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: null })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({ answerOnly: ["wire-other"] }),
+    );
     renderView();
 
     await userEvent.click(await screen.findByTestId("chats-channel"));

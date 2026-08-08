@@ -175,6 +175,23 @@ type ShareReadFailure =
 // the local registry, so any reader that got a listing at all has the true
 // answer. The granted/received rows come from the relay — a reader that is not
 // authoritative for them must leave them exactly as they were.
+// The joined lane is a set of PER-CHANNEL facts, so a read replaces the
+// channels it named and leaves the rest alone. Replacing the whole array threw
+// away answers the new read never spoke to — a read issued before a channel
+// was created landing after it dropped that channel's answer, and the composer
+// vanished under the user.
+//
+// Ordering is unaffected: claimLanes still decides who may write at all, and a
+// claim now writes only what it answered.
+function mergeJoinedAnswers(
+  current: readonly JoinedChannelAnswer[],
+  next: readonly JoinedChannelAnswer[],
+): JoinedChannelAnswer[] {
+  const byWire = new Map(current.map((answer) => [answer.channelWireId, answer]));
+  for (const answer of next) byWire.set(answer.channelWireId, answer);
+  return [...byWire.values()];
+}
+
 function mergeShareLanes(
   current: ShareListing | null,
   next: ShareListing,
@@ -185,7 +202,9 @@ function mergeShareLanes(
   // vouched for.
   if (current === null) return lanes.joined && lanes.relay ? next : current;
   return {
-    joined: lanes.joined ? next.joined : current.joined,
+    joined: lanes.joined
+      ? mergeJoinedAnswers(current.joined, next.joined)
+      : current.joined,
     granted: lanes.relay ? next.granted : current.granted,
     received: lanes.relay ? next.received : current.received,
     sessionKey: lanes.relay ? next.sessionKey : current.sessionKey,
@@ -198,10 +217,11 @@ function mergeShareLanes(
 // Without this the new channel is unanswered, and unanswered locks: the user
 // creates a channel and lands in it with no composer.
 //
-// It writes ONE key. A share read issued before the create replaces the whole
-// lane when it lands, which drops this entry, but openChannel moves liveToken
-// first — so that read can no longer commit, and the next one declares the
-// channel like any other.
+// It writes ONE key, and mergeJoinedAnswers is what keeps it: a read issued
+// before the create never named this channel, so when it lands it replaces the
+// channels it did name and leaves this entry alone. refreshShares is
+// deliberately not liveToken-guarded, so a token bump would not have been
+// enough on its own.
 function answerCreatedChannel(
   current: ShareListing | null,
   channel: ChatChannelRecord,
@@ -1264,11 +1284,15 @@ export function ChatsView(props: {
   // that just read one (refreshOverview, refreshChannelBadges) declare from
   // that instead — it is newer, and a channel this surface is about to show
   // must be in the scope or channelIsLocked locks it.
-  const latestShownWireIds = useRef<string[]>([]);
-  latestShownWireIds.current = shownChannelWireIds(
-    overview.status === "ready" ? overview.channels : [],
-    channelShares?.received ?? [],
-  );
+  // NULL while the overview is unresolved, and that is not the same as "shows
+  // nothing". A read that named nothing answers the lane for nothing, and an
+  // unanswered channel locks — so a reader that cannot say what it shows must
+  // not ask at all.
+  const latestShownWireIds = useRef<string[] | null>(null);
+  latestShownWireIds.current =
+    overview.status === "ready"
+      ? shownChannelWireIds(overview.channels, channelShares?.received ?? [])
+      : null;
   const commitShareListing = useCallback(
     (
       ticket: number,
@@ -3077,13 +3101,25 @@ export function ChatsView(props: {
   );
 
   const refreshShares = useCallback(async () => {
+    // This reader has no channel list of its own, and the joined lane answers
+    // what a caller NAMES. While the overview is unresolved there is nothing
+    // to name, and asking anyway would claim the lane with an answer covering
+    // no channel — every channel then reads unanswered, which locks it, and
+    // the overview's own fully-scoped answer is refused for being older.
+    //
+    // refreshOverview is the reader that knows: it reads the channel list
+    // first and then asks about exactly those channels. Background, because
+    // nobody asked for this refresh and it must not bump liveToken under an
+    // in-flight navigation.
+    const shown = latestShownWireIds.current;
+    if (shown === null) {
+      await refreshOverview({ background: true });
+      return;
+    }
     const ticket = takeCommitTicket();
     const session = sessionGeneration.current;
     const shares = await bridge()
-      .listChatChannelShares({
-        workspaceId,
-        channelWireIds: latestShownWireIds.current,
-      })
+      .listChatChannelShares({ workspaceId, channelWireIds: shown })
       .catch(() => null);
     // Deliberately NOT liveToken-guarded: the share listing is
     // workspace-scoped, not conversation-scoped, so navigating into a
@@ -3091,7 +3127,7 @@ export function ChatsView(props: {
     // switch bumps sessionGeneration, and the commit point refuses the
     // stale response there.
     commitShareListing(ticket, session, shares);
-  }, [commitShareListing, takeCommitTicket, workspaceId]);
+  }, [commitShareListing, refreshOverview, takeCommitTicket, workspaceId]);
 
   // A cloud session transition re-scopes the relay-backed share rows: the
   // granted/received lanes belong to the signed-in account. The generic

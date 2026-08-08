@@ -358,6 +358,7 @@ import {
   awaitCredentialGeneration,
   chatViewerAuthorId,
   createChatChannelIpcHandler,
+  createListJoinedSharedChannelsIpcHandler,
   createSharedChannelWritableChatIpcHandler,
   chatShareSessionKey,
   createSetChatReactionIpcHandler,
@@ -4467,13 +4468,13 @@ function registerIpcHandlers(
     return scopeJoinedChannels(entry.sharedChannels ?? [], channelWireIds);
   }
 
-  ipcMain.handle(CHANNELS.listJoinedSharedChannels, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListJoinedSharedChannelsPayload.parse(payload);
-    return ListJoinedSharedChannelsResult.parse({
-      joined: joinedChannelAnswers(input.workspaceId, input.channelWireIds),
-    });
-  });
+  ipcMain.handle(
+    CHANNELS.listJoinedSharedChannels,
+    createListJoinedSharedChannelsIpcHandler({
+      assertTrustedSender,
+      answerJoinedChannels: joinedChannelAnswers,
+    }),
+  );
 
   // Received shares another local workspace already claimed — joined into its
   // registry, or pinned to it by the account-level DM home map. A received

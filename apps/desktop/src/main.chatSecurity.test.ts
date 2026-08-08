@@ -327,11 +327,15 @@ describe("main-process chat authorization", () => {
   // ever joined, so a handler that answered it whole would put that history
   // in the response — the growth the deleted join gate used to bound.
   it("answers the joined lane only for the channels the caller named", () => {
-    for (const channel of ["listJoinedSharedChannels", "listChatChannelShares"] as const) {
-      const handler = handlerSource(channel);
-      expect(handler, channel).toContain("joinedChannelAnswers(");
-      expect(handler, channel).toContain("input.channelWireIds");
-    }
+    // listJoinedSharedChannels goes through the shared factory, whose scoping
+    // is pinned BEHAVIOURALLY in mainChatIpcHandlers.test.ts — a source pin
+    // cannot observe a response size. This one covers the wiring.
+    expect(handlerSource("listJoinedSharedChannels")).toContain(
+      "answerJoinedChannels: joinedChannelAnswers",
+    );
+    const listing = handlerSource("listChatChannelShares");
+    expect(listing).toContain("joinedChannelAnswers(");
+    expect(listing).toContain("input.channelWireIds");
     // And the scope is a required argument of the one projection, so a third
     // caller cannot answer the lane without naming one.
     expect(mainSource).toContain(
