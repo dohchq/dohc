@@ -315,10 +315,14 @@ export function RunnerSettingsCard(props: {
           type="button"
           data-testid="runner-self-test-button"
           // A button that cannot succeed must not enable: the note above owes
-          // the user the restart, and enabling here would take that
-          // instruction away and hand them main's refusal instead.
+          // the user the restart (or, in a shared view, the fact that there
+          // is no chat to test), and enabling here would take that
+          // instruction away and hand them main's refusal instead. sharedView
+          // is a synchronous prop, so it must gate the button even in the
+          // window before sessionRecorderOn's async status resolves.
           disabled={
             !engineEnabled ||
+            Boolean(sharedView) ||
             sessionRecorderOn === false ||
             !configured ||
             selfTestRunning

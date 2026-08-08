@@ -624,6 +624,31 @@ describe("DesktopSettings", () => {
     expect(note.textContent).not.toContain("restart");
   });
 
+  // #687 codex round 7: sharedView is a synchronous prop, but
+  // sessionRecorderOn only resolves once main's openWorkspace status
+  // arrives. In that window a shared view already knows it has no chat to
+  // test, but sessionRecorderOn is still undefined — the disabled condition
+  // must not wait on it to keep a doomed click off the button.
+  it("disables the self-test in a shared view before the recorder status resolves", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        sharedView
+        onClose={() => {}}
+      />,
+    );
+
+    await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
+    await screen.findByTestId("runner-self-test-engine-note");
+    const button = await screen.findByTestId("runner-self-test-button");
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    await user.click(button);
+    expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
+  });
+
   it("surfaces a failed runner self-test without enabling dispatch", async () => {
     bridge.runnerSelfTest.mockResolvedValueOnce({
       ok: false,
