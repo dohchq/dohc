@@ -1752,6 +1752,22 @@ describe('indented code fences', () => {
     expect(once).toBe('```js\ncode\n```')
   })
 
+  // An empty fence has no body. The codeBlock must be built with no content at
+  // all: a text node holding '' is schema-invalid, so markdownToYDoc would
+  // throw `RangeError: Empty text nodes are not allowed` and the document would
+  // fail to open.
+  it('imports an empty indented fence as a codeBlock with no text node', () => {
+    const input = ' ```js\n ```'
+    const blocks = bodyBlocks(input)
+    expect(blocks.map((block) => block.type)).toEqual(['codeBlock'])
+    expect(blocks[0]?.attrs?.language).toBe('js')
+    expect(codeText(blocks[0])).toBe('')
+
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toBe('```js\n\n```')
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
+  })
+
   // Boundary: four spaces is an indented code block, NOT a fence.
   it('treats a 4-space-indented backtick run as code content, not a fence', () => {
     const blocks = bodyBlocks('    ```\nParagraph')
