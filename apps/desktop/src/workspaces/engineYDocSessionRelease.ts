@@ -32,7 +32,8 @@ interface RetainableEngineYDocEntry {
 
 interface ReleaseEngineYDocSessionInput<TEntry extends RetainableEngineYDocEntry> {
   sessions: Map<string, TEntry>;
-  sessionId: string;
+  /** The registry key this entry is filed under (engineYDocSessionRegistry.ts). */
+  sessionKey: string;
   entry: TEntry;
   /** Why main is releasing this session, for the failure report. */
   reason: string;
@@ -43,7 +44,7 @@ interface ReleaseEngineYDocSessionInput<TEntry extends RetainableEngineYDocEntry
 export async function releaseEngineYDocSession<
   TEntry extends RetainableEngineYDocEntry,
 >(input: ReleaseEngineYDocSessionInput<TEntry>): Promise<boolean> {
-  const { sessions, sessionId, entry } = input;
+  const { sessions, sessionKey, entry } = input;
   try {
     await entry.session.close();
   } catch (error) {
@@ -51,16 +52,16 @@ export async function releaseEngineYDocSession<
     // binding a second writer over it, and register it so that retry (and every
     // later teardown) can reach it.
     entry.closeFailed = true;
-    if (sessions.get(sessionId) !== entry) {
+    if (sessions.get(sessionKey) !== entry) {
       // Two opens can share a session id across the handler's awaits, and
       // displacing the live one would strand it. Dropping this one instead is
       // the unreachability this module exists to remove — no sweep, no close,
       // no retry could ever find the lease again — so it takes a derived key.
       // Nothing looks a session up by that key: everything that must reach it
       // walks the values (the renderer and quit sweeps) or scans by document
-      // (the open's retry), while a by-id lookup still finds the live owner.
-      let key = sessionId;
-      for (let n = 1; sessions.has(key); n += 1) key = `${sessionId}#failed-${n}`;
+      // (the open's retry), while a keyed lookup still finds the live owner.
+      let key = sessionKey;
+      for (let n = 1; sessions.has(key); n += 1) key = `${sessionKey}#failed-${n}`;
       sessions.set(key, entry);
     }
     input.onCloseFailed(
@@ -71,6 +72,6 @@ export async function releaseEngineYDocSession<
     );
     return false;
   }
-  if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
+  if (sessions.get(sessionKey) === entry) sessions.delete(sessionKey);
   return true;
 }
