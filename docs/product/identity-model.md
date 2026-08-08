@@ -28,7 +28,11 @@ The word "boundary" was doing two jobs in #690. The decision splits them.
 
 **The OS user is the trust boundary.** Everything dohc stores on a machine
 belongs to the OS login that put it there, and dohc does not wall stores
-from each other inside one OS user. This matches every file-on-disk peer
+from each other inside one OS user. This statement is about isolation
+between profile stores, not about other OS users: a different OS login
+with access to a workspace directory stays an attacker, and the engine's
+defenses against one (symlink containment, daemon access control — see
+the rust-engine decision record) are unchanged by this model. This matches every file-on-disk peer
 (Obsidian, Dropbox, OneDrive, git) and dohc's own rule that a workspace is
 the user's files first. A Chrome profile does not protect its folder from
 the other profiles either — any process the OS user runs can read them all.
@@ -44,6 +48,13 @@ DM home map. Signing into an account means being in its profile. Another
 account's workspaces are not hidden by security — they are simply not part
 of this profile, the way another Chrome profile's tabs are not in this
 window.
+
+Local use needs no account, so a signed-out install runs in a local
+profile that no account owns — profiles do not gate local work on
+authentication. What first sign-in does with that local profile (attach
+the account to it, or keep it separate) is decided with the profile
+switcher build; either way the user's existing local workspaces stay
+visible to them.
 
 Consequence: today's behavior — switch accounts and still see the previous
 account's whole workspace list — is wrong by design, not by taste. The fix
@@ -69,7 +80,10 @@ a token attaches — remain.
   metadata while chat state stays in a workspace.
 - **#646 / #356** — sharing across spheres is ordinary sharing to another
   account, like sending a Google Doc to an outside address. No
-  cross-sphere machinery inside one account.
+  cross-sphere machinery inside one account. Today that holds for
+  accounts on the same relay deployment; sharing across deployments
+  (separate cloud or self-hosted relays) is its own question for the
+  sync program, not something this decision rules in or out.
 
 ## What this forbids
 
