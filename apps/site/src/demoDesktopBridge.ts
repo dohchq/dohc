@@ -407,6 +407,18 @@ function message(threadId: string, id: string, body: string, agent = false) {
   };
 }
 
+// The joined lane, answered the way main answers it: one entry per wire id the
+// caller NAMED. The demo workspace is solo, so every answer is "no grant" — but
+// the shape matters more than the value. A wire id the lane leaves out is
+// UNKNOWN to the renderer, and unknown locks the channel, so a bridge that
+// ignored the caller's scope would model less than production and lock every
+// demo channel the moment demo channels carry wire ids.
+export function answerDemoJoinedLane(
+  channelWireIds: readonly string[] = [],
+): Array<{ channelWireId: string; joined: null }> {
+  return channelWireIds.map((channelWireId) => ({ channelWireId, joined: null }));
+}
+
 const demoBridge = {
   onSearchResults(listener: (batch: SearchResultsEvent) => void) {
     searchListeners.add(listener);
@@ -618,15 +630,15 @@ const demoBridge = {
       ],
     };
   },
-  async listChatChannelShares() {
+  async listChatChannelShares(payload: { channelWireIds?: readonly string[] }) {
     return {
-      joined: [],
+      joined: answerDemoJoinedLane(payload.channelWireIds),
       sessionKey: null,
       relay: { state: "answered" as const, granted: [], received: [] },
     };
   },
-  async listJoinedSharedChannels() {
-    return { joined: [] };
+  async listJoinedSharedChannels(payload: { channelWireIds?: readonly string[] }) {
+    return { joined: answerDemoJoinedLane(payload.channelWireIds) };
   },
   async syncDms() {
     return { available: false, dms: [] };

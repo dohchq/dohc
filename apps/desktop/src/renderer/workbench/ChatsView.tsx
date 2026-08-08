@@ -220,6 +220,12 @@ type JoinedCommit = {
 
 // What the joined lane remembers between reads.
 export type JoinedLaneOrder = {
+  // The workspace these entries are about. They are cleared when it changes,
+  // and the state carries the identity rather than a caller remembering to
+  // reset it: `local` is eviction-immune until a read NAMES its wire, and no
+  // read in another workspace ever will, so a channel created and abandoned
+  // in one workspace would sit in every later workspace's `keep` forever.
+  workspaceId: string | null;
   // The highest ticket that has ANSWERED each wire id. The lane orders per
   // WIRE, not per lane: one watermark for the whole lane let a newer read
   // outrank an older one for channels the newer read never mentioned. A
@@ -229,14 +235,31 @@ export type JoinedLaneOrder = {
   // locked, until some later refresh. A newer claim outranks only what it
   // answered.
   answeredAt: Map<string, number>;
-  // Wire ids this surface answered ITSELF, with no read behind them — today
-  // just a channel it created. They survive eviction until a read names them,
-  // because every read now in flight was issued before they existed.
+  // Wire ids this surface answered ITSELF — see answerLocally.
   local: Set<string>;
 };
 
 export function emptyJoinedLaneOrder(): JoinedLaneOrder {
-  return { answeredAt: new Map(), local: new Set() };
+  return { workspaceId: null, answeredAt: new Map(), local: new Set() };
+}
+
+function adoptWorkspace(order: JoinedLaneOrder, workspaceId: string): void {
+  if (order.workspaceId === workspaceId) return;
+  order.workspaceId = workspaceId;
+  order.answeredAt.clear();
+  order.local.clear();
+}
+
+// A channel this surface answered ITSELF, with no read behind it. It survives
+// eviction until a read names it, because every read now in flight was issued
+// before the channel existed.
+export function answerLocally(
+  order: JoinedLaneOrder,
+  workspaceId: string,
+  channelWireId: string,
+): void {
+  adoptWorkspace(order, workspaceId);
+  order.local.add(channelWireId);
 }
 
 // The one decision the joined lane makes: what this response may write, and
@@ -248,6 +271,8 @@ export function emptyJoinedLaneOrder(): JoinedLaneOrder {
 export function planJoinedCommit(
   order: JoinedLaneOrder,
   input: {
+    // The workspace this response is about. The order forgets any other.
+    workspaceId: string;
     ticket: number;
     answers: readonly JoinedChannelAnswer[];
     // The lane claim. Only the newest response may evict.
@@ -260,7 +285,8 @@ export function planJoinedCommit(
     shown: readonly string[] | null;
   },
 ): JoinedCommit | null {
-  const { ticket, answers, newestForLane, shown } = input;
+  const { workspaceId, ticket, answers, newestForLane, shown } = input;
+  adoptWorkspace(order, workspaceId);
   const writable = answers.filter(
     (answer) => ticket > (order.answeredAt.get(answer.channelWireId) ?? 0),
   );
@@ -1398,12 +1424,13 @@ export function ChatsView(props: {
   const planJoinedWrite = useCallback(
     (ticket: number, answers: readonly JoinedChannelAnswer[]): JoinedCommit | null =>
       planJoinedCommit(joinedOrder.current, {
+        workspaceId,
         ticket,
         answers,
         newestForLane: claimLanes(["joinedShares"], ticket),
         shown: latestShownWireIds.current,
       }),
-    [claimLanes],
+    [claimLanes, workspaceId],
   );
   const commitShareListing = useCallback(
     (
@@ -3469,7 +3496,9 @@ export function ChatsView(props: {
         // no answer in the lane is a locked channel. Registered as answered
         // LOCALLY, so the read already in flight — issued before this channel
         // existed, and therefore evicting to a view without it — keeps it.
-        if (result.channel.wireId) joinedOrder.current.local.add(result.channel.wireId);
+        if (result.channel.wireId) {
+          answerLocally(joinedOrder.current, workspaceId, result.channel.wireId);
+        }
         setChannelShares((current) => answerCreatedChannel(current, result.channel));
         // The completion is the user's command landing (see openConversation).
         props.onNavCommand?.({ level: "channel", channel: result.channel });

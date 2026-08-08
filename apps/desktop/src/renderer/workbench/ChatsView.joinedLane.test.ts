@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import type { JoinedChannelAnswer } from "../../ipc/bridgeContract";
-import { emptyJoinedLaneOrder, planJoinedCommit } from "./ChatsView";
+import { answerLocally, emptyJoinedLaneOrder, planJoinedCommit } from "./ChatsView";
 
 // The joined lane's cache, tested where its rules live. Two of them cannot be
 // seen from the screen at all: what the cache still HOLDS after a read, and
@@ -20,9 +20,14 @@ function commit(
   cache: JoinedChannelAnswer[],
   ticket: number,
   wireIds: readonly string[],
-  options: { newestForLane?: boolean; shown?: readonly string[] | null } = {},
+  options: {
+    newestForLane?: boolean;
+    shown?: readonly string[] | null;
+    workspaceId?: string;
+  } = {},
 ): JoinedChannelAnswer[] {
   const write = planJoinedCommit(order, {
+    workspaceId: options.workspaceId ?? "workspace-a",
     ticket,
     answers: wireIds.map(answer),
     newestForLane: options.newestForLane ?? true,
@@ -85,7 +90,7 @@ describe("planJoinedCommit", () => {
     let cache = commit(order, [], 1, ["wire-team"]);
     // The user creates a channel. Nothing has read it — this surface answered
     // it — and the read already in flight was issued before it existed.
-    order.local.add("wire-new");
+    answerLocally(order, "workspace-a", "wire-new");
     cache = [...cache, answer("wire-new")];
 
     cache = commit(order, cache, 2, ["wire-team"]);
@@ -122,6 +127,7 @@ describe("planJoinedCommit", () => {
   it("refuses an older response for a wire a newer read already answered", () => {
     const order = emptyJoinedLaneOrder();
     const write = planJoinedCommit(order, {
+      workspaceId: "workspace-a",
       ticket: 7,
       answers: [answer("wire-team")],
       newestForLane: true,
@@ -131,6 +137,7 @@ describe("planJoinedCommit", () => {
     // The same channel, answered by a read that is older. Ordering per wire is
     // still ordering: it may not repaint a fresher answer.
     const stale = planJoinedCommit(order, {
+      workspaceId: "workspace-a",
       ticket: 6,
       answers: [
         {
@@ -149,6 +156,20 @@ describe("planJoinedCommit", () => {
     });
     expect(stale).toBeNull();
     expect(cache).toEqual([answer("wire-team")]);
+  });
+
+  it("forgets what another workspace answered", () => {
+    const order = emptyJoinedLaneOrder();
+    let cache = commit(order, [], 1, ["wire-a"]);
+    // A channel created here and abandoned before any read named it. Its entry
+    // is eviction-immune until a read NAMES it, and no read in another
+    // workspace ever will.
+    answerLocally(order, "workspace-a", "wire-created");
+
+    cache = commit(order, cache, 2, ["wire-b"], { workspaceId: "workspace-b" });
+    expect([...order.local]).toEqual([]);
+    expect([...order.answeredAt.keys()]).toEqual(["wire-b"]);
+    expect(cache.map((entry) => entry.channelWireId)).toEqual(["wire-b"]);
   });
 
   it("evicts nothing for a response that is not the newest for the lane", () => {
