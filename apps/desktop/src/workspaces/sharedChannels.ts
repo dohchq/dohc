@@ -8,9 +8,9 @@ import {
 import type { JoinedChannelAnswer } from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 
-// MU-C4 shared channels — the desktop's refresh pass over every shared
-// channel a workspace has JOINED: push the member's locally-authored channel
-// ops through the share's member-append route, then pull everyone else's.
+// MU-C4 shared channels — the desktop's refresh pass over a bounded window of
+// the shared channels a workspace has JOINED: push the member's locally-authored
+// channel ops through the share's member-append route, then pull everyone else's.
 // Best-effort by design: one failing share never blocks the others (or the
 // workspace's own sync pass), and a revoked share is reported as ENDED so the
 // caller can mark it in the registry — the local copy stays readable, it just
@@ -197,6 +197,45 @@ export async function assertSharedChannelWritable(
   }
 }
 
+// How many live joined rows one pass covers (#718). listChatChannels awaits the
+// pass, and the pass is sequential whatever it does: EngineRelayClient chains
+// every relay RPC for a workspace (engineRelayClient.ts:591, 1020-1037), so
+// running the rows concurrently could not overlap a round trip.
+//
+// Its cost is therefore rows x requests. Each request already had a bound — a
+// 15 s fetch timeout and a 30 s daemon deadline — and a row costs one pull, or a
+// push plus a paged pull at 500 ops a page (sync-relay/src/server.ts:87,
+// dohc-engine-sync/src/model.rs:7). Rows were the only unbounded multiplier.
+// Sixteen caps a pass near 32 requests: what the pass already spends on ONE
+// channel carrying an 8,000-op backlog.
+export const SHARED_CHANNEL_SYNC_PASS_ROWS = 16;
+
+// A pass that left rows behind must say so, naming the constraint, the limit,
+// the unit, and what it covered. The DM poll runs every 5 s, so the notice
+// repeats only when the remainder changes.
+export function createPassCoverageReporter(
+  report: (message: string) => void,
+): (input: {
+  workspaceId: string;
+  live: number;
+  uncovered: number;
+  passRows: number;
+}) => void {
+  const reported = new Map<string, number>();
+  return ({ workspaceId, live, uncovered, passRows }) => {
+    if (uncovered <= 0) {
+      reported.delete(workspaceId);
+      return;
+    }
+    if (reported.get(workspaceId) === uncovered) return;
+    reported.set(workspaceId, uncovered);
+    report(
+      `[desktop] shared channel sync covered ${live - uncovered} of ${live} joined channels this pass ` +
+        `(limit SHARED_CHANNEL_SYNC_PASS_ROWS=${passRows} rows/pass); ${uncovered} resume on the next pass.`,
+    );
+  };
+}
+
 export interface SyncJoinedSharedChannelsResult {
   // Shares whose relay view closed (revoked / gone): mark ended, stop syncing.
   endedShareIds: string[];
@@ -205,6 +244,10 @@ export interface SyncJoinedSharedChannelsResult {
   readOnlyShareIds: string[];
   // True when any pull applied new ops — the caller should refresh the UI.
   changed: boolean;
+  // Live rows that this bounded pass did not reach.
+  uncovered: number;
+  // Last live row covered, or null when the pass covered none.
+  resumeAfterShareId: string | null;
 }
 
 export async function syncJoinedSharedChannels(input: {
@@ -212,6 +255,8 @@ export async function syncJoinedSharedChannels(input: {
   workspaceId: string;
   relay: SyncRelayConnection;
   channels: readonly JoinedSharedChannel[];
+  passRows: number;
+  resumeAfterShareId?: string | null;
   // Required factory-selected operations prevent a rooted sync pass from
   // silently falling back to the legacy TypeScript relay client.
   pull: (input: {
@@ -233,8 +278,25 @@ export async function syncJoinedSharedChannels(input: {
   const endedShareIds: string[] = [];
   const readOnlyShareIds: string[] = [];
   let changed = false;
-  for (const channel of input.channels) {
-    if (channel.ended) continue;
+  // The window rotates: this pass resumes after the row the last one stopped on
+  // and wraps, so freshness decays evenly instead of the pass growing with the
+  // registry. A cursor whose row has since left restarts at the first live row —
+  // a lost cursor must not strand the rotation. Above the window, every row is
+  // reached within ceil(live / passRows) passes; the caller is told how many it
+  // did not reach, so a partial pass never reads as a full refresh.
+  const live = input.channels.filter((channel) => channel.ended !== true);
+  const cursorIndex = input.resumeAfterShareId
+    ? live.findIndex((channel) => channel.shareId === input.resumeAfterShareId)
+    : -1;
+  const startIndex = cursorIndex >= 0 ? (cursorIndex + 1) % live.length : 0;
+  const coveredCount = Math.min(Math.max(input.passRows, 0), live.length);
+  const covered = Array.from(
+    { length: coveredCount },
+    (_, offset) => live[(startIndex + offset) % live.length]!,
+  );
+  const uncovered = live.length - covered.length;
+  const resumeAfterShareId = covered.at(-1)?.shareId ?? null;
+  for (const channel of covered) {
     const target = {
       rootDir: input.rootDir,
       workspaceId: input.workspaceId,
@@ -269,5 +331,11 @@ export async function syncJoinedSharedChannels(input: {
       );
     }
   }
-  return { endedShareIds, readOnlyShareIds, changed };
+  return {
+    endedShareIds,
+    readOnlyShareIds,
+    changed,
+    uncovered,
+    resumeAfterShareId,
+  };
 }

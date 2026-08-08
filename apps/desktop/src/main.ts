@@ -319,9 +319,11 @@ import type { JoinedSharedChannel } from "./workspaces/registryStore";
 import {
   assertSharedChannelWritable,
   createKeyedSerializer,
+  createPassCoverageReporter,
   endJoinedChannel,
   mergeJoinedChannel,
   relayFetchWithTimeout,
+  SHARED_CHANNEL_SYNC_PASS_ROWS,
   scopeJoinedChannels,
   syncJoinedSharedChannels,
 } from "./workspaces/sharedChannels";
@@ -1448,6 +1450,10 @@ async function presenceRelayTransportForScope(
 }
 
 const serializeSharedChannelSync = createKeyedSerializer();
+const sharedChannelSyncCursors = new Map<string, string>();
+const reportSharedChannelPassCoverage = createPassCoverageReporter((message) =>
+  console.info(message),
+);
 let materializePendingChatBookmarksForWorkspace:
   | ((workspaceId: string) => Promise<void>)
   | null = null;
@@ -1499,6 +1505,8 @@ async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
       workspaceId: entry.workspaceId,
       relay,
       channels: matching,
+      passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,
+      resumeAfterShareId: sharedChannelSyncCursors.get(workspaceId) ?? null,
       pull: async (input) =>
         await daemonRelay.pullSharedChannel({
           shareId: input.shareId,
@@ -1509,6 +1517,17 @@ async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
           shareId: input.shareId,
           channelWireId: input.channelWireId,
         }),
+    });
+    if (result.resumeAfterShareId === null) {
+      sharedChannelSyncCursors.delete(workspaceId);
+    } else {
+      sharedChannelSyncCursors.set(workspaceId, result.resumeAfterShareId);
+    }
+    reportSharedChannelPassCoverage({
+      workspaceId,
+      live: matching.length,
+      uncovered: result.uncovered,
+      passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,
     });
     if (result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
       const ended = new Set(result.endedShareIds);
@@ -4646,10 +4665,9 @@ function registerIpcHandlers(
       // leaves channel data with no write gate — the defect this ordering
       // exists to prevent, arriving through the cleanup path.
       //
-      // Nothing is stranded by keeping it: syncJoinedSharedChannels pulls
-      // every LIVE row on each pass, so this one either completes on a later
-      // pass or — if the share is genuinely gone — is marked ended and becomes
-      // the tombstone that gates it.
+      // Nothing is stranded by keeping it: bounded sync passes rotate through
+      // every live row, so this one completes later or becomes an ended
+      // tombstone if the relay reports that the share is gone.
       if (error instanceof ShareUnavailableError) {
         throw new Error("That shared channel isn't available anymore.");
       }

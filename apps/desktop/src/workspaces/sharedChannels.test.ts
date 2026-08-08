@@ -9,6 +9,7 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   assertSharedChannelWritable,
   createKeyedSerializer,
+  createPassCoverageReporter,
   endJoinedChannel,
   joinedSharedChannelForTarget,
   mergeJoinedChannel,
@@ -81,6 +82,150 @@ function pullResult(applied = 0) {
 }
 
 describe("syncJoinedSharedChannels", () => {
+  it("covers only the first passRows live rows and reports the remainder", async () => {
+    const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
+    const channels = Array.from({ length: 5 }, (_, index) =>
+      joined({
+        shareId: `share-${index + 1}`,
+        channelWireId: `wire-${index + 1}`,
+        access: "read-only",
+      }),
+    );
+
+    const result = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      channels,
+      passRows: 2,
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+
+    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-1", "share-2"]);
+    expect(result.uncovered).toBe(3);
+    expect(result.resumeAfterShareId).toBe("share-2");
+  });
+
+  it("resumes after the previous cursor and wraps to the front", async () => {
+    const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
+    const channels = Array.from({ length: 5 }, (_, index) =>
+      joined({
+        shareId: `share-${index + 1}`,
+        channelWireId: `wire-${index + 1}`,
+        access: "read-only",
+      }),
+    );
+    const runPass = async (resumeAfterShareId: string | null) => {
+      pull.mockClear();
+      const result = await syncJoinedSharedChannels({
+        rootDir: "/tmp/ws",
+        workspaceId: "ws-1",
+        relay: RELAY,
+        channels,
+        passRows: 2,
+        resumeAfterShareId,
+        pull,
+        push: vi.fn(async () => ({ pushed: 0 })),
+      });
+      return {
+        pulled: pull.mock.calls.map(([input]) => input.shareId),
+        cursor: result.resumeAfterShareId,
+      };
+    };
+
+    const first = await runPass(null);
+    expect(first).toEqual({ pulled: ["share-1", "share-2"], cursor: "share-2" });
+    const second = await runPass(first.cursor);
+    expect(second).toEqual({ pulled: ["share-3", "share-4"], cursor: "share-4" });
+    const third = await runPass(second.cursor);
+    expect(third).toEqual({ pulled: ["share-5", "share-1"], cursor: "share-1" });
+  });
+
+  it("reports no uncovered rows when the pass covers every live row", async () => {
+    const result = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      channels: [joined(), joined({ shareId: "share-2" })],
+      passRows: 2,
+      pull: vi.fn(async () => pullResult(0)),
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+
+    expect(result.uncovered).toBe(0);
+    expect(result.resumeAfterShareId).toBe("share-2");
+  });
+
+  it("restarts at the first live row when the cursor row is no longer live", async () => {
+    const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
+    const result = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      channels: [
+        joined({ shareId: "share-ended", ended: true }),
+        joined({ shareId: "share-1", access: "read-only" }),
+        joined({ shareId: "share-2", access: "read-only" }),
+        joined({ shareId: "share-3", access: "read-only" }),
+      ],
+      passRows: 2,
+      resumeAfterShareId: "share-ended",
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+
+    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-1", "share-2"]);
+    expect(result.resumeAfterShareId).toBe("share-2");
+  });
+
+  it("does not let ended rows consume the window or count as uncovered", async () => {
+    const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
+    const result = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      channels: [
+        joined({ shareId: "share-ended-1", ended: true }),
+        joined({ shareId: "share-1", access: "read-only" }),
+        joined({ shareId: "share-ended-2", ended: true }),
+        joined({ shareId: "share-2", access: "read-only" }),
+        joined({ shareId: "share-3", access: "read-only" }),
+      ],
+      passRows: 2,
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+
+    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-1", "share-2"]);
+    expect(result.uncovered).toBe(1);
+    expect(result.resumeAfterShareId).toBe("share-2");
+  });
+
+  it("counts a transient failure as covered relay work", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pull = vi.fn(async (_input: { shareId: string }) => {
+      throw new Error("ECONNREFUSED");
+    });
+    const result = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      channels: [
+        joined({ shareId: "share-flaky", access: "read-only" }),
+        joined({ shareId: "share-next", access: "read-only" }),
+      ],
+      passRows: 1,
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+
+    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-flaky"]);
+    expect(result.uncovered).toBe(1);
+    expect(result.resumeAfterShareId).toBe("share-flaky");
+    errorSpy.mockRestore();
+  });
+
   it("pushes then pulls read-write channels and only pulls read-only ones", async () => {
     const calls: string[] = [];
     const push = vi.fn(async (input: { shareId: string }) => {
@@ -96,13 +241,20 @@ describe("syncJoinedSharedChannels", () => {
       workspaceId: "ws-1",
       relay: RELAY,
       channels: [joined(), joined({ shareId: "share-ro", access: "read-only" })],
+      passRows: 2,
       pull,
       push,
     });
     // Push precedes pull per share (local sends land before echoes replay),
     // and the read-only share never attempts an append.
     expect(calls).toEqual(["push:share-1", "pull:share-1", "pull:share-ro"]);
-    expect(result).toEqual({ endedShareIds: [], readOnlyShareIds: [], changed: true });
+    expect(result).toEqual({
+      endedShareIds: [],
+      readOnlyShareIds: [],
+      changed: true,
+      uncovered: 0,
+      resumeAfterShareId: "share-ro",
+    });
   });
 
   it("reports a revoked share as ended and keeps syncing the others", async () => {
@@ -116,11 +268,14 @@ describe("syncJoinedSharedChannels", () => {
       workspaceId: "ws-1",
       relay: RELAY,
       channels: [joined({ shareId: "share-revoked" }), joined({ shareId: "share-live" })],
+      passRows: 2,
       pull,
       push,
     });
     expect(result.endedShareIds).toEqual(["share-revoked"]);
     expect(result.changed).toBe(true);
+    expect(result.uncovered).toBe(0);
+    expect(result.resumeAfterShareId).toBe("share-live");
     expect(pull).toHaveBeenCalledTimes(2);
   });
 
@@ -134,11 +289,14 @@ describe("syncJoinedSharedChannels", () => {
       workspaceId: "ws-1",
       relay: RELAY,
       channels: [joined()],
+      passRows: 1,
       pull,
       push,
     });
     expect(result.readOnlyShareIds).toEqual(["share-1"]);
     expect(result.endedShareIds).toEqual([]);
+    expect(result.uncovered).toBe(0);
+    expect(result.resumeAfterShareId).toBe("share-1");
     expect(pull).toHaveBeenCalledTimes(1);
   });
 
@@ -154,10 +312,17 @@ describe("syncJoinedSharedChannels", () => {
       workspaceId: "ws-1",
       relay: RELAY,
       channels: [joined({ shareId: "share-flaky" }), joined({ shareId: "share-ok" })],
+      passRows: 2,
       pull,
       push,
     });
-    expect(result).toEqual({ endedShareIds: [], readOnlyShareIds: [], changed: false });
+    expect(result).toEqual({
+      endedShareIds: [],
+      readOnlyShareIds: [],
+      changed: false,
+      uncovered: 0,
+      resumeAfterShareId: "share-ok",
+    });
     // Only the healthy share pulled; the flaky one logged and moved on.
     expect(pull).toHaveBeenCalledTimes(1);
     expect(errorSpy).toHaveBeenCalled();
@@ -172,12 +337,64 @@ describe("syncJoinedSharedChannels", () => {
       workspaceId: "ws-1",
       relay: RELAY,
       channels: [joined({ ended: true })],
+      passRows: 1,
       pull,
       push,
     });
     expect(push).not.toHaveBeenCalled();
     expect(pull).not.toHaveBeenCalled();
     expect(result.changed).toBe(false);
+    expect(result.uncovered).toBe(0);
+    expect(result.resumeAfterShareId).toBeNull();
+  });
+});
+
+// A bounded pass that skipped rows must never read as a full refresh: the
+// remainder is reported, and the notice names the limit that produced it.
+describe("createPassCoverageReporter", () => {
+  it("says nothing when the pass covered every live row", () => {
+    const lines: string[] = [];
+    const reportCoverage = createPassCoverageReporter((message) => lines.push(message));
+    reportCoverage({ workspaceId: "ws-1", live: 4, uncovered: 0, passRows: 16 });
+    expect(lines).toEqual([]);
+  });
+
+  it("names the constraint, the limit, the unit, and what the pass covered", () => {
+    const lines: string[] = [];
+    const reportCoverage = createPassCoverageReporter((message) => lines.push(message));
+    reportCoverage({ workspaceId: "ws-1", live: 40, uncovered: 24, passRows: 16 });
+    expect(lines).toEqual([
+      "[desktop] shared channel sync covered 16 of 40 joined channels this pass " +
+        "(limit SHARED_CHANNEL_SYNC_PASS_ROWS=16 rows/pass); 24 resume on the next pass.",
+    ]);
+  });
+
+  it("repeats only when the remainder changes (the DM poll runs every 5 s)", () => {
+    const lines: string[] = [];
+    const reportCoverage = createPassCoverageReporter((message) => lines.push(message));
+    reportCoverage({ workspaceId: "ws-1", live: 40, uncovered: 24, passRows: 16 });
+    reportCoverage({ workspaceId: "ws-1", live: 40, uncovered: 24, passRows: 16 });
+    expect(lines).toHaveLength(1);
+    reportCoverage({ workspaceId: "ws-1", live: 40, uncovered: 8, passRows: 16 });
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("covered 32 of 40 joined channels");
+  });
+
+  it("reports again after a full pass, so a returning remainder is never silent", () => {
+    const lines: string[] = [];
+    const reportCoverage = createPassCoverageReporter((message) => lines.push(message));
+    reportCoverage({ workspaceId: "ws-1", live: 40, uncovered: 24, passRows: 16 });
+    reportCoverage({ workspaceId: "ws-1", live: 12, uncovered: 0, passRows: 16 });
+    reportCoverage({ workspaceId: "ws-1", live: 40, uncovered: 24, passRows: 16 });
+    expect(lines).toHaveLength(2);
+  });
+
+  it("keeps each workspace's remainder separate", () => {
+    const lines: string[] = [];
+    const reportCoverage = createPassCoverageReporter((message) => lines.push(message));
+    reportCoverage({ workspaceId: "ws-1", live: 40, uncovered: 24, passRows: 16 });
+    reportCoverage({ workspaceId: "ws-2", live: 40, uncovered: 24, passRows: 16 });
+    expect(lines).toHaveLength(2);
   });
 });
 

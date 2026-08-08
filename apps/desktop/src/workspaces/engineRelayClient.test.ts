@@ -837,6 +837,7 @@ describe("EngineRelayClient", () => {
         rootDir: rootPath,
         workspaceId: "workspace-a",
         relay,
+        passRows: 1,
         channels: [
           {
             shareId: "channel-revoked",
