@@ -11,12 +11,12 @@ import { SHARED_CHANNEL_SYNC_PASS_ROWS } from "./workspaces/sharedChannels";
 // main.chatSecurity.test.ts and main.bootstrapWindowGate.test.ts do.
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
-function sourceBetween(marker: string, end: string): string {
-  const start = mainSource.indexOf(marker);
+function sourceBetween(marker: string, end: string, source = mainSource): string {
+  const start = source.indexOf(marker);
   if (start < 0) throw new Error(`Missing ${marker}`);
-  const stop = mainSource.indexOf(end, start + marker.length);
+  const stop = source.indexOf(end, start + marker.length);
   if (stop < 0) throw new Error(`Unterminated ${marker}`);
-  return mainSource.slice(start, stop + end.length);
+  return source.slice(start, stop + end.length);
 }
 
 // The pass function, and inside it the call that carries the bound.
@@ -64,12 +64,36 @@ describe("the shared-channel sync pass is bounded in production", () => {
     expect(syncCallSource).toContain("channels: matching,");
   });
 
-  it("rotates the window: the cursor is both read and stored per workspace", () => {
+  // A revoked-and-re-granted channel loses its share id: mergeJoinedChannel
+  // replaces the row. The cursor therefore has to name the CHANNEL, and the
+  // merge has to keep that channel where it was — an appended row moves the
+  // rotation's place to the end of the registry and strands the rest.
+  it("carries the cursor as a channel, and keeps a re-granted channel in place", () => {
     expect(syncCallSource).toContain(
-      "resumeAfterShareId: sharedChannelSyncCursors.get(workspaceId),",
+      "resumeAfterChannelWireId: sharedChannelSyncCursors.get(workspaceId),",
     );
     expect(passSource).toContain(
-      "sharedChannelSyncCursors.set(workspaceId, result.resumeAfterShareId)",
+      "sharedChannelSyncCursors.set(workspaceId, result.resumeAfterChannelWireId)",
+    );
+    // The merge appends only a channel the workspace has never joined.
+    const merge = sourceBetween(
+      "export function mergeJoinedChannel(",
+      "\n}\n",
+      readFileSync(
+        new URL("./workspaces/sharedChannels.ts", import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(merge).toContain("if (!replaced) merged.push(joined);");
+    expect(merge).not.toContain("return [...kept, joined];");
+  });
+
+  it("rotates the window: the cursor is both read and stored per workspace", () => {
+    expect(syncCallSource).toContain(
+      "resumeAfterChannelWireId: sharedChannelSyncCursors.get(workspaceId),",
+    );
+    expect(passSource).toContain(
+      "sharedChannelSyncCursors.set(workspaceId, result.resumeAfterChannelWireId)",
     );
   });
 

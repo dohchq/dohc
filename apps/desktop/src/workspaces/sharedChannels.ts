@@ -109,16 +109,33 @@ export function scopeJoinedChannels(
 // that refused a join could not stop the relay granting one either — it could
 // only make the user's own channel unreachable, which is how the same cap
 // produced three permanent-refusal defects in one review cycle.
+//
+// The replacement happens IN PLACE. A re-granted channel is the same channel,
+// and the sync rotation reads its position from this array — appending it would
+// move it to the end, which strands every row the rotation had not reached yet
+// (#718). Only a channel this workspace has never joined is appended.
 export function mergeJoinedChannel(
   existing: readonly JoinedSharedChannel[],
   joined: JoinedSharedChannel,
 ): JoinedSharedChannel[] {
-  const kept = existing.filter(
-    (channel) =>
+  const merged: JoinedSharedChannel[] = [];
+  let replaced = false;
+  for (const channel of existing) {
+    if (
       channel.shareId !== joined.shareId &&
-      channel.channelWireId !== joined.channelWireId,
-  );
-  return [...kept, joined];
+      channel.channelWireId !== joined.channelWireId
+    ) {
+      merged.push(channel);
+      continue;
+    }
+    // A second stale row for the same channel (one matched by share, one by
+    // wire) collapses into the first: one channel, one row.
+    if (replaced) continue;
+    replaced = true;
+    merged.push(joined);
+  }
+  if (!replaced) merged.push(joined);
+  return merged;
 }
 
 // Member leave stops sync but keeps a durable provenance tombstone. The local
@@ -247,8 +264,10 @@ export interface SyncJoinedSharedChannelsResult {
   changed: boolean;
   // Live rows that this bounded pass did not reach.
   uncovered: number;
-  // Last live row covered, or null when the pass covered none.
-  resumeAfterShareId: string | null;
+  // The channel the rotation stopped on, or null when the pass covered no live
+  // row. A CHANNEL, not a grant: a share id dies with its grant, and a revoked
+  // and re-granted channel would lose the rotation's place with it.
+  resumeAfterChannelWireId: string | null;
 }
 
 export async function syncJoinedSharedChannels(input: {
@@ -263,7 +282,7 @@ export async function syncJoinedSharedChannels(input: {
   // joined under another account — while the rotation still needs its place.
   registryOrder: readonly JoinedSharedChannel[];
   passRows: number;
-  resumeAfterShareId?: string;
+  resumeAfterChannelWireId?: string;
   // The share whose write triggered this pass. Always covered, and covered in
   // ADDITION to the rotation's rows.
   priorityShareId?: string;
@@ -296,19 +315,22 @@ export async function syncJoinedSharedChannels(input: {
   const live = input.channels.filter((channel) => channel.ended !== true);
   // Rotation positions come from the registry, so a row that left the work set
   // between passes keeps its place. Resolving the cursor inside the work set
-  // loses that place the moment the cursor's own share is revoked, and the next
-  // pass restarts at the front, re-covering the prefix it just did.
+  // loses that place the moment the cursor's own channel is revoked, and the
+  // next pass restarts at the front, re-covering the prefix it just did.
   const registryPosition = new Map(
-    input.registryOrder.map((channel, index) => [channel.shareId, index] as const),
+    input.registryOrder.map(
+      (channel, index) => [channel.channelWireId, index] as const,
+    ),
   );
-  const cursorPosition = input.resumeAfterShareId
-    ? (registryPosition.get(input.resumeAfterShareId) ?? -1)
+  const cursorPosition = input.resumeAfterChannelWireId
+    ? (registryPosition.get(input.resumeAfterChannelWireId) ?? -1)
     : -1;
   const afterCursor =
     cursorPosition < 0
       ? -1
       : live.findIndex(
-          (channel) => (registryPosition.get(channel.shareId) ?? -1) > cursorPosition,
+          (channel) =>
+            (registryPosition.get(channel.channelWireId) ?? -1) > cursorPosition,
         );
   const startIndex = afterCursor < 0 ? 0 : afterCursor;
   // The rotation always gets the whole window. A write's own share is EXTRA
@@ -330,8 +352,8 @@ export async function syncJoinedSharedChannels(input: {
   const uncovered = live.length - covered.length;
   // The cursor follows the ROTATION only. A priority row is covered out of
   // order, so letting it move the cursor would skip whatever it jumped over.
-  const resumeAfterShareId =
-    rotation.at(-1)?.shareId ?? input.resumeAfterShareId ?? null;
+  const resumeAfterChannelWireId =
+    rotation.at(-1)?.channelWireId ?? input.resumeAfterChannelWireId ?? null;
   for (const channel of covered) {
     const target = {
       rootDir: input.rootDir,
@@ -372,6 +394,6 @@ export async function syncJoinedSharedChannels(input: {
     readOnlyShareIds,
     changed,
     uncovered,
-    resumeAfterShareId,
+    resumeAfterChannelWireId,
   };
 }

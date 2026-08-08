@@ -1451,6 +1451,8 @@ async function presenceRelayTransportForScope(
 }
 
 const serializeSharedChannelSync = createKeyedSerializer();
+// Where each workspace's rotation stopped, by CHANNEL wire id — the identity
+// that survives a channel being revoked and re-granted under a new share.
 const sharedChannelSyncCursors = new Map<string, string>();
 const reportSharedChannelPassCoverage = createPassCoverageReporter((message) =>
   console.info(message),
@@ -1558,7 +1560,7 @@ async function runSharedChannelSyncPass(
       channels: matching,
       registryOrder,
       passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,
-      resumeAfterShareId: sharedChannelSyncCursors.get(workspaceId),
+      resumeAfterChannelWireId: sharedChannelSyncCursors.get(workspaceId),
       priorityShareId,
       pull: async (input) =>
         await daemonRelay.pullSharedChannel({
@@ -1571,10 +1573,10 @@ async function runSharedChannelSyncPass(
           channelWireId: input.channelWireId,
         }),
     });
-    if (result.resumeAfterShareId === null) {
+    if (result.resumeAfterChannelWireId === null) {
       sharedChannelSyncCursors.delete(workspaceId);
     } else {
-      sharedChannelSyncCursors.set(workspaceId, result.resumeAfterShareId);
+      sharedChannelSyncCursors.set(workspaceId, result.resumeAfterChannelWireId);
     }
     reportSharedChannelPassCoverage({
       workspaceId,

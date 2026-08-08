@@ -66,9 +66,12 @@ async function makeChats(workspaceId: string): Promise<{
 }
 
 function joined(overrides: Partial<JoinedSharedChannel> = {}): JoinedSharedChannel {
+  const shareId = overrides.shareId ?? "share-1";
   return {
-    shareId: "share-1",
-    channelWireId: "wire-1",
+    shareId,
+    // One row is one channel, so the wire id follows the share id unless a test
+    // deliberately models two grants for the same channel.
+    channelWireId: `wire-${shareId.replace(/^share-/u, "")}`,
     access: "read-write",
     granterEmail: "owner@example.com",
     relayUrl: "http://relay.test",
@@ -100,11 +103,7 @@ describe("syncJoinedSharedChannels", () => {
   it("covers only the first passRows live rows and reports the remainder", async () => {
     const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
     const channels = Array.from({ length: 5 }, (_, index) =>
-      joined({
-        shareId: `share-${index + 1}`,
-        channelWireId: `wire-${index + 1}`,
-        access: "read-only",
-      }),
+      joined({ shareId: `share-${index + 1}`, access: "read-only" }),
     );
 
     const result = await syncJoinedSharedChannels({
@@ -119,19 +118,15 @@ describe("syncJoinedSharedChannels", () => {
 
     expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-1", "share-2"]);
     expect(result.uncovered).toBe(3);
-    expect(result.resumeAfterShareId).toBe("share-2");
+    expect(result.resumeAfterChannelWireId).toBe("wire-2");
   });
 
   it("resumes after the previous cursor and wraps to the front", async () => {
     const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
     const channels = Array.from({ length: 5 }, (_, index) =>
-      joined({
-        shareId: `share-${index + 1}`,
-        channelWireId: `wire-${index + 1}`,
-        access: "read-only",
-      }),
+      joined({ shareId: `share-${index + 1}`, access: "read-only" }),
     );
-    const runPass = async (resumeAfterShareId?: string) => {
+    const runPass = async (resumeAfterChannelWireId?: string) => {
       pull.mockClear();
       const result = await syncJoinedSharedChannels({
         rootDir: "/tmp/ws",
@@ -139,22 +134,22 @@ describe("syncJoinedSharedChannels", () => {
         relay: RELAY,
         ...passOver(channels),
         passRows: 2,
-        resumeAfterShareId,
+        resumeAfterChannelWireId,
         pull,
         push: vi.fn(async () => ({ pushed: 0 })),
       });
       return {
         pulled: pull.mock.calls.map(([input]) => input.shareId),
-        cursor: result.resumeAfterShareId ?? undefined,
+        cursor: result.resumeAfterChannelWireId ?? undefined,
       };
     };
 
     const first = await runPass();
-    expect(first).toEqual({ pulled: ["share-1", "share-2"], cursor: "share-2" });
+    expect(first).toEqual({ pulled: ["share-1", "share-2"], cursor: "wire-2" });
     const second = await runPass(first.cursor);
-    expect(second).toEqual({ pulled: ["share-3", "share-4"], cursor: "share-4" });
+    expect(second).toEqual({ pulled: ["share-3", "share-4"], cursor: "wire-4" });
     const third = await runPass(second.cursor);
-    expect(third).toEqual({ pulled: ["share-5", "share-1"], cursor: "share-1" });
+    expect(third).toEqual({ pulled: ["share-5", "share-1"], cursor: "wire-1" });
   });
 
   // A share revoked exactly on the window boundary must not cost the rotation a
@@ -163,11 +158,7 @@ describe("syncJoinedSharedChannels", () => {
   it("steps past a cursor row that ended between passes instead of restarting", async () => {
     const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
     const rows = Array.from({ length: 32 }, (_, index) =>
-      joined({
-        shareId: `share-${index + 1}`,
-        channelWireId: `wire-${index + 1}`,
-        access: "read-only",
-      }),
+      joined({ shareId: `share-${index + 1}`, access: "read-only" }),
     );
     const first = await syncJoinedSharedChannels({
       rootDir: "/tmp/ws",
@@ -178,7 +169,7 @@ describe("syncJoinedSharedChannels", () => {
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
     });
-    expect(first.resumeAfterShareId).toBe("share-16");
+    expect(first.resumeAfterChannelWireId).toBe("wire-16");
 
     // The granter revokes share-16 between the two passes.
     const afterRevoke = rows.map((row) =>
@@ -191,16 +182,62 @@ describe("syncJoinedSharedChannels", () => {
       relay: RELAY,
       ...passOver(afterRevoke),
       passRows: 16,
-      resumeAfterShareId: first.resumeAfterShareId ?? undefined,
+      resumeAfterChannelWireId: first.resumeAfterChannelWireId ?? undefined,
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
     });
     expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(
       Array.from({ length: 16 }, (_, index) => `share-${index + 17}`),
     );
-    expect(second.resumeAfterShareId).toBe("share-32");
+    expect(second.resumeAfterChannelWireId).toBe("wire-32");
     // 31 live rows, 16 covered.
     expect(second.uncovered).toBe(15);
+  });
+
+  // Worse than a plain revoke: the channel is revoked AND re-granted before the
+  // next pass, so mergeJoinedChannel replaces its row and the OLD share id is
+  // gone from the registry entirely. The rotation survives it because its cursor
+  // names the CHANNEL, and the merge keeps that channel in its place.
+  it("steps past a cursor channel revoked and re-granted between passes", async () => {
+    const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
+    const rows = Array.from({ length: 32 }, (_, index) =>
+      joined({ shareId: `share-${index + 1}`, access: "read-only" }),
+    );
+    const first = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      ...passOver(rows),
+      passRows: 16,
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+    expect(first.resumeAfterChannelWireId).toBe("wire-16");
+
+    // wire-16's grant is revoked and re-granted under a new share id, through
+    // the registry's own merge — the same call the join flow makes.
+    const afterRegrant = mergeJoinedChannel(
+      rows,
+      joined({ shareId: "share-16-regranted", channelWireId: "wire-16", access: "read-only" }),
+    );
+    expect(afterRegrant.map((row) => row.shareId)).not.toContain("share-16");
+
+    pull.mockClear();
+    const second = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      ...passOver(afterRegrant),
+      passRows: 16,
+      resumeAfterChannelWireId: first.resumeAfterChannelWireId ?? undefined,
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(
+      Array.from({ length: 16 }, (_, index) => `share-${index + 17}`),
+    );
+    expect(second.resumeAfterChannelWireId).toBe("wire-32");
+    expect(second.uncovered).toBe(16);
   });
 
   // The write that triggered a pass must not have to wait for the rotation:
@@ -216,7 +253,7 @@ describe("syncJoinedSharedChannels", () => {
       return pullResult(0);
     });
     const channels = Array.from({ length: 20 }, (_, index) =>
-      joined({ shareId: `share-${index + 1}`, channelWireId: `wire-${index + 1}` }),
+      joined({ shareId: `share-${index + 1}` }),
     );
     const result = await syncJoinedSharedChannels({
       rootDir: "/tmp/ws",
@@ -225,7 +262,7 @@ describe("syncJoinedSharedChannels", () => {
       ...passOver(channels),
       passRows: 16,
       // Rotation alone would cover share-5 .. share-20 — never share-1.
-      resumeAfterShareId: "share-4",
+      resumeAfterChannelWireId: "wire-4",
       priorityShareId: "share-1",
       pull,
       push,
@@ -239,7 +276,7 @@ describe("syncJoinedSharedChannels", () => {
       ...Array.from({ length: 16 }, (_, index) => `share-${index + 5}`),
     ]);
     // The cursor follows the rotation, not the out-of-order priority row.
-    expect(result.resumeAfterShareId).toBe("share-20");
+    expect(result.resumeAfterChannelWireId).toBe("wire-20");
     expect(result.uncovered).toBe(3);
   });
 
@@ -249,11 +286,7 @@ describe("syncJoinedSharedChannels", () => {
   it("keeps the rotation whole under a share written on every pass", async () => {
     const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
     const rows = Array.from({ length: 32 }, (_, index) =>
-      joined({
-        shareId: `share-${index + 1}`,
-        channelWireId: `wire-${index + 1}`,
-        access: "read-only",
-      }),
+      joined({ shareId: `share-${index + 1}`, access: "read-only" }),
     );
     const covered: string[] = [];
     let cursor: string | undefined;
@@ -265,13 +298,13 @@ describe("syncJoinedSharedChannels", () => {
         relay: RELAY,
         ...passOver(rows),
         passRows: 16,
-        ...(cursor ? { resumeAfterShareId: cursor } : {}),
+        ...(cursor ? { resumeAfterChannelWireId: cursor } : {}),
         // The same share is written before every pass.
         priorityShareId: "share-32",
         pull,
         push: vi.fn(async () => ({ pushed: 0 })),
       });
-      cursor = result.resumeAfterShareId ?? undefined;
+      cursor = result.resumeAfterChannelWireId ?? undefined;
       covered.push(...pull.mock.calls.map(([input]) => input.shareId));
     }
     // Two rotations of 16 reach every row, priority or no priority.
@@ -281,11 +314,7 @@ describe("syncJoinedSharedChannels", () => {
   it("never covers the triggering share twice when rotation already reaches it", async () => {
     const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
     const channels = Array.from({ length: 5 }, (_, index) =>
-      joined({
-        shareId: `share-${index + 1}`,
-        channelWireId: `wire-${index + 1}`,
-        access: "read-only",
-      }),
+      joined({ shareId: `share-${index + 1}`, access: "read-only" }),
     );
     const result = await syncJoinedSharedChannels({
       rootDir: "/tmp/ws",
@@ -296,7 +325,7 @@ describe("syncJoinedSharedChannels", () => {
       // The cursor wraps the rotation to share-1, so its range (share-1 ..
       // share-3) CONTAINS the priority row — the case where a naive fill would
       // spend two of the three slots on share-2.
-      resumeAfterShareId: "share-5",
+      resumeAfterChannelWireId: "wire-5",
       priorityShareId: "share-2",
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
@@ -308,7 +337,7 @@ describe("syncJoinedSharedChannels", () => {
       "share-4",
     ]);
     expect(result.uncovered).toBe(1);
-    expect(result.resumeAfterShareId).toBe("share-4");
+    expect(result.resumeAfterChannelWireId).toBe("wire-4");
   });
 
   it("ignores a priority share this workspace holds no live row for", async () => {
@@ -328,7 +357,7 @@ describe("syncJoinedSharedChannels", () => {
       push: vi.fn(async () => ({ pushed: 0 })),
     });
     expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-1"]);
-    expect(result.resumeAfterShareId).toBe("share-1");
+    expect(result.resumeAfterChannelWireId).toBe("wire-1");
   });
 
   it("reports no uncovered rows when the pass covers every live row", async () => {
@@ -343,7 +372,7 @@ describe("syncJoinedSharedChannels", () => {
     });
 
     expect(result.uncovered).toBe(0);
-    expect(result.resumeAfterShareId).toBe("share-2");
+    expect(result.resumeAfterChannelWireId).toBe("wire-2");
   });
 
   it("restarts at the first live row when the cursor row is no longer live", async () => {
@@ -359,13 +388,13 @@ describe("syncJoinedSharedChannels", () => {
         joined({ shareId: "share-3", access: "read-only" }),
       ]),
       passRows: 2,
-      resumeAfterShareId: "share-ended",
+      resumeAfterChannelWireId: "wire-ended",
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
     });
 
     expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-1", "share-2"]);
-    expect(result.resumeAfterShareId).toBe("share-2");
+    expect(result.resumeAfterChannelWireId).toBe("wire-2");
   });
 
   it("does not let ended rows consume the window or count as uncovered", async () => {
@@ -388,7 +417,7 @@ describe("syncJoinedSharedChannels", () => {
 
     expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-1", "share-2"]);
     expect(result.uncovered).toBe(1);
-    expect(result.resumeAfterShareId).toBe("share-2");
+    expect(result.resumeAfterChannelWireId).toBe("wire-2");
   });
 
   it("counts a transient failure as covered relay work", async () => {
@@ -411,7 +440,7 @@ describe("syncJoinedSharedChannels", () => {
 
     expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-flaky"]);
     expect(result.uncovered).toBe(1);
-    expect(result.resumeAfterShareId).toBe("share-flaky");
+    expect(result.resumeAfterChannelWireId).toBe("wire-flaky");
     errorSpy.mockRestore();
   });
 
@@ -442,7 +471,7 @@ describe("syncJoinedSharedChannels", () => {
       readOnlyShareIds: [],
       changed: true,
       uncovered: 0,
-      resumeAfterShareId: "share-ro",
+      resumeAfterChannelWireId: "wire-ro",
     });
   });
 
@@ -464,7 +493,7 @@ describe("syncJoinedSharedChannels", () => {
     expect(result.endedShareIds).toEqual(["share-revoked"]);
     expect(result.changed).toBe(true);
     expect(result.uncovered).toBe(0);
-    expect(result.resumeAfterShareId).toBe("share-live");
+    expect(result.resumeAfterChannelWireId).toBe("wire-live");
     expect(pull).toHaveBeenCalledTimes(2);
   });
 
@@ -485,7 +514,7 @@ describe("syncJoinedSharedChannels", () => {
     expect(result.readOnlyShareIds).toEqual(["share-1"]);
     expect(result.endedShareIds).toEqual([]);
     expect(result.uncovered).toBe(0);
-    expect(result.resumeAfterShareId).toBe("share-1");
+    expect(result.resumeAfterChannelWireId).toBe("wire-1");
     expect(pull).toHaveBeenCalledTimes(1);
   });
 
@@ -510,7 +539,7 @@ describe("syncJoinedSharedChannels", () => {
       readOnlyShareIds: [],
       changed: false,
       uncovered: 0,
-      resumeAfterShareId: "share-ok",
+      resumeAfterChannelWireId: "wire-ok",
     });
     // Only the healthy share pulled; the flaky one logged and moved on.
     expect(pull).toHaveBeenCalledTimes(1);
@@ -534,7 +563,7 @@ describe("syncJoinedSharedChannels", () => {
     expect(pull).not.toHaveBeenCalled();
     expect(result.changed).toBe(false);
     expect(result.uncovered).toBe(0);
-    expect(result.resumeAfterShareId).toBeNull();
+    expect(result.resumeAfterChannelWireId).toBeNull();
   });
 });
 
@@ -661,20 +690,23 @@ describe("mergeJoinedChannel", () => {
       joined({ shareId: "share-other", channelWireId: "wire-other" }),
     ];
     // Same channel, NEW share id (revoked + re-granted): the stale row for
-    // the wire id is replaced, not duplicated.
+    // the wire id is replaced, not duplicated — and IN PLACE. The sync rotation
+    // reads its positions from this array, so appending the re-granted row
+    // would move the channel to the end and strand every row the rotation had
+    // not reached yet (#718).
     const rejoined = mergeJoinedChannel(
       existing,
       joined({ shareId: "share-new", channelWireId: "wire-1" }),
     );
-    expect(rejoined.map((row) => row.shareId)).toEqual(["share-other", "share-new"]);
+    expect(rejoined.map((row) => row.shareId)).toEqual(["share-new", "share-other"]);
 
-    // Same share id (plain idempotent re-join) still replaces in place.
+    // Same share id (plain idempotent re-join) also keeps its place.
     const rejoinedSameShare = mergeJoinedChannel(
       existing,
       joined({ shareId: "share-old", channelWireId: "wire-1", access: "read-only" }),
     );
-    expect(rejoinedSameShare.map((row) => row.shareId)).toEqual(["share-other", "share-old"]);
-    expect(rejoinedSameShare[1]!.access).toBe("read-only");
+    expect(rejoinedSameShare.map((row) => row.shareId)).toEqual(["share-old", "share-other"]);
+    expect(rejoinedSameShare[0]!.access).toBe("read-only");
   });
 
   // The join gate is gone (#640). It existed to bound the joined-lane
