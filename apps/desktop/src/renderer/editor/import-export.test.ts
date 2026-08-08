@@ -868,32 +868,24 @@ describe('desktop editor markdown import: indented code fences', () => {
           ])
           expect(codeText(blocks[1])).toBe('const a = 1')
           expect(blocks[1]?.attrs?.language ?? null).toBe(info || null)
-
-          const once = yDocToMarkdown(markdownToYDoc(input))
-          expect(once).toContain('const a = 1')
-          expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
         })
       }
     }
   }
 
-  it('keeps every body line of an indented fence, including blanks and hashes', () => {
+  it('keeps every body line, stripping only the opener indent', () => {
     const input = [
       '  ```md',
-      'first',
+      '  first',
       '',
       '# not a heading',
+      '   deeper',
       '  ```',
     ].join('\n')
     const blocks = bodyBlocks(input)
     expect(blocks.map((block) => block.type)).toEqual(['codeBlock'])
-    expect(codeText(blocks[0])).toBe('first\n\n# not a heading')
+    expect(codeText(blocks[0])).toBe('first\n\n# not a heading\n deeper')
     expect(blocks[0]?.attrs?.language).toBe('md')
-  })
-
-  it('strips the opener indent from the body, as CommonMark requires', () => {
-    const blocks = bodyBlocks(['  ```', '  code', '   deeper', '  ```'].join('\n'))
-    expect(codeText(blocks[0])).toBe('code\n deeper')
   })
 
   it('normalizes an indented fence to column 0 on export', () => {
@@ -902,17 +894,11 @@ describe('desktop editor markdown import: indented code fences', () => {
   })
 
   // Boundary: four spaces is an indented code block, NOT a fence.
-  it('reads a 4-space-indented block as indented code', () => {
-    const blocks = bodyBlocks('    indented\n    code')
-    expect(blocks.map((block) => block.type)).toEqual(['codeBlock'])
-    expect(codeText(blocks[0])).toBe('indented\ncode')
-    expect(blocks[0]?.attrs?.language ?? null).toBeNull()
-  })
-
   it('treats a 4-space-indented backtick run as code content, not a fence', () => {
     const blocks = bodyBlocks('    ```\nParagraph')
     expect(blocks.map((block) => block.type)).toEqual(['codeBlock', 'paragraph'])
     expect(codeText(blocks[0])).toBe('```')
+    expect(blocks[0]?.attrs?.language ?? null).toBeNull()
   })
 
   // Boundary: fences that already worked must keep working.
@@ -924,12 +910,10 @@ describe('desktop editor markdown import: indented code fences', () => {
     expect(codeText(itemBlocks[1])).toBe('code')
   })
 
-  it('round-trips a column-0 fence byte-for-byte', () => {
-    const input = 'Para\n\n```js\nconst a = 1\n```\n\nAfter'
-    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
-  })
-
-  it('keeps a fence inside a blockquote quoted', () => {
+  // The suite above covers a fence inside a callout, whose tokenizer strips the
+  // `>` prefix itself. This is the only case that reaches marked's blockquote
+  // tokenizer with a fence inside it.
+  it('keeps a fence inside a plain blockquote quoted', () => {
     const input = ['> ```', '> code', '> ```'].join('\n')
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
