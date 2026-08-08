@@ -1046,9 +1046,9 @@ pub fn close_session(
             TxnOutcome::Crashed { committed } => TxnOutcome::Crashed { committed },
         });
     }
-    // Local-only prune would DISCARD the CRDT cache. Refuse unless the current
-    // head is already covered by a durable settle (markdown-is-the-artifact: the
-    // artifact must exist before the cache is thrown away). A doc with no edits
+    // Local-only prune would DISCARD the CRDT cache. Refuse unless the artifact
+    // already holds the head's bytes (markdown-is-the-artifact: the artifact
+    // must exist before the cache is thrown away). A doc with no edits
     // (`head_update_seq == 0`) has nothing to lose and prunes freely.
     if marker.head_update_seq > 0 {
         let persisted = load_persisted(store, key)?.ok_or(CollabError::NoMarker)?;
@@ -1059,8 +1059,22 @@ pub fn close_session(
                 .markdown
                 .as_bytes(),
         );
-        let last_settled = store.read_with(|conn| last_settled_sha(conn, key))?;
-        if last_settled.as_deref() != Some(content_sha.as_str()) {
+        // TWO ways the artifact can already hold these bytes, and both count.
+        // A settle records itself in `last_settled_sha`. A CAPTURE of the file
+        // moves the HEAD to them and touches no marker column — it reads the
+        // disk, so a matching captured head IS the proof this guard asks for.
+        // Reading the marker alone refuses a document whose own projection is
+        // already the head, and capture -> discharge -> open never converges
+        // (#665). The sync-side `ydoc_apply::project_and_write_in_tx` uses a
+        // narrower head/projection match to dedupe a converged envelope; it
+        // does not gate this prune.
+        let covered = store.read_with(|conn| -> Result<bool, CollabError> {
+            Ok(
+                last_settled_sha(conn, key)?.as_deref() == Some(content_sha.as_str())
+                    || captured_head_sha(conn, key)?.as_deref() == Some(content_sha.as_str()),
+            )
+        })?;
+        if !covered {
             return Err(CollabError::UnsettledClose);
         }
         // The settle may have COMMITTED while its materialization failed
@@ -1259,6 +1273,40 @@ fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, C
     .optional()
     .map_err(map_sql)?
     .ok_or(CollabError::NoMarker)
+}
+
+/// The object's head sha, but ONLY when a capture put it there.
+///
+/// The DIRECTION decides, not the bytes. A capture is disk -> engine: it reads
+/// the file, mints no materialization job, and its head therefore IS what the
+/// file holds. A head the engine wrote is engine -> disk, and its job is the
+/// only thing that says whether the file ever received it — a job that
+/// conflicted leaves the head holding bytes the file never had, and
+/// `ydoc_settle_on_store` withdraws `last_settled_sha` for exactly that case.
+/// Answering "covered" from such a head would prune the CRDT over a file that
+/// disagrees with it.
+///
+/// Matched on content and path rather than on a job-id prefix, so a job kind
+/// added later cannot slip past this by being spelled differently.
+fn captured_head_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
+    conn.query_row(
+        "SELECT s.blob_sha256 FROM snapshots s \
+         WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM materialization_jobs j \
+             WHERE j.content_sha256 = s.blob_sha256 \
+               AND j.target_path = s.path \
+               AND (j.workspace_id = ?1 OR j.workspace_id = ''))",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+        // NULL for a BINARY head (schema v10), which a path whose bytes stop
+        // round-tripping as UTF-8 becomes. It covers nothing, and reading it
+        // as a plain String would raise InvalidColumnType instead —
+        // `.optional()` absorbs only QueryReturnedNoRows.
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map_err(map_sql)
+    .map(Option::flatten)
 }
 
 pub(crate) fn head_of(conn: &Connection, key: &DocKey) -> Result<(i64, i64, bool), CollabError> {

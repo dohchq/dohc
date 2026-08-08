@@ -28,6 +28,7 @@ import {
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import {
+  DaemonRefusalError,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   VERSIONED_METHOD,
@@ -514,6 +515,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: "note.md",
           head: "present" as const,
           lineage: "existing" as const,
+          evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), markdown: "" }) as never,
@@ -560,6 +562,7 @@ describe("workspaceEngineCapture batch capture", () => {
         // every drift case here.
         head: "present" as const,
         lineage: "existing" as const,
+        evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () => {
           await options.onSettled?.({ ...settled, materialized: true } as never, 1);
@@ -2763,6 +2766,7 @@ describe("Rust engine session selection", () => {
           path: "note.md",
           head: "present" as const,
           lineage: "existing" as const,
+          evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "b".repeat(64), markdown: "daemon" }) as never,
@@ -2828,6 +2832,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
         // absent-head refusal never ran in this test at all.
         head: "present" as const,
         lineage: "existing" as const,
+        evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () =>
           ({ sha256: "c".repeat(64), markdown: "" }) as never,
@@ -3063,6 +3068,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           // durable. The peer's update is still in flight behind it.
           head: "absent" as const,
           lineage: "absent" as const,
+          evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
@@ -3101,13 +3107,17 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     // closed itself and dropped every subscription) and cannot be reopened (a
     // refused close reinserts the daemon entry with its lease held).
     //
-    // So the answer is the UNRELEASED refusal, not a verdict about the disk.
-    // It used to be `YDocOpenRacedError`, which is true — something IS writing
-    // the path — but `main` answers it with a bare `available: false` and the
-    // renderer opens the writable plain editor over the session the daemon
-    // just kept (#564, codex r17). What is true of every refused release is
-    // that the engine may still own the document, and that is what has to
-    // reach the surface: read-only, with a retry that discharges the orphan.
+    // Two things must be true of the answer, and #665 changed which refusal
+    // carries them. It may never call the path missing — something IS writing
+    // it — and it may never leave the surface writable over a session the
+    // daemon still holds (#564, codex r17).
+    //
+    // The orphan now EVICTS when its close is refused, so the daemon no longer
+    // holds the session and the second hazard is gone with it. What remains is
+    // the first, and `YDocOpenRacedError` is exactly it: this open's answer is
+    // already stale, open it again — and the next open binds the lineage the
+    // eviction preserved. The path this test guards is that the refusal is
+    // decided by the REFUSED CLOSE, not by a second look at the disk.
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
@@ -3121,6 +3131,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     const peerUpdate = Y.encodeStateAsUpdate(doc);
     const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> = [];
     const settles: string[] = [];
+    let evicts = 0;
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
       openRustYDocProviderSession: async (options) => {
@@ -3132,6 +3143,9 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           path: options.path,
           head: "absent" as const,
           lineage: "absent" as const,
+          evict: async () => {
+            evicts += 1;
+          },
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
@@ -3147,7 +3161,14 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
             if (deliver) {
               deliver();
               deliver = null;
-              throw new Error("unsettled-close");
+              throw new DaemonRefusalError(
+                {
+                  code: "INVALID_PARAMS",
+                  message: "ydoc-unsettled-close",
+                  retry: "no",
+                },
+                undefined,
+              );
             }
           },
         } as never;
@@ -3161,22 +3182,186 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         (error: unknown) => error,
       );
 
-    // MUTATION: let an ordinary release refusal fall through to the disk
-    // verdict -> a raced/artifact refusal, a plain fallback, and two writers
-    // on one path.
-    expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
-    // The daemon's own words are kept as the cause, for whoever reads the log.
-    expect((refusal as Error).cause).toMatchObject({
-      message: "unsettled-close",
-    });
-    // It must NOT claim the version does not have a path something is writing.
+    // MUTATION: drop the `dischargedByEvict` arm (#665) -> the recheck finds
+    // the path still absent and the refusal claims the version does not have a
+    // file a peer is writing into it.
+    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
     expect(isYDocPathNotInVersionError(refusal)).toBe(false);
+    // The lease is gone, so the surface may fall back — that is what makes the
+    // raced refusal safe here where #564 needed the unreleased one.
+    expect(refusal).not.toBeInstanceOf(YDocSessionUnreleasedError);
+    expect(evicts).toBe(1);
     // And the release never escalated, so nothing was materialized.
     expect(closeCalls).toEqual([{ settle: false, settleOnRefusal: false }]);
     expect(settles).toEqual([]);
     await expect(readFile(join(root, "peer-created.md"), "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
+    await engine.stop();
+  });
+
+  it("clears dead-session health when orphan eviction discharges it", async () => {
+    // A handed-out session can never become an orphan: only the absent-head
+    // refusal below sets that state, before open returns. Stage daemon death at
+    // that boundary through the provider's real reconnect callback instead.
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "unrelated.md",
+      text: "main",
+    });
+    const doc = new Y.Doc();
+    const outcomes: boolean[] = [];
+    const reconnectFailure = Object.assign(new Error("daemon exited"), {
+      code: "transport-error",
+    });
+    const replacementFailure = new Error("replacement daemon unavailable");
+    const unsettled = new DaemonRefusalError(
+      {
+        code: "INVALID_PARAMS",
+        message: "ydoc-unsettled-close",
+        retry: "no",
+      },
+      undefined,
+    );
+    let opens = 0;
+    let evicts = 0;
+    let reportedDeath = false;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      onError: () => undefined,
+      openRustYDocProviderSession: async (options) => {
+        opens += 1;
+        if (opens > 1) throw replacementFailure;
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext",
+          path: options.path,
+          get head() {
+            if (!reportedDeath) {
+              reportedDeath = true;
+              options.onSessionError?.(reconnectFailure);
+            }
+            return "absent" as const;
+          },
+          lineage: "absent" as const,
+          evict: async () => {
+            evicts += 1;
+          },
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () =>
+            ({ sha256: "f".repeat(64), markdown: "" }) as never,
+          applyExternalMarkdownEdit: async (markdown: string) =>
+            ({ kind: "merged", markdown }) as const,
+          close: async () => {
+            throw unsettled;
+          },
+        };
+      },
+    });
+
+    const refusal = await engine
+      .openYDocSession({
+        path: "peer-created.md",
+        onRemoteUpdate: () => undefined,
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    // MUTATION: delete `clearDeadYDocSession` from the orphan evict -> the last outcome stays false.
+    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
+    expect(opens).toBe(2);
+    expect(outcomes).toEqual([false, true]);
+    // MUTATION: drop the `releaseObligation` branch from the wrapper's
+    // `evict()` -> the obligated session's lease remains held forever.
+    expect(evicts).toBe(1);
+    await engine.stop();
+  });
+
+  it("does not evict an orphan when its close fails for an unrelated reason", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "unrelated.md",
+      text: "main",
+    });
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "arrived from a peer");
+    const peerUpdate = Y.encodeStateAsUpdate(doc);
+    const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> = [];
+    const settles: string[] = [];
+    let evicts = 0;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        let deliver: (() => void) | null = () =>
+          options.onRemoteUpdate(peerUpdate);
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext",
+          path: options.path,
+          head: "absent" as const,
+          lineage: "absent" as const,
+          evict: async () => {
+            evicts += 1;
+          },
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            settles.push("settle");
+            return {
+              sha256: "f".repeat(64),
+              markdown: "arrived from a peer",
+            } as never;
+          },
+          close: async (closeOptions?: {
+            settle?: boolean;
+            settleOnRefusal?: boolean;
+          }) => {
+            closeCalls.push({ ...closeOptions });
+            if (deliver) {
+              deliver();
+              deliver = null;
+              throw new DaemonRefusalError(
+                {
+                  code: "INVALID_PARAMS",
+                  message: "ydoc-something-else",
+                  retry: "no",
+                },
+                undefined,
+              );
+            }
+          },
+        } as never;
+      },
+    });
+
+    const refusal = await engine
+      .openYDocSession({
+        path: "peer-created.md",
+        onRemoteUpdate: () => undefined,
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
+    expect(refusal).not.toBeInstanceOf(YDocOpenRacedError);
+    expect(evicts).toBe(0);
+    expect(closeCalls).toEqual([{ settle: false, settleOnRefusal: false }]);
+    expect(settles).toEqual([]);
+    await expect(
+      readFile(join(root, "peer-created.md"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
     await engine.stop();
   });
 
@@ -3205,6 +3390,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         path: options.path,
         head: "absent" as const,
         lineage: "absent" as const,
+        evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () => {
           settles.push("settle");
@@ -3269,6 +3455,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           path: options.path,
           head: "absent" as const,
           lineage: "absent" as const,
+          evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
@@ -3298,6 +3485,77 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     expect(await readFile(join(root, "uncaptured.md"), "utf8")).toBe(
       "bytes the watcher has not seen",
     );
+    await engine.stop();
+  });
+
+  it("refuses an uncaptured artifact again after orphan eviction resurrects its lineage", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "unrelated.md",
+      text: "main",
+    });
+    // The default policy tracks this short Markdown file, so capture will reach it.
+    const path = "resurrected.md";
+    const original = "already on disk, never captured";
+    const resurrected = "resurrected and settled";
+    await writeFile(join(root, path), original, "utf8");
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, resurrected);
+    const settled: string[] = [];
+    let opens = 0;
+    let evicts = 0;
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        opens += 1;
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "plaintext",
+          path: options.path,
+          head: "absent" as const,
+          lineage: opens === 1 ? ("absent" as const) : ("existing" as const),
+          evict: async () => {
+            evicts += 1;
+          },
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            settled.push(resurrected);
+            await writeFile(join(root, path), resurrected, "utf8");
+            return { sha256: "7".repeat(64), markdown: resurrected } as never;
+          },
+          close: async () => {
+            throw new DaemonRefusalError(
+              {
+                code: "INVALID_PARAMS",
+                message: "ydoc-unsettled-close",
+                retry: "no",
+              },
+              undefined,
+            );
+          },
+        } as never;
+      },
+    });
+
+    await expect(
+      engine.openYDocSession({ path, onRemoteUpdate: () => undefined }),
+    ).rejects.toBeInstanceOf(YDocUncapturedArtifactError);
+    expect(evicts).toBe(1);
+    expect(await readFile(join(root, path), "utf8")).toBe(original);
+
+    // MUTATION: revert to `head === "absent" && lineage === "absent"` -> the
+    // second open binds the resurrected doc and its settle clobbers the file.
+    await expect(
+      engine.openYDocSession({ path, onRemoteUpdate: () => undefined }),
+    ).rejects.toBeInstanceOf(YDocUncapturedArtifactError);
+    expect(opens).toBe(2);
+    expect(evicts).toBe(2);
+    expect(settled).toEqual([]);
+    expect(await readFile(join(root, path), "utf8")).toBe(original);
     await engine.stop();
   });
 });

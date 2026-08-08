@@ -16,13 +16,8 @@ interface LoopbackFile {
   objectId: string;
   contentKind: YdocContentKind;
   markdown: string;
-  // The daemon reports these INDEPENDENTLY (actor.rs ydoc_open_state_on_store),
-  // so the loopback must too. head-absent + lineage-existing is the
-  // crash-orphaned draft the daemon resurrects: no snapshot in the version,
-  // but durable CRDT rows that hold the only copy of the user's edits. A
-  // loopback that coupled them could not stage that case at all.
+  // Whether this version has a file snapshot.
   head: "present" | "absent";
-  lineage: "existing" | "absent";
 }
 
 interface LoopbackSession {
@@ -49,10 +44,8 @@ export interface SeedLoopbackFileInput {
   markdown: string;
   contentKind?: YdocContentKind;
   objectId?: string;
-  // Defaults model an ordinary captured file: the version has the snapshot,
-  // no CRDT lineage has been built yet.
+  // The default models an ordinary captured file with a version snapshot.
   head?: "present" | "absent";
-  lineage?: "existing" | "absent";
 }
 
 function fileKey(workspace: string, versionId: string, path: string): string {
@@ -98,12 +91,25 @@ function sha256(value: Uint8Array | string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function createSeededDoc(markdown: string, contentKind: YdocContentKind): Y.Doc {
+function declaredDoc(): Y.Doc {
   const doc = new Y.Doc();
   doc.getMap("frontmatter");
   doc.getMap("meta");
   doc.getXmlFragment("body");
   doc.getText("plainText");
+  return doc;
+}
+
+/// The lineage brought back as a fresh session's doc, exactly as the daemon's
+/// reopen replays its durable rows.
+function resurrectedDoc(lineage: Y.Doc): Y.Doc {
+  const doc = declaredDoc();
+  Y.applyUpdate(doc, Y.encodeStateAsUpdate(lineage));
+  return doc;
+}
+
+function createSeededDoc(markdown: string, contentKind: YdocContentKind): Y.Doc {
+  const doc = declaredDoc();
   if (contentKind === "plaintext") {
     doc.getText("plainText").insert(0, markdown);
   } else if (markdown.length > 0) {
@@ -156,6 +162,14 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   private readonly files = new Map<string, LoopbackFile>();
   private readonly sessions = new Map<string, LoopbackSession>();
+  // The durable CRDT rows, which do NOT belong to a session. The daemon keeps
+  // them across an eviction and resurrects them on the next open, and a
+  // local-only close is the one thing that prunes them
+  // (crates/dohc-engine-collab/src/durable.rs). A loopback that stored the
+  // lineage in the session map instead would report an evicted document as
+  // gone — modelling less than the daemon, so every test driving it would
+  // certify a convergence that does not happen (#665).
+  private readonly lineages = new Map<string, Y.Doc>();
   private readonly eventHandlers = new Set<(event: Event) => void>();
   private nextSessionId = 1;
   private nextMomentId = 1;
@@ -168,7 +182,6 @@ export class YdocLoopbackEngine implements EngineTransport {
       contentKind: input.contentKind ?? "richdoc",
       markdown: input.markdown,
       head: input.head ?? "present",
-      lineage: input.lineage ?? "existing",
     });
   }
 
@@ -204,6 +217,7 @@ export class YdocLoopbackEngine implements EngineTransport {
   ): void {
     const session = this.requireSession(sessionId);
     Y.applyUpdate(session.doc, update);
+    this.journalSessionState(session);
     this.emitRemoteUpdate(sessionId, update, options);
   }
 
@@ -244,6 +258,8 @@ export class YdocLoopbackEngine implements EngineTransport {
         return this.applyExternalMarkdownEdit(request.params);
       case YDOC_METHOD.close:
         return this.close(request.params);
+      case YDOC_METHOD.evict:
+        return this.evict(request.params);
       case YDOC_METHOD.resync:
         return this.resync(request.params);
       default:
@@ -275,7 +291,14 @@ export class YdocLoopbackEngine implements EngineTransport {
     // modelled less than the daemon and hid every consumer bug on that branch.
     const contentKind = requestedKind ?? file?.contentKind ?? "richdoc";
     const sessionId = `session-${this.nextSessionId++}`;
-    const doc = file ? createSeededDoc(file.markdown, contentKind) : new Y.Doc();
+    // A surviving lineage RESURRECTS: it is the document's own state, and it
+    // outranks the file exactly as the daemon's does.
+    const lineage = this.lineages.get(key);
+    const doc = lineage
+      ? resurrectedDoc(lineage)
+      : file
+        ? createSeededDoc(file.markdown, contentKind)
+        : new Y.Doc();
     const objectId = file?.objectId ?? `object-derived-${key}`;
     this.sessions.set(sessionId, {
       sessionId,
@@ -294,7 +317,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       path,
       contentKind,
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(doc)),
-      lineage: file ? file.lineage : "absent",
+      lineage: lineage ? "existing" : "absent",
       head: file ? file.head : "absent",
     };
   }
@@ -318,6 +341,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     Y.applyUpdate(validationDoc, Y.encodeStateAsUpdate(session.doc));
     Y.applyUpdate(validationDoc, update);
     Y.applyUpdate(session.doc, update);
+    this.journalSessionState(session);
     this.recordedUpdates.push(update);
     session.updateSeq += 1;
     return { seq: session.updateSeq };
@@ -376,6 +400,7 @@ export class YdocLoopbackEngine implements EngineTransport {
         }
       }
     });
+    this.journalSessionState(session);
     this.emitRemoteUpdate(
       session.sessionId,
       Y.encodeStateAsUpdate(session.doc, before),
@@ -388,9 +413,36 @@ export class YdocLoopbackEngine implements EngineTransport {
     const sessionId = requiredString(params, "sessionId", "ydoc.close params");
     optionalBoolean(params, "settle");
     optionalString(params, "summary");
-    this.requireSession(sessionId);
+    const session = this.requireSession(sessionId);
+    // A local-only close PRUNES the CRDT rows — markdown is the artifact, and
+    // the next open reseeds from the file. This is the one thing an evict does
+    // not do, and keeping the two apart is the point of modelling the lineage.
+    this.lineages.delete(
+      fileKey(session.workspace, session.versionId, session.path),
+    );
     this.sessions.delete(sessionId);
     return { closed: true };
+  }
+
+  // The daemon drops the session and its lease and leaves the durable lineage
+  // exactly as it stands. So the session map loses its entry and `lineages`
+  // keeps its row — which is what makes the next open resurrect the document
+  // instead of finding it gone.
+  private evict(value: JsonValue): JsonValue {
+    const params = asObject(value, "ydoc.evict params");
+    const sessionId = requiredString(params, "sessionId", "ydoc.evict params");
+    this.requireSession(sessionId);
+    this.sessions.delete(sessionId);
+    return { evicted: true };
+  }
+
+  private journalSessionState(session: LoopbackSession): void {
+    // Journal the session's whole state because each delta depends on the
+    // state that seeded its session.
+    const key = fileKey(session.workspace, session.versionId, session.path);
+    const lineage = this.lineages.get(key) ?? declaredDoc();
+    Y.applyUpdate(lineage, Y.encodeStateAsUpdate(session.doc));
+    this.lineages.set(key, lineage);
   }
 
   private resync(value: JsonValue): JsonValue {

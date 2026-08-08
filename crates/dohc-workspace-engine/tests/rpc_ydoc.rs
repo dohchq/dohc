@@ -1791,3 +1791,288 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
     .await;
     call(&transport, &handle, 10, "workspace.close", json!({})).await;
 }
+
+/// Poll capture until the head for `path` holds exactly `text`. One sleep plus
+/// one flush cannot carry that proof: a watcher that has not queued the write
+/// yet makes the flush report quiescence.
+async fn wait_for_captured_head(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    path: &str,
+    text: &str,
+    id_base: u64,
+) -> Value {
+    let mut head = Value::Null;
+    for attempt in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        call(
+            transport,
+            handle,
+            id_base + attempt * 2,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        head = call(
+            transport,
+            handle,
+            id_base + attempt * 2 + 1,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": path }),
+        )
+        .await;
+        if head["text"] == json!(text) {
+            return head;
+        }
+    }
+    panic!("capture never ingested {path} as {text:?}; last head: {head}");
+}
+
+/// #665, part A: capture -> discharge -> open CONVERGES.
+///
+/// The probe on `probe/665-convergence` staged this exact sequence and recorded
+/// a closed loop: the prune guard read `last_settled_sha`, only a settle writes
+/// that column, and so a capture that put the document's own projection into
+/// the head still refused the discharge. Every lap answered the same refusals
+/// and the document stayed read-only until the daemon restarted.
+///
+/// This is the same sequence with the answers a working discharge gives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_captured_head_discharges_a_dirty_local_only_session() {
+    const PATH: &str = "notes/converge.md";
+    const TYPED: &str = "what the user typed";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), PATH, b"base");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-665-a", 1).await;
+
+    // The opening reconcile ingests the artifact, so the path has a head.
+    wait_for_captured_head(&transport, &handle, PATH, "base", 1_000).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(opened["head"], json!("present"));
+    assert_eq!(opened["seedMarkdown"], json!("base"));
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+
+    // Dirty the lineage and never settle it: `head_update_seq > 0` with
+    // `last_settled_sha` NULL — the crashed never-settled draft #665 names.
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": plaintext_update(TYPED) }),
+    )
+    .await;
+
+    // A CAPTURE, not a settle, carries the content: the disk gets the doc's
+    // exact projection and the watcher ingests it.
+    write_file(scratch.path(), PATH, TYPED.as_bytes());
+    let captured = wait_for_captured_head(&transport, &handle, PATH, TYPED, 2_000).await;
+    assert_eq!(
+        captured["objectId"], opened["objectId"],
+        "the capture must mint the head on the object the session holds"
+    );
+
+    // MUTATION: drop the head comparison from the prune guard in
+    // `crates/dohc-engine-collab/src/durable.rs` — this close refuses
+    // `ydoc-unsettled-close` and the call below panics.
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.close",
+        json!({ "sessionId": session_id, "settle": false }),
+    )
+    .await;
+
+    // The loop's exit: the discharge released the lease, so the retry's open
+    // binds instead of answering `ydoc-session-busy`, and it seeds from the
+    // captured head.
+    let reopened = call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(reopened["head"], json!("present"));
+    assert_eq!(reopened["seedMarkdown"], json!(TYPED));
+    assert_eq!(
+        reopened["lineage"],
+        json!("absent"),
+        "the discharge pruned the CRDT cache, so this open reseeds from the head"
+    );
+
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.close",
+        json!({
+            "sessionId": reopened["sessionId"].as_str().expect("session id"),
+            "settle": false,
+        }),
+    )
+    .await;
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+}
+
+/// #665, part B: a session that can neither settle nor prune EVICTS, and the
+/// reopen resurrects its edits.
+///
+/// The desktop reaches this on two populations `captureOnePath` never captures
+/// — a policy-excluded path, and a file between the 128 KiB capture limit and
+/// the 2 MiB editor limit. The daemon has no policy notion at `ydoc.open`, so
+/// this stages the state those two share and nothing else: a dirty local-only
+/// lineage whose head does NOT hold its bytes, which no capture will ever fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
+    const PATH: &str = "notes/evict.md";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), PATH, b"base");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-665-b", 1).await;
+    wait_for_captured_head(&transport, &handle, PATH, "base", 1_000).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": plaintext_update("what the user typed") }),
+    )
+    .await;
+
+    // The prune still refuses, and it must: the head holds "base" and the
+    // document holds what the user typed, so pruning would discard the only
+    // copy of it. Part A widened the guard's PROOF, not its verdict.
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "ydoc.close",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "settle": false }),
+            ),
+        )
+        .await
+        .expect_err("a head holding other bytes cannot cover this prune");
+    assert_eq!(refused.message, "ydoc-unsettled-close");
+
+    // And the refused close reinserted the session, so the retry's open is
+    // still locked out. Without an evict this is where the document stays.
+    let busy = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "ydoc.open",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+            ),
+        )
+        .await
+        .expect_err("the refused close holds the lease");
+    assert_eq!(busy.message, "ydoc-session-busy");
+
+    // MUTATION: make `ydoc_evict` skip its `sessions.remove` — the open below
+    // answers `ydoc-session-busy` and its `call` panics.
+    let evicted = call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(evicted["evicted"], json!(true));
+
+    // An id the daemon does not hold is still a refusal, so a caller can never
+    // read "evicted" for a session that is somebody else's.
+    let unknown = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "ydoc.evict",
+                Some(handle.clone()),
+                json!({ "sessionId": "no-such-session" }),
+            ),
+        )
+        .await
+        .expect_err("an unknown session id must refuse");
+    assert_eq!(unknown.code, ErrorCode::InvalidParams);
+    assert_eq!(unknown.message, "ydoc-session-not-found");
+
+    // Nothing was written and nothing was discarded: the lineage resurrects
+    // with the user's edits, and it can now be settled.
+    let reopened = call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(
+        reopened["lineage"],
+        json!("existing"),
+        "the evicted lineage survives — an evict settles nothing and prunes nothing"
+    );
+    let settled = call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.settle",
+        json!({
+            "sessionId": reopened["sessionId"].as_str().expect("session id"),
+            "summary": "after the evict",
+        }),
+    )
+    .await;
+    assert_eq!(settled["markdown"], json!("what the user typed"));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("on disk"),
+        "what the user typed"
+    );
+
+    call(
+        &transport,
+        &handle,
+        10,
+        "ydoc.close",
+        json!({
+            "sessionId": reopened["sessionId"].as_str().expect("session id"),
+            "settle": false,
+        }),
+    )
+    .await;
+    call(&transport, &handle, 11, "workspace.close", json!({})).await;
+}

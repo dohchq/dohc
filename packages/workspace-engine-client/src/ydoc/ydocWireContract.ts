@@ -6,6 +6,11 @@ export const YDOC_METHOD = {
   settle: "ydoc.settle",
   applyExternalMarkdownEdit: "ydoc.applyExternalMarkdownEdit",
   close: "ydoc.close",
+  // Ends a session without settling and without pruning: the daemon drops the
+  // session and its lease and leaves the durable lineage alone. The only exit
+  // for a session that may not write its artifact and may not discard its
+  // CRDT — see `EngineYdocProviderSession.evict` (#665).
+  evict: "ydoc.evict",
   // R13 OBLIGATION (resync): implement this transport after a stale signal.
   // R13 OBLIGATION (schema): add Rust serde counterparts for all ydoc.* shapes.
   resync: "ydoc.resync",
@@ -95,6 +100,14 @@ export type YdocCloseParams = JsonObject & {
 
 export type YdocCloseResult = JsonObject & {
   closed: true;
+};
+
+export type YdocEvictParams = JsonObject & {
+  sessionId: string;
+};
+
+export type YdocEvictResult = JsonObject & {
+  evicted: true;
 };
 
 export type YdocRemoteUpdatePayload = JsonObject & {
@@ -296,6 +309,14 @@ export function decodeYdocCloseResult(value: JsonValue): YdocCloseResult {
     throw new YdocProtocolShapeError("ydoc.close result.closed must be true.");
   }
   return { closed: true };
+}
+
+export function decodeYdocEvictResult(value: JsonValue): YdocEvictResult {
+  const object = objectValue(value, "ydoc.evict result");
+  if (object.evicted !== true) {
+    throw new YdocProtocolShapeError("ydoc.evict result.evicted must be true.");
+  }
+  return { evicted: true };
 }
 
 export function decodeYdocRemoteUpdatePayload(

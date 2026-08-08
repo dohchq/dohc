@@ -777,8 +777,20 @@ it("opens a crash-orphaned draft the daemon resurrects, head absent and all", as
     markdown: "Typed before the crash.",
     contentKind: "richdoc",
     head: "absent",
-    lineage: "existing",
   });
+  const crashed = await openEngineYdocProviderSession({
+    transport: ydoc,
+    workspace: WORKSPACE_ID,
+    versionId: "main",
+    path: ORPHANED,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+    scheduleSettle: () => () => undefined,
+  });
+  const crashMarker = new Y.Doc();
+  crashMarker.getMap("meta").set("crash-orphaned", true);
+  await crashed.applyLocalUpdate(Y.encodeStateAsUpdate(crashMarker));
+  await crashed.evict();
 
   const session = await capture.openYDocSession({
     path: ORPHANED,
@@ -793,4 +805,3 @@ it("opens a crash-orphaned draft the daemon resurrects, head absent and all", as
   );
   await session.close({ settle: false });
 });
-

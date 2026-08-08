@@ -8741,10 +8741,15 @@ fn ydoc_version_unsettled_content_kind_on_store(
                 "SELECT blob_sha256 FROM snapshots \
                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                 params![workspace_id, version_id, key.object_id],
-                |row| row.get(0),
+                // NULL for a BINARY head (schema v10). It matches no text
+                // projection, and reading it as a plain String would raise
+                // InvalidColumnType instead — `.optional()` absorbs only
+                // QueryReturnedNoRows.
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()
             .map_err(StorageError::corrupt_public)
+            .map(Option::flatten)
         })?;
         if materialized_sha.as_deref() != Some(projected_sha.as_str()) {
             return Ok(Some(content_kind));
