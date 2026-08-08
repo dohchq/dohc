@@ -2439,37 +2439,16 @@ export const ShareChatChannelResult = z.object({
 });
 export type ShareChatChannelResult = z.infer<typeof ShareChatChannelResult>;
 
-// How many chat-channel shares one account can hold, in one place because
-// three layers enforce it: readRelayChatShareLanes caps the RELAY lanes, and
-// mergeJoinedChannel refuses a join past it. One number, because the received
-// lane IS the set of shares that can become joined rows, so both bound the
-// same quantity — an account's chat-channel shares.
+// How many rows the RELAY lanes may carry in one listing. It bounds a body
+// dohc did not write and must parse in one go, and readRelayChatShareLanes
+// applies it before this schema sees them: a relay-controlled body over the
+// cap would otherwise fail the parse below, reject the IPC call, and clear
+// every cached row on the sharing surface (#608).
 //
-// This number is PROVISIONAL, and an earlier version of this comment claimed
-// it was measured. It was not: the fixture behind that claim invented account
-// sizes and checked their arithmetic, and its central assumption — one DM per
-// correspondent — is not the product's shape, because a DM can have several
-// recipients. The fabricated fixture is gone; see sharedChannels.test.ts for
-// the one contract the live count really has (it is the per-pass relay
-// fan-out, which makes this backpressure rather than a limit on user work).
-//
-// Two things this number does NOT do, both open:
-//  - It does not bound total retained state. A revocation moves a row out of
-//    the live count without deleting its tombstone, so revoke-and-grant
-//    cycles grow the durable array and every joined-lane response without
-//    limit.
-//  - It has no evidence fixing it at 4096 rather than any other value.
-// Both resolve by scoping the lane to the channels a caller is showing —
-// paging, the alternative #617 named — not by choosing a better constant.
-//
-// On the joined lane it counts LIVE rows only — an ended tombstone is a
-// durable row the user cannot delete, so counting it would make the refusal's
-// own recovery impossible to act on. See mergeJoinedChannel.
-//
-// readRelayChatShareLanes applies it to the RELAY lanes before this schema
-// sees them: a relay-controlled body over the cap would otherwise fail the
-// parse below, reject the IPC call, and clear every cached row on the sharing
-// surface (#608).
+// It does NOT gate joining. #640 deleted that use: the joined lane is now
+// answered per channel the caller names, so its response size no longer
+// depends on how many channels the account has ever joined, and nothing about
+// the read needs a join to be refused. See scopeJoinedChannels.
 export const MAX_CHAT_CHANNEL_SHARE_ROWS = 4096;
 
 export const ChatChannelShareGrantRow = z.object({
@@ -2498,8 +2477,35 @@ export const JoinedSharedChannelRow = z.object({
 });
 export type JoinedSharedChannelRow = z.infer<typeof JoinedSharedChannelRow>;
 
+// The joined lane, answered one channel at a time.
+//
+// A caller names the channels it is SHOWING and gets one answer per name:
+// the registry row that gates that channel, or null when this workspace holds
+// none. So the response is bounded by the caller's view, not by how many
+// channels the account has ever joined — which is what lets tombstones be
+// kept for as long as the write gate needs them, with no reaping and no
+// compaction (#640).
+//
+// A wire id the caller did NOT name is absent, and absent means UNKNOWN.
+// Unknown locks the channel, exactly as an unresolved listing does: the
+// renderer must never read a channel it has no gate row for as one it owns.
+export const JoinedChannelAnswer = z.object({
+  channelWireId: CHANNEL_WIRE_ID,
+  joined: JoinedSharedChannelRow.nullable(),
+});
+export type JoinedChannelAnswer = z.infer<typeof JoinedChannelAnswer>;
+
+// The wire ids a caller is showing. No cap, and it must not gain one: it is
+// the caller's own channel list (ListChatChannelsResult carries no cap
+// either), so a cap here could only reject a workspace for having channels.
+const SHOWN_CHANNEL_WIRE_IDS = z.array(CHANNEL_WIRE_ID);
+
 export const ListChatChannelSharesPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  // The channels the caller is showing. The answer covers these plus the
+  // received invitations it returns — the caller cannot name those yet,
+  // because this call is what tells it they exist.
+  channelWireIds: SHOWN_CHANNEL_WIRE_IDS,
 });
 export type ListChatChannelSharesPayload = z.infer<typeof ListChatChannelSharesPayload>;
 
@@ -2514,14 +2520,17 @@ export type ListChatChannelSharesPayload = z.infer<typeof ListChatChannelSharesP
 //    rows must clear — another account's invitations and recipient emails
 //    must not survive a logout.
 export const ListChatChannelSharesResult = z.object({
-  // The joined lane carries NO row cap, and must not gain one. These rows are
-  // dohc's own durable registry state, and they are the authority for
-  // channelIsLocked: a read that refuses them rejects the whole IPC call, the
-  // renderer reads an unknown listing, and every channel goes read-only. The
-  // count only grows, so that state never recovers (#617). The bound belongs
-  // at the WRITE, where mergeJoinedChannel can refuse one join and name why —
-  // never at the read, where it can only reject rows dohc itself wrote.
-  joined: z.array(JoinedSharedChannelRow),
+  // One answer per channel this listing covers: the caller's own
+  // channelWireIds plus the received invitations below, because the sharing
+  // surface shows those too and decides for each one whether this workspace
+  // has already joined it.
+  //
+  // NO row cap, and it must not gain one. These are dohc's own registry rows
+  // and they are the authority for channelIsLocked: a read that refuses them
+  // rejects the whole IPC call, the renderer reads an unknown listing, and
+  // every channel goes read-only (#617). Nothing needs a cap here now — the
+  // caller's view bounds the size.
+  joined: z.array(JoinedChannelAnswer),
   // The account the relay lanes are scoped to (server + stable user id), or
   // null when no session exists. Cached relay rows are preservable only
   // within the SAME session: an unreachable answer under a different account
@@ -2566,14 +2575,18 @@ export type ListChatChannelSharesResult = z.infer<typeof ListChatChannelSharesRe
 // network for an answer the network does not hold.
 export const ListJoinedSharedChannelsPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  // The channels the caller is showing. This read talks to nothing but the
+  // registry, so it answers exactly these and nothing else.
+  channelWireIds: SHOWN_CHANNEL_WIRE_IDS,
 });
 export type ListJoinedSharedChannelsPayload = z.infer<
   typeof ListJoinedSharedChannelsPayload
 >;
 
 export const ListJoinedSharedChannelsResult = z.object({
-  // No row cap, for the reason ListChatChannelSharesResult states.
-  joined: z.array(JoinedSharedChannelRow),
+  // One answer per named channel, and no row cap — see
+  // ListChatChannelSharesResult.
+  joined: z.array(JoinedChannelAnswer),
 });
 export type ListJoinedSharedChannelsResult = z.infer<
   typeof ListJoinedSharedChannelsResult
