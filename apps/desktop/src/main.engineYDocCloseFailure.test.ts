@@ -143,6 +143,10 @@ describe("engine Y.Doc registry: a registration never replaces a live session", 
     const claimAt = handler.indexOf("claimEngineYDocSessionSlot(");
     expect(claimAt).toBeGreaterThan(handler.indexOf("capture.openYDocSession"));
     const claim = handler.slice(claimAt);
+    // The SAME key the rest of the handler uses. Claiming under a key nothing
+    // else computes would file the entry where no lookup, sweep, or release
+    // can reach it, while every other assertion here stayed green.
+    expect(claim).toContain("key: sessionKey,");
     // The refused open releases ITS OWN session through the same helper as
     // every other post-open refusal, and answers read-only unless that release
     // happened.

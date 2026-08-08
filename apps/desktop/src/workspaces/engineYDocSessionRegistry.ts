@@ -1,18 +1,6 @@
-// HOW MAIN FILES A LIVE ENGINE Y.DOC SESSION, and the one rule that keeps the
-// registry honest: a registration NEVER replaces a different live session.
-//
-// The renderer mints the session id, so main cannot trust it to be unique. Two
-// opens carrying the same id both pass the open handler's first look at the
-// registry while neither has registered yet, and an unconditional `set` then
-// buries the first session — live in the daemon, unreachable from main, while
-// every later update and close for its document lands on the second entry. That
-// is a second writer over a document the first session still holds.
-//
-// The key namespaces the id by the SENDER, which main owns, so two renderers
-// can never collide. Inside one renderer the id is still the renderer's, so the
-// claim below re-reads the slot after the open and refuses the newcomer — the
-// same yield a failed close makes when the id it wants is taken
-// (engineYDocSessionRelease.ts).
+// Main namespaces each renderer-minted session id by sender. The claim re-reads
+// the slot after the open and refuses a newcomer rather than replacing a live
+// session and stranding its daemon lease.
 
 /** The registry key for one renderer-minted session id. */
 export function engineYDocSessionKey(senderId: number, sessionId: string): string {

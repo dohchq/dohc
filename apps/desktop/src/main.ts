@@ -7988,15 +7988,10 @@ function registerIpcHandlers(
           });
         }
       }
-      // THIS open's edit/settle bookkeeping, made before the session so its
-      // callbacks can close over it. A callback that looked the state up by
-      // session id would find whichever entry holds that id when the settle
-      // lands: a refused open whose close failed keeps reporting, and its
-      // outcomes would then move the save sequence of the session that owns
-      // the id — a settle vouching for edits it never carried (#683).
+      // This open owns its save sequence. A refused open can keep reporting
+      // after its close fails, so callbacks must not look up state by session id.
       const saveSeq = createEngineYDocSaveSeqState();
-      // A refused open stops reporting: the renderer keys this event by the
-      // session id it minted, which by then belongs to another document.
+      // Stop callbacks after this open loses its session id to another document.
       let refused = false;
       let session: WorkspaceEngineYDocProviderSession;
       try {
