@@ -316,7 +316,9 @@ function scrollToBlock(
   // from, so the refinement no longer speaks for it.
   const range =
     target.match && child === target.index
-      ? intraBlockRange(doc.child(child), pos, target.match)
+      ? intraBlockRange(doc.child(child), pos, target.match, (source) =>
+          renderInlineText(editor, source),
+        )
       : null;
   if (range) {
     const revealed = revealDocPosition(editor, range, () =>
@@ -328,6 +330,15 @@ function scrollToBlock(
     const dom = editor.view.nodeDOM(pos);
     return dom instanceof HTMLElement ? dom : null;
   });
+}
+
+function renderInlineText(editor: Editor, source: string): string {
+  if (!editor.markdown) return source;
+  try {
+    return editor.schema.nodeFromJSON(editor.markdown.parse(source)).textContent;
+  } catch {
+    return source;
+  }
 }
 
 const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInnerProps>(

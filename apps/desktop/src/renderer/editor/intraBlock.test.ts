@@ -28,7 +28,12 @@ function revealed(body: string, line: number): string | null {
   if (index !== target.index || !target.match) return null;
   let pos = 0;
   for (let before = 0; before < index; before += 1) pos += doc.child(before).nodeSize;
-  const range = intraBlockRange(doc.child(index), pos, target.match);
+  const range = intraBlockRange(
+    doc.child(index),
+    pos,
+    target.match,
+    (source) => editorDoc(source).textContent,
+  );
   return range ? doc.textBetween(range.from, range.to, "\n") : null;
 }
 
@@ -52,6 +57,50 @@ describe("a match deep in a long block lands the matched line", () => {
     expect(revealed(ordered, 47)).toBe("Step 47");
     const checklist = items(40, (n) => `- [ ] Task ${n}`).join("\n");
     expect(revealed(checklist, 31)).toBe("Task 31");
+  });
+
+  it("lands a bold list item, not the block start", () => {
+    const body = items(40, (n) =>
+      n === 20 ? "- **Beta** second" : `- Item ${n}`,
+    ).join("\n");
+    expect(revealed(body, 20)).toBe("Beta second");
+  });
+
+  it("lands a list item with a code span, not the block start", () => {
+    const body = items(40, (n) =>
+      n === 20 ? "- `code span` second" : `- Item ${n}`,
+    ).join("\n");
+    expect(revealed(body, 20)).toBe("code span second");
+  });
+
+  it("lands a linked list item, not the block start", () => {
+    const body = items(40, (n) =>
+      n === 20 ? "- [Beta](https://example.com) second" : `- Item ${n}`,
+    ).join("\n");
+    expect(revealed(body, 20)).toBe("Beta second");
+  });
+
+  it("lands an emphasized ordered-list item, not the block start", () => {
+    const body = items(40, (n) =>
+      n === 20 ? "20. *Beta* second" : `${n}. Item ${n}`,
+    ).join("\n");
+    expect(revealed(body, 20)).toBe("Beta second");
+  });
+
+  it("lands a bold task item, not the block start", () => {
+    const body = items(40, (n) =>
+      n === 20 ? "- [ ] **Beta** task" : `- [ ] Task ${n}`,
+    ).join("\n");
+    expect(revealed(body, 20)).toBe("Beta task");
+  });
+
+  it("lands a wikilink list item, not the block start", () => {
+    const body = items(40, (n) =>
+      n === 20 ? "- [[Beta]]" : `- Item ${n}`,
+    ).join("\n");
+    const landing = revealed(body, 20);
+    expect(landing).not.toBeNull();
+    expect(landing).toBe(editorDoc("[[Beta]]").textContent);
   });
 
   it("rejects a same-count list whose matched child holds different text", () => {
@@ -124,6 +173,22 @@ describe("a match deep in a long block lands the matched line", () => {
       "After",
     ].join("\n");
     expect(revealed(body, 6)).toBe("const target = 3;");
+  });
+
+  it("keeps body indentation beyond the fence opener's indent", () => {
+    const body = [
+      "Intro",
+      "",
+      " ```",
+      "  extra indent kept",
+      " more",
+      " ```",
+      "",
+      "After",
+    ].join("\n");
+    const expected = editorDoc(body).child(1).textContent.split("\n")[0];
+    expect(revealed(body, 4)).toBe(expected);
+    expect(expected).toBe(" extra indent kept");
   });
 });
 

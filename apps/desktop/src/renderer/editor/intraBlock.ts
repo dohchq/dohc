@@ -46,6 +46,8 @@ export type IntraBlockMatch = {
  *  resolved in: `containerPos` is where the block starts. */
 export type DocRange = { from: number; to: number };
 
+export type InlineTextRenderer = (source: string) => string;
+
 // A list item's marker. Narrower than the list rules in lineBlocks.ts on
 // purpose: this only has to recognize a line that starts an item of a list
 // the parser has ALREADY built, and the count check below rejects it when it
@@ -83,6 +85,7 @@ export function intraBlockRange(
   container: ProseMirrorNode,
   containerPos: number,
   match: IntraBlockMatch,
+  renderInlineText: InlineTextRenderer = (source) => source,
 ): DocRange | null {
   const { lines, offset } = match;
   if (offset <= 0 || offset >= lines.length) return null;
@@ -90,7 +93,13 @@ export function intraBlockRange(
     return codeLineRange(container, containerPos, lines, offset);
   }
   if (LIST_TYPES.has(container.type.name)) {
-    return listItemRange(container, containerPos, lines, offset);
+    return listItemRange(
+      container,
+      containerPos,
+      lines,
+      offset,
+      renderInlineText,
+    );
   }
   return null;
 }
@@ -134,6 +143,7 @@ function listItemRange(
   containerPos: number,
   lines: readonly string[],
   offset: number,
+  renderInlineText: InlineTextRenderer,
 ): DocRange | null {
   const first = lines[0] ?? "";
   const firstMarker = LIST_ITEM_RE.exec(first);
@@ -152,12 +162,13 @@ function listItemRange(
   if (child <= 0) return null;
   const matched = lines[offset] ?? "";
   const matchedMarker = LIST_ITEM_RE.exec(matched);
-  let matchedText = matched
+  let matchedSource = matched
     .slice(matchedMarker?.[0].length ?? 0)
     .replace(/^[ \t]*/, "");
   if (container.type.name === "taskList") {
-    matchedText = matchedText.replace(/^\[[ xX]\](?:[ \t]+|$)/, "");
+    matchedSource = matchedSource.replace(/^\[[ xX]\](?:[ \t]+|$)/, "");
   }
+  const matchedText = renderInlineText(matchedSource);
   if (!container.child(child).textContent.includes(matchedText)) return null;
   let from = containerPos + 1;
   for (let before = 0; before < child; before += 1) {
