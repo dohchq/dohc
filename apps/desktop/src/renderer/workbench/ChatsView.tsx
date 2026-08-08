@@ -35,6 +35,7 @@ import type {
   ChatRunRecord,
   DmRecord,
   FileChatThreadRecord,
+  JoinedChannelAnswer,
   JoinedSharedChannelRow,
   ListChatChannelSharesResult,
   WorkspaceFileEntry,
@@ -134,8 +135,27 @@ type CommitLane = "overview" | "joinedShares" | "relayShares" | "relayReach";
 interface ShareListing {
   granted: ChatChannelShareGrantRow[];
   received: ChatChannelShareReceivedRow[];
-  joined: JoinedSharedChannelRow[];
+  // One answer per channel the read covered. A channel the read did NOT cover
+  // is absent, which is unknown, and unknown locks it — see channelIsLocked.
+  joined: JoinedChannelAnswer[];
   sessionKey: string | null;
+}
+
+// What this surface is showing, and therefore the only channels it may ask
+// the joined lane about: the channels in the list, plus the invitations under
+// "Shared with you" (each one needs to know whether this workspace already
+// joined that channel). The response is one answer per name, so it is bounded
+// by the view and not by how many channels the account has ever joined (#640).
+function shownChannelWireIds(
+  channels: readonly ChatChannelRecord[],
+  received: readonly ChatChannelShareReceivedRow[],
+): string[] {
+  const ids = new Set<string>();
+  for (const channel of channels) {
+    if (channel.wireId) ids.add(channel.wireId);
+  }
+  for (const row of received) ids.add(row.channelWireId);
+  return [...ids];
 }
 
 // Why a committed share read carried no rows. "unreachable" covers both a
@@ -765,9 +785,9 @@ function UnreadPill(props: { count: number; testId: string }) {
 // channel they own. It is the same unit slip that made the deleted account
 // fixture wrong, arriving at the surface.
 //
-// The joined lane is different and its refusal is not: mergeJoinedChannel
-// matches on channelWireId as well as shareId, so those rows really are one
-// per channel, and "leave a shared channel" is the action that shrinks them.
+// The joined lane counts the other unit — mergeJoinedChannel matches on
+// channelWireId as well as shareId, so those rows really are one per channel —
+// and it has no limit to report at all now that it is read per channel (#640).
 function overLimitSentences(failure: {
   lanes: ReadonlyArray<{ lane: "granted" | "received"; rows: number }>;
   limit: number;
@@ -1212,6 +1232,20 @@ export function ChatsView(props: {
   // Read the committed listing from an async callback (see latestComposerState).
   const latestChannelShares = useRef(channelShares);
   latestChannelShares.current = channelShares;
+  // The declaration a reader that has no fresher channel list sends. Readers
+  // that just read one (refreshOverview, refreshChannelBadges) declare from
+  // that instead — it is newer, and a channel this surface is about to show
+  // must be in the scope or channelIsLocked locks it.
+  const shownWireIds = useMemo(
+    () =>
+      shownChannelWireIds(
+        overview.status === "ready" ? overview.channels : [],
+        channelShares?.received ?? [],
+      ),
+    [overview, channelShares],
+  );
+  const latestShownWireIds = useRef(shownWireIds);
+  latestShownWireIds.current = shownWireIds;
   const commitShareListing = useCallback(
     (
       ticket: number,
@@ -1374,25 +1408,37 @@ export function ChatsView(props: {
         );
       }
       try {
-        const [result, shares] = await Promise.all([
-          bridge().listChatChannels({ workspaceId }),
-          // Sharing is OPTIONAL: solo / signed-out workspaces simply render
-          // without the sharing affordances. Whether the lookup FAILED is
-          // kept separate from what it returned — null is not an answer, it
-          // is the absence of one, and it fails closed in channelIsLocked.
-          bridge()
-            .listChatChannelShares({ workspaceId })
-            .then((value) => ({ answered: true, value }) as const)
-            .catch(() => ({ answered: false, value: null }) as const),
-        ]);
+        // The channel listing FIRST, and not beside the share read: the share
+        // read now has to be told which channels this surface is showing, and
+        // that is what the listing answers. The listing also syncs joined
+        // shared channels before it reads, so a channel a sync just pulled is
+        // in the declaration rather than missing from it for a whole cycle.
+        const result = await bridge().listChatChannels({ workspaceId });
         if (token !== liveToken.current) return;
-        // Whether the lookup FAILED is kept separate from what it returned,
-        // and commitShareListing decides what a failure is worth: for a
-        // refresh nobody asked for, only a placeholder where nothing has
-        // answered yet.
+        // Sharing is OPTIONAL: solo / signed-out workspaces simply render
+        // without the sharing affordances. Whether the lookup FAILED is kept
+        // separate from what it returned — null is not an answer, it is the
+        // absence of one, and it fails closed in channelIsLocked.
+        const shares = await bridge()
+          .listChatChannelShares({
+            workspaceId,
+            channelWireIds: shownChannelWireIds(
+              result.channels,
+              latestChannelShares.current?.received ?? [],
+            ),
+          })
+          .then((value) => ({ answered: true, value }) as const)
+          .catch(() => ({ answered: false, value: null }) as const);
+        if (token !== liveToken.current) return;
+        // commitShareListing decides what a failure is worth: for a refresh
+        // nobody asked for, only a placeholder where nothing has answered yet.
         commitShareListing(ticket, session, shares.value, {
           background: options?.background === true,
         });
+        // The channel list settles WITH its share answer, not before it: a
+        // list rendered while the joined lane is still unknown is a list of
+        // locked channels, and the flash back to writable is worse than
+        // holding the load a moment longer.
         if (claimLanes(["overview"], ticket)) {
           setOverview({
             status: "ready",
@@ -1495,7 +1541,18 @@ export function ChatsView(props: {
           const cachedShares = latestChannelShares.current;
           if (cachedShares !== null) {
             const sharesTicket = takeCommitTicket();
-            const refreshed = await bridge().listJoinedSharedChannels({ workspaceId });
+            const refreshed = await bridge().listJoinedSharedChannels({
+              workspaceId,
+              // The channels this pass just listed, plus the invitations
+              // already on the sharing surface. This read speaks for no relay
+              // lane, so the cached invitations are the ones it must cover:
+              // a narrower scope would drop their answers and offer Join for
+              // a channel this workspace is already in.
+              channelWireIds: shownChannelWireIds(
+                result.channels,
+                cachedShares.received,
+              ),
+            });
             // ONLY the joined lane, which is all this read answers. Leaving the
             // relay-backed lane alone also lets a full share read still in
             // flight land its own rows.
@@ -1967,6 +2024,17 @@ export function ChatsView(props: {
     [loadDmConversation, workspaceId],
   );
 
+  // MU-C4 derived lookups: a channel matches a grant by its WIRE id. A key
+  // that is PRESENT with a null value means "asked, and this workspace holds
+  // no grant" — an absent key means nobody asked, which is unknown.
+  const joinedByWire = useMemo(() => {
+    const map = new Map<string, JoinedSharedChannelRow | null>();
+    for (const answer of channelShares?.joined ?? []) {
+      map.set(answer.channelWireId, answer.joined);
+    }
+    return map;
+  }, [channelShares]);
+
   const channelIsLocked = useCallback(
     (channel: ChatChannelRecord) => {
       // Share metadata is the authority for whether this local row is owned
@@ -1974,20 +2042,17 @@ export function ChatsView(props: {
       // unknown joined channel as local would re-enable writes and read-cursor
       // mutations across a permission boundary.
       if (channelShares === null) return true;
-      let joined: JoinedSharedChannelRow | undefined;
-      if (channel.wireId) {
-        // Match joinedByWire's last-write-wins semantics so every channel
-        // access decision resolves the same canonical grant row.
-        for (const row of channelShares?.joined ?? []) {
-          if (row.channelWireId === channel.wireId) joined = row;
-        }
-      }
-      return (
-        joined !== undefined &&
-        (joined.access === "read-only" || joined.ended)
-      );
+      // A channel with no wire identity cannot carry a grant at all.
+      if (!channel.wireId) return false;
+      // The joined lane answers the channels this surface declared. One that
+      // was not declared — a channel the list gained since the last read —
+      // has no answer, and an unanswered channel fails closed exactly like an
+      // unresolved listing. The next refresh declares it and unlocks it.
+      if (!joinedByWire.has(channel.wireId)) return true;
+      const joined = joinedByWire.get(channel.wireId) ?? null;
+      return joined !== null && (joined.access === "read-only" || joined.ended);
     },
-    [channelShares],
+    [channelShares, joinedByWire],
   );
 
   const applyThreadSnapshot = useCallback(
@@ -2850,12 +2915,6 @@ export function ChatsView(props: {
     }
   }, [dmDraft, dmRecipients, openDm, props, startingDm, workspaceId]);
 
-  // MU-C4 derived lookups: a channel matches a grant by its WIRE id.
-  const joinedByWire = useMemo(() => {
-    const map = new Map<string, JoinedSharedChannelRow>();
-    for (const row of channelShares?.joined ?? []) map.set(row.channelWireId, row);
-    return map;
-  }, [channelShares]);
   const grantedByWire = useMemo(() => {
     const map = new Map<string, ChatChannelShareGrantRow[]>();
     for (const row of channelShares?.granted ?? []) {
@@ -2869,9 +2928,17 @@ export function ChatsView(props: {
     // An ended row is a durable leave tombstone, not an active join. Keep its
     // invitation visible so Leave has an explicit reverse path; a successful
     // rejoin replaces the tombstone through mergeJoinedChannel.
-    const joinedIds = new Set(
-      channelShares.joined.filter((row) => row.ended !== true).map((row) => row.shareId),
-    );
+    //
+    // An invitation the joined lane did not answer for stays listed. Join is
+    // a user-initiated action that main gates in full, so offering it once too
+    // often costs a redundant click; hiding it would take away the only route
+    // back into a channel this workspace left.
+    const joinedIds = new Set<string>();
+    for (const answer of channelShares.joined) {
+      if (answer.joined && answer.joined.ended !== true) {
+        joinedIds.add(answer.joined.shareId);
+      }
+    }
     return channelShares.received.filter((row) => !joinedIds.has(row.shareId));
   }, [channelShares]);
   const joinedFor = useCallback(
@@ -2989,7 +3056,10 @@ export function ChatsView(props: {
     const ticket = takeCommitTicket();
     const session = sessionGeneration.current;
     const shares = await bridge()
-      .listChatChannelShares({ workspaceId })
+      .listChatChannelShares({
+        workspaceId,
+        channelWireIds: latestShownWireIds.current,
+      })
       .catch(() => null);
     // Deliberately NOT liveToken-guarded: the share listing is
     // workspace-scoped, not conversation-scoped, so navigating into a
