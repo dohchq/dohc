@@ -16,7 +16,7 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
-    "yjs": "^13.6.32"
+    "yjs": "13.6.30"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
