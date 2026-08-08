@@ -2137,6 +2137,68 @@ describe("engine markdown source view", () => {
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
   });
 
+  // #685. The two seams above and below this line behave in OPPOSITE ways on
+  // the same remount, and that asymmetry is the decision, not an oversight.
+  //
+  // A search jump is one shot. It names a line the reader looked for once, so
+  // #680 made it consumable: the editor reports the landing back through
+  // onBlockTargetConsumed, and the instance that mounts after a version
+  // switch has nothing left to apply.
+  //
+  // A heading navigation is a place, not an act. It says where the reader IS
+  // in the document. `headingTarget` is therefore shell state with no
+  // consumed-callback, and a same-path version switch — which unmounts the
+  // editor and mounts a fresh one at the top of the document — re-applies it.
+  // That returns the reader to their heading instead of dumping them at the
+  // top of a document they were reading in the middle of.
+  //
+  // Wikilink, chat mention, and graph navigation all set this same shell
+  // state through openPathWithHeading, so this rule covers them too.
+  it("re-applies a heading navigation when the version switches under it", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+
+    // The reader navigates to a heading.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        headingTarget={{ anchor: "plan", nonce: 1 }}
+      />,
+    );
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1), {
+      timeout: 5_000,
+    });
+
+    // The version switch: engineVersionKey reopens the session, the editor
+    // unmounts, and a fresh one binds. The shell's heading target stands —
+    // nothing consumes it, and no ordinary open cleared it.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        headingTarget={{ anchor: "plan", nonce: 1 }}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 });
+
+    // MUTATION: give headingTarget the onBlockTargetConsumed shape (retire it
+    // in OutlinePanel's effect and clear it in MarkdownView) -> one reveal,
+    // and the reader lands at the top of the new version instead of at the
+    // heading they were reading.
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2), {
+      timeout: 5_000,
+    });
+  });
+
   it("retires the jump after one landing, so a later re-read cannot replay it", async () => {
     const scrollIntoView = stubScrollSpy("scrollIntoView");
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
