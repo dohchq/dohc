@@ -4,7 +4,7 @@
   "type": "module",
   "engines": {
     "node": ">=24.14.0",
-    "pnpm": "10.24.0"
+    "pnpm": "11.20.0"
   },
   "scripts": {
     "dev": "pnpm --filter @dohc/desktop dev",
@@ -36,9 +36,9 @@
     "check:debt": "node scripts/check-tech-debt.mjs",
     "check:brand": "node scripts/check-brand.mjs"
   },
-  "packageManager": "pnpm@10.24.0",
+  "packageManager": "pnpm@11.20.0",
   "devDependencies": {
-    "@playwright/test": "^1.60.0",
+    "@playwright/test": "^1.62.1",
     "vitest": "^2.1.9"
   }
 }

@@ -13,11 +13,11 @@
     "@dohc/ydoc-projection": "workspace:*",
     "@types/js-yaml": "^4.0.9",
     "js-yaml": "^4.1.1",
-    "yjs": "13.6.30"
+    "yjs": "13.6.32"
   },
   "devDependencies": {
-    "@types/node": "^22.19.19",
-    "tsx": "^4.20.0",
+    "@types/node": "^24.13.3",
+    "tsx": "^4.23.11",
     "typescript": "^5.9.3"
   }
 }

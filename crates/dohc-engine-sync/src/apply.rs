@@ -882,8 +882,10 @@ fn truncate_slug_base(value: &str, max_utf16_units: usize) -> String {
 fn channel_allocation_base(name: &str) -> String {
     let slug = channel_slug_for_name(name);
     let base = if slug.is_empty() {
-        let digest = Sha256::digest(name.as_bytes());
-        format!("channel-{digest:x}")
+        format!(
+            "channel-{}",
+            dohc_engine_storage::hex_sha256(name.as_bytes())
+        )
     } else {
         slug
     };

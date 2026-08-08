@@ -14,14 +14,14 @@
   },
   "dependencies": {
     "@dohc/workspace-auth": "workspace:*",
-    "better-auth": "^1.6.16",
-    "pg": "^8.21.0"
+    "better-auth": "^1.6.26",
+    "pg": "^8.22.0"
   },
   "devDependencies": {
-    "@types/node": "^22.19.19",
-    "@types/pg": "^8.20.0",
-    "esbuild": "0.28.0",
-    "tsx": "^4.22.3",
+    "@types/node": "^24.13.3",
+    "@types/pg": "^8.20.4",
+    "esbuild": "0.28.1",
+    "tsx": "^4.23.11",
     "typescript": "^5.9.3",
     "vitest": "^2.1.9"
   }

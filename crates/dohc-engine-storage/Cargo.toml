@@ -14,8 +14,8 @@ description = "CAL-1/CAL-2 calibration slice: one writable rusqlite connection p
 fault-injection = []
 
 [dependencies]
-rusqlite = { version = "0.37", features = ["bundled"] }
-sha2 = "0.10"
+rusqlite = { version = "0.40", features = ["bundled"] }
+sha2 = "0.11"
 thiserror = "2"
 # Robust manifest parsing for the backup validator (the producer hand-writes a
 # flat JSON manifest; the validator must read it back to enforce the

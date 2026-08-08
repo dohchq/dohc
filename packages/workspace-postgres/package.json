@@ -10,11 +10,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "pg": "^8.13.1"
+    "pg": "^8.22.0"
   },
   "devDependencies": {
-    "@types/pg": "^8.11.11",
-    "typescript": "^5.7.2",
+    "@types/pg": "^8.20.4",
+    "typescript": "^5.9.3",
     "vitest": "^2.1.9"
   }
 }

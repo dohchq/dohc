@@ -2143,7 +2143,22 @@ describe("engine markdown source view", () => {
   // activateEditorTab routes a file path through openFile, which clears the
   // target.
   it("re-applies a heading navigation when the version switches under it", async () => {
-    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const revealedTargets: Array<{
+      connected: boolean;
+      flashed: boolean;
+      text: string | null;
+    }> = [];
+    const scrollIntoView = vi.fn(function (this: HTMLElement) {
+      revealedTargets.push({
+        connected: this.isConnected,
+        flashed: this.classList.contains("dohc-outline-target-flash"),
+        text: this.textContent,
+      });
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
     vi.stubGlobal("dohcDesktop", bridgeMock);
     const headingTarget = { anchor: "plan", nonce: 1 };
@@ -2185,10 +2200,11 @@ describe("engine markdown source view", () => {
     });
     // WHICH heading, not just how many reveals: the count alone would accept a
     // second reveal that landed somewhere else.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(revealedTargets[1]).toEqual({
+      connected: true,
+      flashed: true,
+      text: "Plan",
     });
-    expect(flashedBlockText()).toBe("Plan");
   });
 
   it("retires the jump after one landing, so a later re-read cannot replay it", async () => {
