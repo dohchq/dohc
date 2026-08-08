@@ -316,10 +316,9 @@ import {
   assertSharedChannelWritable,
   createKeyedSerializer,
   endJoinedChannel,
-  JoinedSharedChannelLimitError,
-  joinedSharedChannelLimitRefusal,
   mergeJoinedChannel,
   relayFetchWithTimeout,
+  scopeJoinedChannels,
   syncJoinedSharedChannels,
 } from "./workspaces/sharedChannels";
 import {
@@ -4453,25 +4452,26 @@ function registerIpcHandlers(
     return ShareChatChannelResult.parse({ shareId: created.shareId });
   });
 
-  // What THIS machine joined, straight from the registry. The grant side lives
-  // on the relay; this side does not, so asking it costs no network — and a
-  // caller that needs only this must not wait on a relay that may never answer.
-  function joinedSharedChannelRows(workspaceId: string) {
+  // What THIS machine joined, for the channels the caller named. The grant
+  // side lives on the relay; this side does not, so asking it costs no network
+  // — and a caller that needs only this must not wait on a relay that may
+  // never answer.
+  //
+  // The scope is a required argument, not a filter a caller may skip: the
+  // registry array grows with every channel this workspace has ever joined,
+  // and an unscoped answer would carry that history to the renderer. The write
+  // gate is unaffected — assertSharedChannelWritable reads the whole array
+  // here in main and never crosses IPC at all.
+  function joinedChannelAnswers(workspaceId: string, channelWireIds: readonly string[]) {
     const entry = requireWorkspace(workspaceId);
-    return (entry.sharedChannels ?? []).map((channel) => ({
-      shareId: channel.shareId,
-      channelWireId: channel.channelWireId,
-      access: channel.access,
-      granterEmail: channel.granterEmail,
-      ended: channel.ended === true,
-    }));
+    return scopeJoinedChannels(entry.sharedChannels ?? [], channelWireIds);
   }
 
   ipcMain.handle(CHANNELS.listJoinedSharedChannels, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListJoinedSharedChannelsPayload.parse(payload);
     return ListJoinedSharedChannelsResult.parse({
-      joined: joinedSharedChannelRows(input.workspaceId),
+      joined: joinedChannelAnswers(input.workspaceId, input.channelWireIds),
     });
   });
 
@@ -4506,7 +4506,6 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ListChatChannelSharesPayload.parse(payload);
     const entry = requireWorkspace(input.workspaceId);
-    const joined = joinedSharedChannelRows(input.workspaceId);
     // Relay-side listings need a signed-in session; without one the local
     // joined set still answers (their local copies keep working offline), and
     // the relay side reports signed-out or unreachable instead of posing as
@@ -4528,8 +4527,20 @@ function registerIpcHandlers(
       remoteWorkspaceId: entry.remote?.remoteWorkspaceId ?? null,
       shareIdsClaimedElsewhere: shareIdsClaimedByOtherWorkspaces(input.workspaceId),
     });
+    // The caller's channels PLUS the invitations this answer is about to hand
+    // it. The sharing surface shows both, and for each invitation it decides
+    // whether this workspace has already joined that channel — a question it
+    // cannot ask in advance, because this call is what tells it the invitation
+    // exists. Read after the relay await, so a sync pass that ended a row
+    // during it is reflected rather than missed.
+    const shownWireIds = [
+      ...input.channelWireIds,
+      ...(relay.state === "answered"
+        ? relay.received.map((row) => row.channelWireId)
+        : []),
+    ];
     return ListChatChannelSharesResult.parse({
-      joined,
+      joined: joinedChannelAnswers(input.workspaceId, shownWireIds),
       sessionKey:
         relay.state === "signed-out" ? null : chatShareSessionKey(credentials),
       relay,
@@ -7014,18 +7025,6 @@ function registerIpcHandlers(
       ) {
         continue;
       }
-      // Before ANY durable mutation on this path — the DM home claim below
-      // and the pull after it. A refusal raised at the merge would leave a
-      // claimed home and the channel's pulled messages with no registry row,
-      // and no row reads as a channel this workspace owns and may write into.
-      const refusal = joinedSharedChannelLimitRefusal(existing, {
-        shareId,
-        channelWireId: selector.channelWireId,
-      });
-      if (refusal) {
-        console.warn(`[desktop] DM auto-join stopped: ${refusal}`);
-        return;
-      }
       // Probe each received share AT MOST ONCE (CodeRabbit: unbounded relay
       // round-trips). Skip without a network peek when it is either already
       // confirmed non-DM, or a DM homed in ANOTHER workspace (cross-workspace
@@ -7091,14 +7090,6 @@ function registerIpcHandlers(
         // unavailable — skip it; the next pass reconciles. Never blocks the
         // other grants.
         if (error instanceof ShareUnavailableError) continue;
-        // The joined lane is full. Auto-join is the relay-fed writer, so this
-        // is where the bound bites: stop the pass instead of retrying the same
-        // refusal for every remaining grant. Everything already joined keeps
-        // working; the user makes room by leaving a shared channel.
-        if (error instanceof JoinedSharedChannelLimitError) {
-          console.warn(`[desktop] DM auto-join stopped: ${error.message}`);
-          return;
-        }
         throw error;
       }
     }

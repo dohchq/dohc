@@ -451,8 +451,8 @@ function mapRelayShareListing(
     // were blocked, and revoking more could not reduce the count — a permanent
     // lockout with no user action that helps.
     //
-    // Same rule the joined lane already follows: a cap may only count what the
-    // user can actually reduce. Nothing displays these either — grantedByWire
+    // The rule is that a cap may only count what the user can actually
+    // reduce. Nothing displays these either — grantedByWire
     // skips them — so dropping them shrinks the payload the cap exists to
     // bound instead of merely uncounting it.
     if (row.revokedAtMs !== null && row.revokedAtMs !== undefined) continue;
