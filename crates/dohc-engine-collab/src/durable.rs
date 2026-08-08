@@ -1068,8 +1068,10 @@ pub fn close_session(
         // `ydoc_apply::project_and_write_in_tx` applies the same rule on the
         // sync side.
         let covered = store.read_with(|conn| -> Result<bool, CollabError> {
-            Ok(last_settled_sha(conn, key)?.as_deref() == Some(content_sha.as_str())
-                || head_content_sha(conn, key)?.as_deref() == Some(content_sha.as_str()))
+            Ok(
+                last_settled_sha(conn, key)?.as_deref() == Some(content_sha.as_str())
+                    || head_content_sha(conn, key)?.as_deref() == Some(content_sha.as_str()),
+            )
         })?;
         if !covered {
             return Err(CollabError::UnsettledClose);
