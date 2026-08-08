@@ -3034,6 +3034,29 @@ describe("history page", () => {
     });
   });
 
+  // The Next has to be the one that works (#687). Main decides the recorder
+  // once per workspace per app session — `openWorkspaceActivity` retains every
+  // workspace it opens and `workspaceActivity.open` no-ops for one it already
+  // watches — so leaving the workspace and coming back re-reads the flag
+  // nowhere. Same instruction the Chats surface gives, for the same cause.
+  it("tells the user to restart, not to reopen the workspace", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
+    bridge.openWorkspace = vi.fn(async () => offStatus);
+    bridge.getSyncStatus = vi.fn(async () => offStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    const placeholder = await screen.findByTestId("history-off-placeholder");
+    await waitFor(() =>
+      expect(placeholder.textContent).toContain(
+        "Turn it on. Then restart dohc to record history.",
+      ),
+    );
+    expect(placeholder.textContent).not.toContain("reopen");
+  });
+
   // #542: the renderer's own settings read failed, and main has NOT said
   // recording is off — it may be recording right now. The placeholder must
   // not blame Settings, and must not promise "not recorded": either would be
@@ -6458,6 +6481,17 @@ describe("version-compare off copy", () => {
     expect(copy).not.toContain("no versions");
   });
 
+  // The Next has to be the one that works (#687). Main decides the recorder
+  // once per workspace per app session — `openWorkspaceActivity` retains every
+  // workspace it opens and `workspaceActivity.open` no-ops for one it already
+  // watches — so leaving the workspace and coming back re-reads the flag
+  // nowhere. Same instruction the Chats surface gives, for the same cause.
+  it("tells the user to restart, not to reopen the workspace", () => {
+    const copy = versionCompareOffCopy({ ...base, historyRecordingOff: true });
+    expect(copy).toContain("Turn it on. Then restart dohc to compare versions.");
+    expect(copy).not.toContain("reopen");
+  });
+
   it("names the unreadable settings file instead of blaming the toggle", () => {
     // #483: the opt-out line below names Settings, and nobody touched it.
     const copy = versionCompareOffCopy({
@@ -7671,6 +7705,59 @@ describe("settings entry points", () => {
 
     await user.keyboard("{Control>},{/Control}");
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+});
+
+// #687/#589: the note's precedence and exact copy are pinned at the
+// AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
+// sessionRecorderOn and sharedView straight to DesktopSettings — bypassing
+// the shell's own derivation. A regression that severs
+// DesktopWorkspaceShell's wiring (for example, replacing the syncStatus ->
+// sessionRecorderOn derivation with `undefined`, or dropping sharedView)
+// would leave every other suite green. This test drives the real command
+// palette -> Settings -> Agents & MCP path through the shell itself.
+describe("runner note reaches the card through the shell's own wiring", () => {
+  it("carries a recorder-less status into the restart note", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
+    bridge.openWorkspace = vi.fn(async () => offStatus);
+    bridge.getSyncStatus = vi.fn(async () => offStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Settings: Open Agents & MCP",
+      ),
+    );
+
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toBe(
+        "The workspace engine starts when dohc starts. Restart dohc to test the runner.",
+      ),
+    );
+  });
+
+  it("carries a shared view into the no-chat note instead of the restart it can never satisfy", async () => {
+    const user = userEvent.setup();
+    renderShell(makeShareBridge(), SHARE_VIEW);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Settings: Open Agents & MCP",
+      ),
+    );
+
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toBe(
+        "This workspace is a shared view. dohc records nothing here, so there is no chat to test.",
+      ),
+    );
+    expect(note.textContent).not.toContain("restart");
   });
 });
 

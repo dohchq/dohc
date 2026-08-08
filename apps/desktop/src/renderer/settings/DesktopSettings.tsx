@@ -10,6 +10,11 @@ export function DesktopSettings(props: {
    * that capability instead of offering a toggle that records nothing.
    */
   sharedView?: boolean;
+  /**
+   * Main's open-time recorder decision for this workspace (#687), undefined
+   * until its status arrives.
+   */
+  sessionRecorderOn?: boolean;
   initialSection?: SettingsSectionId;
   onClose: () => void;
   onAgentActiveChange?: (update: {

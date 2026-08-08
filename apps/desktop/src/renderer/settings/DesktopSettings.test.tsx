@@ -507,6 +507,148 @@ describe("DesktopSettings", () => {
     expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
   });
 
+  // #687 on this surface. The note's gate is the RENDERER's live settings
+  // value, but the recovery depends on main's open-time decision, and the two
+  // off states differ. Opened with the engine OFF: main built no recorder and
+  // cannot until a restart, so turning the setting on hides the note and
+  // enables Test runner over a click that can only fail.
+  it("tells the user to restart when this session has no recorder", async () => {
+    bridge.getWorkspaceSettings.mockResolvedValueOnce({
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: { workspaceEngineAlpha: false },
+      },
+      source: "default" as const,
+    });
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        sessionRecorderOn={false}
+        onClose={() => {}}
+      />,
+    );
+
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toContain(
+        "Turn it on in Advanced. Then restart dohc to test the runner.",
+      ),
+    );
+  });
+
+  // The other off state (#687, codex round 5): the workspace opened with the
+  // engine ON and the user switched it off here. Main's recorder is still
+  // live, so switching back on makes Test runner work at once. Prescribing a
+  // restart would send the user to relaunch the app for nothing.
+  it("asks for no restart when this session already has a recorder", async () => {
+    bridge.getWorkspaceSettings.mockResolvedValueOnce({
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: { workspaceEngineAlpha: false },
+      },
+      source: "default" as const,
+    });
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        sessionRecorderOn
+        onClose={() => {}}
+      />,
+    );
+
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toContain("Turn it on in Advanced to test the runner."),
+    );
+    expect(note.textContent).not.toContain("restart");
+  });
+
+  // The third state (#687, codex round 6), and the one the live-setting gate
+  // got wrong: the session has NO recorder and the user has already followed
+  // the instruction, so the setting reads on. Main still holds the
+  // recorder-less activity — `runnerSelfTest` takes `prepareRunWorkspace`,
+  // which refuses without a capture — so enabling Test runner here would show
+  // a button known to fail and delete the restart instruction on the way.
+  it("keeps the restart visible after the setting is turned on without a recorder", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        sessionRecorderOn={false}
+        onClose={() => {}}
+      />,
+    );
+
+    // Configured, and the engine setting is ON (the schema default) — so the
+    // live-setting gate alone would enable this button.
+    await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toBe(
+        "The workspace engine starts when dohc starts. Restart dohc to test the runner.",
+      ),
+    );
+    const button = await screen.findByTestId("runner-self-test-button");
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    await user.click(button);
+    expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
+  });
+
+  // #687: a shared view materializes no settings file, so the engine reads as
+  // on by default, while main installs no recorder. The no-recorder branch
+  // must not prescribe a restart that cannot make the self-test work.
+  it("shows the shared-view note without a restart instruction", async () => {
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        sharedView
+        sessionRecorderOn={false}
+        onClose={() => {}}
+      />,
+    );
+
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toBe(
+        "This workspace is a shared view. dohc records nothing here, so there is no chat to test.",
+      ),
+    );
+    expect(note.textContent).not.toContain("restart");
+  });
+
+  // #687 codex round 7: sharedView is a synchronous prop, but
+  // sessionRecorderOn only resolves once main's openWorkspace status
+  // arrives. In that window a shared view already knows it has no chat to
+  // test, but sessionRecorderOn is still undefined — the disabled condition
+  // must not wait on it to keep a doomed click off the button.
+  it("disables the self-test in a shared view before the recorder status resolves", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        sharedView
+        onClose={() => {}}
+      />,
+    );
+
+    await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
+    await screen.findByTestId("runner-self-test-engine-note");
+    const button = await screen.findByTestId("runner-self-test-button");
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    await user.click(button);
+    expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
+  });
+
   it("surfaces a failed runner self-test without enabling dispatch", async () => {
     bridge.runnerSelfTest.mockResolvedValueOnce({
       ok: false,
@@ -1076,6 +1218,35 @@ describe("DesktopSettings", () => {
     expect(
       (screen.getByTestId("attachment-location-select") as HTMLSelectElement).value,
     ).toBe("global-folder");
+  });
+
+  // #687: the recovery path this row prescribes has to be the one that works.
+  // Main decides the recorder once per workspace per app session —
+  // `openWorkspaceActivity` retains every workspace it opens and
+  // `workspaceActivity.open` no-ops for one it already watches — so reopening
+  // the workspace re-reads this flag nowhere. Same instruction the History,
+  // versions and chats surfaces give, for the same cause.
+  it("tells the user to restart, not to reopen the workspace", async () => {
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-workspace-engine-alpha");
+    await waitFor(() =>
+      expect(row.textContent).toContain(
+        "Restart dohc after you change this setting.",
+      ),
+    );
+    expect(row.textContent).not.toContain("next time the workspace is opened");
+    // And the row may not claim the turn-off is immediate: the retained
+    // capture keeps recording until that restart.
+    expect(row.textContent).toContain("Until you restart, recording does not change.");
+    expect(row.textContent).not.toContain("no history is recorded while it is off");
   });
 
   // #589: a shared view is fed by the share's pull and gets no capture, so it

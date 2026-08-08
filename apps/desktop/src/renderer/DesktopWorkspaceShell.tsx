@@ -244,8 +244,10 @@ function historyOffPlaceholderCopy(
     return "dohc could not start recording history for this workspace. Your files still save normally. Restart dohc to try again.";
   }
   if (syncStatus?.historyRecordingOff) {
-    // The real opt-out: main read the file and the flag is off.
-    return "History is off for this workspace. The workspace engine is turned off in Settings → Advanced, so changes are not being recorded. Turn it on and reopen the workspace to record history again.";
+    // The real opt-out: main read the file and the flag is off. RESTART, not
+    // reopen (#687) — see `chatsOffCopy` below for why reopening the workspace
+    // re-reads the flag nowhere.
+    return "History is off for this workspace. The workspace engine is turned off in Settings → Advanced, so changes are not being recorded. Turn it on. Then restart dohc to record history.";
   }
   // Main has not said recording is off. It may be recording right now, so
   // no cause and no "not recorded" — only what dohc could not do, plus the
@@ -273,8 +275,9 @@ export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): stri
   }
   if (syncStatus?.historyRecordingOff) {
     // The real opt-out. The engine is off, so versions cannot be opened here
-    // — which is not the same as there being none.
-    return "Versions are off for this workspace. The workspace engine is turned off in Settings → Advanced. Turn it on and reopen the workspace to compare versions.";
+    // — which is not the same as there being none. RESTART, not reopen
+    // (#687) — see `chatsOffCopy` below for why reopening re-reads nothing.
+    return "Versions are off for this workspace. The workspace engine is turned off in Settings → Advanced. Turn it on. Then restart dohc to compare versions.";
   }
   // Main has not said anything is wrong, so the renderer's own read failing
   // is all this surface knows. No cause, and no claim about what exists.
@@ -4380,6 +4383,12 @@ export function DesktopWorkspaceShell(props: {
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
             sharedView={isShareView}
+            // Main's own decision, not the renderer's settings read (#542):
+            // only main knows whether a recorder exists for this session, and
+            // a failed capture build is as recorder-less as the opt-out.
+            sessionRecorderOn={
+              syncStatus ? !statusSaysNoRecorder(syncStatus) : undefined
+            }
             initialSection={settingsSection}
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
