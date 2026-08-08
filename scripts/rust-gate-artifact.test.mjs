@@ -379,7 +379,13 @@ test("a HEAD moved and returned inside one step is refused", () => {
     const run = runGate(stub);
 
     assert.match(run.summary, /FAIL tree provenance/);
-    assert.match(run.summary, /HEAD was updated 2 times during `native target`/);
+    // Git can expose one or both ref updates in HEAD's worktree reflog. The
+    // contract is that any recorded update makes the run unattributable, not
+    // that every Git host records the same count.
+    assert.match(
+      run.summary,
+      /HEAD was updated [1-9]\d* time(?:s)? during `native target`/,
+    );
 
     // The stamp is the judgement's, and the verdict is the run's.
     assert.match(run.summary, /^== summary ==\r?\n {2}tree UNATTRIBUTABLE\r?\n/);
