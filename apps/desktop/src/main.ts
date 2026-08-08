@@ -1506,7 +1506,7 @@ async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
       relay,
       channels: matching,
       passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,
-      resumeAfterShareId: sharedChannelSyncCursors.get(workspaceId) ?? null,
+      resumeAfterShareId: sharedChannelSyncCursors.get(workspaceId),
       pull: async (input) =>
         await daemonRelay.pullSharedChannel({
           shareId: input.shareId,

@@ -42,7 +42,7 @@ describe("the shared-channel sync pass is bounded in production", () => {
 
   it("rotates the window: the cursor is both read and stored per workspace", () => {
     expect(syncCallSource).toContain(
-      "resumeAfterShareId: sharedChannelSyncCursors.get(workspaceId) ?? null,",
+      "resumeAfterShareId: sharedChannelSyncCursors.get(workspaceId),",
     );
     expect(passSource).toContain(
       "sharedChannelSyncCursors.set(workspaceId, result.resumeAfterShareId)",

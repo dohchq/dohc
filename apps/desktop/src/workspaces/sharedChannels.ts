@@ -256,7 +256,7 @@ export async function syncJoinedSharedChannels(input: {
   relay: SyncRelayConnection;
   channels: readonly JoinedSharedChannel[];
   passRows: number;
-  resumeAfterShareId?: string | null;
+  resumeAfterShareId?: string;
   // Required factory-selected operations prevent a rooted sync pass from
   // silently falling back to the legacy TypeScript relay client.
   pull: (input: {

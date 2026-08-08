@@ -116,7 +116,7 @@ describe("syncJoinedSharedChannels", () => {
         access: "read-only",
       }),
     );
-    const runPass = async (resumeAfterShareId: string | null) => {
+    const runPass = async (resumeAfterShareId?: string) => {
       pull.mockClear();
       const result = await syncJoinedSharedChannels({
         rootDir: "/tmp/ws",
@@ -130,11 +130,11 @@ describe("syncJoinedSharedChannels", () => {
       });
       return {
         pulled: pull.mock.calls.map(([input]) => input.shareId),
-        cursor: result.resumeAfterShareId,
+        cursor: result.resumeAfterShareId ?? undefined,
       };
     };
 
-    const first = await runPass(null);
+    const first = await runPass();
     expect(first).toEqual({ pulled: ["share-1", "share-2"], cursor: "share-2" });
     const second = await runPass(first.cursor);
     expect(second).toEqual({ pulled: ["share-3", "share-4"], cursor: "share-4" });
