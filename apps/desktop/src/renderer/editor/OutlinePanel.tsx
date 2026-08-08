@@ -12,6 +12,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import {
@@ -37,13 +38,33 @@ type HeadingFlashState = {
   decorations: DecorationSet;
 };
 
+// `end` turns the flash INLINE: the node at `pos` is the whole block, and a
+// reveal inside a long one (#688) marks the matched lines instead.
 type HeadingFlashMeta =
-  | { kind: "show"; pos: number; token: number }
+  | { kind: "show"; pos: number; end?: number; token: number }
   | { kind: "clear"; token: number };
 
 export const headingFlashPluginKey = new PluginKey<HeadingFlashState>(
   "dohc-heading-target-flash",
 );
+
+/** The flashed range's class, which is also how a caller finds the element it
+ *  drew: an inline flash renders spans ProseMirror owns, and nothing else in
+ *  the editor DOM can be addressed by position. */
+export const FLASH_CLASS = "dohc-outline-target-flash";
+
+/** The whole block, or the range inside it the caller named. */
+function flashDecoration(
+  doc: ProseMirrorNode,
+  meta: { pos: number; end?: number },
+): Decoration | null {
+  if (meta.end !== undefined) {
+    return Decoration.inline(meta.pos, meta.end, { class: FLASH_CLASS });
+  }
+  const node = doc.nodeAt(meta.pos);
+  if (!node) return null;
+  return Decoration.node(meta.pos, meta.pos + node.nodeSize, { class: FLASH_CLASS });
+}
 
 /** A node decoration keeps the flash inside ProseMirror's render lifecycle.
  * Directly mutating a heading class is interpreted as an editor DOM change and
@@ -58,15 +79,11 @@ export function makeHeadingFlashPlugin(): Plugin<HeadingFlashState> {
           | HeadingFlashMeta
           | undefined;
         if (meta?.kind === "show") {
-          const node = transaction.doc.nodeAt(meta.pos);
-          if (!node) return { token: null, decorations: DecorationSet.empty };
+          const decoration = flashDecoration(transaction.doc, meta);
+          if (!decoration) return { token: null, decorations: DecorationSet.empty };
           return {
             token: meta.token,
-            decorations: DecorationSet.create(transaction.doc, [
-              Decoration.node(meta.pos, meta.pos + node.nodeSize, {
-                class: "dohc-outline-target-flash",
-              }),
-            ]),
+            decorations: DecorationSet.create(transaction.doc, [decoration]),
           };
         }
         if (meta?.kind === "clear") {
@@ -105,17 +122,20 @@ function findScrollParent(el: HTMLElement | null): HTMLElement | null {
   return null;
 }
 
-/** Reveal a navigation target: flash the node at `pos`, scroll it into view,
- *  and — when `moveCursorTo` is given and the editor is editable — put the
- *  cursor there. `resolveElement` runs AFTER the flash dispatch, because
- *  selection-driven decorations can replace the rendered node and resolving
- *  the DOM first would scroll a detached element.
+/** Reveal a navigation target: flash it, scroll it into view, and — when
+ *  `moveCursorTo` is given and the editor is editable — put the cursor there.
+ *  A number flashes the NODE at that position; a range flashes the text
+ *  inside it, which is how a reveal lands inside a long block (#688).
+ *  `resolveElement` runs AFTER the flash dispatch, because selection-driven
+ *  decorations can replace the rendered node and resolving the DOM first
+ *  would scroll a detached element — and because an inline flash IS the
+ *  element its caller scrolls.
  *
  *  Returns a cleanup that clears the flash early, or undefined when nothing
  *  was revealed — a caller that must not lose the jump retries on that. */
 export function revealDocPosition(
   editor: Editor,
-  pos: number,
+  pos: number | { from: number; to: number },
   resolveElement: () => HTMLElement | null,
   moveCursorTo?: number,
 ): (() => void) | undefined {
@@ -127,7 +147,7 @@ export function revealDocPosition(
     editor.view.dispatch(
       editor.state.tr.setMeta(headingFlashPluginKey, {
         kind: "show",
-        pos,
+        ...(typeof pos === "number" ? { pos } : { pos: pos.from, end: pos.to }),
         token: flashToken,
       } satisfies HeadingFlashMeta),
     );

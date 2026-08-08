@@ -1,11 +1,40 @@
 import { describe, expect, it } from "vitest";
 import { yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
-import { blockIndexForLine } from "./lineBlocks";
+import { blockForLine, blockIndexForLine } from "./lineBlocks";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocBodyFragment,
   markdownToYDoc,
 } from "./import-export";
+
+// The span is what lets a caller slice the block's own source and refine a
+// landing inside it (#688). Same walk as the index, so the rules above hold
+// it; these hold the boundaries the index never had to name.
+describe("blockForLine", () => {
+  it("spans the block from its first line to its last", () => {
+    // 1 "First"  2 ""  3 "Second one"  4 "wrapped"  5 ""  6 "Third"
+    const body = "First\n\nSecond one\nwrapped\n\nThird";
+    expect(blockForLine(body, 1)).toEqual({ index: 0, startLine: 1, endLine: 2 });
+    expect(blockForLine(body, 4)).toEqual({ index: 1, startLine: 3, endLine: 5 });
+    expect(blockForLine(body, 6)).toEqual({ index: 2, startLine: 6, endLine: 6 });
+  });
+
+  it("spans a fenced block, blank lines and closing fence included", () => {
+    // 1 "```"  2 "a"  3 ""  4 "b"  5 "```"  6 ""  7 "After"
+    // Line 6 is the gap, and the span runs to the line before the next block
+    // opens — the same rule the index has, where a gap line resolves to the
+    // block above it.
+    const body = "```\na\n\nb\n```\n\nAfter";
+    expect(blockForLine(body, 4)).toEqual({ index: 0, startLine: 1, endLine: 6 });
+  });
+
+  it("names no start line above the first block, or in an empty body", () => {
+    // MUTATION: drop the startLine guard in blockTargetForLine -> the slice
+    // starts at -1 and the offset points at a line the block does not own.
+    expect(blockForLine("\n\nText", 1).startLine).toBe(0);
+    expect(blockForLine("", 4).startLine).toBe(0);
+  });
+});
 
 describe("blockIndexForLine", () => {
   it("maps every line of a block to that block", () => {

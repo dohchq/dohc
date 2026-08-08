@@ -210,8 +210,11 @@ function listMarker(text: string): string {
 }
 
 /** The column reached after `end` characters of `text`, counting a tab as the
- *  jump to the next multiple of four the way the tokenizer does. */
-function columnAt(text: string, end: number): number {
+ *  jump to the next multiple of four the way the tokenizer does.
+ *
+ *  This and `leadingColumns` are exported for intraBlock.ts, which measures a
+ *  list item's indent the same way. Text utilities, not mapping rules. */
+export function columnAt(text: string, end: number): number {
   let column = 0;
   for (let index = 0; index < end; index += 1) {
     column = text[index] === "\t" ? column + 4 - (column % 4) : column + 1;
@@ -219,7 +222,7 @@ function columnAt(text: string, end: number): number {
   return column;
 }
 
-function leadingColumns(text: string): number {
+export function leadingColumns(text: string): number {
   const spaces = /^[ \t]*/.exec(text)?.[0] ?? "";
   return columnAt(text, spaces.length);
 }
@@ -289,14 +292,34 @@ function closesFence(text: string, fence: Fence): boolean {
   );
 }
 
+/** A top-level block: its index, and the 1-based lines of `body` it spans.
+ *  `endLine` is the line before the NEXT block opens, so the gap under a block
+ *  is part of its span — the same rule the index has, where a gap line
+ *  resolves to the block above it. `startLine` is 0 when no block opened at or
+ *  above the line asked about: an empty body, or a line above the first one. */
+export type LineBlock = {
+  index: number;
+  startLine: number;
+  endLine: number;
+};
+
 /** PURE: the index of the top-level block holding 1-based `line` of `body`.
  *  A line in the gap between blocks resolves to the block above it; a line
  *  past the end resolves to the last block. Returns 0 for an empty body. */
 export function blockIndexForLine(body: string, line: number): number {
+  return blockForLine(body, line).index;
+}
+
+/** PURE: the top-level block holding 1-based `line` of `body`, with the line
+ *  span it covers — which is what lets a caller slice the block's own source
+ *  and refine a landing inside it (intraBlock.ts). Same walk, same rules;
+ *  `blockIndexForLine` is this without the span. */
+export function blockForLine(body: string, line: number): LineBlock {
   const lines = body.split(/\r?\n/);
-  // Blocks opened so far, and the one holding `line`.
+  // Blocks opened so far, and the one holding `line` with its first line.
   let blocks = 0;
   let holder = 0;
+  let holderStart = 0;
   let open = false;
   let openKind: BlockKind = "other";
   let openMarker = "";
@@ -463,9 +486,13 @@ export function blockIndexForLine(body: string, line: number): number {
     const opens = (kind === "heading" || interrupts || !open) && !resumes;
     if (opens) {
       // Blocks open in document order, so the first one starting PAST `line`
-      // settles the answer and leaves nothing worth walking.
-      if (index + 1 > line) return holder;
+      // settles the answer and leaves nothing worth walking. This block's
+      // first line is the line after the holder's last one.
+      if (index + 1 > line) {
+        return { index: holder, startLine: holderStart, endLine: index };
+      }
       holder = blocks;
+      holderStart = index + 1;
       blocks += 1;
       openKind = kind;
       openMarker = marker;
@@ -498,5 +525,5 @@ export function blockIndexForLine(body: string, line: number): number {
       else open = false;
     }
   }
-  return holder;
+  return { index: holder, startLine: holderStart, endLine: lines.length };
 }
