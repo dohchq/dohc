@@ -257,6 +257,9 @@ export async function syncJoinedSharedChannels(input: {
   channels: readonly JoinedSharedChannel[];
   passRows: number;
   resumeAfterShareId?: string;
+  // The share whose write triggered this pass. It is always covered, whatever
+  // the rotation would have reached, and it counts against passRows.
+  priorityShareId?: string;
   // Required factory-selected operations prevent a rooted sync pass from
   // silently falling back to the legacy TypeScript relay client.
   pull: (input: {
@@ -280,22 +283,47 @@ export async function syncJoinedSharedChannels(input: {
   let changed = false;
   // The window rotates: this pass resumes after the row the last one stopped on
   // and wraps, so freshness decays evenly instead of the pass growing with the
-  // registry. A cursor whose row has since left restarts at the first live row —
-  // a lost cursor must not strand the rotation. Above the window, every row is
-  // reached within ceil(live / passRows) passes; the caller is told how many it
-  // did not reach, so a partial pass never reads as a full refresh.
+  // registry. Above the window, every row is reached within
+  // ceil(live / passRows) passes, and the caller is told how many it did not
+  // reach — a partial pass never reads as a full refresh.
   const live = input.channels.filter((channel) => channel.ended !== true);
-  const cursorIndex = input.resumeAfterShareId
-    ? live.findIndex((channel) => channel.shareId === input.resumeAfterShareId)
+  // The cursor is resolved against the FULL registry order, ended rows included.
+  // A share revoked between passes keeps its place, so the rotation steps past
+  // it; resolving against the live rows alone would lose the position and send
+  // the next pass back to the front, re-covering the prefix it just did.
+  const cursorOrder = input.resumeAfterShareId
+    ? input.channels.findIndex(
+        (channel) => channel.shareId === input.resumeAfterShareId,
+      )
     : -1;
-  const startIndex = cursorIndex >= 0 ? (cursorIndex + 1) % live.length : 0;
-  const coveredCount = Math.min(Math.max(input.passRows, 0), live.length);
-  const covered = Array.from(
-    { length: coveredCount },
-    (_, offset) => live[(startIndex + offset) % live.length]!,
-  );
+  const liveThroughCursor =
+    cursorOrder < 0
+      ? 0
+      : input.channels
+          .slice(0, cursorOrder + 1)
+          .filter((channel) => channel.ended !== true).length;
+  const startIndex = live.length === 0 ? 0 : liveThroughCursor % live.length;
+  const budget = Math.min(Math.max(input.passRows, 0), live.length);
+  // A write's own share never waits for the rotation to reach it: without this,
+  // a one-shot trigger (a send, with Chats then closed) could be the last pass
+  // for minutes and the message would sit local.
+  const priority =
+    budget > 0 && input.priorityShareId
+      ? (live.find((channel) => channel.shareId === input.priorityShareId) ?? null)
+      : null;
+  const rotation: JoinedSharedChannel[] = [];
+  const rotationBudget = budget - (priority ? 1 : 0);
+  for (let offset = 0; rotation.length < rotationBudget && offset < live.length; offset += 1) {
+    const channel = live[(startIndex + offset) % live.length]!;
+    if (channel.shareId === priority?.shareId) continue;
+    rotation.push(channel);
+  }
+  const covered = priority ? [priority, ...rotation] : rotation;
   const uncovered = live.length - covered.length;
-  const resumeAfterShareId = covered.at(-1)?.shareId ?? null;
+  // The cursor follows the ROTATION only. A priority row is covered out of
+  // order, so letting it move the cursor would skip whatever it jumped over.
+  const resumeAfterShareId =
+    rotation.at(-1)?.shareId ?? input.resumeAfterShareId ?? null;
   for (const channel of covered) {
     const target = {
       rootDir: input.rootDir,

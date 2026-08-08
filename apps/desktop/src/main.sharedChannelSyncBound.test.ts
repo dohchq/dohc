@@ -29,6 +29,16 @@ const syncCallSource = sourceBetween(
   "\n    });",
 );
 
+// One IPC handler's body, so a trigger wired in ONE handler cannot stand in for
+// the others.
+function handlerSource(channel: string): string {
+  const marker = `ipcMain.handle(CHANNELS.${channel},`;
+  const start = mainSource.indexOf(marker);
+  if (start < 0) throw new Error(`Missing handler for ${channel}`);
+  const next = mainSource.indexOf("ipcMain.handle(", start + marker.length);
+  return mainSource.slice(start, next < 0 ? undefined : next);
+}
+
 describe("the shared-channel sync pass is bounded in production", () => {
   it("bounds one pass to a small, finite number of live rows", () => {
     expect(Number.isInteger(SHARED_CHANNEL_SYNC_PASS_ROWS)).toBe(true);
@@ -53,5 +63,44 @@ describe("the shared-channel sync pass is bounded in production", () => {
     expect(passSource).toContain("reportSharedChannelPassCoverage({");
     expect(passSource).toContain("uncovered: result.uncovered,");
     expect(mainSource).toContain("createPassCoverageReporter((message) =>");
+  });
+
+  // The reporter deduplicates by remainder, so a pass that returns early
+  // without reporting leaves the last remainder remembered. A workspace whose
+  // rows go away and come back would then have its first partial pass silenced.
+  it("clears the remembered remainder on every no-rows return", () => {
+    expect(passSource).toContain(
+      "if (!entry || channels.length === 0) {\n      reportSharedChannelPassCoveredEverything(workspaceId);\n      return;\n    }",
+    );
+    expect(passSource).toContain(
+      "if (matching.length === 0) {\n      reportSharedChannelPassCoveredEverything(workspaceId);\n      return;\n    }",
+    );
+  });
+
+  // A pass a write triggered must cover the written share (#718): with more
+  // rows than the window, closing Chats stops the poll, so that pass can be the
+  // last one for minutes and the message would sit local.
+  it("names the written share so its own pass covers it", () => {
+    expect(syncCallSource).toContain("priorityShareId,");
+    // Each write trigger separately: one handler still naming its share is not
+    // proof the others do.
+    for (const channel of [
+      "sendChatMessage",
+      "startChannelThread",
+      "resolveChatDecision",
+    ]) {
+      expect(handlerSource(channel), channel).toContain(
+        "void syncSharedChannelsForChatTarget(",
+      );
+      expect(handlerSource(channel), channel).not.toContain(
+        "void syncWorkspaceSharedChannels(",
+      );
+    }
+    // The agent dispatch path posts through the chat service, which now carries
+    // the thread it wrote into.
+    expect(mainSource).toContain("onMessagePosted: (workspaceId, threadId) => {");
+    expect(mainSource).toContain(
+      "void syncSharedChannelsForChatTarget(workspaceId, { threadId });",
+    );
   });
 });

@@ -142,6 +142,134 @@ describe("syncJoinedSharedChannels", () => {
     expect(third).toEqual({ pulled: ["share-5", "share-1"], cursor: "share-1" });
   });
 
+  // A share revoked exactly on the window boundary must not cost the rotation a
+  // lap: the cursor row is gone from the live rows, and resolving it there would
+  // send this pass back to the front and re-cover the prefix it just did.
+  it("steps past a cursor row that ended between passes instead of restarting", async () => {
+    const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
+    const rows = Array.from({ length: 32 }, (_, index) =>
+      joined({
+        shareId: `share-${index + 1}`,
+        channelWireId: `wire-${index + 1}`,
+        access: "read-only",
+      }),
+    );
+    const first = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      channels: rows,
+      passRows: 16,
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+    expect(first.resumeAfterShareId).toBe("share-16");
+
+    // The granter revokes share-16 between the two passes.
+    const afterRevoke = rows.map((row) =>
+      row.shareId === "share-16" ? { ...row, ended: true } : row,
+    );
+    pull.mockClear();
+    const second = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      channels: afterRevoke,
+      passRows: 16,
+      resumeAfterShareId: first.resumeAfterShareId ?? undefined,
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(
+      Array.from({ length: 16 }, (_, index) => `share-${index + 17}`),
+    );
+    expect(second.resumeAfterShareId).toBe("share-32");
+    // 31 live rows, 16 covered.
+    expect(second.uncovered).toBe(15);
+  });
+
+  // The write that triggered a pass must not have to wait for the rotation:
+  // closing Chats stops the poll, so a send can be the last pass for minutes.
+  it("always covers the share that triggered the pass, even outside the window", async () => {
+    const calls: string[] = [];
+    const push = vi.fn(async (input: { shareId: string }) => {
+      calls.push(`push:${input.shareId}`);
+      return { pushed: 1 };
+    });
+    const pull = vi.fn(async (input: { shareId: string }) => {
+      calls.push(`pull:${input.shareId}`);
+      return pullResult(0);
+    });
+    const channels = Array.from({ length: 20 }, (_, index) =>
+      joined({ shareId: `share-${index + 1}`, channelWireId: `wire-${index + 1}` }),
+    );
+    const result = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      channels,
+      passRows: 16,
+      // Rotation alone would cover share-5 .. share-20 — never share-1.
+      resumeAfterShareId: "share-4",
+      priorityShareId: "share-1",
+      pull,
+      push,
+    });
+    // The written share pushes in THIS pass, first, and it costs one window slot.
+    expect(calls.slice(0, 2)).toEqual(["push:share-1", "pull:share-1"]);
+    expect(calls).toHaveLength(32);
+    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual([
+      "share-1",
+      ...Array.from({ length: 15 }, (_, index) => `share-${index + 5}`),
+    ]);
+    // The cursor follows the rotation, not the out-of-order priority row.
+    expect(result.resumeAfterShareId).toBe("share-19");
+    expect(result.uncovered).toBe(4);
+  });
+
+  it("never covers the triggering share twice when rotation already reaches it", async () => {
+    const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
+    const channels = Array.from({ length: 5 }, (_, index) =>
+      joined({
+        shareId: `share-${index + 1}`,
+        channelWireId: `wire-${index + 1}`,
+        access: "read-only",
+      }),
+    );
+    const result = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      channels,
+      passRows: 2,
+      priorityShareId: "share-2",
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-2", "share-1"]);
+    expect(result.uncovered).toBe(3);
+  });
+
+  it("ignores a priority share this workspace holds no live row for", async () => {
+    const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
+    const result = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      channels: [
+        joined({ shareId: "share-1", access: "read-only" }),
+        joined({ shareId: "share-2", access: "read-only" }),
+        joined({ shareId: "share-gone", ended: true }),
+      ],
+      passRows: 1,
+      priorityShareId: "share-gone",
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+    expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual(["share-1"]);
+    expect(result.resumeAfterShareId).toBe("share-1");
+  });
+
   it("reports no uncovered rows when the pass covers every live row", async () => {
     const result = await syncJoinedSharedChannels({
       rootDir: "/tmp/ws",
