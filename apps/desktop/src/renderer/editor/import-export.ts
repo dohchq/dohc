@@ -1,5 +1,7 @@
 import type { AnyExtension, JSONContent } from '@tiptap/core'
 import { getHTMLFromFragment, getSchema } from '@tiptap/core'
+import { backtickFence } from '@dohc/ydoc-projection'
+import { CodeBlock } from '@tiptap/extension-code-block'
 import { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
@@ -28,9 +30,25 @@ const META_FIELD = 'meta'
 const DOHC_SCHEMA_VERSION = 1
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 
+// Match packages/ydoc-projection's rewriteCodeBlockFences/backtickFence rule.
+// This prevents content from closing its own fence (#704). Exported so every
+// markdown-serializing editor surface (this module and MarkdownEditor.tsx's
+// live editor) registers the same widened fence instead of drifting again.
+// Named distinctly from extensions.ts's DohcCodeBlock, which parses the
+// `code` markdown token on import — this one only overrides export.
+export const FenceWideningCodeBlock = CodeBlock.extend({
+  renderMarkdown: (node, helpers) => {
+    const language = node.attrs?.language || ''
+    const content = helpers.renderChildren(node.content ?? [])
+    const fence = backtickFence(content, 3)
+    return [`${fence}${language}`, content, fence].join('\n')
+  },
+})
+
 const extensions: AnyExtension[] = [
   ...dohcMarkdownExtensions,
-  StarterKit,
+  StarterKit.configure({ codeBlock: false }),
+  FenceWideningCodeBlock,
   TaskList,
   DohcTaskItem,
   TableKit,

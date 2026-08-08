@@ -16,3 +16,4 @@ export {
   yDocToMarkdown,
 } from "./import-export.js";
 export { dohcMarkdownExtensions } from "./dohc-markdown-extensions.js";
+export { backtickFence } from "./markdown-fence.js";

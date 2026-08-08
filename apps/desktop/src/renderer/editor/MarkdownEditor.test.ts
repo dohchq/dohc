@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { createElement, type SetStateAction } from "react";
+import { createElement, createRef, type SetStateAction } from "react";
 import {
   cleanup,
   fireEvent,
@@ -19,7 +19,7 @@ import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { dohcMarkdownExtensions } from "./extensions";
 import { markdownToYDoc } from "./import-export";
-import { MarkdownEditor } from "./MarkdownEditor";
+import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 import {
   findEmptyListItemParagraph,
   makeCodeBlockChromePlugin,
@@ -677,6 +677,41 @@ describe("MarkdownEditor remote carets", () => {
       awarenessB.destroy();
       docA.destroy();
       docB.destroy();
+    }
+  });
+});
+
+// The live editor's getMarkdown() is what FileInspector.tsx's WYSIWYG save
+// and engine-draft export, and blockControls.tsx's "copy block as markdown"
+// all read from (they all serialize through this same mounted editor's
+// markdown manager). Before MarkdownEditor.tsx registered
+// FenceWideningCodeBlock, StarterKit's default codeBlock hardcoded a
+// three-backtick fence regardless of content, so a code block whose own
+// content held a ``` line closed its fence early and truncated on
+// re-import (#704).
+describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
+  it("widens a code fence in the live editor's getMarkdown when the block content contains a fence", async () => {
+    const content = "before\n```\nafter";
+    const value = ["````js", "before", "```", "after", "````"].join("\n");
+    const ref = createRef<MarkdownEditorHandle>();
+    const view = render(
+      createElement(MarkdownEditor, {
+        ref,
+        value,
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/fence.md",
+        knownFiles: [],
+      }),
+    );
+
+    try {
+      await screen.findByTestId("markdown-editor");
+      const markdown = ref.current?.getMarkdown();
+      expect(markdown).toMatch(/^`{4,}js$/m);
+      expect(markdown).toContain(content);
+    } finally {
+      view.unmount();
     }
   });
 });
