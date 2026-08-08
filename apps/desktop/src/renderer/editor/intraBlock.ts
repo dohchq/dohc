@@ -9,6 +9,8 @@
 // against the node the editor already built and asks whether the two line up.
 // When they do not, the answer is null and the reveal stays at the block
 // start — the behaviour before this module existed.
+// A gap or trailing-blank match inside the block's span lands the item or
+// content immediately above it, following lineBlocks.ts's gap rule.
 //
 // UNSURE, every case, all of which fall back to the block start:
 //
@@ -106,7 +108,15 @@ function codeLineRange(
   const textLines = text.split("\n");
   const target = offset - 1;
   if (target >= textLines.length) return null;
-  if (lines.slice(1, 1 + textLines.length).join("\n") !== text) return null;
+  const openerIndent = /^[ \t]*/.exec(lines[0] ?? "")?.[0].length ?? 0;
+  const sourceText = lines
+    .slice(1, 1 + textLines.length)
+    .map((line) => {
+      const indent = /^[ \t]*/.exec(line)?.[0].length ?? 0;
+      return line.slice(Math.min(indent, openerIndent));
+    })
+    .join("\n");
+  if (sourceText !== text) return null;
   // Positions inside a textblock start one past the node itself.
   let from = containerPos + 1;
   for (let line = 0; line < target; line += 1) {
@@ -125,33 +135,33 @@ function listItemRange(
   lines: readonly string[],
   offset: number,
 ): DocRange | null {
-  const starts = itemStartLines(lines);
-  if (starts.length === 0 || starts.length !== container.childCount) return null;
-  let child = -1;
-  for (let item = 0; item < starts.length; item += 1) {
-    if ((starts[item] ?? 0) <= offset) child = item;
+  const first = lines[0] ?? "";
+  const firstMarker = LIST_ITEM_RE.exec(first);
+  if (!firstMarker) return null;
+  const spaces = /^[ \t]*/.exec(first.slice(firstMarker[0].length))?.[0] ?? "";
+  const content = columnAt(first, firstMarker[0].length + spaces.length);
+  let itemCount = 1;
+  let child = 0;
+  for (let line = 1; line < lines.length; line += 1) {
+    const text = lines[line] ?? "";
+    if (leadingColumns(text) >= content || !LIST_ITEM_RE.test(text)) continue;
+    if (line <= offset) child = itemCount;
+    itemCount += 1;
   }
+  if (itemCount !== container.childCount) return null;
   if (child <= 0) return null;
+  const matched = lines[offset] ?? "";
+  const matchedMarker = LIST_ITEM_RE.exec(matched);
+  let matchedText = matched
+    .slice(matchedMarker?.[0].length ?? 0)
+    .replace(/^[ \t]*/, "");
+  if (container.type.name === "taskList") {
+    matchedText = matchedText.replace(/^\[[ xX]\](?:[ \t]+|$)/, "");
+  }
+  if (!container.child(child).textContent.includes(matchedText)) return null;
   let from = containerPos + 1;
   for (let before = 0; before < child; before += 1) {
     from += container.child(before).nodeSize;
   }
   return { from: from + 1, to: from + container.child(child).nodeSize - 1 };
-}
-
-/** The lines that start an item of the list `lines` opens. An item's own
- *  content column is what a NESTED item reaches and a sibling does not, so
- *  the first item sets the threshold every later line is measured against. */
-function itemStartLines(lines: readonly string[]): number[] {
-  const first = lines[0] ?? "";
-  const marker = LIST_ITEM_RE.exec(first);
-  if (!marker) return [];
-  const spaces = /^[ \t]*/.exec(first.slice(marker[0].length))?.[0] ?? "";
-  const content = columnAt(first, marker[0].length + spaces.length);
-  const starts = [0];
-  for (let line = 1; line < lines.length; line += 1) {
-    const text = lines[line] ?? "";
-    if (leadingColumns(text) < content && LIST_ITEM_RE.test(text)) starts.push(line);
-  }
-  return starts;
 }

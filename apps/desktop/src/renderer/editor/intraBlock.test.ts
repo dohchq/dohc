@@ -54,6 +54,21 @@ describe("a match deep in a long block lands the matched line", () => {
     expect(revealed(checklist, 31)).toBe("Task 31");
   });
 
+  it("rejects a same-count list whose matched child holds different text", () => {
+    const body = "1. x\n- a\n```\n1. x";
+    const doc = editorDoc(body);
+    const list = doc.child(0);
+    expect(blockTargetForLine(body, 2)).toEqual({
+      index: 0,
+      match: { lines: ["1. x", "- a"], offset: 1 },
+    });
+    expect(list.type.name).toBe("orderedList");
+    expect(list.childCount).toBe(2);
+    expect(list.child(0).textContent).toBe("xa");
+    expect(list.child(1).textContent).toBe("x");
+    expect(revealed(body, 2)).toBeNull();
+  });
+
   it("lands the item above a blank line inside the list", () => {
     // The same rule one level down: a line in a gap resolves to the thing
     // ABOVE it. A loose list keeps its blank lines, and a hit that lands on
@@ -94,6 +109,21 @@ describe("a match deep in a long block lands the matched line", () => {
     const body = "```\nfirst\n\n# not a heading\nlast\n```";
     expect(revealed(body, 4)).toBe("# not a heading");
     expect(revealed(body, 5)).toBe("last");
+  });
+
+  it("lands inside a fence indented by its opener", () => {
+    const body = [
+      "Intro",
+      "",
+      "  ```ts",
+      "  const a = 1;",
+      "  const b = 2;",
+      "  const target = 3;",
+      "  ```",
+      "",
+      "After",
+    ].join("\n");
+    expect(revealed(body, 6)).toBe("const target = 3;");
   });
 });
 
@@ -168,6 +198,15 @@ describe("an unsure intra-block match falls back to the block start", () => {
     const list = editorDoc("- a\n- b\n- c");
     expect(
       intraBlockRange(list.child(0), 0, { lines: ["- a", "- b"], offset: 1 }),
+    ).toBeNull();
+  });
+
+  it("does not apply list rules to a blockquote container", () => {
+    const quote = editorDoc("> - a\n>\n> * b").child(0);
+    expect(quote.type.name).toBe("blockquote");
+    expect(quote.childCount).toBe(2);
+    expect(
+      intraBlockRange(quote, 0, { lines: ["- a", "", "* b"], offset: 2 }),
     ).toBeNull();
   });
 });

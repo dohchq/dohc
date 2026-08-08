@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { MarkdownEditor } from "./MarkdownEditor";
-import { blockTargetForLine } from "./intraBlock";
+import * as intraBlock from "./intraBlock";
 import {
   resolveOutlineHeadingTarget,
   revealDocPosition,
@@ -288,7 +288,7 @@ describe("MarkdownEditor block navigation", () => {
           path: "notes/plan.md",
           knownFiles: [],
           // The mapping the shell sends, not a hand-written one.
-          blockTarget: { ...blockTargetForLine(value, line), nonce: 1 },
+          blockTarget: { ...intraBlock.blockTargetForLine(value, line), nonce: 1 },
         }),
       );
       return { view, scrollIntoView };
@@ -336,6 +336,47 @@ describe("MarkdownEditor block navigation", () => {
       const { elements } = revealDom(view);
       expect(elements).toHaveLength(1);
       expect(elements[0]?.tagName).toBe("BLOCKQUOTE");
+      expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);
+    });
+
+    it("drops the inner match when the block index is clamped", async () => {
+      const value = "- First\n- Shared\n\nMiddle\n\nLast paragraph";
+      const target = {
+        ...intraBlock.blockTargetForLine(value, 2),
+        index: 99,
+        nonce: 1,
+      };
+      const refine = vi
+        .spyOn(intraBlock, "intraBlockRange")
+        .mockImplementation((_container, containerPos) => ({
+          from: containerPos + 1,
+          to: containerPos + 5,
+        }));
+      const scrollIntoView = vi.fn();
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true,
+        value: scrollIntoView,
+      });
+      const view = render(
+        createElement(MarkdownEditor, {
+          value,
+          onDirty: vi.fn(),
+          workspaceId: "workspace-1",
+          path: "notes/plan.md",
+          knownFiles: [],
+          blockTarget: target,
+        }),
+      );
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+      await waitFor(() => expect(revealDom(view).elements).toHaveLength(1));
+
+      const { elements, text } = revealDom(view);
+      expect(refine).not.toHaveBeenCalled();
+      expect(text).toBe("Last paragraph");
+      expect(elements).toHaveLength(1);
+      expect(elements[0]?.tagName).toBe("P");
       expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);
     });
   });
