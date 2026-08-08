@@ -38,17 +38,10 @@ const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 // `code` markdown token on import — this one only overrides export.
 export const FenceWideningCodeBlock = CodeBlock.extend({
   renderMarkdown: (node, helpers) => {
-    let output = ''
     const language = node.attrs?.language || ''
     const content = helpers.renderChildren(node.content ?? [])
     const fence = backtickFence(content, 3)
-    if (!node.content) {
-      output = `${fence}${language}\n\n${fence}`
-    } else {
-      const lines = [`${fence}${language}`, content, fence]
-      output = lines.join('\n')
-    }
-    return output
+    return [`${fence}${language}`, content, fence].join('\n')
   },
 })
 
