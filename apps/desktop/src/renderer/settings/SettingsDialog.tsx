@@ -599,6 +599,7 @@ export function SettingsDialog(props: {
               }
               runner={userSettings.runner}
               engineEnabled={workspaceSettings.experimental.workspaceEngineAlpha}
+              sharedView={props.sharedView}
               sessionRecorderOn={props.sessionRecorderOn}
               onRunnerChange={(runner) =>
                 saveUserSettings({

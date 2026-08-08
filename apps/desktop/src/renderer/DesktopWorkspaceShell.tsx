@@ -4387,10 +4387,7 @@ export function DesktopWorkspaceShell(props: {
             // only main knows whether a recorder exists for this session, and
             // a failed capture build is as recorder-less as the opt-out.
             sessionRecorderOn={
-              syncStatus
-                ? !syncStatus.historyRecordingOff &&
-                  !syncStatus.historyRecordingUnavailable
-                : undefined
+              syncStatus ? !statusSaysNoRecorder(syncStatus) : undefined
             }
             initialSection={settingsSection}
             onClose={closeSettings}

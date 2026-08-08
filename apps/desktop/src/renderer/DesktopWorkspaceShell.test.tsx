@@ -7708,6 +7708,59 @@ describe("settings entry points", () => {
   });
 });
 
+// #687/#589: the note's precedence and exact copy are pinned at the
+// AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
+// sessionRecorderOn and sharedView straight to DesktopSettings — bypassing
+// the shell's own derivation. A regression that severs
+// DesktopWorkspaceShell's wiring (for example, replacing the syncStatus ->
+// sessionRecorderOn derivation with `undefined`, or dropping sharedView)
+// would leave every other suite green. This test drives the real command
+// palette -> Settings -> Agents & MCP path through the shell itself.
+describe("runner note reaches the card through the shell's own wiring", () => {
+  it("carries a recorder-less status into the restart note", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
+    bridge.openWorkspace = vi.fn(async () => offStatus);
+    bridge.getSyncStatus = vi.fn(async () => offStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Settings: Open Agents & MCP",
+      ),
+    );
+
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toBe(
+        "The workspace engine starts when dohc starts. Restart dohc to test the runner.",
+      ),
+    );
+  });
+
+  it("carries a shared view into the no-chat note instead of the restart it can never satisfy", async () => {
+    const user = userEvent.setup();
+    renderShell(makeShareBridge(), SHARE_VIEW);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Settings: Open Agents & MCP",
+      ),
+    );
+
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toBe(
+        "This workspace is a shared view. dohc records nothing here, so there is no chat to test.",
+      ),
+    );
+    expect(note.textContent).not.toContain("restart");
+  });
+});
+
 // AUDIT-OPTOUT: a settings file that cannot be read reads as opted out, so the
 // workspace records no history. The Settings dialog is not enough — the user
 // must see it without opening Settings.

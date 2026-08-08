@@ -600,6 +600,30 @@ describe("DesktopSettings", () => {
     expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
   });
 
+  // #687: a shared view materializes no settings file, so the engine reads as
+  // on by default, while main installs no recorder. The no-recorder branch
+  // must not prescribe a restart that cannot make the self-test work.
+  it("shows the shared-view note without a restart instruction", async () => {
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        sharedView
+        sessionRecorderOn={false}
+        onClose={() => {}}
+      />,
+    );
+
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toBe(
+        "This workspace is a shared view. dohc records nothing here, so there is no chat to test.",
+      ),
+    );
+    expect(note.textContent).not.toContain("restart");
+  });
+
   it("surfaces a failed runner self-test without enabling dispatch", async () => {
     bridge.runnerSelfTest.mockResolvedValueOnce({
       ok: false,

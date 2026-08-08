@@ -43,9 +43,13 @@ function runnerSettingsEqual(left: RunnerSettings, right: RunnerSettings): boole
 // main is not evidence of a missing recorder, and the restart it prescribes
 // is heavier than needed but never false.
 function runnerEngineNote(
+  sharedView: boolean,
   engineEnabled: boolean,
   sessionRecorderOn: boolean | undefined,
 ): string | null {
+  if (sharedView) {
+    return "This workspace is a shared view. dohc records nothing here, so there is no chat to test.";
+  }
   if (!engineEnabled) {
     return sessionRecorderOn
       ? "The workspace engine is off, so there is no chat to test. Turn it on in Advanced to test the runner."
@@ -64,13 +68,21 @@ export function RunnerSettingsCard(props: {
   // The self-test spawns a runner that writes a chat thread. An opted-out
   // workspace records nothing, so the main process refuses it there.
   engineEnabled: boolean;
+  // Mirrors SettingsDialog's shared-view fact (#589/#687).
+  sharedView?: boolean;
   // Whether main built a recorder for this workspace in THIS app session
   // (#687). Undefined until its status arrives. See `runnerEngineNote`.
   sessionRecorderOn: boolean | undefined;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
 }) {
-  const { workspaceId, runner, engineEnabled, sessionRecorderOn, onRunnerChange } =
-    props;
+  const {
+    workspaceId,
+    runner,
+    engineEnabled,
+    sharedView,
+    sessionRecorderOn,
+    onRunnerChange,
+  } = props;
   const [commandDraft, setCommandDraft] = useState(runner.command);
   const [timeoutDraft, setTimeoutDraft] = useState(String(runner.timeoutMinutes));
   const [selfTest, setSelfTest] = useState<SelfTestState>({ status: "idle" });
@@ -159,7 +171,11 @@ export function RunnerSettingsCard(props: {
 
   const configured = commandDraft.trim().length > 0;
   const selfTestRunning = selfTest.status === "running";
-  const engineNote = runnerEngineNote(engineEnabled, sessionRecorderOn);
+  const engineNote = runnerEngineNote(
+    Boolean(sharedView),
+    engineEnabled,
+    sessionRecorderOn,
+  );
 
   return (
     <section
