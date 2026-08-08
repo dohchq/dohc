@@ -42,6 +42,7 @@ import {
 } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
+import * as orphanedDraftsModule from "./orphanedDrafts";
 
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
@@ -2239,6 +2240,1379 @@ describe("engine markdown source view", () => {
     });
   });
 
+  it("re-applies a read-mode heading navigation when the version switches under it", async () => {
+    // The 2,500-heading chunked backfill runs real DOM work on a busy gate
+    // box; this bounds the OVERALL test, not just an inner waitFor's poll.
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const bigBody = [
+      "# Hello",
+      "",
+      "## Exact destination",
+      "Body",
+      "",
+      "# Filler\n\nbody paragraph.\n\n".repeat(2_500),
+    ].join("\n");
+    expect(bigBody.length).toBeGreaterThan(64 * 1024);
+    const { bridgeMock } = makeEngineBridge(bigBody);
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const headingTarget = { anchor: "exact-destination", nonce: 2 };
+
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("view-markdown");
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        headingTarget={headingTarget}
+      />,
+    );
+    const destination = await screen.findByRole(
+      "heading",
+      { name: "Exact destination" },
+      { timeout: 10_000 },
+    );
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1), {
+      timeout: 10_000,
+    });
+    expect(scrollIntoView.mock.instances[0]).toBe(destination);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        headingTarget={headingTarget}
+      />,
+    );
+
+    // The 2,500-heading chunked backfill can outrun the default waitFor
+    // budget under a busy gate box — a busy box must not red-herring this.
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2), {
+      timeout: 10_000,
+    });
+    expect(scrollIntoView.mock.instances[1]).toBe(destination);
+
+    // A tab return clears the place without changing the version.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+  }, 120_000);
+
+  it("replays a read-mode heading against the version-switch reread", async () => {
+    // The 2,500-heading chunked backfill runs real DOM work on a busy gate
+    // box; this bounds the OVERALL test, not just an inner waitFor's poll.
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const filler = "# Filler\n\nbody paragraph.\n\n".repeat(2_500);
+    const firstBody = `# Hello\n\n## Exact destination\nBody\n\n${filler}`;
+    const secondBody = [
+      "# Hello",
+      "",
+      "## Inserted heading",
+      "Inserted paragraph.",
+      "",
+      "## Exact destination",
+      "Body",
+      "",
+      filler,
+    ].join("\n");
+    expect(firstBody.length).toBeGreaterThan(64 * 1024);
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const headingTarget = { anchor: "exact-destination", nonce: 4 };
+
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("view-markdown");
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        headingTarget={headingTarget}
+      />,
+    );
+    const firstDestination = await screen.findByRole(
+      "heading",
+      { name: "Exact destination" },
+      { timeout: 10_000 },
+    );
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1), {
+      timeout: 10_000,
+    });
+    expect(scrollIntoView.mock.instances[0]).toBe(firstDestination);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        headingTarget={headingTarget}
+      />,
+    );
+
+    await waitFor(() => expect(reads).toBe(2));
+    // The 2,500-heading chunked backfill can outrun the default waitFor
+    // budget under a busy gate box — a busy box must not red-herring this.
+    const secondDestination = await waitFor(
+      () => {
+        const heading = screen.getByRole("heading", {
+          name: "Exact destination",
+        });
+        if (heading === firstDestination) {
+          throw new Error("The post-switch heading has not rendered yet.");
+        }
+        return heading;
+      },
+      { timeout: 10_000 },
+    );
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2), {
+      timeout: 10_000,
+    });
+    expect(scrollIntoView.mock.instances[1]).toBe(secondDestination);
+  }, 120_000);
+
+  it("retires a read-mode heading observer when a newer switch arm replaces it", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const firstBody = Array.from(
+      { length: 201 },
+      (_, index) =>
+        `# First ${index + 1}\n\n${"first document padding ".repeat(20)}\n\n`,
+    ).join("");
+    const secondBody = Array.from(
+      { length: 201 },
+      (_, index) => `# Replacement ${index + 1}`,
+    ).join("\n");
+    expect(firstBody.length).toBeGreaterThan(32 * 1024);
+    expect(secondBody.length).toBeLessThan(32 * 1024);
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let releaseSecondRead!: () => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondRead = resolve;
+        });
+      }
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const observers: ControlledMutationObserver[] = [];
+    class ControlledMutationObserver implements MutationObserver {
+      disconnected = false;
+      observed: Node | null = null;
+
+      constructor(private readonly callback: MutationCallback) {
+        observers.push(this);
+      }
+
+      disconnect(): void {
+        this.disconnected = true;
+      }
+
+      observe(target: Node): void {
+        this.observed = target;
+      }
+
+      takeRecords(): MutationRecord[] {
+        return [];
+      }
+
+      notify(): void {
+        if (!this.disconnected) this.callback([], this);
+      }
+    }
+
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("view-markdown");
+    vi.stubGlobal("MutationObserver", ControlledMutationObserver);
+    const headingTarget = { anchor: "first-201", nonce: 7 };
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        headingTarget={headingTarget}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const headingObserver = observers.find(
+      (observer) =>
+        observer.observed instanceof HTMLElement &&
+        observer.observed.classList.contains("dohc-readable-text"),
+    );
+    expect(headingObserver).toBeDefined();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        headingTarget={headingTarget}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await act(async () => {
+      releaseSecondRead();
+      await Promise.resolve();
+    });
+    await screen.findByRole("heading", { name: "Replacement 201" });
+    headingObserver!.notify();
+
+    // MUTATION: leave pendingRenderedHeadingIndex armed. Its old observer
+    // treats the new document's same ordinal as the requested destination.
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("clears a stale read-mode heading wait carried through source mode into a later switch", async () => {
+    const scrollIntoView = stubScrollSpy("scrollIntoView");
+    const firstBody = Array.from(
+      { length: 201 },
+      (_, index) =>
+        `# First ${index + 1}\n\n${"first document padding ".repeat(20)}\n\n`,
+    ).join("");
+    const secondBody = Array.from(
+      { length: 201 },
+      (_, index) => `# Replacement ${index + 1}`,
+    ).join("\n");
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let releaseSecondRead!: () => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondRead = resolve;
+        });
+      }
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const observers: ControlledMutationObserver[] = [];
+    class ControlledMutationObserver implements MutationObserver {
+      disconnected = false;
+      observed: Node | null = null;
+
+      constructor(private readonly callback: MutationCallback) {
+        observers.push(this);
+      }
+
+      disconnect(): void {
+        this.disconnected = true;
+      }
+
+      observe(target: Node): void {
+        this.observed = target;
+      }
+
+      takeRecords(): MutationRecord[] {
+        return [];
+      }
+
+      notify(): void {
+        if (!this.disconnected) this.callback([], this);
+      }
+    }
+    let toggleSource: (() => void) | null = null;
+    const sourceToggle = (toggle: (() => void) | null) => {
+      toggleSource = toggle;
+    };
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        readOnly
+        registerSourceToggle={sourceToggle}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    vi.stubGlobal("MutationObserver", ControlledMutationObserver);
+    const headingTarget = { anchor: "first-201", nonce: 9 };
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        readOnly
+        registerSourceToggle={sourceToggle}
+        headingTarget={headingTarget}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const headingObserver = observers.find(
+      (observer) =>
+        observer.observed instanceof HTMLElement &&
+        observer.observed.classList.contains("dohc-readable-text"),
+    );
+    expect(headingObserver).toBeDefined();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    // Leave read mode BEFORE the wait resolves — it is still pending.
+    await toggleSourceOnce(() => toggleSource);
+
+    // A version switch while in source mode: the re-arm must not skip the
+    // clear just because mode is not "read" right now.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        readOnly
+        refreshKey={1}
+        engineVersionKey={1}
+        registerSourceToggle={sourceToggle}
+        headingTarget={headingTarget}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await act(async () => {
+      releaseSecondRead();
+      await Promise.resolve();
+    });
+    await findSourceEditor();
+
+    // Return to read mode on the new document.
+    await act(async () => {
+      toggleSource!();
+    });
+    await screen.findByTestId("view-markdown");
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // MUTATION: clear the pending index only when mode !== "source" at
+    // re-arm time — a wait carried from read mode through source mode
+    // survives the switch and scrolls "Replacement 201" (same ordinal, new
+    // document) once read mode returns, though the reader never asked for it.
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("re-applies a source-mode heading navigation when the version switches under it", async () => {
+    const body = "# Hello\n\nParagraph\n\n## Exact destination\nBody\n";
+    const { bridgeMock } = makeEngineBridge(body);
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const headingTarget = { anchor: "exact-destination", nonce: 3 };
+    let toggleSource: (() => void) | null = null;
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    await toggleSourceOnce(() => toggleSource);
+    const source = await findSourceEditor();
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+        headingTarget={headingTarget}
+      />,
+    );
+    const expected = lineSpanInText(source.value, 5);
+    await waitFor(() => {
+      expect(source.selectionStart).toBe(expected.start);
+      expect(source.selectionEnd).toBe(expected.end);
+    });
+    expect(source.value.slice(source.selectionStart, source.selectionEnd)).toBe(
+      "## Exact destination",
+    );
+
+    source.setSelectionRange(0, 0);
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+        headingTarget={headingTarget}
+      />,
+    );
+
+    const reopenedSource = await waitFor(() => {
+      const editor = screen.getByTestId("markdown-editor");
+      if (!(editor instanceof HTMLTextAreaElement) || editor === source) {
+        throw new Error("The source editor has not reopened for the new version.");
+      }
+      return editor;
+    });
+    await waitFor(() => {
+      expect(reopenedSource.selectionStart).toBe(expected.start);
+      expect(reopenedSource.selectionEnd).toBe(expected.end);
+    });
+    expect(
+      reopenedSource.value.slice(
+        reopenedSource.selectionStart,
+        reopenedSource.selectionEnd,
+      ),
+    ).toBe("## Exact destination");
+
+    reopenedSource.setSelectionRange(0, 0);
+    // A tab return clears the place without changing the version.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(reopenedSource.selectionStart).toBe(0);
+    expect(reopenedSource.selectionEnd).toBe(0);
+  });
+
+  it("replays a source-mode heading against the version-switch reread", async () => {
+    const firstBody = "# Hello\n\nParagraph\n\n## Exact destination\nBody\n";
+    const secondBody = [
+      "# Hello",
+      "",
+      "## Inserted heading",
+      "Inserted paragraph.",
+      "",
+      "Paragraph",
+      "",
+      "## Exact destination",
+      "Body",
+      "",
+    ].join("\n");
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const headingTarget = { anchor: "exact-destination", nonce: 5 };
+    let toggleSource: (() => void) | null = null;
+
+    const sourceToggle = (toggle: (() => void) | null) => {
+      toggleSource = toggle;
+    };
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    await toggleSourceOnce(() => toggleSource);
+    const source = await findSourceEditor();
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+        headingTarget={headingTarget}
+      />,
+    );
+    const firstExpected = lineSpanInText(firstBody, 5);
+    await waitFor(() => {
+      expect(source.selectionStart).toBe(firstExpected.start);
+      expect(source.selectionEnd).toBe(firstExpected.end);
+    });
+
+    source.setSelectionRange(0, 0);
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerSourceToggle={sourceToggle}
+        headingTarget={headingTarget}
+      />,
+    );
+
+    await waitFor(() => expect(reads).toBe(2));
+    const reopenedSource = await waitFor(() => {
+      const editor = screen.getByTestId("markdown-editor");
+      if (!(editor instanceof HTMLTextAreaElement) || editor === source) {
+        throw new Error("The source editor has not reopened for the new version.");
+      }
+      return editor;
+    });
+    const secondExpected = lineSpanInText(secondBody, 8);
+    await waitFor(() => {
+      expect(reopenedSource.selectionStart).toBe(secondExpected.start);
+      expect(reopenedSource.selectionEnd).toBe(secondExpected.end);
+    });
+    expect(
+      reopenedSource.value.slice(
+        reopenedSource.selectionStart,
+        reopenedSource.selectionEnd,
+      ),
+    ).toBe("## Exact destination");
+  });
+
+  it("does not replay a source heading that an active search jump suppressed", async () => {
+    const firstBody = "# Hello\n\nParagraph\n\n## Exact destination\nBody\n";
+    const secondBody = [
+      "# Hello",
+      "",
+      "## Inserted heading",
+      "Inserted paragraph.",
+      "",
+      "Paragraph",
+      "",
+      "## Exact destination",
+      "Body",
+      "",
+    ].join("\n");
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const headingTarget = { anchor: "exact-destination", nonce: 8 };
+    let toggleSource: (() => void) | null = null;
+    const sourceToggle = (toggle: (() => void) | null) => {
+      toggleSource = toggle;
+    };
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    await toggleSourceOnce(() => toggleSource);
+    const source = await findSourceEditor();
+    const setSelectionRange = vi.spyOn(
+      HTMLTextAreaElement.prototype,
+      "setSelectionRange",
+    );
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+        scrollTarget={{ path: "a.md", line: 1, nonce: 1 }}
+        headingTarget={headingTarget}
+        onScrollConsumed={vi.fn()}
+      />,
+    );
+    const searchExpected = lineSpanInText(firstBody, 1);
+    await waitFor(() => {
+      expect(source.selectionStart).toBe(searchExpected.start);
+      expect(source.selectionEnd).toBe(searchExpected.end);
+    });
+    setSelectionRange.mockClear();
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+        headingTarget={headingTarget}
+      />,
+    );
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerSourceToggle={sourceToggle}
+        headingTarget={headingTarget}
+      />,
+    );
+
+    await waitFor(() => expect(reads).toBe(2));
+    const reopenedSource = await waitFor(() => {
+      const editor = screen.getByTestId("markdown-editor");
+      if (
+        !(editor instanceof HTMLTextAreaElement) ||
+        editor === source ||
+        editor.value !== secondBody
+      ) {
+        throw new Error("The source editor has not reopened for the new version.");
+      }
+      return editor;
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    // MUTATION: advance appliedHeadingNonce for the suppressed target. The
+    // switch then replays a destination that never landed for the reader.
+    const replaySelections = setSelectionRange.mock.calls.length;
+    setSelectionRange.mockRestore();
+    expect(replaySelections).toBe(0);
+  });
+
+  it("blocks the source autosave for the full switch reread and sets the draft aside without a heading target", async () => {
+    const firstBody = "# Hello\n\nParagraph\n";
+    const secondBody = "# Hello from the new version\n\nReplacement paragraph.\n";
+    const typedBody = `${firstBody}\nTyped while the reread was pending.`;
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let releaseSecondRead!: () => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondRead = resolve;
+        });
+      }
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    let toggleSource: (() => void) | null = null;
+    const sourceToggle = (toggle: (() => void) | null) => {
+      toggleSource = toggle;
+    };
+    const user = userEvent.setup();
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    await toggleSourceOnce(() => toggleSource);
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerSourceToggle={sourceToggle}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    const pendingSource = await findSourceEditor();
+    expect(pendingSource.value).toBe(firstBody);
+    fireEvent.change(pendingSource, { target: { value: typedBody } });
+    expect(pendingSource.value).toBe(typedBody);
+
+    // Let the armed autosave attempt its write while the independent disk
+    // reread still holds the switch window open.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 900));
+    });
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseSecondRead();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
+      ).toBe(secondBody),
+    );
+    const copies = await screen.findAllByTestId("orphaned-draft-copy");
+    await user.click(copies[copies.length - 1]!);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(typedBody),
+    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("keeps a rejected switch reread write-blocked and recovers the unmounted draft", async () => {
+    const firstBody = "# Old version\n\nOld paragraph.\n";
+    const typedBody = `${firstBody}\nTyped after the reopen settled.`;
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let rejectSecondRead!: (reason?: unknown) => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 1) {
+        return { text: firstBody, truncated: false };
+      }
+      return await new Promise<never>((_resolve, reject) => {
+        rejectSecondRead = reject;
+      });
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    let toggleSource: (() => void) | null = null;
+    const sourceToggle = (toggle: (() => void) | null) => {
+      toggleSource = toggle;
+    };
+    const user = userEvent.setup();
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    await toggleSourceOnce(() => toggleSource);
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerSourceToggle={sourceToggle}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    const pendingSource = await findSourceEditor();
+    fireEvent.change(pendingSource, { target: { value: typedBody } });
+    expect(pendingSource.value).toBe(typedBody);
+
+    await act(async () => {
+      rejectSecondRead(new Error("read failed"));
+      await Promise.resolve();
+    });
+    await screen.findByText("Couldn't read this file.");
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    const copies = await screen.findAllByTestId("orphaned-draft-copy");
+    await user.click(copies[copies.length - 1]!);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(typedBody),
+    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  // The recovery half of the rule above: a rejected reread must not refuse
+  // writes FOREVER, only until a later reread of that same switch succeeds.
+  // Without this pin, an inverted or dropped `!error` guard (refusing on
+  // every answer instead of clearing only on success) passes every other
+  // test in this file, because none of them retry PAST a failure.
+  it("lifts the switch refusal once a retried reread succeeds", async () => {
+    const firstBody = "# Old version\n\nOld paragraph.\n";
+    const thirdBody = "# New version\n\nReplacement paragraph.\n";
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 1) return { text: firstBody, truncated: false };
+      if (reads === 2) throw new Error("read failed");
+      return { text: thirdBody, truncated: false };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("view-markdown");
+
+    // The switch: read 2 rejects.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+      />,
+    );
+    await screen.findByText("Couldn't read this file.");
+    expect(reads).toBe(2);
+
+    // The retry: read 3, for the SAME switch, succeeds.
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={2}
+        engineVersionKey={1}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(3));
+    const source = await screen.findByText("New version");
+    expect(source).toBeTruthy();
+
+    // A NEW edit now, on the verified version, must reach disk — the
+    // refusal must have lifted, not stayed on because a `!error` guard
+    // regressed to refusing on every answer.
+    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    await userEvent.setup().type(title, "!");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalled(),
+      { timeout: 5_000 },
+    );
+  });
+
+  it("PROBE-STALE-FLUSH: the registered draft flush must refuse the switch window too", async () => {
+    const firstBody = "# Hello\n\nParagraph\n";
+    const secondBody = "# Hello from the new version\n\nReplacement paragraph.\n";
+    const typedBody = `${firstBody}\nTyped while the reread was pending.`;
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let releaseSecondRead!: () => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondRead = resolve;
+        });
+      }
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    let toggleSource: (() => void) | null = null;
+    const sourceToggle = (toggle: (() => void) | null) => {
+      toggleSource = toggle;
+    };
+    // STABLE identity, like the shell's useCallback([], ...) registrar: the
+    // flush registers once, against the MOUNT render's closures.
+    let draftFlush: (() => Promise<void>) | null = null;
+    const registerFlush = (flush: (() => Promise<void>) | null) => {
+      draftFlush = flush;
+    };
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+        registerDraftFlush={registerFlush}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    await toggleSourceOnce(() => toggleSource);
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerSourceToggle={sourceToggle}
+        registerDraftFlush={registerFlush}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    const pendingSource = await findSourceEditor();
+    expect(pendingSource.value).toBe(firstBody);
+    fireEvent.change(pendingSource, { target: { value: typedBody } });
+
+    // The shell awaits this seam before an explorer op — which a user can
+    // trigger while the switch reread is still pending. The window rule says
+    // no disk write until the reread answers.
+    expect(draftFlush).not.toBeNull();
+    await act(async () => {
+      await draftFlush!();
+    });
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseSecondRead();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
+      ).toBe(secondBody),
+    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  // The successful reread's commit and the resync effect that applies it are
+  // two separate React steps (a render, then a passive effect) — RTL's act()
+  // settles both before test code can observe a gap between them, so this
+  // cannot be pinned by racing the scheduler (verified: every interleaving
+  // attempted here stayed green on the unfixed ref). It intercepts the fire
+  // effect's own resync entry point instead: a write fired FROM INSIDE that
+  // interception is synchronous with the effect body, landing exactly between
+  // "the draft is captured" and "the refusal ref is cleared" — the one
+  // ordering the fix promises never to invert.
+  it("keeps the write path refused for the whole resync step, not just until the reread lands", async () => {
+    const firstBody = "# Hello\n\nParagraph\n";
+    const secondBody = "# Hello from the new version\n\nReplacement paragraph.\n";
+    const typedBody = `${firstBody}\nTyped while the reread was pending.`;
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let releaseSecondRead!: () => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondRead = resolve;
+        });
+      }
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    let toggleSource: (() => void) | null = null;
+    const sourceToggle = (toggle: (() => void) | null) => {
+      toggleSource = toggle;
+    };
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    await toggleSourceOnce(() => toggleSource);
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerSourceToggle={sourceToggle}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    const pendingSource = await findSourceEditor();
+    fireEvent.change(pendingSource, { target: { value: typedBody } });
+
+    const realCapture = orphanedDraftsModule.captureOrphanedDraft;
+    let interceptionRan = false;
+    let writeCallsInsideResync = 0;
+    const captureSpy = vi
+      .spyOn(orphanedDraftsModule, "captureOrphanedDraft")
+      .mockImplementation((...args) => {
+        // Synchronous, mid-effect: the fire effect just captured the pending
+        // draft and has not yet cleared the shared refusal ref. A write fired
+        // right here — before this function even returns — must still land
+        // nothing.
+        interceptionRan = true;
+        const editor = screen.getByTestId("markdown-editor");
+        fireEvent.keyDown(editor, { key: "s", ctrlKey: true });
+        writeCallsInsideResync = bridgeMock.writeWorkspaceText.mock.calls.length;
+        return realCapture(...args);
+      });
+
+    await act(async () => {
+      releaseSecondRead();
+      await Promise.resolve();
+    });
+
+    captureSpy.mockRestore();
+
+    // MUTATION: clear the shared ref before applying the resync (or clear it
+    // in the parent as soon as the reread succeeds) instead of after — the
+    // interception above then observes an EARLY write and this assertion
+    // catches it.
+    expect(interceptionRan).toBe(true);
+    expect(writeCallsInsideResync).toBe(0);
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
+      ).toBe(secondBody),
+    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("resyncs WYSIWYG after the switch reread and preserves its pending edit", async () => {
+    const firstBody = "# Old version\n\nOld paragraph.";
+    const secondBody = "# New version\n\nReplacement paragraph.";
+    const typedBody = "# Pending switch edit. Old version\n\nOld paragraph.";
+    const freshBody = "# Fresh edit. New version\n\nReplacement paragraph.";
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let releaseSecondRead!: () => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondRead = resolve;
+        });
+      }
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const user = userEvent.setup();
+
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    const firstEditor = await screen.findByTestId("markdown-editor");
+    expect(firstEditor).not.toBeInstanceOf(HTMLTextAreaElement);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    const pendingEditor = await screen.findByTestId("markdown-editor");
+    expect(pendingEditor).not.toBeInstanceOf(HTMLTextAreaElement);
+    await user.type(pendingEditor, "Pending switch edit. ");
+
+    // The pending WYSIWYG autosave must answer to the same switch window as
+    // the source timer and both long-lived flush callers.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 900));
+    });
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseSecondRead();
+      await Promise.resolve();
+    });
+    await screen.findByText("Replacement paragraph.");
+
+    const copies = await screen.findAllByTestId("orphaned-draft-copy");
+    await user.click(copies[copies.length - 1]!);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(typedBody),
+    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    const resyncedEditor = screen.getByTestId("markdown-editor");
+    expect(resyncedEditor).not.toBe(pendingEditor);
+    await user.type(resyncedEditor, "Fresh edit. ");
+    await waitFor(
+      () =>
+        expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+          workspaceId: "ws-1",
+          relativePath: "a.md",
+          text: freshBody,
+        }),
+      { timeout: 5_000 },
+    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "a.md",
+      text: typedBody,
+    });
+  });
+
+  it("resyncs an editable mode entered while the switch reread is pending", async () => {
+    const firstBody = `# Old version\n\n${"x".repeat(64 * 1024)}`;
+    const secondBody = "# New version\n\nReplacement paragraph.\n";
+    const typedBody = `${firstBody}\nTyped while the reread was pending.`;
+    expect(firstBody.length).toBeGreaterThan(64 * 1024);
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let releaseSecondRead!: () => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondRead = resolve;
+        });
+      }
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const user = userEvent.setup();
+
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("view-markdown");
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    const editToggle = screen.getByTestId("markdown-edit-toggle");
+    expect(editToggle.textContent).toBe("Edit");
+    await user.click(editToggle);
+    await waitFor(() => expect(editToggle.textContent).toBe("Source"));
+    await user.click(editToggle);
+    const pendingSource = await findSourceEditor();
+    fireEvent.change(pendingSource, { target: { value: typedBody } });
+    expect(pendingSource.value).toBe(typedBody);
+
+    await act(async () => {
+      releaseSecondRead();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
+      ).toBe(secondBody),
+    );
+
+    const copies = await screen.findAllByTestId("orphaned-draft-copy");
+    await user.click(copies[copies.length - 1]!);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(typedBody),
+    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("sets aside a source edit typed after the engine reopen settles but before the switch reread", async () => {
+    const firstBody = "# Hello\n\nParagraph\n\n## Exact destination\nBody\n";
+    const secondBody = [
+      "# Hello",
+      "",
+      "## Inserted heading",
+      "Inserted paragraph.",
+      "",
+      "Paragraph",
+      "",
+      "## Exact destination",
+      "Body",
+      "",
+    ].join("\n");
+    const typedBody = `${firstBody}\nTyped while the reread was pending.`;
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let releaseSecondRead!: () => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondRead = resolve;
+        });
+      }
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const headingTarget = { anchor: "exact-destination", nonce: 6 };
+    let toggleSource: (() => void) | null = null;
+    const sourceToggle = (toggle: (() => void) | null) => {
+      toggleSource = toggle;
+    };
+    const user = userEvent.setup();
+
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    await toggleSourceOnce(() => toggleSource);
+    const source = await findSourceEditor();
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={sourceToggle}
+        headingTarget={headingTarget}
+      />,
+    );
+    const firstExpected = lineSpanInText(firstBody, 5);
+    await waitFor(() => {
+      expect(source.selectionStart).toBe(firstExpected.start);
+      expect(source.selectionEnd).toBe(firstExpected.end);
+    });
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerSourceToggle={sourceToggle}
+        headingTarget={headingTarget}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    const pendingSource = await findSourceEditor();
+    expect(pendingSource.value).toBe(firstBody);
+    expect(pendingSource.readOnly).toBe(false);
+    fireEvent.change(pendingSource, { target: { value: typedBody } });
+    expect(pendingSource.value).toBe(typedBody);
+
+    await act(async () => {
+      releaseSecondRead();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
+      ).toBe(secondBody),
+    );
+
+    // MUTATION: reset the source draft without capturing it. The reread then
+    // erases the keystroke with no recovery entry.
+    const copies = await screen.findAllByTestId("orphaned-draft-copy");
+    await user.click(copies[copies.length - 1]!);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(typedBody),
+    );
+
+    // The capture also cancels the armed autosave. It must not write either
+    // the set-aside text or the resynced document after the reread lands.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
   it("retires the jump after one landing, so a later re-read cannot replay it", async () => {
     const scrollIntoView = stubScrollSpy("scrollIntoView");
     const { bridgeMock } = makeEngineBridge(SEARCH_DOC);
@@ -2990,6 +4364,7 @@ describe("markdown document opening state", () => {
         path="a.md"
         engineVersionKey={2}
         {...extraProps}
+        refreshKey={(extraProps.refreshKey ?? 0) + 1}
       />,
     );
     expect(screen.getByTestId("markdown-open-state").textContent).toBe(
@@ -3685,7 +5060,12 @@ describe("markdown document opening state", () => {
 
     // The version switch reopens the same content.
     view.rerender(
-      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={2} />,
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={2}
+      />,
     );
     await screen.findByTestId("orphaned-draft-notice");
     bridge.answerNotEngineBacked();

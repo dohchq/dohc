@@ -137,6 +137,159 @@ describe("a match deep in a long block lands the matched line", () => {
     expect(landing).not.toContain("Item one");
   });
 
+  it("lands a fenced-code line nested under a later list item", () => {
+    const codeLines = items(300, (n) => `const value${n} = ${n};`);
+    const body = [
+      "1. Item one",
+      "2. Item two",
+      "   ```ts",
+      ...codeLines.map((line) => `   ${line}`),
+      "   ```",
+      "3. Item three",
+    ].join("\n");
+
+    const targetLine = editorDoc(body)
+      .child(0)
+      .child(1)
+      .child(1)
+      .textContent.split("\n")[249];
+    // MUTATION: number the wrong fence line -> this fixture no longer pins line 250.
+    expect(targetLine?.trimStart()).toBe("const value250 = 250;");
+    // MUTATION: keep the item-wide range -> the reveal starts at "Item two".
+    expect(revealed(body, 253)).toBe(targetLine);
+  });
+
+  it("lands a fenced-code line in the first item of a nested list", () => {
+    const codeLines = items(200, (n) => `const nested${n} = ${n};`);
+    const body = [
+      "1. Outer one",
+      "2. Outer two",
+      "   - Nested one",
+      "     ```ts",
+      ...codeLines.map((line) => `     ${line}`),
+      "     ```",
+      "   - Nested two",
+      "3. Outer three",
+    ].join("\n");
+    const outerList = editorDoc(body).child(0);
+    const outerItem = outerList.child(1);
+    const nestedList = outerItem.child(1);
+    const nestedItem = nestedList.child(0);
+    const codeBlock = nestedItem.child(1);
+
+    // Prove the exact descent: later outer item -> nested list -> first nested
+    // item -> deep fence. The first nested item is new ground at this depth.
+    expect(outerList.type.name).toBe("orderedList");
+    expect(outerList.childCount).toBe(3);
+    expect(outerItem.childCount).toBe(2);
+    expect(outerItem.child(0).type.name).toBe("paragraph");
+    expect(nestedList.type.name).toBe("bulletList");
+    expect(nestedList.childCount).toBe(2);
+    expect(nestedItem.childCount).toBe(2);
+    expect(nestedItem.child(0).type.name).toBe("paragraph");
+    expect(codeBlock.type.name).toBe("codeBlock");
+    const targetLine = codeBlock.textContent.split("\n")[149];
+    expect(targetLine?.trimStart()).toBe("const nested150 = 150;");
+
+    // MUTATION: apply the first-item guard at every recursion depth. The
+    // reveal then falls back to the whole "Outer two" item.
+    expect(revealed(body, 154)).toBe(targetLine);
+  });
+
+  it("lands a fenced-code line when a later list item has no text of its own", () => {
+    const codeLines = items(300, (n) => `const value${n} = ${n};`);
+    const body = [
+      "- [ ] Item one",
+      "- [ ] ",
+      "  ```ts",
+      ...codeLines.map((line) => `  ${line}`),
+      "  ```",
+      "- Item three",
+    ].join("\n");
+    const doc = editorDoc(body);
+    const target = blockTargetForLine(body, 253);
+    const item = doc.child(0).child(1);
+
+    expect(target.index).toBe(0);
+    expect(target.match?.offset).toBe(252);
+    expect(target.match?.lines[0]).toBe("- [ ] Item one");
+    expect(doc.child(0).childCount).toBe(2);
+    expect(item.childCount).toBe(2);
+    expect(item.child(0).type.name).toBe("paragraph");
+    expect(item.child(0).textContent).toBe("");
+    expect(item.child(1).type.name).toBe("codeBlock");
+    const targetLine = item.child(1).textContent.split("\n")[249];
+    expect(targetLine?.trimStart()).toBe("const value250 = 250;");
+    // MUTATION: require nested block index 1 even when the item's own source
+    // line is empty. The reveal then keeps the whole item range.
+    expect(revealed(body, 253)).toBe(targetLine);
+  });
+
+  it("lands a nested fenced-code line when a tab crosses the list indent", () => {
+    const body = `- Item one
+- x
+	\`\`\`ts
+	const target = true;
+	\`\`\`
+- Item three`;
+    const doc = editorDoc(body);
+    const item = doc.child(0).child(1);
+
+    expect(doc.child(0).type.name).toBe("bulletList");
+    expect(item.childCount).toBe(2);
+    expect(item.child(0).type.name).toBe("paragraph");
+    expect(item.child(0).textContent).toBe("x");
+    expect(item.child(1).type.name).toBe("codeBlock");
+    expect(item.child(1).textContent).toBe("const target = true;");
+    expect(revealed(body, 4)).toBe("const target = true;");
+  });
+
+  it("keeps the item range when a nested-container shape is not provable", () => {
+    const body = [
+      "1. Item one",
+      "2. Item two",
+      "",
+      "   Before fence.",
+      "",
+      "   ```ts",
+      "   const target = true;",
+      "   ```",
+      "",
+      "   After fence.",
+      "3. Item three",
+    ].join("\n");
+    const item = editorDoc(body).child(0).child(1);
+    const itemText = item.textBetween(0, item.content.size, "\n");
+
+    // MUTATION: accept an item with extra children -> this shape refines anyway.
+    expect(item.childCount).toBe(4);
+    // MUTATION: narrow an unproved shape -> this loses the item-wide fallback.
+    expect(revealed(body, 7)).toBe(itemText);
+  });
+
+  it("keeps the item range when a valid nested fence has trailing item content", () => {
+    const body = [
+      "1. Item one",
+      "2. Item two",
+      "   ```ts",
+      "   const nested = true;",
+      "   ```",
+      "",
+      "   Trailing item content.",
+      "3. Item three",
+    ].join("\n");
+    const item = editorDoc(body).child(0).child(1);
+    const itemText = item.textBetween(0, item.content.size, "\n");
+
+    expect(item.childCount).toBe(3);
+    expect(item.child(1).type.name).toBe("codeBlock");
+    expect(item.child(2).type.name).toBe("paragraph");
+    // MUTATION: loosen `childCount !== 2` to `< 2` -> the fence line narrows
+    // even though the trailing paragraph makes the item shape unprovable.
+    expect(revealed(body, 4)).toBe(itemText);
+    expect(revealed(body, 7)).toBe(itemText);
+  });
+
   // 1 "```ts"  2.. 300 code lines  302 "```"  303 ""  304 "After"
   const LONG_FENCE = [
     "```ts",
