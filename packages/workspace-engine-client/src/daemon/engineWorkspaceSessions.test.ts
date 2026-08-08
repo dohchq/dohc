@@ -28,7 +28,6 @@ import {
   EngineWorkspaceSessions,
   EngineWorkspaceShuttingDownError,
   isEngineWorkspaceOpenRefusedError,
-  TRANSPORT_REBIND_MAX_BACKOFF_MS,
   WORKSPACE_OPEN_DEADLINE_MS,
 } from "./engineWorkspaceSessions";
 
@@ -740,9 +739,10 @@ describe("EngineWorkspaceSessions", () => {
     expect(clientLookups).toBeGreaterThanOrEqual(3);
   });
 
-  // The pacing tests above pin the GROWTH of the transport backoff. This pins
-  // its CEILING, which nothing else did: the delay could double without limit
-  // and the whole suite stayed green (#678).
+  // The pacing tests above pin the GROWTH of the transport backoff; nothing
+  // pinned its ceiling, so the delay could double without limit and the whole
+  // suite stayed green (#678). Three capped delays distinguish a ceiling from
+  // a slower uncapped curve, and eight attempts is what it takes to see them.
   it("stops doubling the transport backoff at its ceiling", async () => {
     const workspace = await tempWorkspace("workspace-backoff-ceiling");
     const client = new MockClient("handle-backoff-ceiling");
@@ -750,9 +750,6 @@ describe("EngineWorkspaceSessions", () => {
     const sessions = new EngineWorkspaceSessions(
       { currentClient: () => client },
       {
-        // Eight attempts is what it takes to watch the ceiling HOLD. The
-        // ladder first reaches it on the fifth rung, so a shorter run shows
-        // one clamped delay and cannot tell a ceiling from a slower curve.
         transportRebindAttempts: 8,
         sleep: async (delayMs) => {
           delays.push(delayMs);
@@ -770,17 +767,11 @@ describe("EngineWorkspaceSessions", () => {
       ),
     ).rejects.toMatchObject({ code: "transport-error" });
 
-    // MUTATION: raise the clamp to Number.MAX_SAFE_INTEGER -> the tail reads
-    // 1600, 3200, 6400 and this fails. Nothing else in the suite notices.
-    expect(delays).toEqual([
-      100,
-      200,
-      400,
-      800,
-      TRANSPORT_REBIND_MAX_BACKOFF_MS,
-      TRANSPORT_REBIND_MAX_BACKOFF_MS,
-      TRANSPORT_REBIND_MAX_BACKOFF_MS,
-    ]);
+    // Literals, not the exported constant: an expectation that reads the value
+    // it pins moves with it, and ships green for any ceiling at all.
+    // MUTATION: raise the clamp -> the tail reads 1600, 3200, 6400 and this
+    // fails. Nothing else in the suite notices.
+    expect(delays).toEqual([100, 200, 400, 800, 1_000, 1_000, 1_000]);
   });
 
   // #564: the retry deadline bounds how long one run may keep WAITING on
