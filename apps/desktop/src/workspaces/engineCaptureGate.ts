@@ -15,13 +15,14 @@ import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daem
 // moments and no legacy .dohc/history change set is written.
 //
 // WHEN the flag is read: on every fresh entry to this gate. A RETAINED session
-// gets exactly one — `openWorkspaceActivity` retains what it opens,
-// `workspaceActivity.open` skips a workspace it already watches, and nothing
-// closes a retained entry — so every window surface sees one decision per app
-// session, and only a restart re-reads the flag (#687: that is why their copy
-// says restart). Transient entries re-read without one: a tray scoped sync
-// calls this gate per scan, and a released dispatch entry rebuilds its capture
-// on the next attempt (see `EngineOffRecovery` below).
+// gets exactly one — `openWorkspaceActivity` retains what it opens and
+// `workspaceActivity.open` skips a workspace it already watches — so a window
+// that opened its workspace sees one decision per app session, and only a
+// restart re-reads the flag (#687: that is why their copy says restart).
+// Three paths re-enter without one: a tray scoped sync calls this gate per
+// scan, a released dispatch entry rebuilds its capture on the next attempt
+// (see `EngineOffRecovery` below), and a failed join closes the entry it just
+// retained, so the user's retry re-reads.
 //
 // The daemon is REQUIRED, not optional: `startRustEngineDaemon` quits the app
 // when it cannot start, before any window exists, so no running workspace can

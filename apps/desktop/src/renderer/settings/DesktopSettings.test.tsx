@@ -507,12 +507,12 @@ describe("DesktopSettings", () => {
     expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
   });
 
-  // #687 on this surface: the note's gate is the RENDERER's live settings
-  // value, so turning the engine on in Advanced hides the note and enables
-  // Test runner in the same session — but main built no capture for this
-  // workspace and cannot until a restart, so the click can only fail. The
-  // note owes the restart, like every other surface that names this cause.
-  it("tells the user to restart, not just to turn the engine on", async () => {
+  // #687 on this surface. The note's gate is the RENDERER's live settings
+  // value, but the recovery depends on main's open-time decision, and the two
+  // off states differ. Opened with the engine OFF: main built no recorder and
+  // cannot until a restart, so turning the setting on hides the note and
+  // enables Test runner over a click that can only fail.
+  it("tells the user to restart when this session has no recorder", async () => {
     bridge.getWorkspaceSettings.mockResolvedValueOnce({
       settings: {
         ...DEFAULT_WORKSPACE_SETTINGS,
@@ -525,6 +525,7 @@ describe("DesktopSettings", () => {
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
+        sessionRecorderOn={false}
         onClose={() => {}}
       />,
     );
@@ -535,6 +536,35 @@ describe("DesktopSettings", () => {
         "Turn it on in Advanced. Then restart dohc to test the runner.",
       ),
     );
+  });
+
+  // The other off state (#687, codex round 5): the workspace opened with the
+  // engine ON and the user switched it off here. Main's recorder is still
+  // live, so switching back on makes Test runner work at once. Prescribing a
+  // restart would send the user to relaunch the app for nothing.
+  it("asks for no restart when this session already has a recorder", async () => {
+    bridge.getWorkspaceSettings.mockResolvedValueOnce({
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: { workspaceEngineAlpha: false },
+      },
+      source: "default" as const,
+    });
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        sessionRecorderOn
+        onClose={() => {}}
+      />,
+    );
+
+    const note = await screen.findByTestId("runner-self-test-engine-note");
+    await waitFor(() =>
+      expect(note.textContent).toContain("Turn it on in Advanced to test the runner."),
+    );
+    expect(note.textContent).not.toContain("restart");
   });
 
   it("surfaces a failed runner self-test without enabling dispatch", async () => {

@@ -4383,6 +4383,15 @@ export function DesktopWorkspaceShell(props: {
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
             sharedView={isShareView}
+            // Main's own decision, not the renderer's settings read (#542):
+            // only main knows whether a recorder exists for this session, and
+            // a failed capture build is as recorder-less as the opt-out.
+            sessionRecorderOn={
+              syncStatus
+                ? !syncStatus.historyRecordingOff &&
+                  !syncStatus.historyRecordingUnavailable
+                : undefined
+            }
             initialSection={settingsSection}
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}

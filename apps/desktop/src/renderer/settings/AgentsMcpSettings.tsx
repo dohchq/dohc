@@ -36,6 +36,7 @@ export function AgentsMcpSettings(props: {
   onPreferredNameChange: (preferredName: string | undefined) => Promise<void>;
   runner: RunnerSettings;
   engineEnabled: boolean;
+  sessionRecorderOn: boolean | undefined;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
   onAgentActiveChange?: (update: {
     active: boolean;
@@ -54,6 +55,7 @@ export function AgentsMcpSettings(props: {
     onPreferredNameChange,
     runner,
     engineEnabled,
+    sessionRecorderOn,
     onRunnerChange,
     onAgentActiveChange,
   } = props;
@@ -343,6 +345,7 @@ export function AgentsMcpSettings(props: {
         workspaceId={workspaceId}
         runner={runner}
         engineEnabled={engineEnabled}
+        sessionRecorderOn={sessionRecorderOn}
         onRunnerChange={onRunnerChange}
       />
 

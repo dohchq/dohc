@@ -40,9 +40,17 @@ export function RunnerSettingsCard(props: {
   // The self-test spawns a runner that writes a chat thread. An opted-out
   // workspace records nothing, so the main process refuses it there.
   engineEnabled: boolean;
+  // Whether main built a recorder for this workspace in THIS app session
+  // (#687). Undefined until its status arrives. The note below needs it
+  // because the two off states have different recoveries: a workspace opened
+  // with the engine off gets its recorder only from a restart, while one
+  // opened with the engine on still holds a live recorder the user can use
+  // the moment they switch the setting back on.
+  sessionRecorderOn: boolean | undefined;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
 }) {
-  const { workspaceId, runner, engineEnabled, onRunnerChange } = props;
+  const { workspaceId, runner, engineEnabled, sessionRecorderOn, onRunnerChange } =
+    props;
   const [commandDraft, setCommandDraft] = useState(runner.command);
   const [timeoutDraft, setTimeoutDraft] = useState(String(runner.timeoutMinutes));
   const [selfTest, setSelfTest] = useState<SelfTestState>({ status: "idle" });
@@ -262,8 +270,10 @@ export function RunnerSettingsCard(props: {
               data-testid="runner-self-test-engine-note"
               className="m-0 mt-1 text-[10px] leading-relaxed text-subtle"
             >
-              The workspace engine is off, so there is no chat to test. Turn it on
-              in Advanced. Then restart dohc to test the runner.
+              The workspace engine is off, so there is no chat to test.{" "}
+              {sessionRecorderOn
+                ? "Turn it on in Advanced to test the runner."
+                : "Turn it on in Advanced. Then restart dohc to test the runner."}
             </p>
           )}
         </div>
