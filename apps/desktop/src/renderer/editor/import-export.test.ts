@@ -804,3 +804,20 @@ describe('desktop editor markdown round-trip', () => {
     expect(twice).toBe(once)
   })
 })
+
+// A bare TaskItem takes `paragraph+`, so an indented list under a checkbox is
+// schema-invalid and the Y.Doc -> ProseMirror conversion returned an EMPTY
+// document: the whole task list disappeared on open (#700).
+describe('a list nested inside a task item', () => {
+  const CASES = [
+    ['bullet', '- [ ] parent\n  - child one\n  - child two'],
+    ['ordered', '- [x] parent\n  1. first\n  2. second'],
+    ['task', '- [ ] parent\n  - [x] done child\n  - [ ] open child'],
+  ] as const
+
+  for (const [kind, markdown] of CASES) {
+    it(`survives the Y.Doc round-trip as a ${kind} list`, () => {
+      expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+    })
+  }
+})

@@ -15,7 +15,7 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
-import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
@@ -32,6 +32,7 @@ import type * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 import { caretSelectionRender, resolveCaretUser } from "../collab/caretPresence";
 import {
+  DohcTaskItem,
   dohcMarkdownExtensions,
   escapeHighlightMarkdown,
   type DohcImageStorage,
@@ -258,7 +259,7 @@ const TABLE_KIT_EXTENSION = TableKit.configure({
 const STATIC_EDITOR_EXTENSIONS = [
   ...dohcMarkdownExtensions,
   TaskList,
-  TaskItem,
+  DohcTaskItem,
   TABLE_KIT_EXTENSION,
   MARKDOWN_EXTENSION,
   findReplaceExtension,

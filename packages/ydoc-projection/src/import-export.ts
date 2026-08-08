@@ -13,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from '@tiptap/extension-table'
-import { TaskItem, TaskList } from '@tiptap/extension-list'
+import { TaskList } from '@tiptap/extension-list'
 import yaml from 'js-yaml'
 import {
   prosemirrorJSONToYXmlFragment,
@@ -21,6 +21,7 @@ import {
 } from 'y-prosemirror'
 import * as Y from 'yjs'
 import {
+  DohcTaskItem,
   dohcMarkdownExtensions,
   escapeHighlightMarkdown,
 } from './dohc-markdown-extensions.js'
@@ -77,7 +78,7 @@ const extensions: AnyExtension[] = [
   ...dohcMarkdownExtensions,
   StarterKit,
   TaskList,
-  TaskItem,
+  DohcTaskItem,
   MarkdownTable,
   TableCell,
   TableHeader,
