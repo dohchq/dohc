@@ -5798,14 +5798,26 @@ export function createWorkspaceEngineCapture(
       // payment is the one payment this move NEEDS to land.
       let closeRemovalWindow: () => void = () => undefined;
       return enqueueResult("prepare rename", async () => {
-        // A live Y.Doc session over either endpoint is vacated FIRST, ahead
-        // of the detached-debt drain below (#681 round 2). A session
-        // recovering a stood-down path (reopened, per every stand-down's
-        // own instruction) proves nothing by merely existing — only a real
-        // settle does — so it needs its chance to settle here, on the
-        // chain, before the drain reads whatever marker it left behind.
-        // Without this order, reopening and immediately renaming would
-        // refuse on a marker the session was about to clear itself.
+        // DESCENDANTS too: this method also serves directory moves, so a
+        // live session on `dir/note.md` rides a move of `dir`. Left
+        // unvacated, its daemon-armed debounced settle can fire mid-move and
+        // materialize the moved-away child path — #738, the same prefix rule
+        // the delete seam already applies to its own path.
+        const isSourceSide = (candidate: string): boolean =>
+          candidate === fromPath || candidate.startsWith(`${fromPath}/`);
+        const endpointMatch = (candidate: string): boolean =>
+          isSourceSide(candidate) ||
+          candidate === toPath ||
+          candidate.startsWith(`${toPath}/`);
+        // A live Y.Doc session over either endpoint (or, for a folder move,
+        // any child under either endpoint) is vacated FIRST, ahead of the
+        // detached-debt drain below (#681 round 2). A session recovering a
+        // stood-down path (reopened, per every stand-down's own instruction)
+        // proves nothing by merely existing — only a real settle does — so
+        // it needs its chance to settle here, on the chain, before the drain
+        // reads whatever marker it left behind. Without this order,
+        // reopening and immediately renaming would refuse on a marker the
+        // session was about to clear itself.
         //
         // WS-G2-C-2 (gate fix 3): required regardless — a live session over
         // either endpoint must be flushed + released before the file moves,
@@ -5813,7 +5825,7 @@ export function createWorkspaceEngineCapture(
         // moved-from file / orphaning the object. Vacate first (a teardown
         // failure fails the rename).
         await settleAndCloseLiveYDocSessions(
-          (p) => p === fromPath || p === toPath,
+          endpointMatch,
           "Saved latest edits before renaming",
         );
         // A DETACHED locked-write debt is another live thing a
@@ -5844,17 +5856,10 @@ export function createWorkspaceEngineCapture(
         // covering are handled elsewhere: an externally removed destination
         // clears through the watcher's own delete-cancel, and an existing
         // one is `movePath`'s refusal, not this one's.
-        // DESCENDANTS too: this method also serves directory
-        // moves, so a debt for `dir/note.md` rides a move of `dir`. Left
-        // behind, its delayed payment reopens the moved-from path and
-        // recreates the tree the user just moved away — the same prefix rule
-        // the delete seam already applies.
-        const isSourceSide = (candidate: string): boolean =>
-          candidate === fromPath || candidate.startsWith(`${fromPath}/`);
-        const endpointMatch = (candidate: string): boolean =>
-          isSourceSide(candidate) ||
-          candidate === toPath ||
-          candidate.startsWith(`${toPath}/`);
+        // DESCENDANTS too, via the same `endpointMatch` the vacate above
+        // uses: a debt for `dir/note.md` rides a move of `dir`. Left behind,
+        // its delayed payment reopens the moved-from path and recreates the
+        // tree the user just moved away.
         for (const endpoint of [...detachedLockedDebts.keys()]) {
           if (!endpointMatch(endpoint)) continue;
           const debt = detachedLockedDebts.get(endpoint);
