@@ -3111,12 +3111,26 @@ describe("the ydoc.open deadline (#616)", () => {
     adapter.dispose();
   });
 
-  // Codex P2 on #728. `markSessionReplicated` used to seed a FRESH lineage
-  // entry from an empty `declaredDoc()`, so promoting a session to
-  // replicated before it ever recorded an update durably discarded whatever
-  // the session's own document already held (a seed, or a resurrection).
-  it("markSessionReplicated seeds the lineage from the session's live content, not an empty doc", async () => {
-    const engine = seedPlaintextEngine("seeded before any edit");
+  // Codex round on #728 head 1a05775e. The `?? resurrectedDoc(session.doc)`
+  // fallback this test used to pin was unreachable: after the seedMarkdown
+  // fix, every server-side content source (a captured seed, a
+  // resurrection, a local edit, a remote update) journals a lineage before
+  // markSessionReplicated can run, so a session with no lineage entry
+  // never carries content that fallback could lose — the test's own
+  // "mutation" (an empty-doc substitution) stayed green either way.
+  // Staging unjournaled live state to reach it was declined: the client
+  // has no path that mutates a session's doc without a recordUpdate
+  // journaling it first, so that staging would certify state production
+  // cannot produce. Per the no-dead-paths rule, the fallback is deleted
+  // (see markSessionReplicated) and this test now pins the resulting
+  // contract instead: promoting an un-journaled session throws, and
+  // promoting a journaled one preserves the content already there.
+  it("markSessionReplicated requires a journaled lineage, and preserves live content once one exists", async () => {
+    // No `seedFile` call: this path has no captured head at all, so
+    // opening it derives an empty doc with no auto-seed recordUpdate
+    // (#721/#728) — the clean "nothing journaled yet" case this contract
+    // needs.
+    const engine = new YdocLoopbackEngine();
     const adapter = new YdocLiveAdapter(engine);
     const session = await adapter.openSession({
       workspace: WORKSPACE,
@@ -3124,15 +3138,20 @@ describe("the ydoc.open deadline (#616)", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    // Marked replicated BEFORE any recordUpdate/remote update: there is no
-    // lineage row yet, so this call is the one that creates it.
-    engine.markSessionReplicated(session.sessionId);
 
-    // MUTATION: seed the fresh entry's doc from `declaredDoc()` instead of
-    // the session's live content -> the replicated close below still
-    // resolves (a replicated close never refuses), but preserves an EMPTY
-    // document, and the reopen below finds nothing instead of the seeded
-    // text.
+    // No recordUpdate yet: there is no lineage row to promote.
+    expect(() => engine.markSessionReplicated(session.sessionId)).toThrow(
+      /markSessionReplicated requires a journaled lineage/,
+    );
+
+    // A recorded update journals the lineage; promoting it now preserves
+    // the content already there.
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "typed content",
+    });
+    engine.markSessionReplicated(session.sessionId);
     await expect(session.close({ settle: false })).resolves.toBeUndefined();
 
     const reopened = await adapter.openSession({
@@ -3143,7 +3162,7 @@ describe("the ydoc.open deadline (#616)", () => {
     });
     expect(reopened.lineage).toBe("existing");
     expect(reopened.doc.getText("plainText").toString()).toBe(
-      "seeded before any edit",
+      "typed content",
     );
     await reopened.close({ settle: true });
     adapter.dispose();

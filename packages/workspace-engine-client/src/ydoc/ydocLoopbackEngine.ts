@@ -338,20 +338,23 @@ export class YdocLoopbackEngine implements EngineTransport {
   // there is no wire method to reach this from a test; a replicated
   // lineage's close compacts and KEEPS the CRDT rows regardless of settle
   // state, which is what this exists to exercise.
+  //
+  // Requires an existing lineage entry: a replicated doc has durable state
+  // by definition (`claim_base_in_tx` promotes a MARKER that already
+  // exists), and every server-side content source — a captured seed, a
+  // resurrection, a local edit, a remote update — journals a lineage
+  // before a session's doc can hold anything this seam would need to
+  // preserve. A session with no lineage entry is un-modelable here, not a
+  // case to paper over with a fabricated fallback doc.
   markSessionReplicated(sessionId: string): void {
     const session = this.requireSession(sessionId);
     const key = this.lineageKeyFor(session);
-    // A fresh entry starts from the session's OWN current document, not an
-    // empty one: a session's content predates any lineage row whenever it
-    // came from a seed or a resurrection rather than a recorded update, and
-    // a replicated close never prunes — an empty seed here would durably
-    // discard that content instead of promoting it.
-    const entry = this.lineages.get(key) ?? {
-      doc: resurrectedDoc(session.doc),
-      regime: "local-only" as LineageRegime,
-      contentKind: session.contentKind,
-      lastSettledSha: null,
-    };
+    const entry = this.lineages.get(key);
+    if (!entry) {
+      throw new Error(
+        "markSessionReplicated requires a journaled lineage; record an update first.",
+      );
+    }
     entry.regime = "replicated";
     this.lineages.set(key, entry);
   }
