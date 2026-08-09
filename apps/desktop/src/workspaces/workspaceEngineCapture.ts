@@ -2522,14 +2522,46 @@ export function createWorkspaceEngineCapture(
     // to ever clear the marker it left behind (#681 round 3, codex P2).
     // `consumeExpectedEvent` is consumed here, once, so the "delete"
     // handling below reads the same verdict instead of re-asking it.
+    //
+    // Cleanup runs whether the delete is EXTERNAL or EXPECTED (#681 round 4,
+    // codex P2): an engine-materialized removal — a version switch whose
+    // target omits the file, a relay fast-forward delete — is registered as
+    // an expected event so it never re-journals as a new moment, but it is
+    // exactly as terminal for an abandoned write as an external delete. The
+    // path is gone either way; only the REASON differs, and only the trace
+    // needs to say which.
+    const isDeleteEvent = event.operation === "delete";
     const isExternalDelete =
-      event.operation === "delete" &&
-      !consumeExpectedEvent("delete", event.path);
-    if (isExternalDelete) {
+      isDeleteEvent && !consumeExpectedEvent("delete", event.path);
+    if (isDeleteEvent) {
       cancelSuspendedDebts(
         suspendDetachedDebts((path) => path === event.path),
-        `an external delete of ${event.path}`,
+        isExternalDelete
+          ? `an external delete of ${event.path}`
+          : `dohc's own removal of ${event.path}`,
       );
+    }
+    // A write-classified event can ALSO resolve to absence once read — the
+    // watcher's own classification lagging disk (captureOnePath's "absent"
+    // branch, below). Same cleanup obligation, same reason it cannot wait
+    // on the gates below (#681 round 4, O4): the racy stat-then-read door
+    // the round-3 hoist missed, because this branch's disk read only ran
+    // AFTER the secret/live-session/policy gates. Read disk ONCE, here,
+    // unconditionally for a non-delete event, and reuse the result below
+    // instead of reading twice.
+    let diskState: Awaited<ReturnType<typeof readDiskTextState>> | undefined;
+    let isExternalAbsence = false;
+    if (!isDeleteEvent) {
+      diskState = await readDiskTextState(rootPath, event.path);
+      if (diskState.kind === "absent") {
+        isExternalAbsence = !consumeExpectedEvent("delete", event.path);
+        cancelSuspendedDebts(
+          suspendDetachedDebts((path) => path === event.path),
+          isExternalAbsence
+            ? `an external delete of ${event.path}`
+            : `dohc's own removal of ${event.path}`,
+        );
+      }
     }
     // The secret floor outranks policy: secret paths route to the encrypted
     // driver and never reach the plaintext text store (which would refuse
@@ -2581,16 +2613,17 @@ export function createWorkspaceEngineCapture(
       await deleteIfTracked(engine, versionId, event.path, metadata, author);
       return;
     }
-    const disk = await readDiskTextState(rootPath, event.path);
+    // Computed unconditionally above, before the gates this event just
+    // passed — not re-read here (a second read could TOCTOU-disagree with
+    // the first, and reading twice per event is waste this hot path
+    // doesn't need).
+    const disk = diskState!;
     if (disk.kind === "unreadable") return;
     if (disk.kind === "absent") {
-      if (consumeExpectedEvent("delete", event.path)) return;
-      // Same external removal as the delete branch above, reached through a
-      // write-classified event instead (#681).
-      cancelSuspendedDebts(
-        suspendDetachedDebts((path) => path === event.path),
-        `an external delete of ${event.path}`,
-      );
+      // The cleanup above already ran and consumed the expected-event
+      // verdict; an EXPECTED removal (ours) reads false here and stops,
+      // same as the delete branch above.
+      if (!isExternalAbsence) return;
       await deleteIfTracked(engine, versionId, event.path, metadata, author);
       return;
     }
