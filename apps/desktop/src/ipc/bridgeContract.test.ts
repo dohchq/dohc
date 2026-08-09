@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  ListChatChannelsResult,
+  ListPersonalChatFeedResult,
+  ListChatFileMentionsResult,
   ChatChannelRecord,
   ChatAttachmentRecord,
   ChatBookmarkRecord,
@@ -9,6 +12,8 @@ import {
   ChatDispatchStateForThreadPayload,
   ChatDispatchStateForThreadResult,
   ChatReactionRecord,
+  DatabaseSnapshotResult,
+  DesktopMarksResult,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
@@ -266,6 +271,30 @@ describe("workspace graph IPC contract", () => {
       WorkspaceGraphResult.safeParse(
         graph({ ...common, path: "a.md", threadId: "thread-on-file" }),
       ).success,
+    ).toBe(false);
+  });
+});
+
+describe("record IPC contracts", () => {
+  it("accepts string-keyed records and validates each value", () => {
+    expect(
+      DatabaseSnapshotResult.parse({
+        path: "workspace.db",
+        tables: [
+          {
+            name: "tasks",
+            columns: [],
+            rows: [{ "task title": "Ship Zod 4", priority: 1, done: false }],
+          },
+        ],
+      }).tables[0]?.rows[0],
+    ).toEqual({ "task title": "Ship Zod 4", priority: 1, done: false });
+
+    expect(
+      DesktopMarksResult.safeParse({
+        marks: { appReady: 100 },
+        measures: { startup: "fast" },
+      }).success,
     ).toBe(false);
   });
 });
@@ -1394,5 +1423,41 @@ describe("a persisted share refusal stays readable", () => {
       () => WorkspaceSummary.parse(summary("k".repeat(200))),
       "MUTATION: an oversized op kind reaches the registry and breaks every later listing",
     ).toThrow();
+  });
+});
+
+// #718: aggregate chat reads answer from the local store after ONE bounded
+// shared-channel pass. The remainder rides the response so an agent reading it
+// through the CLI or MCP can see the answer is partially fresh — a console line
+// reaches nobody. Absent means fully covered, so the field can never be zero.
+describe("partial-freshness marker on aggregate chat reads", () => {
+  const RESULTS = {
+    ListChatChannelsResult: () => ({ channels: [], fileThreads: [] }),
+    ListPersonalChatFeedResult: () => ({ items: [] }),
+    ListChatFileMentionsResult: () => ({ mentions: [] }),
+  } as const;
+
+  it("carries the remainder when a pass left rows, and omits it when none", () => {
+    const parsed = ListChatChannelsResult.parse({
+      ...RESULTS.ListChatChannelsResult(),
+      sharedChannelRowsUncovered: 24,
+    });
+    expect(parsed.sharedChannelRowsUncovered).toBe(24);
+    expect(
+      ListChatChannelsResult.parse(RESULTS.ListChatChannelsResult())
+        .sharedChannelRowsUncovered,
+    ).toBeUndefined();
+  });
+
+  it("refuses a zero remainder, on every surface that reports one", () => {
+    for (const [name, base] of Object.entries(RESULTS)) {
+      const schema = { ListChatChannelsResult, ListPersonalChatFeedResult, ListChatFileMentionsResult }[
+        name as keyof typeof RESULTS
+      ];
+      expect(
+        () => schema.parse({ ...base(), sharedChannelRowsUncovered: 0 }),
+        `MUTATION (${name}): "0 rows uncovered" is a full refresh reported as a partial one`,
+      ).toThrow();
+    }
   });
 });

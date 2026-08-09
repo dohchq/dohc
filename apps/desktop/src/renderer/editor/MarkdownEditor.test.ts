@@ -12,13 +12,24 @@ import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Editor, Extension } from "@tiptap/core";
+import { Editor, Extension, getSchema, type JSONContent } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
+// Bare TaskItem is imported here ONLY as the contrast case for the schema-
+// fidelity pin below (#711) — every registered test-local editor schema in
+// this file uses DohcTaskItem.
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
-import { dohcMarkdownExtensions } from "./extensions";
-import { markdownToYDoc } from "./import-export";
+import {
+  prosemirrorJSONToYXmlFragment,
+  yXmlFragmentToProseMirrorRootNode,
+} from "y-prosemirror";
+import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
+import {
+  getDohcProseMirrorSchema,
+  getDohcYDocBodyFragment,
+  markdownToYDoc,
+} from "./import-export";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 import {
   findEmptyListItemParagraph,
@@ -71,6 +82,346 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+// prosemirror-state's TextSelection construction warning is a module-level,
+// once-per-process latch (`warnedAboutTextSelection` in prosemirror-state's
+// checkTextSelection) — it logs at most once for the life of this test
+// process. These pins are only honest while this describe block is the
+// FIRST one in this file to construct a collab editor: if some earlier suite
+// already tripped the latch, `console.warn` assertions below would pass
+// vacuously (the warning simply never fires again) whether or not the fix
+// still works. Keep this describe first in the file.
+describe("MarkdownEditor collaboration selection", () => {
+  it("binds a leading task list without constructing an invalid text selection", async () => {
+    const selectionWarning =
+      /TextSelection endpoint not pointing into a node with inline content/;
+    const warn = vi.spyOn(console, "warn");
+    const markdown = "- [ ] parent";
+    const ydoc = markdownToYDoc(markdown);
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: markdown,
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/checklist.md",
+        knownFiles: [],
+        collab: {
+          ydoc,
+          status: "connected",
+          peerCount: 0,
+          synced: true,
+        },
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(editor.textContent).toContain("parent"));
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringMatching(selectionWarning),
+      );
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+      warn.mockRestore();
+    }
+  });
+
+  // The selection-seed helper (getDohcYDocSelectionSeed) reduces the Y.Doc's
+  // body to its first-node path — but an empty or frontmatter-only body has
+  // NO first node (yDocBodyToJSON returns `{ type: 'doc' }`, content
+  // undefined). An unguarded seed there hands tiptap a schema-invalid `doc`
+  // node with zero children: schema.nodeFromJSON builds it without
+  // validating (tiptap only validates when enableContentCheck is set), so
+  // the editor mounts with no paragraph at all — no placeholder, empty DOM —
+  // and still logs the #705 warning, since nothing in that document resolves
+  // to inline content either. Both shapes are first-class in product: a
+  // brand-new note (empty body) and a properties-only page (frontmatter,
+  // no body) both bind through this exact path.
+  it("binds an empty Y.Doc body without losing the placeholder paragraph or warning", async () => {
+    const selectionWarning =
+      /TextSelection endpoint not pointing into a node with inline content/;
+    const warn = vi.spyOn(console, "warn");
+    const markdown = "";
+    const ydoc = markdownToYDoc(markdown);
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: markdown,
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/empty.md",
+        knownFiles: [],
+        collab: {
+          ydoc,
+          status: "connected",
+          peerCount: 0,
+          synced: true,
+        },
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(editor.querySelector("p")).not.toBeNull());
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringMatching(selectionWarning),
+      );
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+      warn.mockRestore();
+    }
+  });
+
+  it("binds a frontmatter-only Y.Doc body without losing the placeholder paragraph or warning", async () => {
+    const selectionWarning =
+      /TextSelection endpoint not pointing into a node with inline content/;
+    const warn = vi.spyOn(console, "warn");
+    const markdown = "---\ntitle: Plan\n---\n";
+    const ydoc = markdownToYDoc(markdown);
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: markdown,
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/properties-only.md",
+        knownFiles: [],
+        collab: {
+          ydoc,
+          status: "connected",
+          peerCount: 0,
+          synced: true,
+        },
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(editor.querySelector("p")).not.toBeNull());
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringMatching(selectionWarning),
+      );
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+      warn.mockRestore();
+    }
+  });
+
+  // A raw `new Y.Doc()` — no frontmatter, no meta, no body fragment content
+  // at all — is the exact shape "undoes and redoes a local edit in
+  // collaboration mode" below binds before typing into it. It hits the same
+  // empty-body path as the two pins above; called out on its own because an
+  // unguarded seed logs the RELATED `(doc)` warning variant here specifically
+  // (confirmed 0/5 clean on the unguarded seed, 5/5 clean once guarded).
+  it("binds a bare new Y.Doc() without losing the placeholder paragraph or warning", async () => {
+    const selectionWarning =
+      /TextSelection endpoint not pointing into a node with inline content/;
+    const warn = vi.spyOn(console, "warn");
+    const ydoc = new Y.Doc();
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: "",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/bare.md",
+        knownFiles: [],
+        collab: {
+          ydoc,
+          status: "connected",
+          peerCount: 0,
+          synced: true,
+        },
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(editor.querySelector("p")).not.toBeNull());
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringMatching(selectionWarning),
+      );
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+      warn.mockRestore();
+    }
+  });
+
+  // The selection seed must be recomputed on every editor REBUILD, not just
+  // when collab.ydoc's own identity changes. useEditor rebuilds (destroys
+  // and reconstructs the tiptap Editor) whenever `extensions` changes
+  // identity — which happens when awareness is added, removed, or swapped,
+  // since CollaborationCaret is only registered when awareness is present.
+  // A seed memoized on [collab?.ydoc] alone would survive that rebuild
+  // holding the doc's shape from MOUNT time — reseeding the fresh editor
+  // with a stale (here: paragraph-first) path even though the doc's real
+  // leading node is now a taskList, recreating #705's invalid selection.
+  it("recomputes the selection seed on a rebuild, not the mount-time doc shape", async () => {
+    const selectionWarning =
+      /TextSelection endpoint not pointing into a node with inline content/;
+    const warn = vi.spyOn(console, "warn");
+    const ydoc = markdownToYDoc("First paragraph.");
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: "First paragraph.",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/rebuild.md",
+        knownFiles: [],
+        collab: { ydoc, status: "connected", peerCount: 0, synced: true },
+      }),
+    );
+
+    let awareness: Awareness | undefined;
+    try {
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() =>
+        expect(screen.getByTestId("markdown-editor").textContent).toContain(
+          "First paragraph.",
+        ),
+      );
+
+      // Rewrite the SAME Y.Doc's body to a taskList-first shape — an
+      // external actor replacing content, not typed through the bound
+      // editor (which would apply incrementally and never exercise a fresh
+      // mount's seed path at all). The fragment is cleared first:
+      // prosemirrorJSONToYXmlFragment reconciles against existing content
+      // (the same diff it uses for live typing) rather than hard-replacing
+      // it, so writing a taskList over an already-populated paragraph
+      // fragment without clearing it first collapses onto the old
+      // paragraph's structure instead of truly becoming a taskList.
+      const bodyFragment = getDohcYDocBodyFragment(ydoc);
+      ydoc.transact(() => {
+        bodyFragment.delete(0, bodyFragment.length);
+      });
+      prosemirrorJSONToYXmlFragment(
+        getDohcProseMirrorSchema(),
+        {
+          type: "doc",
+          content: [
+            {
+              type: "taskList",
+              content: [
+                {
+                  type: "taskItem",
+                  attrs: { checked: false },
+                  content: [
+                    { type: "paragraph", content: [{ type: "text", text: "parent" }] },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        bodyFragment,
+      );
+
+      // Adding awareness changes `extensions`' identity — one of
+      // useEditor's own rebuild deps — which destroys the bound editor and
+      // constructs a fresh one, exercising the same y-tiptap
+      // _forceRerender path #705 fixed for the initial mount.
+      awareness = new Awareness(ydoc);
+      view.rerender(
+        createElement(MarkdownEditor, {
+          value: "First paragraph.",
+          onDirty: vi.fn(),
+          workspaceId: "workspace-1",
+          path: "notes/rebuild.md",
+          knownFiles: [],
+          collab: { ydoc, awareness, status: "connected", peerCount: 0, synced: true },
+        }),
+      );
+
+      await waitFor(() =>
+        expect(screen.getByTestId("markdown-editor").textContent).toContain("parent"),
+      );
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringMatching(selectionWarning),
+      );
+    } finally {
+      view.unmount();
+      awareness?.destroy();
+      ydoc.destroy();
+      warn.mockRestore();
+    }
+  });
+});
+
+// #711: the bare-TaskItem swap isn't registration-only — a bare TaskItem's
+// `paragraph+` content model rejects the nested list a real task item can
+// hold. Driven through the REAL Y.Doc round trip (the same
+// prosemirrorJSONToYXmlFragment / yXmlFragmentToProseMirrorRootNode pair
+// production uses), a document that nests a list under a task item survives
+// with DohcTaskItem and is dropped ENTIRELY (the whole doc reduces to
+// `{ type: "doc" }`, content undefined) with bare TaskItem — the earlier
+// fakes weren't just modeling a narrower schema, they'd have silently eaten
+// this exact document if a test had ever driven one through them.
+describe("MarkdownEditor task-item schema fidelity", () => {
+  const NESTED_TASK_LIST: JSONContent = {
+    type: "doc",
+    content: [
+      {
+        type: "taskList",
+        content: [
+          {
+            type: "taskItem",
+            attrs: { checked: false },
+            content: [
+              { type: "paragraph", content: [{ type: "text", text: "parent" }] },
+              {
+                type: "bulletList",
+                content: [
+                  {
+                    type: "listItem",
+                    content: [
+                      {
+                        type: "paragraph",
+                        content: [{ type: "text", text: "child one" }],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  function roundTrip(taskItemExtension: typeof TaskItem | typeof DohcTaskItem): JSONContent {
+    const schema = getSchema([
+      StarterKit.configure({ trailingNode: false }),
+      ...dohcMarkdownExtensions,
+      TaskList,
+      taskItemExtension,
+    ]);
+    const ydoc = new Y.Doc();
+    prosemirrorJSONToYXmlFragment(schema, NESTED_TASK_LIST, ydoc.getXmlFragment("body"));
+    const json = yXmlFragmentToProseMirrorRootNode(
+      ydoc.getXmlFragment("body"),
+      schema,
+    ).toJSON() as JSONContent;
+    ydoc.destroy();
+    return json;
+  }
+
+  it("drops a nested list under a task item with the bare TaskItem schema", () => {
+    expect(roundTrip(TaskItem)).toEqual({ type: "doc" });
+  });
+
+  it("preserves a nested list under a task item with the real DohcTaskItem schema", () => {
+    const json = roundTrip(DohcTaskItem);
+    expect(json.content?.[0]?.type).toBe("taskList");
+    const taskItem = json.content?.[0]?.content?.[0];
+    expect(taskItem?.type).toBe("taskItem");
+    expect(taskItem?.content?.map((n) => n.type)).toEqual([
+      "paragraph",
+      "bulletList",
+    ]);
+  });
 });
 
 describe("MarkdownEditor slash commands", () => {
@@ -175,7 +526,7 @@ describe("MarkdownEditor slash command: image", () => {
         StarterKit.configure({ trailingNode: false }),
         ...dohcMarkdownExtensions,
         TaskList,
-        TaskItem,
+        DohcTaskItem,
         Markdown.configure({ indentation: { style: "space", size: 2 } }),
       ],
       content: markdown,
@@ -242,7 +593,7 @@ describe("MarkdownEditor slash command: math", () => {
         StarterKit.configure({ trailingNode: false }),
         ...dohcMarkdownExtensions,
         TaskList,
-        TaskItem,
+        DohcTaskItem,
         Markdown.configure({ indentation: { style: "space", size: 2 } }),
       ],
       content: markdown,
@@ -295,7 +646,7 @@ describe("MarkdownEditor code block continuation", () => {
         StarterKit.configure({ trailingNode: false }),
         ...dohcMarkdownExtensions,
         TaskList,
-        TaskItem,
+        DohcTaskItem,
         Markdown.configure({ indentation: { style: "space", size: 2 } }),
       ],
       content: markdown,
@@ -457,7 +808,7 @@ describe("MarkdownEditor history", () => {
         StarterKit.configure({ trailingNode: false }),
         ...dohcMarkdownExtensions,
         TaskList,
-        TaskItem,
+        DohcTaskItem,
         TableKit,
         Markdown,
       ],

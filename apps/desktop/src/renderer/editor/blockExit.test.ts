@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
-import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { NodeSelection } from "@tiptap/pm/state";
 import type { Dispatch, SetStateAction } from "react";
-import { dohcMarkdownExtensions } from "./extensions";
+import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
 import { makeBlockExitPlugin } from "./blockExit";
 import { makeCodeBlockContinuationPlugin } from "./codeBlockChrome";
 import { makeCalloutChromePlugin } from "./calloutChrome";
@@ -60,7 +60,7 @@ function makeEditor(markdown: string): Editor {
       StarterKit.configure({ trailingNode: false }),
       ...dohcMarkdownExtensions,
       TaskList,
-      TaskItem,
+      DohcTaskItem,
       TableKit.configure({ table: { resizable: true } }),
       Markdown.configure({ indentation: { style: "space", size: 2 } }),
       testChrome,

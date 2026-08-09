@@ -13,11 +13,36 @@ import {
 } from "./ydocWireContract";
 
 interface LoopbackFile {
+  // Object ids are only unique WITHIN a scope, matching the daemon's
+  // `DocKey` (workspace_id, version_id, object_id) — a fixture that reuses
+  // an id across scopes must never let one scope's row cover another's.
+  workspace: string;
+  versionId: string;
   objectId: string;
   contentKind: YdocContentKind;
   markdown: string;
   // Whether this version has a file snapshot.
   head: "present" | "absent";
+}
+
+// Mirrors `dohc_engine_collab::durable::Regime`: LocalOnly is a prunable
+// fast-resume cache (markdown is durable canonical), Replicated is the
+// durable canonical CRDT lineage itself, and its close NEVER prunes it.
+type LineageRegime = "local-only" | "replicated";
+
+interface Lineage {
+  doc: Y.Doc;
+  regime: LineageRegime;
+  // The content kind the lineage was created under. `ydoc_open_state_on_store`
+  // reads this off the persisted marker whenever durable state exists,
+  // never off the reopen's request — a plaintext lineage resurrected under
+  // a richdoc request would settle the EMPTY `body` fragment instead of the
+  // `plainText` content it actually holds.
+  contentKind: YdocContentKind;
+  // The content sha the last settle over this lineage materialized, or
+  // `null` if it was never settled — mirrors `ydoc_docs.last_settled_sha`,
+  // the durable close guard's coverage check.
+  lastSettledSha: string | null;
 }
 
 interface LoopbackSession {
@@ -30,6 +55,12 @@ interface LoopbackSession {
   doc: Y.Doc;
   updateSeq: number;
   eventSeq: number;
+  // Mirrors the daemon session's `lineage_absent` / `first_update_pending`
+  // (crates/dohc-workspace-engine/src/lib.rs), which decide close()'s
+  // implicit settle default: settle unless this session opened onto no
+  // lineage and has recorded no update yet.
+  lineageAbsentAtOpen: boolean;
+  firstUpdatePending: boolean;
 }
 
 export interface EmitLoopbackRemoteUpdateOptions {
@@ -50,6 +81,67 @@ export interface SeedLoopbackFileInput {
 
 function fileKey(workspace: string, versionId: string, path: string): string {
   return `${workspace}\u0000${versionId}\u0000${path}`;
+}
+
+// The daemon's `ydoc_docs` row is keyed by (workspace, version, objectId) —
+// object identity, not path (crates/dohc-engine-collab/src/durable.rs). A
+// path-keyed lineage map would resurrect a rename's old text under a
+// different object and let a reused path inherit a stranger's edits; this is
+// the key `open()` resolves the path alias through.
+// Both the daemon's absent-head open (`ydoc_open_state_on_store`,
+// crates/dohc-engine-runtime/src/actor.rs) and its capture ingestion
+// (crates/dohc-workspace-engine/src/store.rs) resolve an unrecorded path to
+// the SAME `derive_capture_object_id`, so a path capture seeds later finds
+// the id its own earlier open already derived. `seedFile`'s default reuses
+// this instead of an unrelated counter — a mismatched default would make
+// capture-seeding a path AFTER it was already opened land on a fresh object
+// id, orphaning the lineage the open's derived id created.
+function deriveObjectId(fileLookupKey: string): string {
+  return `object-derived-${fileLookupKey}`;
+}
+
+function lineageKey(
+  workspace: string,
+  versionId: string,
+  objectId: string,
+): string {
+  return `${workspace}\u0000${versionId}\u0000${objectId}`;
+}
+
+function unsettledCloseRefusal(): Error {
+  return Object.assign(new Error("ydoc-unsettled-close"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "ydoc-unsettled-close",
+      retry: "no",
+    },
+  });
+}
+
+// The literal from crates/dohc-workspace-engine/src/lib.rs's
+// `CollabError::ObjectAliasCollision` mapping.
+function objectAliasCollisionRefusal(): Error {
+  return Object.assign(new Error("ydoc-object-alias-collision"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "ydoc-object-alias-collision",
+      retry: "no",
+    },
+  });
+}
+
+// `CollabError::NoMarker` has no specific message mapping in
+// crates/dohc-workspace-engine/src/lib.rs — it falls through to the
+// generic InvalidParams tail, so this is the literal the wire actually
+// carries.
+function noMarkerRefusal(): Error {
+  return Object.assign(new Error("workspace operation failed"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "workspace operation failed",
+      retry: "no",
+    },
+  });
 }
 
 function asObject(value: JsonValue, label: string): JsonObject {
@@ -108,18 +200,6 @@ function resurrectedDoc(lineage: Y.Doc): Y.Doc {
   return doc;
 }
 
-function createSeededDoc(markdown: string, contentKind: YdocContentKind): Y.Doc {
-  const doc = declaredDoc();
-  if (contentKind === "plaintext") {
-    doc.getText("plainText").insert(0, markdown);
-  } else if (markdown.length > 0) {
-    const paragraph = new Y.XmlElement("paragraph");
-    paragraph.insert(0, [new Y.XmlText(markdown)]);
-    doc.getXmlFragment("body").insert(0, [paragraph]);
-  }
-  return doc;
-}
-
 function project(session: LoopbackSession): string {
   if (session.contentKind === "plaintext") {
     return session.doc.getText("plainText").toString();
@@ -168,21 +248,115 @@ export class YdocLoopbackEngine implements EngineTransport {
   // (crates/dohc-engine-collab/src/durable.rs). A loopback that stored the
   // lineage in the session map instead would report an evicted document as
   // gone — modelling less than the daemon, so every test driving it would
-  // certify a convergence that does not happen (#665).
-  private readonly lineages = new Map<string, Y.Doc>();
+  // certify a convergence that does not happen (#665). Keyed by
+  // (workspace, version, objectId) — see `lineageKey` — not by path.
+  private readonly lineages = new Map<string, Lineage>();
   private readonly eventHandlers = new Set<(event: Event) => void>();
   private nextSessionId = 1;
   private nextMomentId = 1;
+  private nextRecaptureOrder = 2;
 
   constructor(private readonly options: YdocLoopbackEngineOptions = {}) {}
 
   seedFile(input: SeedLoopbackFileInput): void {
-    this.files.set(fileKey(input.workspace, input.versionId, input.path), {
-      objectId: input.objectId ?? `object-${this.files.size + 1}`,
+    const key = fileKey(input.workspace, input.versionId, input.path);
+    // Mirrors `resolve_capture_object`'s FIRST step, `alias_object_id`: a
+    // path that already has a known alias reuses it, before derivation or
+    // disambiguation ever run. An ordinary re-capture of the same path
+    // (content changed, no rename) must keep the object identity its
+    // current row already holds — including an explicit or previously
+    // disambiguated id — or the evicted lineage behind it becomes
+    // unreachable.
+    const objectId =
+      input.objectId ??
+      this.files.get(key)?.objectId ??
+      this.resolveDefaultObjectId(input.workspace, key);
+    // The daemon keeps ONE snapshot row per object: a capture that lands
+    // the SAME object at a new path replaces its row rather than adding a
+    // second one, or a scan over `files` (capturedFileFor) would find the
+    // stale row first and never reach the current one.
+    for (const [otherKey, file] of this.files) {
+      if (
+        otherKey !== key &&
+        file.workspace === input.workspace &&
+        file.versionId === input.versionId &&
+        file.objectId === objectId
+      ) {
+        this.files.delete(otherKey);
+      }
+    }
+    this.files.set(key, {
+      workspace: input.workspace,
+      versionId: input.versionId,
+      objectId,
       contentKind: input.contentKind ?? "richdoc",
       markdown: input.markdown,
       head: input.head ?? "present",
     });
+  }
+
+  // Mirrors `resolve_capture_object`'s disambiguation branch
+  // (crates/dohc-engine-domain/src/store.rs): a path's default id must not
+  // collide with an object that renamed away and is still live elsewhere.
+  private resolveDefaultObjectId(workspace: string, key: string): string {
+    const derived = deriveObjectId(key);
+    return this.objectHasLiveAliasElsewhere(workspace, key, derived)
+      ? `${derived}#recaptured-${this.nextRecaptureOrder++}`
+      : derived;
+  }
+
+  // Mirrors `object_has_live_alias` (crates/dohc-engine-domain/src/store.rs):
+  // true when some path OTHER than `excludingKey`, WITHIN `workspace`,
+  // currently holds this exact object id — the sign an object renamed
+  // away and is still referenced elsewhere. Scoped to the workspace like
+  // the daemon's query (`WHERE workspace_id = ?1 AND object_id = ?2`):
+  // object ids are unique only within a workspace, so a fixture in a
+  // DIFFERENT workspace reusing this exact string must never collide.
+  // Shared by capture's id resolution (above) and open's collision
+  // refusal (`open()`, actor.rs ydoc_open_state_on_store) — the SAME
+  // rule, at the two sites that mint an id from a bare path.
+  private objectHasLiveAliasElsewhere(
+    workspace: string,
+    excludingKey: string,
+    objectId: string,
+  ): boolean {
+    for (const [otherKey, file] of this.files) {
+      if (
+        file.workspace === workspace &&
+        otherKey !== excludingKey &&
+        file.objectId === objectId
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Test-only seam for the sync-promotion the daemon does inside
+  // `claim_base_in_tx` when a peer's base lands: it promotes the marker's
+  // regime from local-only to replicated. Sync is not built (#356, #378), so
+  // there is no wire method to reach this from a test; a replicated
+  // lineage's close compacts and KEEPS the CRDT rows regardless of settle
+  // state, which is what this exists to exercise.
+  //
+  // Requires an existing lineage entry: a replicated doc has durable state
+  // by definition (`claim_base_in_tx` promotes a MARKER that already
+  // exists), and every server-side content source — a captured seed, a
+  // resurrection, a local edit, a remote update — journals a lineage
+  // before a session's doc can hold anything this seam would need to
+  // preserve. A session with no lineage entry is un-modelable here, not a
+  // case to paper over with a fabricated fallback doc.
+  markSessionReplicated(sessionId: string): void {
+    const session = this.requireSession(sessionId);
+    const key = this.lineageKeyFor(session);
+    const entry = this.lineages.get(key);
+    if (!entry) {
+      throw new Error(
+        "markSessionReplicated requires a journaled lineage; record an update first.",
+      );
+    }
+    entry.regime = "replicated";
+    this.lineages.set(key, entry);
   }
 
   onEvent(handler: (event: Event) => void): () => void {
@@ -282,24 +456,61 @@ export class YdocLoopbackEngine implements EngineTransport {
     ) {
       throw new Error("ydoc.open params.contentKind is invalid.");
     }
-    const key = fileKey(request.workspace, versionId, path);
-    const file = this.files.get(key);
+    const fileLookupKey = fileKey(request.workspace, versionId, path);
+    const file = this.files.get(fileLookupKey);
+    let objectId: string;
+    if (file) {
+      objectId = file.objectId;
+    } else {
+      const derived = deriveObjectId(fileLookupKey);
+      // A derived id still LIVE at another alias means this path's former
+      // file was renamed away: only capture's locked resolution may mint a
+      // disambiguated id for that (resolve_capture_object); an open cannot
+      // reserve one pre-commit, so it refuses instead of grafting onto the
+      // renamed file's lineage (actor.rs ydoc_open_state_on_store).
+      if (this.objectHasLiveAliasElsewhere(request.workspace, fileLookupKey, derived)) {
+        throw objectAliasCollisionRefusal();
+      }
+      objectId = derived;
+    }
+    const sessionId = `session-${this.nextSessionId++}`;
+    // A surviving lineage RESURRECTS: it is the document's own state, and it
+    // outranks the file exactly as the daemon's does. Keyed by OBJECT
+    // IDENTITY (workspace, version, objectId) — see `lineageKey` — so a
+    // rename resurrects the same lineage and a path a different object now
+    // occupies does not inherit its predecessor's edits.
+    const lineageMapKey = lineageKey(request.workspace, versionId, objectId);
+    const lineage = this.lineages.get(lineageMapKey);
     // NO HEAD in this version. The daemon does NOT refuse here — it derives an
     // object id and binds an EMPTY doc, which is how a just-created file
     // becomes editable before capture ingests it (actor.rs
     // ydoc_open_state_on_store, head == None). A loopback that threw instead
     // modelled less than the daemon and hid every consumer bug on that branch.
-    const contentKind = requestedKind ?? file?.contentKind ?? "richdoc";
-    const sessionId = `session-${this.nextSessionId++}`;
-    // A surviving lineage RESURRECTS: it is the document's own state, and it
-    // outranks the file exactly as the daemon's does.
-    const lineage = this.lineages.get(key);
-    const doc = lineage
-      ? resurrectedDoc(lineage)
-      : file
-        ? createSeededDoc(file.markdown, contentKind)
-        : new Y.Doc();
-    const objectId = file?.objectId ?? `object-derived-${key}`;
+    //
+    // A RESURRECTION uses the lineage's OWN stored kind, never the reopen's
+    // request: ydoc_open_state_on_store reads the persisted marker's
+    // content_kind whenever durable state exists. Binding a plaintext
+    // lineage as richdoc would settle the empty `body` fragment instead of
+    // the `plainText` content it actually holds.
+    const contentKind = lineage
+      ? lineage.contentKind
+      : (requestedKind ?? file?.contentKind ?? "richdoc");
+    const doc = lineage ? resurrectedDoc(lineage.doc) : declaredDoc();
+    const lineageAbsentAtOpen = lineage === undefined;
+    // A captured file with no durable lineage yet ships its markdown as
+    // `seedMarkdown`, not embedded in `initialUpdateBase64` — the CLIENT
+    // applies it as a real local update and records it through
+    // `ydoc.recordUpdate` (`YdocLiveAdapter.openSession`), exactly as
+    // `ydoc_open_state_on_store` does (actor.rs): `initial_update` stays
+    // the EMPTY doc's state, and `seed_markdown` carries the head's text
+    // separately, `(!lineage_existing).then(|| head...).flatten()`. That
+    // recordUpdate is what clears `firstUpdatePending` — embedding the
+    // seed directly into the initial doc here (as an earlier version of
+    // this loopback did) leaves an ordinary settle over a freshly-opened
+    // captured file looking untouched forever, and the NoMarker guard
+    // refuses it.
+    const seedMarkdown =
+      !lineage && file?.head === "present" ? file.markdown : undefined;
     this.sessions.set(sessionId, {
       sessionId,
       workspace: request.workspace,
@@ -310,6 +521,8 @@ export class YdocLoopbackEngine implements EngineTransport {
       doc,
       updateSeq: 0,
       eventSeq: 0,
+      lineageAbsentAtOpen,
+      firstUpdatePending: lineageAbsentAtOpen,
     });
     return {
       sessionId,
@@ -319,6 +532,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(doc)),
       lineage: lineage ? "existing" : "absent",
       head: file ? file.head : "absent",
+      ...(seedMarkdown !== undefined ? { seedMarkdown } : {}),
     };
   }
 
@@ -347,19 +561,41 @@ export class YdocLoopbackEngine implements EngineTransport {
     return { seq: session.updateSeq };
   }
 
+  private settleSession(session: LoopbackSession): {
+    markdown: string;
+    sha256: string;
+  } {
+    // `ydoc_settle_on_store`'s `load_persisted` finds no marker row at all
+    // for a session that has never recorded a durable update — a marker is
+    // created lazily, by the first recordUpdate, not by open. Mirrors that
+    // with NoMarker's wire shape rather than letting an untouched session's
+    // structurally-empty projection materialize and clobber whatever the
+    // artifact already holds. `close()`'s implicit default already avoids
+    // this; this guards the EXPLICIT settle:true override, and the direct
+    // `ydoc.settle` RPC, which share this same path.
+    if (session.lineageAbsentAtOpen && session.firstUpdatePending) {
+      throw noMarkerRefusal();
+    }
+    const markdown = project(session);
+    const digest = sha256(markdown);
+    this.options.materialize?.({ path: session.path, markdown });
+    const entry = this.lineages.get(this.lineageKeyFor(session));
+    if (entry) entry.lastSettledSha = digest;
+    return { markdown, sha256: digest };
+  }
+
   private settle(value: JsonValue): JsonValue {
     const params = asObject(value, "ydoc.settle params");
     const session = this.requireSession(
       requiredString(params, "sessionId", "ydoc.settle params"),
     );
     optionalString(params, "summary");
-    const markdown = project(session);
-    this.options.materialize?.({ path: session.path, markdown });
+    const { markdown, sha256: digest } = this.settleSession(session);
     return {
       momentId: `moment-${this.nextMomentId++}`,
       path: session.path,
       markdown,
-      sha256: sha256(markdown),
+      sha256: digest,
       // The loopback always "materializes": it has no containment to block.
       materialized: true,
       projection: {
@@ -411,15 +647,59 @@ export class YdocLoopbackEngine implements EngineTransport {
   private close(value: JsonValue): JsonValue {
     const params = asObject(value, "ydoc.close params");
     const sessionId = requiredString(params, "sessionId", "ydoc.close params");
-    optionalBoolean(params, "settle");
+    const settleFlag = optionalBoolean(params, "settle");
     optionalString(params, "summary");
     const session = this.requireSession(sessionId);
-    // A local-only close PRUNES the CRDT rows — markdown is the artifact, and
-    // the next open reseeds from the file. This is the one thing an evict does
-    // not do, and keeping the two apart is the point of modelling the lineage.
-    this.lineages.delete(
-      fileKey(session.workspace, session.versionId, session.path),
-    );
+    const key = this.lineageKeyFor(session);
+
+    // Missing `settle` means SETTLE unless this session opened onto no
+    // lineage and has recorded no update yet — mirrors
+    // `!(session.lineage_absent && session.first_update_pending)`
+    // (crates/dohc-workspace-engine/src/lib.rs).
+    const shouldSettle =
+      settleFlag ?? !(session.lineageAbsentAtOpen && session.firstUpdatePending);
+    // Threaded through instead of recomputed below: when this settled, its
+    // digest IS what `settleSession` just wrote to `lastSettledSha`, so the
+    // coverage check a settling close can never refuse is stated here, not
+    // left to fall out of two separate `sha256(project(session))` calls
+    // agreeing.
+    const settled = shouldSettle ? this.settleSession(session) : null;
+
+    const entry = this.lineages.get(key);
+    if (entry && entry.regime === "local-only") {
+      // Local-only prune would DISCARD the CRDT rows — the daemon refuses
+      // unless the artifact already holds the head's bytes
+      // (durable.rs close_session): the projected content must match either
+      // the last settle this lineage recorded, OR a CAPTURED head — the
+      // `files` row IS this loopback's disk read, so a present head whose
+      // markdown already matches the projection is the same proof
+      // `captured_head_sha` reads there (durable.rs:1278-1310). That query
+      // is scoped by (workspace, version, object_id) with NO path
+      // restriction — a rename does not mint a new object — so the lookup
+      // here resolves by object identity too, never by this session's own
+      // path: a renamed object captured at its NEW path still covers the
+      // OLD session's close, and a path rebound to a DIFFERENT object with
+      // coincidentally identical markdown never covers this one. Absent
+      // head covers nothing either, same as the daemon's read. A
+      // REPLICATED lineage never takes this branch — its close compacts
+      // and keeps the rows regardless of settle state (see
+      // `markSessionReplicated`).
+      const currentSha = settled?.sha256 ?? sha256(project(session));
+      const capturedFile = this.capturedFileFor(
+        session.workspace,
+        session.versionId,
+        session.objectId,
+      );
+      const coveredByCapture =
+        capturedFile !== undefined &&
+        capturedFile.head === "present" &&
+        sha256(capturedFile.markdown) === currentSha;
+      if (entry.lastSettledSha !== currentSha && !coveredByCapture) {
+        throw unsettledCloseRefusal();
+      }
+      this.lineages.delete(key);
+    }
+
     this.sessions.delete(sessionId);
     return { closed: true };
   }
@@ -439,10 +719,16 @@ export class YdocLoopbackEngine implements EngineTransport {
   private journalSessionState(session: LoopbackSession): void {
     // Journal the session's whole state because each delta depends on the
     // state that seeded its session.
-    const key = fileKey(session.workspace, session.versionId, session.path);
-    const lineage = this.lineages.get(key) ?? declaredDoc();
-    Y.applyUpdate(lineage, Y.encodeStateAsUpdate(session.doc));
-    this.lineages.set(key, lineage);
+    const key = this.lineageKeyFor(session);
+    const entry = this.lineages.get(key) ?? {
+      doc: declaredDoc(),
+      regime: "local-only" as LineageRegime,
+      contentKind: session.contentKind,
+      lastSettledSha: null,
+    };
+    Y.applyUpdate(entry.doc, Y.encodeStateAsUpdate(session.doc));
+    this.lineages.set(key, entry);
+    session.firstUpdatePending = false;
   }
 
   private resync(value: JsonValue): JsonValue {
@@ -457,6 +743,33 @@ export class YdocLoopbackEngine implements EngineTransport {
     return {
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(session.doc)),
     };
+  }
+
+  private lineageKeyFor(session: LoopbackSession): string {
+    return lineageKey(session.workspace, session.versionId, session.objectId);
+  }
+
+  // The daemon's `captured_head_sha` query is scoped by
+  // (workspace, version, object_id), not by path (durable.rs) — the
+  // loopback's disk read must resolve the same way, so a renamed object's
+  // capture at its NEW path is still found for an OLD session still bound
+  // to it, and a fixture reusing an object id in a DIFFERENT scope never
+  // covers this one.
+  private capturedFileFor(
+    workspace: string,
+    versionId: string,
+    objectId: string,
+  ): LoopbackFile | undefined {
+    for (const file of this.files.values()) {
+      if (
+        file.workspace === workspace &&
+        file.versionId === versionId &&
+        file.objectId === objectId
+      ) {
+        return file;
+      }
+    }
+    return undefined;
   }
 
   private requireSession(sessionId: string): LoopbackSession {

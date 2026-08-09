@@ -93,14 +93,15 @@ const PATH_STRING = z.string().min(1).max(4096);
 // engine owns the real limit and re-checks it.
 export const ENGINE_TEXT_MAX_CHARS = 10 * 1024 * 1024;
 function engineStoredText(label: string) {
-  return z.string().refine(
-    (text) => text.length <= ENGINE_TEXT_MAX_CHARS,
-    (text) => ({
+  return z.string().superRefine((text, ctx) => {
+    if (text.length <= ENGINE_TEXT_MAX_CHARS) return;
+    ctx.addIssue({
+      code: "custom",
       message:
         `${label} is ${text.length} characters; the IPC bridge carries at most ` +
         `${ENGINE_TEXT_MAX_CHARS} characters (the engine's 10 MiB UTF-8 text cap)`,
-    }),
-  );
+    });
+  });
 }
 
 const SITE_ROOT_STRING = PATH_STRING.superRefine((value, ctx) => {
@@ -571,6 +572,8 @@ export const ReadWorkspaceGraphPayload = z.object({
 export type ReadWorkspaceGraphPayload = z.infer<typeof ReadWorkspaceGraphPayload>;
 
 export const WorkspaceGraphResult = z.object({
+  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   nodes: z.array(WorkspaceGraphNode).max(2000),
   edges: z.array(WorkspaceGraphEdge).max(10000),
   unresolvedLinks: z.number().int().nonnegative(),
@@ -651,7 +654,7 @@ const DatabaseColumnView = z.object({
 const DatabaseTableView = z.object({
   name: z.string(),
   columns: z.array(DatabaseColumnView),
-  rows: z.array(z.record(z.unknown())),
+  rows: z.array(z.record(z.string(), z.unknown())),
 });
 
 export const DatabaseSnapshotResult = z.object({
@@ -674,7 +677,7 @@ export const ApplyDatabaseEditPayload = z.object({
     op: z.enum(["insert", "update", "upsert", "delete"]),
     pkColumn: SQL_IDENT,
     rowId: z.union([z.string().max(4096), z.number()]),
-    payload: z.record(z.unknown()).optional(),
+    payload: z.record(z.string(), z.unknown()).optional(),
   }),
 });
 export type ApplyDatabaseEditPayload = z.infer<typeof ApplyDatabaseEditPayload>;
@@ -949,6 +952,14 @@ export const ChatFileMentionRecord = z.object({
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
 
 export const ListChatFileMentionsResult = z.object({
+  // #718: these responses are built from the local store after ONE bounded
+  // shared-channel sync pass. This is how many joined rows that pass did not
+  // leave fresh — the ones its window never reached, plus the ones it reached
+  // and could not sync (offline, relay hiccup). A pass that died outright, or
+  // never ran because the account is signed out, reports every live row.
+  // Absent means the pass that ran left no row behind, which is the only claim
+  // of full freshness this field ever makes.
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   mentions: z.array(ChatFileMentionRecord).max(2000),
 });
 export type ListChatFileMentionsResult = z.infer<
@@ -1153,7 +1164,7 @@ export type ChatRunRecordsForThreadPayload = z.infer<
 >;
 
 export const ChatRunRecordsForThreadResult = z.object({
-  runs: z.record(ChatRunRecord).describe(
+  runs: z.record(z.string(), ChatRunRecord).describe(
     "Run records linked to messages from the thread's 200 most recent runs, newest first.",
   ),
 });
@@ -1261,6 +1272,8 @@ export const ListChatChannelsPayload = z.object({
 export type ListChatChannelsPayload = z.infer<typeof ListChatChannelsPayload>;
 
 export const ListChatChannelsResult = z.object({
+  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   channels: z.array(ChatChannelRecord),
   // The "Files" grouping: file-linked Chats listed read-only beside the
   // channels (they live in the file rail; the Chats view cross-links).
@@ -1337,6 +1350,8 @@ export const ListPersonalChatFeedPayload = z.object({
 });
 export type ListPersonalChatFeedPayload = z.infer<typeof ListPersonalChatFeedPayload>;
 export const ListPersonalChatFeedResult = z.object({
+  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   items: z.array(ChatFeedItemRecord).max(50),
   nextCursor: z.string().max(1000).optional(),
   headCursor: z.string().max(1000).optional(),
@@ -1471,6 +1486,10 @@ export type DmRecord = z.infer<typeof DmRecord>;
 
 export const SyncDmsPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  // The DM the caller is reading, when it is reading one. The shared-channel
+  // pass is bounded, so a poll that names its open conversation keeps that one
+  // fresh instead of waiting for the rotation to reach it (#718).
+  openChannelId: CHAT_CHANNEL_ID.optional(),
 });
 export type SyncDmsPayload = z.infer<typeof SyncDmsPayload>;
 
@@ -2274,8 +2293,8 @@ export const OpenExternalUrlPayload = z.object({
 export type OpenExternalUrlPayload = z.infer<typeof OpenExternalUrlPayload>;
 
 export const CloudLoginStartPayload = z.object({
-  serverUrl: z.string().url().max(2048).optional(),
-  relayUrl: z.string().url().max(2048).optional(),
+  serverUrl: z.url().max(2048).optional(),
+  relayUrl: z.url().max(2048).optional(),
 });
 export type CloudLoginStartPayload = z.infer<typeof CloudLoginStartPayload>;
 
@@ -2343,7 +2362,7 @@ export const CloudJoinWorkspaceResult = z.object({
 });
 export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 
-const EMAIL_STRING = z.string().email().max(320);
+const EMAIL_STRING = z.email().max(320);
 const SHARE_ID = z.string().min(1).max(200);
 
 // ---- Relay shares (PR 18, the engine-native cloud) ----
@@ -3161,8 +3180,8 @@ export type EngineYDocRemoteUpdateEventSchema = z.infer<
 // Test-only snapshot of the main-process mark/measure recorder (Phase 16):
 // named marks as wall-clock epochs, measures as durations between marks.
 export const DesktopMarksResult = z.object({
-  marks: z.record(z.number()),
-  measures: z.record(z.number()),
+  marks: z.record(z.string(), z.number()),
+  measures: z.record(z.string(), z.number()),
 });
 export type DesktopMarksResult = z.infer<typeof DesktopMarksResult>;
 

@@ -2202,7 +2202,12 @@ export function ChatsView(props: {
     async (dm: DmRecord, token: number) => {
       const request = ++dmRefreshSeq.current;
       try {
-        const result = await bridge().syncDms({ workspaceId });
+        // Name the open DM: the main-side shared-channel pass is bounded, so an
+        // unnamed poll can refresh 16 other channels and leave this one stale.
+        const result = await bridge().syncDms({
+          workspaceId,
+          openChannelId: dm.channelId,
+        });
         if (token !== liveToken.current || request !== dmRefreshSeq.current) {
           return;
         }

@@ -24,6 +24,7 @@ vi.setConfig({ testTimeout: 15_000 });
 import type {
   AgentRunStatusResult,
   ChatChannelRecord,
+  DismissShareSkipsPayload,
   DmRecord,
   EngineMomentRecord,
   FileChatThreadRecord,
@@ -34,6 +35,9 @@ import type {
   RefreshSharedViewResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
+  SyncDmsPayload,
+  SyncDmsResult,
+  SyncStatusResult,
   TryInVersionStateResult,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
@@ -90,14 +94,12 @@ const WORKSPACE: Workspace = {
   mode: "local-first",
 };
 
-const SYNC_STATUS = {
-  state: "synced" as const,
+const SYNC_STATUS: SyncStatusResult = {
+  state: "synced",
   pendingChangeCount: 0,
   lastSyncedAtMs: null,
   // Required on the contract (#505, #540): every status states whether the
-  // recorder failed to build and whether the workspace is a shared view. This
-  // fake is not type-checked against SyncStatusResult, so it declares the
-  // causes by hand rather than shipping a payload main could never produce.
+  // recorder failed to build and whether the workspace is a shared view.
   historyRecordingUnavailable: false,
   historyShareView: false,
 };
@@ -364,7 +366,9 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     }),
     // Typed to the contract, not to this one default: a test that drives a
     // real pull ("updated") must be able to swap the implementation.
-    dismissShareSkips: vi.fn(async () => undefined),
+    dismissShareSkips: vi.fn(
+      async (_payload: DismissShareSkipsPayload): Promise<void> => undefined,
+    ),
     refreshSharedView: vi.fn(
       async (): Promise<RefreshSharedViewResult> => ({
         status: "unchanged",
@@ -470,7 +474,12 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       // Sharing is optional; ChatsView downgrades a rejection to "none".
       throw new Error("sharing unavailable in shell tests");
     }),
-    syncDms: vi.fn(async () => ({ available: false, dms: [] })),
+    syncDms: vi.fn(
+      async (_payload: SyncDmsPayload): Promise<SyncDmsResult> => ({
+        available: false,
+        dms: [],
+      }),
+    ),
     listFileChats: vi.fn(async () => ({ fileObjectId: null, threads: [] })),
   });
 }
@@ -525,9 +534,9 @@ function makeShareBridge(
     "listChatFileMentions",
     "syncDms",
   ] as const) {
-    bridge[call] = vi.fn(async (): Promise<never> => {
-      throw new Error("Chats are not enabled for this workspace.");
-    });
+    bridge[call].mockRejectedValue(
+      new Error("Chats are not enabled for this workspace."),
+    );
   }
   return bridge;
 }
@@ -6791,9 +6800,9 @@ describe("chats surface after a failed capture build", () => {
       "listChatFileMentions",
       "syncDms",
     ] as const) {
-      bridge[call] = vi.fn(async (): Promise<never> => {
-        throw new Error("Chats are not enabled for this workspace.");
-      });
+      bridge[call].mockRejectedValue(
+        new Error("Chats are not enabled for this workspace."),
+      );
     }
     return bridge;
   }
