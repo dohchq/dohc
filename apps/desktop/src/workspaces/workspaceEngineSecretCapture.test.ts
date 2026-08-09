@@ -282,10 +282,8 @@ describe("#681 round 5: the stand-down marker cleanup must never touch secret pa
     await engine.flush();
 
     const envAbsolute = join(root, ".env");
-    const trackedReadFile = fsPromises.readFile as unknown as {
-      mock: { calls: unknown[][] };
-    };
-    trackedReadFile.mock.calls.length = 0;
+    const trackedReadFile = vi.mocked(fsPromises.readFile);
+    trackedReadFile.mockClear();
     await write(root, ".env", ENV_B);
     engine.captureBatch([{ path: ".env", operation: "update" }]);
     await engine.flush();

@@ -3119,6 +3119,54 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
   await capture.stop();
 }, 15_000);
 
+it("an external delete observed before a debt registers cancels it at the door instead of arming a resurrecting ladder", async () => {
+  // #681 round 7, codex P1 (real): a debt used to register unconditionally
+  // at its one door — `scheduleDetachedLockedSettle`, reached directly (a
+  // release that succeeds over a failed settle) and again after a
+  // transient close retry ladder that runs OFF the capture chain for as
+  // long as TEARDOWN_RETRY_CAP_MS allows (seconds wide in production,
+  // unlike the chain-serialized delete/move seams #697 already fences).
+  // An external delete landing anywhere in that window finds no debt yet
+  // (`cleanupDetachedDebtForEvent`'s has(path) gate correctly skips it),
+  // and the LATE registration that follows then owns a path that is
+  // already gone: its own ladder can recreate the deleted file from the
+  // canonical Y.Doc, or (if it later stands down) strand a marker
+  // blocking an unrelated file recreated at that same path.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-late-registration-",
+  );
+
+  // The watcher observes the external delete first — no session has even
+  // opened yet, so no debt exists for it.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  const { session } = await openWithOneEdit(capture, "would resurrect this");
+  state.locked = true;
+  state.replicated = true;
+
+  // RED before the fix: nothing remembered the earlier delete, so this
+  // close's own registration armed a fresh, un-cancelled debt.
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+
+  // The cancel trace names the absence, not a fabricated lock.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+
+  // And the ladder never armed: no reopen, no settle, ever — the deleted
+  // path stays deleted.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(1);
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 15_000);
+
 it("a delete refuses the open that could register a debt while disk work is in flight", async () => {
   // #696 rescanned for debts registered after its suspension snapshot. #697
   // makes that late registration unreachable: a new live open cannot enter
@@ -4573,6 +4621,14 @@ it("a recovered debt with no retained release does not linger for a later delete
   mirror.getText("plainText").insert(0, "recovered, nothing owed");
   await reopened.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
   await reopened.settleNow();
+  // Anti-vacuity: the recovery settle actually reached disk — otherwise
+  // the entry could be retired for an unrelated reason and this test
+  // would still pass on the negative trace assertion alone. (The doc
+  // carries the journaled "never written" text too — the recovery
+  // session's seed, per the fake's own replay of durable state.)
+  expect(
+    state.settledMarkdowns.some((text) => text.includes("recovered, nothing owed")),
+  ).toBe(true);
   await reopened.close({ settle: false });
   // Drain the chain so recovery's own enqueued pay() retires the entry
   // before the delete below.
@@ -4952,8 +5008,11 @@ it("in the daemon-owned production configuration, an external delete still cance
   expect(typeof finish).toBe("function");
   // No `capture.stop()`/`flush()` here: in daemon-owned mode both also
   // flush the DAEMON's own capture over the wire (a real RPC this
-  // loopback harness does not model), and this test never calls
-  // `capture.start()` — nothing here arms a timer that would outlive it.
+  // loopback harness does not model). `session.close()` above DID arm a
+  // detached retry timer regardless of `capture.start()` — but the
+  // external delete's own cancellation already cleared it
+  // (`discardDetachedLockedDebt`, reached through `cancelSuspendedDebts`),
+  // so nothing is left running past this test.
 }, 20_000);
 
 it("a stood-down debt on the rename's destination survives a move that fails because the destination exists", async () => {

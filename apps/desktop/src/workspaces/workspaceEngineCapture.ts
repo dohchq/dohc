@@ -1479,6 +1479,35 @@ export function createWorkspaceEngineCapture(
   }
   const detachedLockedDebts = new Map<string, DetachedLockedDebt>();
 
+  // A delete-shaped watcher event that named a path with no debt to clean
+  // up YET (#681 round 7, codex P1): `cleanupDetachedDebtForEvent`'s own
+  // `has(path)` gate correctly does nothing there, but a close's transient
+  // retry ladder runs OFF the capture chain for as long as
+  // TEARDOWN_RETRY_CAP_MS allows — seconds wide in production — and can
+  // still register a FRESH debt for that same path afterward. Recording
+  // the path here (not a raw disk stat, which cannot tell "deleted" from
+  // "never written yet" — the same absence either way) lets the
+  // registration door (`scheduleDetachedLockedSettle`) ask "did the
+  // watcher JUST tell me this exact path is gone" instead. Expiring
+  // entries (mirrors `registerExpectedEngineEvents`'s own TTL) keep a
+  // stale deletion from blocking an unrelated LATER write to a path the
+  // user legitimately recreated.
+  let recentExternalDeletesWithNoDebt = new Map<string, number>();
+  function noteExternalDeleteWithNoDebt(path: string): void {
+    recentExternalDeletesWithNoDebt.set(path, now() + EXPECTED_ENGINE_EVENT_EXPIRY_MS);
+  }
+  function consumeRecentExternalDeleteWithNoDebt(path: string): boolean {
+    const nowMs = now();
+    recentExternalDeletesWithNoDebt = new Map(
+      [...recentExternalDeletesWithNoDebt].filter(
+        ([, expiresAtMs]) => expiresAtMs > nowMs,
+      ),
+    );
+    if (!recentExternalDeletesWithNoDebt.has(path)) return false;
+    recentExternalDeletesWithNoDebt.delete(path);
+    return true;
+  }
+
   // Take matching debts OUT of the registry without deciding their fate: the
   // caller is about to attempt a removal, and only its OUTCOME says whether
   // they are cancelled or restored. Suspended debts have no timer (the
@@ -2568,7 +2597,16 @@ export function createWorkspaceEngineCapture(
   // a secret path somehow carrying a debt: peeking rather than consuming
   // leaves that path's own verdict intact either way).
   async function cleanupDetachedDebtForEvent(event: WatcherEvent): Promise<void> {
-    if (!detachedLockedDebts.has(event.path)) return;
+    if (!detachedLockedDebts.has(event.path)) {
+      // A confirmed "delete" operation still means the path is gone, even
+      // with no debt registered yet to clean up: remember it, so a debt
+      // that registers LATER (#681 round 7) does not treat this as news.
+      // Scoped to the "delete" operation only (no disk read needed) to
+      // keep every other path, secrets included, untouched by this door
+      // (#681 round 5).
+      if (event.operation === "delete") noteExternalDeleteWithNoDebt(event.path);
+      return;
+    }
     if (event.operation === "delete") {
       const isExternalDelete = !peekExpectedEvent("delete", event.path);
       cancelSuspendedDebts(
@@ -3947,8 +3985,49 @@ export function createWorkspaceEngineCapture(
             throw error;
           }
         };
+        // The registration door (#681 round 7, codex P1). A close can reach
+        // here two ways: directly, when a release SUCCEEDS over a failed
+        // settle (this debt is fresh — `writeCancelled` is still false);
+        // or off the chain, after a transient close retry ladder that runs
+        // for as long as TEARDOWN_RETRY_CAP_MS allows — seconds wide in
+        // production, unlike the delete/move seams #697 already fences on
+        // the chain. `discardDetachedLockedDebt`'s own re-registration
+        // (`writeCancelled` already true) is release-only by then — no
+        // write is left to resurrect anything, so it always registers.
+        //
+        // A FRESH debt is different: its ladder can reopen the canonical
+        // Y.Doc and settle it back to disk, recreating a file an external
+        // delete removed anywhere in that window. `cleanupDetachedDebtForEvent`
+        // cannot have cleaned up a debt that did not exist yet when the
+        // delete's watcher event ran, but it DOES remember the path
+        // (`noteExternalDeleteWithNoDebt`) — consuming that memory here,
+        // at the door, is what cancels this write with the same trace the
+        // watcher's own cleanup uses, instead of arming a ladder that
+        // would resurrect the file (or, if it later stood down instead,
+        // strand a marker blocking an unrelated file recreated at this
+        // path). A raw disk stat cannot stand in for this: an absent path
+        // means "deleted" and "never written yet" identically, and most
+        // pending writes ARE their document's first materialization.
+        //
+        // BEST-EFFORT, not a fence: the watcher's own memory expires
+        // (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`), and a delete landing after
+        // that window, or after this door already registered, is not
+        // caught here — `cleanupDetachedDebtForEvent` remains the
+        // authoritative door for those.
         const scheduleDetachedLockedSettle = (): void => {
           if (stopped) return;
+          if (
+            !writeCancelled &&
+            consumeRecentExternalDeleteWithNoDebt(input.path)
+          ) {
+            onError(
+              `ydoc close retry of ${input.path}`,
+              new Error(
+                `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`,
+              ),
+            );
+            return;
+          }
           detachedLockedDebts.set(input.path, {
             pay: payDetachedLockedDebt,
             arm: armDetachedLockedRetry,
