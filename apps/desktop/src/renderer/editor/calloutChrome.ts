@@ -249,7 +249,7 @@ function buildCalloutHeader(
   typeTrigger.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    setTypeMenuOpen(typeMenu.hidden);
+    setTypeMenuOpen(typeMenu.hidden !== false);
   });
   typeTrigger.addEventListener("keydown", (event) => {
     if (event.key === "ArrowDown") {
