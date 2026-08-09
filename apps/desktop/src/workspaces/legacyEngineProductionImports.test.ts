@@ -323,11 +323,14 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
     }
   };
   t.traverseFast(sourceFile, collectNames);
-  const resolveConst = (name: string, resolving: ReadonlySet<string>): readonly string[] => {
-    if (resolving.has(name)) return [];
-    const nextResolving = new Set(resolving).add(name);
+  const resolveConst = (
+    name: string,
+    resolving: ReadonlySet<t.Expression>,
+  ): readonly string[] => {
     const values = new Set<string>();
     for (const expression of stringConstExpressions.get(name) ?? []) {
+      if (resolving.has(expression)) continue;
+      const nextResolving = new Set(resolving).add(expression);
       for (const value of resolveSpecifiers(
         expression,
         (dependency) => resolveConst(dependency, nextResolving),
@@ -685,13 +688,13 @@ const m = await import(name);`),
 
     // Same-name declarations across scopes can create a cycle in the
     // conservative file-wide map. The resolver must stop the cycle while
-    // keeping the statically reachable legacy candidate.
+    // keeping the candidate reached through the inner same-name binding.
     const cyclic = [
       `const name = "@dohc";`,
       `function outer() {`,
       `  const specifier = name + "/workspace-engine";`,
-      `  function inner() { const name = specifier; return name; }`,
-      `  return require(specifier);`,
+      `  function inner() { const name = specifier; return require(name); }`,
+      `  return inner();`,
       `}`,
     ].join("\n");
     expect(hasRuntimeLegacyImport(cyclic)).toBe(true);
