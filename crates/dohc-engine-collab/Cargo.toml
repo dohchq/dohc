@@ -30,7 +30,14 @@ fault-injection = ["dohc-engine-storage/fault-injection"]
 dohc-engine-storage = { path = "../dohc-engine-storage" }
 # `store::CAPTURE_ORIGIN` — the domain layer's own name for the
 # capture-owned `metadata_origin` value, which `captured_head_sha` reads
-# directly instead of re-deriving it from a job-row heuristic (#723).
+# directly instead of re-deriving it from a job-row heuristic (#723). The
+# coupling was already real: this crate's durable SQL reads and writes the
+# domain schema's own tables (`snapshots`, `materialization_jobs`) directly.
+# Declaring the dependency just makes that checkable at compile time instead
+# of by convention. `ydoc_full_state_size.rs`'s dev-only need for
+# `MAX_TEXT_BYTES` — the largest document body the store accepts, which
+# `MAX_YDOC_UPDATE_BYTES` is measured against (#549) — rides the same real
+# dependency now, so its former standalone dev-dependency is gone.
 dohc-engine-domain = { path = "../dohc-engine-domain" }
 # The ydoc SQL runs against the store's connection/transaction through its
 # read_with/write_with seams. Pinned to storage's exact rusqlite so the shared

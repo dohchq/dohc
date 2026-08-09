@@ -10,15 +10,34 @@ use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::{
     apply_remote_update, claim_base, close_session, ensure_marker, load_persisted, read_marker,
     record_local_update, settle, ClaimOutcome, CloseOutcome, CollabError, DocKey, LeaseRegistry,
-    Regime, RemoteUpdate, ReplicationApplyOutcome, Ydoc,
+    Regime, RemoteUpdate, ReplicationApplyOutcome, SettleOutcome, Ydoc,
 };
-use dohc_engine_storage::{NoFaults, TxnOutcome};
+use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 
 fn committed<T>(o: TxnOutcome<T>) -> T {
     match o {
         TxnOutcome::Committed(v) => v,
         TxnOutcome::Crashed { .. } => panic!("expected committed, got crashed"),
     }
+}
+
+/// Mark a `settle()` call's OWN materialization job complete. Every test
+/// below that seeds an ADDITIONAL pending job to prove the close guard
+/// blocks on THAT job must call this first — the settle's own job (still
+/// pending, same target path) would otherwise block the close by itself,
+/// and the seeded job would prove nothing: deleting it would flip no
+/// assertion.
+fn land_settle_job(store: &mut EngineStore, outcome: &SettleOutcome) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE materialization_jobs SET status = 'complete' WHERE job_id = ?1",
+                [&outcome.job_id],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("land the settle's own job");
 }
 
 /// A small plaintext lineage: (base full-state bytes, a follow-up remote delta).
@@ -70,23 +89,14 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "mine");
     committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_000).expect("rec"));
-    committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    let settle_outcome =
+        committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
     // The settle's OWN job must land before this test's cross-workspace
     // collision means anything — a still-pending job for THIS object's own
     // path is correctly blocking (#715: the guard now reads any pending job
     // aimed at the path, not just certain job-id spellings), and asserting
     // through it would test that instead of the workspace-scoping bug below.
-    ts.store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE materialization_jobs SET status = 'complete' \
-                 WHERE workspace_id = ?1 AND target_path = 'notes/doc.md'",
-                [&key.workspace_id],
-            )
-            .map_err(dohc_engine_storage::StorageError::persist_public)?;
-            Ok::<_, dohc_engine_storage::StorageError>(())
-        })
-        .expect("complete the settle's own job");
+    land_settle_job(&mut ts.store, &settle_outcome);
 
     // The guard joins `moments`, so this lineage needs the settle moment a
     // domain-layer settle would have written — without it the join matches
@@ -167,7 +177,11 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     let doc2 = Ydoc::wire();
     let delta2 = doc2.plaintext_insert(0, "mine");
     committed(record_local_update(&mut ts2.store, &key2, &delta2, &NoFaults, 1_000).expect("rec"));
-    committed(settle(&mut ts2.store, &key2, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    let settle_outcome2 =
+        committed(settle(&mut ts2.store, &key2, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    // Land THIS settle's own job too — the seeded job below must be the
+    // ONLY thing this half blocks on, or it proves nothing either.
+    land_settle_job(&mut ts2.store, &settle_outcome2);
     ts2.store
         .write_with(&NoFaults, |tx| {
             let text_sha = dohc_engine_storage::hex_sha256(b"mine");
@@ -234,13 +248,19 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
 /// content).
 ///
 /// One test per prefix, settle-then-seed a same-path pending job of exactly
-/// that kind, and require the close to refuse.
+/// that kind, and require the close to refuse. `job_id_prefix` also names
+/// the scratch store — every prefix is a distinct valid identifier already.
+///
+/// The settle's OWN job is landed (marked complete) before the seeded job:
+/// otherwise that still-pending job — same target path — would block the
+/// close by itself, and the seeded job would prove nothing (deleting it
+/// would flip no assertion).
 ///
 /// MUTATION: restore the `ydoc-mat_` / `resolve-mat_` job-id prefix match in
 /// `close_session`'s pending-job query — each of these three still-pending
 /// jobs stops blocking and the assert fails.
-fn assert_pending_job_of_kind_blocks_close(tag: &str, job_id_prefix: &str) {
-    let mut ts = fresh_store(tag);
+fn assert_pending_job_of_kind_blocks_close(job_id_prefix: &str) {
+    let mut ts = fresh_store(job_id_prefix);
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
     committed(
@@ -257,7 +277,9 @@ fn assert_pending_job_of_kind_blocks_close(tag: &str, job_id_prefix: &str) {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "mine");
     committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_000).expect("rec"));
-    committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    let settle_outcome =
+        committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    land_settle_job(&mut ts.store, &settle_outcome);
 
     let moment_id = "settle-moment-id";
     ts.store
@@ -318,17 +340,17 @@ fn assert_pending_job_of_kind_blocks_close(tag: &str, job_id_prefix: &str) {
 
 #[test]
 fn a_pending_merge_mat_job_blocks_the_local_close() {
-    assert_pending_job_of_kind_blocks_close("pending-merge-mat", "merge-mat_");
+    assert_pending_job_of_kind_blocks_close("merge-mat_");
 }
 
 #[test]
 fn a_pending_sync_resolve_mat_job_blocks_the_local_close() {
-    assert_pending_job_of_kind_blocks_close("pending-sync-resolve-mat", "sync-resolve-mat_");
+    assert_pending_job_of_kind_blocks_close("sync-resolve-mat_");
 }
 
 #[test]
 fn a_pending_secret_mat_job_blocks_the_local_close() {
-    assert_pending_job_of_kind_blocks_close("pending-secret-mat", "secret-mat_");
+    assert_pending_job_of_kind_blocks_close("secret-mat_");
 }
 
 #[test]
