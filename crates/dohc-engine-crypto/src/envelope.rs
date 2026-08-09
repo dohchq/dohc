@@ -12,7 +12,7 @@
 use crate::base64;
 use crate::error::CryptoError;
 use crate::key::{SECRET_KEY_BYTES, SecretDataKey};
-use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::aead::{AeadInOut, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -68,7 +68,7 @@ fn derive_kek(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, Cryp
     if passphrase.is_empty() {
         return Err(CryptoError::EnvelopeUnwrapFailed);
     }
-    let params = scrypt::Params::new(SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P, SECRET_KEY_BYTES)
+    let params = scrypt::Params::new(SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P)
         .map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
     let mut kek = Zeroizing::new([0u8; 32]);
     scrypt::scrypt(passphrase.as_bytes(), salt, &params, kek.as_mut_slice())
@@ -85,8 +85,8 @@ pub fn wrap(
 ) -> Result<String, CryptoError> {
     let mut salt = [0u8; SALT_BYTES];
     let mut iv = [0u8; IV_BYTES];
-    getrandom::getrandom(&mut salt).map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
-    getrandom::getrandom(&mut iv).map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
+    getrandom::fill(&mut salt).map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
+    getrandom::fill(&mut iv).map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
     wrap_with(data_key, passphrase, workspace_id, salt, iv)
 }
 
@@ -103,8 +103,9 @@ pub fn wrap_with(
         Aes256Gcm::new_from_slice(kek.as_slice()).map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
     let aad = envelope_aad(workspace_id);
     let mut buffer = data_key_bytes(data_key);
+    let nonce = Nonce::from(iv);
     let tag = cipher
-        .encrypt_in_place_detached(Nonce::from_slice(&iv), &aad, buffer.as_mut_slice())
+        .encrypt_inout_detached(&nonce, &aad, buffer.as_mut_slice().into())
         .map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
     let envelope = EnvelopeJson {
         format: ENVELOPE_FORMAT.to_owned(),
@@ -153,13 +154,10 @@ pub fn unwrap(
     let cipher =
         Aes256Gcm::new_from_slice(kek.as_slice()).map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
     let aad = envelope_aad(workspace_id);
+    let nonce = Nonce::try_from(iv.as_slice()).map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
+    let tag = Tag::try_from(tag.as_slice()).map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
     cipher
-        .decrypt_in_place_detached(
-            Nonce::from_slice(&iv),
-            &aad,
-            buffer.as_mut_slice(),
-            Tag::from_slice(&tag),
-        )
+        .decrypt_inout_detached(&nonce, &aad, buffer.as_mut_slice().into(), &tag)
         .map_err(|_| CryptoError::EnvelopeUnwrapFailed)?;
     if buffer.len() != SECRET_KEY_BYTES {
         return Err(CryptoError::EnvelopeUnwrapFailed);
@@ -200,6 +198,38 @@ mod tests {
     }
 
     #[test]
+    fn rewrap_matches_ts_fixture_byte_exact() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ts_key_envelope.json"
+        ))
+        .expect("read fixture");
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let expected = fixture["envelopeJson"].as_str().unwrap();
+        let envelope: EnvelopeJson = serde_json::from_str(expected).unwrap();
+        let salt: [u8; SALT_BYTES] = base64::strict_decode(&envelope.salt_base64)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let iv: [u8; IV_BYTES] = base64::strict_decode(&envelope.iv_base64)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let key = SecretDataKey::from_bytes(&hex(fixture["dataKeyHex"].as_str().unwrap())).unwrap();
+
+        let actual = wrap_with(
+            &key,
+            fixture["passphrase"].as_str().unwrap(),
+            fixture["workspaceId"].as_str().unwrap(),
+            salt,
+            iv,
+        )
+        .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn wrong_passphrase_fails_closed() {
         let envelope = wrap_with(
             &data_key(),
@@ -236,7 +266,7 @@ mod tests {
     /// all land on the AEAD check rather than on a decode or shape guard.
     ///
     /// Honest about what this adds: it does NOT have a mutation of its own.
-    /// Giving `decrypt_in_place_detached`'s `map_err` a different error kills
+    /// Giving `decrypt_inout_detached`'s `map_err` a different error kills
     /// this test AND `wrong_passphrase_fails_closed` AND
     /// `wrong_workspace_aad_fails_closed`, because all three reach that one
     /// call. What it closes is an INPUT-CLASS gap -- nothing else here feeds
@@ -303,5 +333,12 @@ mod tests {
             unwrap(bad, "pw", "wsA").unwrap_err(),
             CryptoError::EnvelopeUnwrapFailed
         );
+    }
+
+    fn hex(value: &str) -> Vec<u8> {
+        (0..value.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&value[index..index + 2], 16).unwrap())
+            .collect()
     }
 }
