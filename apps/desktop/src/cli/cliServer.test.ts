@@ -1432,6 +1432,77 @@ describe("CLI socket server", () => {
     expect(elapsedMs).toBeLessThan(5_000);
   });
 
+  // #749 review: a detached pass past the budget stays running. Without
+  // coalescing, a slow relay behind a stream of reads starts one detached
+  // pass PER READ — main.ts's serializer only stops them running
+  // concurrently, not from queueing up unboundedly.
+  it("coalesces concurrent chat reads for the same workspace onto one pass", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Local-only message",
+    });
+    // Never resolves within the test — the worst case for unbounded queueing.
+    onReadEffect = () => new Promise<void>(() => {});
+    serverOptions.chatReadSyncBudgetMs = 40;
+
+    const [first, second] = await Promise.all([
+      invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: thread.id }),
+      invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: thread.id }),
+    ]);
+    if (!first.ok) throw new Error(first.reason);
+    if (!second.ok) throw new Error(second.reason);
+
+    // Two reads raced the budget, but only ONE of them actually started the
+    // hook — the second joined its race instead of starting a second pass.
+    expect(calls.reads).toBe(1);
+  });
+
+  it("starts a fresh pass once the prior one for that workspace has settled", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Local-only message",
+    });
+    const release: { firstPass: (() => void) | null } = { firstPass: null };
+    let hookCalls = 0;
+    onReadEffect = () => {
+      hookCalls += 1;
+      if (hookCalls > 1) return undefined;
+      return new Promise<void>((resolveHang) => {
+        release.firstPass = resolveHang;
+      });
+    };
+    serverOptions.chatReadSyncBudgetMs = 40;
+
+    const first = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: thread.id,
+    });
+    if (!first.ok) throw new Error(first.reason);
+    expect(hookCalls).toBe(1);
+
+    release.firstPass?.();
+    // Let the settled pass's own `.finally` cleanup run before the next read.
+    await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+
+    const second = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: thread.id,
+    });
+    if (!second.ok) throw new Error(second.reason);
+    // Not stuck coalescing onto a pass that already finished.
+    expect(hookCalls).toBe(2);
+  });
+
   it("names the read's own channel or thread as the sync priority", async () => {
     const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const { thread } = await store!.startChannelThread({

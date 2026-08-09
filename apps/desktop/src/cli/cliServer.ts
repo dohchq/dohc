@@ -963,16 +963,45 @@ async function notifyWrite(
 // contract the sync pass itself keeps.
 const CHAT_READ_SYNC_BUDGET_MS = 10_000;
 
+// A pass past the budget keeps running detached (see notifyRead below). A
+// slow relay behind a stream of reads would otherwise start one detached pass
+// PER READ — main.ts's own serializer only stops them running concurrently,
+// not from queueing up unboundedly. One in-flight pass per (options,
+// workspace) is tracked here so a read that finds one already running joins
+// its race instead of starting another.
+const chatReadSyncInFlight = new WeakMap<CliServerOptions, Map<string, Promise<void>>>();
+
+function chatReadSyncInFlightFor(options: CliServerOptions): Map<string, Promise<void>> {
+  const existing = chatReadSyncInFlight.get(options);
+  if (existing) return existing;
+  const created = new Map<string, Promise<void>>();
+  chatReadSyncInFlight.set(options, created);
+  return created;
+}
+
 async function notifyRead(
   options: CliServerOptions,
   context: CliWorkspaceContext,
   target?: { channelId: string } | { threadId: string },
 ): Promise<void> {
-  const pending = Promise.resolve()
-    .then(() => options.onRead?.(context, target))
-    .catch((error) => {
-      options.onError?.(error);
-    });
+  const inFlight = chatReadSyncInFlightFor(options);
+  let pending = inFlight.get(context.workspaceId);
+  if (!pending) {
+    // `target` names the pass THIS call starts. A read that instead joins an
+    // already-running pass gets whatever priority that pass already
+    // committed to — the same tradeoff a rotation-only pass always had.
+    pending = Promise.resolve()
+      .then(() => options.onRead?.(context, target))
+      .catch((error) => {
+        options.onError?.(error);
+      })
+      .finally(() => {
+        if (inFlight.get(context.workspaceId) === pending) {
+          inFlight.delete(context.workspaceId);
+        }
+      });
+    inFlight.set(context.workspaceId, pending);
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const budget = new Promise<void>((resolveBudget) => {
     timer = setTimeout(
@@ -981,8 +1010,9 @@ async function notifyRead(
     );
   });
   // Past the budget, the read proceeds on whatever the store already has —
-  // `pending` keeps running (main.ts's pass is serialized per workspace, so it
-  // is never duplicated) and the NEXT read benefits from what it finishes.
+  // `pending` keeps running (tracked above, so a concurrent read joins it
+  // instead of starting a second one) and the NEXT read benefits from what it
+  // finishes.
   await Promise.race([pending, budget]);
   clearTimeout(timer);
 }
