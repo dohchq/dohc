@@ -937,8 +937,13 @@ export class YDocRemovalInProgressError extends Error {
     readonly workspacePath: string,
     readonly inProgress: string,
     readonly operation: "open" | "settle",
+    readonly removalOperation: "delete" | "move",
   ) {
-    super(`dohc could not ${operation} ${workspacePath}. ${inProgress}`);
+    super(
+      operation === "open"
+        ? `dohc could not open ${workspacePath}. ${inProgress}`
+        : `dohc could not save ${workspacePath}. ${inProgress} Wait for that to finish. Then save again.`,
+    );
     this.name = "YDocRemovalInProgressError";
   }
 }
@@ -1531,6 +1536,7 @@ export function createWorkspaceEngineCapture(
   // window needs no drain: refusing the STARTS is the whole fence.
   interface RemovalWindow {
     match: (path: string) => boolean;
+    operation: "delete" | "move";
     // What another operation tells the user when it has to wait for this one.
     inProgress: string;
   }
@@ -2018,11 +2024,25 @@ export function createWorkspaceEngineCapture(
         });
       },
       settleNow(settleOptions) {
-        return append(async () =>
-          await executeWithReconnect(async (session) =>
+        return append(async () => {
+          // The delete seam's own vacate settles on this capture chain before
+          // it opens its removal window. That ordering prevents its settle
+          // from racing its delete. This fence backs every other caller that
+          // can reach the same settle door while another operation already
+          // owns the path.
+          const removal = removalWindowFor(input.path);
+          if (removal) {
+            throw new YDocRemovalInProgressError(
+              input.path,
+              removal.inProgress,
+              "settle",
+              removal.operation,
+            );
+          }
+          return await executeWithReconnect(async (session) =>
             await session.settleNow(settleOptions),
-          ),
-        );
+          );
+        });
       },
       applyExternalMarkdownEdit(markdown) {
         return append(async () => {
@@ -3095,6 +3115,7 @@ export function createWorkspaceEngineCapture(
             input.path,
             removal.inProgress,
             "open",
+            removal.operation,
           );
         }
         // An ORPHANED session — one a refused open could not release — still
@@ -4127,20 +4148,7 @@ export function createWorkspaceEngineCapture(
             noteUpdate();
             return session.applyLocalUpdate(update, onArmed);
           },
-          settleNow: async (opts) => {
-            // Fence the public provider once. The only direct caller of the
-            // inner restart-safe session is detached-debt payment, which has
-            // its own removal-window check before it can open or settle.
-            const removal = removalWindowFor(input.path);
-            if (removal) {
-              throw new YDocRemovalInProgressError(
-                input.path,
-                removal.inProgress,
-                "settle",
-              );
-            }
-            return await session.settleNow(opts);
-          },
+          settleNow: (opts) => session.settleNow(opts),
           applyExternalMarkdownEdit: (markdown) => {
             noteUpdate();
             return session.applyExternalMarkdownEdit(markdown);
@@ -4178,6 +4186,7 @@ export function createWorkspaceEngineCapture(
         // only closer this seam needs.
         const closeRemovalWindow = openRemovalWindow({
           match,
+          operation: "delete",
           inProgress: `dohc is still deleting ${pathOrPrefix}.`,
         });
         // Closed LAST. Both branches below are synchronous and append nothing
@@ -5537,6 +5546,7 @@ export function createWorkspaceEngineCapture(
         // stops them from starting for as long as the move is unfinished.
         closeRemovalWindow = openRemovalWindow({
           match: endpointMatch,
+          operation: "move",
           inProgress: `dohc is still moving ${fromPath}.`,
         });
         const policy = await readPolicyForTask();

@@ -3163,9 +3163,14 @@ export const OpenEngineYDocSessionResult = z.object({
   // closed. The caller stays read-only, states the reason, and offers a retry —
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: z.boolean().optional(),
-  // A delete or move already owns this path. The renderer must not downgrade
-  // to the writable plain editor, because that editor could recreate the path.
-  deletedWhileEditing: z.boolean().optional(),
+  // A delete or move owns this path for an interval. The renderer must stay
+  // read-only and offer a retry, without claiming that the operation finished.
+  removalInProgress: z
+    .object({
+      operation: z.enum(["delete", "move"]),
+      message: z.string().min(1),
+    })
+    .optional(),
 });
 export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionResult>;
 

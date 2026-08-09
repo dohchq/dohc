@@ -1368,13 +1368,22 @@ describe("document export IPC contract", () => {
 });
 
 describe("engine Y.Doc update IPC contract", () => {
-  it("keeps a removal-window open refusal distinguishable in the renderer", () => {
+  it("keeps a removal-window open refusal operation-aware in the renderer", () => {
     expect(
       OpenEngineYDocSessionResult.parse({
         available: false,
-        deletedWhileEditing: true,
+        removalInProgress: {
+          operation: "move",
+          message: "dohc is still moving notes.",
+        },
       }),
-    ).toEqual({ available: false, deletedWhileEditing: true });
+    ).toEqual({
+      available: false,
+      removalInProgress: {
+        operation: "move",
+        message: "dohc is still moving notes.",
+      },
+    });
   });
 
   // AUDIT-SILENTSAVE round 2 (D1). The engine Y.Doc apply-update handler is a

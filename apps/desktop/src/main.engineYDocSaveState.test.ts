@@ -81,12 +81,15 @@ describe("engine Y.Doc save-state reporting in main", () => {
     expect(handler.indexOf("return;", deletedAt)).toBeLessThan(applyAt);
   });
 
-  it("maps a removal-window open refusal to the renderer deletion contract", () => {
+  it("maps a removal-window open refusal to a retryable interval", () => {
     const handler = handlerSource("engineYDocOpen");
     const catchAt = handler.indexOf("} catch (error) {");
     const answer = handler.slice(catchAt, handler.indexOf("const entry:"));
     expect(answer).toContain("isYDocRemovalInProgressError(error)");
-    expect(answer).toContain("deletedWhileEditing: true");
+    expect(answer).toContain("removalInProgress:");
+    expect(answer).toContain("operation: error.removalOperation");
+    expect(answer).toContain("message: error.inProgress");
+    expect(answer).not.toContain("deletedWhileEditing");
   });
 
   it("reports each settle against the seq state of ITS OWN open", () => {

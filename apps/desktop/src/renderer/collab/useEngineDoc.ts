@@ -46,6 +46,11 @@ export type EngineDocSaveState =
   | "changed-on-disk"
   | "deleted";
 
+export type EngineRemovalInProgress = {
+  operation: "delete" | "move";
+  message: string;
+};
+
 export type UseEngineDoc = {
   // True once the engine session is open and the mirror doc is bound. false =>
   // fall back to the local autosave editor, but ONLY once `opening` is false.
@@ -80,12 +85,12 @@ export type UseEngineDoc = {
   // stays read-only, states the reason, and offers a retry (bump retryKey),
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: boolean;
-  // The file was removed while this request was opening or while its live
-  // session was bound. The current document is retained for recovery only.
+  // Main confirmed that it removed this file while the live session was
+  // bound. The current document is retained for recovery only.
   deletedWhileEditing: boolean;
-  // True when this mirror contains a local update that no successful settle
-  // has covered. Deletion recovery captures only when this is true.
-  hasUnsettledChanges: boolean;
+  // An open lost to a delete or move interval. This is not a terminal outcome:
+  // the operation can still fail, so the caller stays read-only and retries.
+  removalInProgress: EngineRemovalInProgress | null;
 };
 
 // What ONE open answers: a workspace, a path, the gate, and the active-version
@@ -117,7 +122,7 @@ type EngineDocOpenOutcome =
   // behind one flag.
   | { key: string; kind: "not-in-version" }
   | { key: string; kind: "engine-may-hold-document" }
-  | { key: string; kind: "deleted-while-editing" };
+  | { key: string; kind: "removal-in-progress"; removal: EngineRemovalInProgress };
 
 let engineDocSessionCounter = 0;
 function nextSessionId(): string {
@@ -148,7 +153,9 @@ function makeTransport(
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
-        ...(result.deletedWhileEditing ? { deletedWhileEditing: true } : {}),
+        ...(result.removalInProgress
+          ? { removalInProgress: result.removalInProgress }
+          : {}),
       };
     },
     applyLocalUpdate(update) {
@@ -201,7 +208,6 @@ export function useEngineDoc(input: {
   const [outcome, setOutcome] = useState<EngineDocOpenOutcome | null>(null);
   const [saveState, setSaveState] = useState<EngineDocSaveState>("saved");
   const [deletedRequestKey, setDeletedRequestKey] = useState<string | null>(null);
-  const [unsettledRequestKey, setUnsettledRequestKey] = useState<string | null>(null);
   // Monotonic per-open token: only the newest open may set state (the async-
   // state invariant — a stale workspace/path response never repaints).
   const openTokenRef = useRef(0);
@@ -223,17 +229,19 @@ export function useEngineDoc(input: {
   // repaints the document they just entered.
   const notInVersion = settled?.kind === "not-in-version";
   const engineMayHoldDocument = settled?.kind === "engine-may-hold-document";
+  const removalInProgress =
+    settled?.kind === "removal-in-progress" ? settled.removal : null;
   const deletedWhileEditing =
-    settled?.kind === "deleted-while-editing" ||
-    (settled?.kind === "bound" && deletedRequestKey === requestKey);
-  const hasUnsettledChanges = unsettledRequestKey === requestKey;
+    settled?.kind === "bound" && deletedRequestKey === requestKey;
   const writesRefused = useRef(false);
   const writesRefusedKey = useRef(requestKey);
   if (writesRefusedKey.current !== requestKey) {
     writesRefusedKey.current = requestKey;
     writesRefused.current = false;
   }
-  if (deletedWhileEditing) writesRefused.current = true;
+  if (deletedWhileEditing || removalInProgress !== null) {
+    writesRefused.current = true;
+  }
 
   useEffect(() => {
     setSaveState("saved");
@@ -275,16 +283,19 @@ export function useEngineDoc(input: {
           // write the phantom the engine just refused (#534), and when the
           // engine may still hold the document, where a plain autosave would
           // race the session it still binds (#564, #657).
-          setOutcome({
-            key,
-            kind: bound.notInVersion
-              ? "not-in-version"
-              : bound.engineMayHoldDocument
-                ? "engine-may-hold-document"
-                : bound.deletedWhileEditing
-                  ? "deleted-while-editing"
-                  : "unavailable",
-          });
+          if (bound.notInVersion) {
+            setOutcome({ key, kind: "not-in-version" });
+          } else if (bound.engineMayHoldDocument) {
+            setOutcome({ key, kind: "engine-may-hold-document" });
+          } else if (bound.removalInProgress) {
+            setOutcome({
+              key,
+              kind: "removal-in-progress",
+              removal: bound.removalInProgress,
+            });
+          } else {
+            setOutcome({ key, kind: "unavailable" });
+          }
           return;
         }
         // An edit is unsaved the instant it happens. Only main's settle report
@@ -293,7 +304,6 @@ export function useEngineDoc(input: {
         const onUpdate = () => {
           if (cancelled) return;
           if (writesRefused.current) return;
-          setUnsettledRequestKey(key);
           setSaveState("saving");
         };
         bound.doc.on("update", onUpdate);
@@ -350,7 +360,6 @@ export function useEngineDoc(input: {
           // "saved" vouches only for edits journaled before that settle began.
           // Anything typed since is still unsaved — keep showing "Saving…".
           if (event.seq >= localSeq.current) {
-            setUnsettledRequestKey((current) => (current === key ? null : current));
             setSaveState("saved");
           }
         });
@@ -393,6 +402,6 @@ export function useEngineDoc(input: {
     notInVersion,
     engineMayHoldDocument,
     deletedWhileEditing,
-    hasUnsettledChanges,
+    removalInProgress,
   };
 }

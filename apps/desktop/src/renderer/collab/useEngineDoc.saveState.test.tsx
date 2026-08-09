@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
@@ -22,10 +23,17 @@ function harnessBridge() {
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
   doc.getText("plainText").insert(0, "seed");
+  let removalInProgress: {
+    operation: "delete" | "move";
+    message: string;
+  } | null = null;
 
   const api = {
     async openEngineYDocSession(payload: { sessionId: string }) {
       openedSessionId = payload.sessionId;
+      if (removalInProgress) {
+        return { available: false, removalInProgress };
+      }
       return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) };
     },
     async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
@@ -54,21 +62,36 @@ function harnessBridge() {
     });
   }
 
-  return { api, emit, applied, sessionId: () => openedSessionId };
+  return {
+    api,
+    emit,
+    applied,
+    sessionId: () => openedSessionId,
+    setRemovalInProgress(value: typeof removalInProgress) {
+      removalInProgress = value;
+    },
+  };
 }
 
 function Harness(props: { workspaceId: string; path: string }) {
+  const [retryKey, setRetryKey] = useState(0);
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
     enabled: true,
+    retryKey,
   });
   return (
     <div>
       <span data-testid="state">{engine.saveState}</span>
       <span data-testid="available">{String(engine.available)}</span>
       <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
-      <span data-testid="unsettled">{String(engine.hasUnsettledChanges)}</span>
+      <span data-testid="removal-operation">
+        {engine.removalInProgress?.operation ?? "none"}
+      </span>
+      <span data-testid="removal-message">
+        {engine.removalInProgress?.message ?? "none"}
+      </span>
       <button
         type="button"
         data-testid="type"
@@ -78,6 +101,9 @@ function Harness(props: { workspaceId: string; path: string }) {
         }}
       >
         type
+      </button>
+      <button type="button" data-testid="retry" onClick={() => setRetryKey((n) => n + 1)}>
+        retry
       </button>
     </div>
   );
@@ -148,7 +174,6 @@ it("refuses transport writes synchronously after main reports deletion", async (
 
   expect(screen.getByTestId("state").textContent).toBe("deleted");
   expect(screen.getByTestId("deleted").textContent).toBe("true");
-  expect(screen.getByTestId("unsettled").textContent).toBe("true");
 
   // A Y.Doc update can fire before the read-only React render commits. The
   // transport ref closes that gap, so no later update reaches main.
@@ -160,6 +185,31 @@ it("refuses transport writes synchronously after main reports deletion", async (
 
   harness.emit("error", harness.applied.at(-1)!.seq);
   expect(screen.getByTestId("state").textContent).toBe("deleted");
+});
+
+it("keeps a failed delete interval retryable without storing a deleted verdict", async () => {
+  harness.setRemovalInProgress({
+    operation: "delete",
+    message: "dohc is still deleting notes/big.md.",
+  });
+  render(<Harness workspaceId="ws-1" path="notes/big.md" />);
+
+  await waitFor(() =>
+    expect(screen.getByTestId("removal-operation").textContent).toBe("delete"),
+  );
+  expect(screen.getByTestId("removal-message").textContent).toBe(
+    "dohc is still deleting notes/big.md.",
+  );
+  expect(screen.getByTestId("available").textContent).toBe("false");
+  expect(screen.getByTestId("deleted").textContent).toBe("false");
+
+  // The underlying delete failed and closed its interval. A new request opens
+  // the still-present file without carrying a terminal verdict forward.
+  harness.setRemovalInProgress(null);
+  act(() => screen.getByTestId("retry").click());
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+  expect(screen.getByTestId("removal-operation").textContent).toBe("none");
+  expect(screen.getByTestId("deleted").textContent).toBe("false");
 });
 
 it("passes a file-locked report through, and a real settle clears it", async () => {

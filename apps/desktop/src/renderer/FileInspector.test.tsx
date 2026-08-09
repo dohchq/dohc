@@ -1229,7 +1229,56 @@ describe("engine markdown source view", () => {
     expect(screen.queryByTestId("markdown-source-view")).toBeNull();
   });
 
-  it("keeps a deleted live document read-only and preserves its unsettled text in recovery", async () => {
+  it("shows the plain deletion notice when the last edit settled first", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    await user.type(screen.getByTestId("page-title"), " Retitled");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => pushSaveState("saved", 999));
+    act(() => pushSaveState("deleted", 999));
+
+    expect(
+      (await screen.findByTestId("deleted-while-editing-notice")).textContent,
+    ).toBe(
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+    );
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    expect(screen.queryByTestId("orphaned-draft-copy")).toBeNull();
+    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(true);
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("markdown-editor").getAttribute("contenteditable"),
+      ).toBe("false"),
+    );
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+    );
+  });
+
+  it("does not relabel an older set-aside edit as part of this deletion", async () => {
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    captureOrphanedDraft("ws-1", "a.md", "Older set-aside text");
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    act(() => pushSaveState("deleted", 0));
+
+    expect(
+      (await screen.findByTestId("deleted-while-editing-notice")).textContent,
+    ).toBe(
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+    );
+    expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
+      "This document reopened before your last edit saved. Copy your text to keep it.",
+    );
+  });
+
+  it("sets aside an edit that races the confirmed deletion", async () => {
     const user = userEvent.setup();
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
@@ -1241,15 +1290,15 @@ describe("engine markdown source view", () => {
     act(() => pushSaveState("deleted", 1));
 
     expect(
-      await screen.findByText(
-        "This file was deleted while you were editing it. Your unsaved changes are kept as a recoverable draft.",
-      ),
-    ).toBeTruthy();
-    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(true);
-    await waitFor(() =>
-      expect(
-        screen.getByTestId("markdown-editor").getAttribute("contenteditable"),
-      ).toBe("false"),
+      (await screen.findByTestId("deleted-while-editing-notice")).textContent,
+    ).toBe(
+      "This file was deleted while you had it open. Copy your set-aside edit to keep it.",
+    );
+    expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
+      "This document reopened before your last edit saved. Copy your text to keep it.",
+    );
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
+      "This file was deleted while you had it open. Copy your set-aside edit to keep it.",
     );
 
     // Reuse #600's existing Copy recovery action and prove it returns the
@@ -1260,38 +1309,44 @@ describe("engine markdown source view", () => {
     );
   });
 
-  it("renders the same recovery surface when the live open loses to deletion", async () => {
+  it.each([
+    ["delete" as const, "dohc is still deleting a.md."],
+    ["move" as const, "dohc is still moving a.md."],
+  ])("keeps a %s-window open refusal retryable and operation-aware", async (operation, message) => {
     const user = userEvent.setup();
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    const openBound = bridgeMock.openEngineYDocSession;
+    let removalInProgress = true;
     const refusedBridge = {
       ...bridgeMock,
-      openEngineYDocSession: vi.fn(async () => ({
-        available: false,
-        deletedWhileEditing: true,
-      })),
+      openEngineYDocSession: vi.fn(async (...args: Parameters<typeof openBound>) =>
+        removalInProgress
+          ? {
+              available: false,
+              removalInProgress: { operation, message },
+            }
+          : await openBound(...args),
+      ),
     };
-    captureOrphanedDraft(
-      "ws-1",
-      "a.md",
-      "---\ntitle: Draft from the refused open\n---\n\nUnsettled body\n",
-    );
     vi.stubGlobal("dohcDesktop", refusedBridge);
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    expect(
-      await screen.findByText(
-        "This file was deleted while you were editing it. Your unsaved changes are kept as a recoverable draft.",
-      ),
-    ).toBeTruthy();
+    const notice = await screen.findByTestId("engine-removal-in-progress-notice");
+    expect(notice.getAttribute("data-operation")).toBe(operation);
+    expect(notice.textContent).toContain(`${message} Wait for it to finish.`);
+    expect(screen.queryByTestId("deleted-while-editing-notice")).toBeNull();
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(
       true,
     );
-    await user.click(screen.getByTestId("orphaned-draft-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toContain(
-        "Draft from the refused open",
-      ),
+    removalInProgress = false;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    expect(screen.queryByTestId("engine-removal-in-progress-notice")).toBeNull();
+    expect(screen.queryByTestId("deleted-while-editing-notice")).toBeNull();
+    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(
+      false,
     );
   });
 

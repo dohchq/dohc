@@ -35,9 +35,12 @@ export interface EngineYDocTransport {
     // A session for this document may still be the engine's (#564, #657) —
     // the other available:false that must not fall back to the plain editor.
     engineMayHoldDocument?: boolean;
-    // A destructive operation already owns this path. Falling back to the
-    // plain editor would let its autosave recreate the deleted file.
-    deletedWhileEditing?: boolean;
+    // A destructive operation owns this path for an interval. Falling back to
+    // the plain editor would let its autosave race that operation.
+    removalInProgress?: {
+      operation: "delete" | "move";
+      message: string;
+    };
   }>;
   // Ship a local editor update to main, where it is journaled via recordUpdate.
   applyLocalUpdate(update: Uint8Array): void;
@@ -60,9 +63,12 @@ export interface EngineYDocBinding {
   // caller keeps the document read-only with the reason stated and a retry
   // offered — the same no-downgrade rule as notInVersion.
   readonly engineMayHoldDocument: boolean;
-  // A delete won the path while this open was queued. The caller keeps the
-  // document read-only and uses the orphaned-draft recovery surface.
-  readonly deletedWhileEditing: boolean;
+  // A delete or move owns the path for an interval. The caller keeps the
+  // document read-only and offers a fresh open after the interval ends.
+  readonly removalInProgress: {
+    operation: "delete" | "move";
+    message: string;
+  } | null;
   // Tear down: stop shipping edits, unsubscribe, close the engine session, and
   // destroy the mirror doc. Idempotent.
   destroy(): Promise<void>;
@@ -80,7 +86,7 @@ export async function bindEngineYDoc(
       available: false,
       notInVersion: opened.notInVersion === true,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,
-      deletedWhileEditing: opened.deletedWhileEditing === true,
+      removalInProgress: opened.removalInProgress ?? null,
       async destroy() {
         // Best-effort close even on the unavailable path: main may have taken a
         // reservation before deciding not to serve (it should not, but never
@@ -119,7 +125,7 @@ export async function bindEngineYDoc(
     available: true,
     notInVersion: false,
     engineMayHoldDocument: false,
-    deletedWhileEditing: false,
+    removalInProgress: null,
     async destroy() {
       if (destroyed) return;
       destroyed = true;

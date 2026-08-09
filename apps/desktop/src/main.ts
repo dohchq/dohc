@@ -8283,7 +8283,12 @@ function registerIpcHandlers(
           available: false,
           ...(isYDocPathNotInVersionError(error) ? { notInVersion: true } : {}),
           ...(isYDocRemovalInProgressError(error)
-            ? { deletedWhileEditing: true }
+            ? {
+                removalInProgress: {
+                  operation: error.removalOperation,
+                  message: error.inProgress,
+                },
+              }
             : {}),
           ...(isEngineWorkspaceOpenRefusedError(error) ||
           isYDocSessionUnreleasedError(error)

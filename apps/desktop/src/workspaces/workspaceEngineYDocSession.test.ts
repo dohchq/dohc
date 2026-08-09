@@ -232,29 +232,6 @@ it("journals a live editor update through the Rust Y.Doc provider and suppresses
   await session.close({ settle: false });
 });
 
-it("refuses a stale live-session settle while a removal window is open", async () => {
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-  });
-  const finishDelete = await capture.settleAndCloseLiveSessionsForPath(PATH);
-  const settlesBeforeRefusal = methodCount(YDOC_METHOD.settle);
-
-  const refusal = await session.settleNow().then(
-    () => null,
-    (error: unknown) => error,
-  );
-
-  expect(refusal).toMatchObject({
-    name: "YDocRemovalInProgressError",
-    code: "removal-in-progress",
-    workspacePath: PATH,
-  });
-  expect((refusal as Error).message).toContain(`dohc is still deleting ${PATH}.`);
-  expect(methodCount(YDOC_METHOD.settle)).toBe(settlesBeforeRefusal);
-  finishDelete(true);
-});
-
 it("refuses a new live session before it can recreate a path inside a removal window", async () => {
   const finishDelete = await capture.settleAndCloseLiveSessionsForPath(PATH);
   await rm(join(root, PATH));

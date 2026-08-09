@@ -3301,6 +3301,202 @@ it("a move refuses the open that could register a debt while disk work is in fli
   await capture.stop();
 }, 20_000);
 
+it("an overlapping move window refuses a live-session vacate at the inner settle door", async () => {
+  // A folder move vacates its exact endpoints before opening the window. A
+  // child session can remain live, so a later destructive vacate reaches the
+  // restart-safe session directly. The inner door must refuse before the
+  // provider can settle or materialize that child path.
+  //
+  // MUTATION: drop the removal-window check from restartSafeSession.settleNow
+  // -> settleAndCloseLiveSessionsForPath reaches the provider and adds a
+  // settle call while the folder-move window is open.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-inner-settle-window-",
+  );
+  await mkdir(join(rootPath, "dir"), { recursive: true });
+  await writeFile(join(rootPath, "dir", "note.md"), "stale artifact\n", "utf8");
+  await openWithOneEdit(capture, "covered edit", "dir/note.md");
+
+  const finishMove = await capture.beginFileRename("dir", "moved");
+  const settlesAtWindow = state.settleCalls.length;
+  const refusal = await capture
+    .settleAndCloseLiveSessionsForPath("dir/note.md")
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+  expect(refusal).toMatchObject({
+    name: "YDocRemovalInProgressError",
+    code: "removal-in-progress",
+    workspacePath: "dir/note.md",
+    operation: "settle",
+    removalOperation: "move",
+  });
+  expect((refusal as Error).message).toBe(
+    "dohc could not save dir/note.md. dohc is still moving dir. Wait for that to finish. Then save again.",
+  );
+  expect(state.settleCalls).toHaveLength(settlesAtWindow);
+
+  await finishMove(false);
+  const finishCleanup = await capture.settleAndCloseLiveSessionsForPath(
+    "dir/note.md",
+  );
+  finishCleanup(false);
+  await capture.stop();
+}, 20_000);
+
+it("a move window that closes hands the debt back, on the no-op finisher", async () => {
+  // The child session exists before the folder move. The move vacates only
+  // its exact endpoints, so closing the child during the open window can
+  // register a detached debt. Its timer is a reachable payment-side door.
+  //
+  // MUTATION: drop the removal-window check in `payDetachedLockedDebt` -> the
+  // timer opens a second generation and settles "child edit" while the folder
+  // move is still unfinished. Drop `closeRemovalWindow()` from the no-op
+  // finisher -> the debt never resumes after the failed move.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-folder-child-payment-",
+  );
+  await mkdir(join(rootPath, "dir"), { recursive: true });
+  await writeFile(join(rootPath, "dir", "note.md"), "stale artifact\n", "utf8");
+  const { session } = await openWithOneEdit(
+    capture,
+    "child edit",
+    "dir/note.md",
+  );
+
+  const finishMove = await capture.beginFileRename("dir", "moved");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  const attemptsAtWindow = state.openAttempts;
+  const settlesAtWindow = state.settledMarkdowns.length;
+
+  state.locked = false;
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await capture.flush();
+  expect(state.openAttempts).toBe(attemptsAtWindow);
+  expect(state.settledMarkdowns).toHaveLength(settlesAtWindow);
+
+  await finishMove(false);
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toContain("child edit");
+  await capture.stop();
+}, 25_000);
+
+it("a move window stops a debt's payment before it ever reaches the daemon", async () => {
+  // A folder move leaves an already-open child session live while its removal
+  // window covers that child. Closing the child under a lock registers the
+  // late detached debt that the payment-side fence must stop.
+  //
+  // MUTATION: drop the removal-window check in `payDetachedLockedDebt` -> the
+  // ladder opens a second generation over the moved-from child and settles
+  // "mid-flight edit" while the disk move is still unfinished.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-move-inflight-payment-",
+  );
+  await mkdir(join(rootPath, "dir"), { recursive: true });
+  await writeFile(join(rootPath, "dir", "note.md"), "stale artifact\n", "utf8");
+  const { session } = await openWithOneEdit(
+    capture,
+    "mid-flight edit",
+    "dir/note.md",
+  );
+  const finishMove = await capture.beginFileRename("dir", "moved");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  const attemptsAtWindow = state.openAttempts;
+  const settlesAtWindow = state.settledMarkdowns.length;
+
+  state.locked = false;
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await capture.flush();
+  expect(state.openAttempts).toBe(attemptsAtWindow);
+  expect(state.settledMarkdowns).toHaveLength(settlesAtWindow);
+
+  await finishMove(true);
+  await capture.stop();
+}, 25_000);
+
+it("a delete window refuses a debt's payment while the disk delete is unfinished", async () => {
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-delete-payment-window-",
+  );
+  const { session } = await openWithOneEdit(capture, "written mid-delete");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+  const attemptsAtWindow = state.openAttempts;
+  const settlesAtWindow = state.settledMarkdowns.length;
+  state.locked = false;
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await capture.flush();
+
+  expect(state.openAttempts).toBe(attemptsAtWindow);
+  expect(state.settledMarkdowns).toHaveLength(settlesAtWindow);
+  finishDelete(true);
+  await capture.stop();
+}, 20_000);
+
+it("a delete window that closes hands the debt back instead of stranding it", async () => {
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-delete-payment-release-",
+  );
+  const { session } = await openWithOneEdit(capture, "survives the window");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+  finishDelete(false);
+  state.locked = false;
+
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toContain("survives the window");
+  await capture.stop();
+}, 20_000);
+
+it("a debt's ladder settles nothing while its path's delete is in flight", async () => {
+  // The delete seam suspends the existing debt for the whole disk interval.
+  // Its first timer rung passes while the finisher is held, then a successful
+  // outcome cancels the debt without materializing the path.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-delete-ladder-payment-",
+  );
+  const { session } = await openWithOneEdit(capture, "written by the ladder");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+  const generationAtDelete = state.generation;
+
+  state.locked = false;
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await capture.flush();
+  expect(state.generation).toBe(generationAtDelete);
+  expect(state.settledMarkdowns).toEqual([]);
+
+  finishDelete(true);
+  await capture.stop();
+}, 20_000);
+
 it("a move window refuses a live open before it reaches the daemon", async () => {
   // #696 stopped detached-debt payment inside this interval. #697 closes the
   // earlier entrance too: a live open cannot create the session that could
@@ -3390,10 +3586,14 @@ it("a failed delete closes its window before a later debt is paid", async () => 
   await capture.stop();
 }, 20_000);
 
-it("a failed move holds its window through rollback and then permits a live open", async () => {
+it("a failed move holds its window across the rollback, not just up to it", async () => {
   // #696 keeps the interval open until engine rollback completes. #697 makes
   // the observable contract direct: an open is refused while that interval
   // stands and succeeds only after the failed move has rolled back.
+  //
+  // TWO MUTATIONS, one per assertion:
+  //   - close the window before rollback -> the queued open enters the gap.
+  //   - never close it -> the open after rollback is still refused.
   const { capture, state, rootPath } = await lockedRebindCapture(
     "dohc-ydoc-move-rollback-gap-",
   );
