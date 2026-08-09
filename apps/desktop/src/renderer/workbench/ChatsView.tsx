@@ -1271,6 +1271,17 @@ function LeaveDmDialog(props: {
         aria-modal="true"
         aria-labelledby="chats-leave-dm-title"
         data-testid="chats-leave-dm-dialog"
+        // #742 P2-D: this dialog owns Escape. Without the marker, the Chats
+        // root's own Escape handler (onKeyDownCapture, capture phase — it
+        // runs before this) walks the DM view back before this dialog ever
+        // sees the key, leaving it open over whatever conversation goBack
+        // lands on next.
+        data-chat-escape-local="true"
+        onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          event.stopPropagation();
+          if (!busyRef.current) props.onClose();
+        }}
         className="dohc-elevated flex w-105 max-w-[80vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex flex-col gap-1">
@@ -1288,6 +1299,7 @@ function LeaveDmDialog(props: {
           <button
             type="button"
             data-testid="chats-leave-dm-cancel"
+            autoFocus
             disabled={busy}
             onClick={props.onClose}
             className="rounded border border-line px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
@@ -3327,6 +3339,20 @@ export function ChatsView(props: {
     return () => clearInterval(interval);
   }, [nav, refreshOpenDm]);
 
+  // #742 P2-D belt: LeaveDmDialog owns Escape itself, but this clears
+  // leavingDm on any navigation away from the DM it was opened for — leaving
+  // this DM, opening a different one, or leaving Chats entirely — so a stale
+  // confirmation can never reappear over a conversation it wasn't opened for.
+  // A field-level refresh of the SAME open DM (refreshOpenDm) leaves leavingDm
+  // alone.
+  useEffect(() => {
+    setLeavingDm((current) => {
+      if (current === null) return current;
+      if (nav.level === "dm" && nav.dm.channelId === current.channelId) return current;
+      return null;
+    });
+  }, [nav]);
+
   const sendDmMessage = useCallback(async () => {
     if (nav.level !== "dm" || !nav.dm.threadId || !nav.dm.connected) return;
     const body = composer.trim();
@@ -3846,34 +3872,6 @@ export function ChatsView(props: {
     [props, refreshOverview, workspaceId],
   );
 
-  // Ends the DM's registry row through the exact leaveSharedChannel mechanism
-  // (#742). The conversation drops out of `dms` immediately; the next
-  // syncDms poll's classifyDmRequests puts it back in the request lane
-  // because no workspace holds a live row for its shareId anymore.
-  const leaveDmConversation = useCallback(
-    async (dm: DmRecord) => {
-      const shareId = dm.shareId;
-      if (!shareId) return;
-      const token = liveToken.current;
-      try {
-        await bridge().leaveDm({ workspaceId, shareId });
-        if (token !== liveToken.current) return;
-        setLeavingDm(null);
-        setDms((current) =>
-          current.filter((candidate) => candidate.channelId !== dm.channelId),
-        );
-        // The completion is the user's command landing (see openConversation).
-        props.onNavCommand?.({ level: "channels" });
-        setNav({ level: "channels" });
-        await refreshDms();
-      } catch (error) {
-        if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "dohc could not leave that conversation."));
-      }
-    },
-    [props, refreshDms, workspaceId],
-  );
-
   const createChannel = useCallback(
     async (name: string) => {
       const trimmed = name.trim();
@@ -3943,6 +3941,40 @@ export function ChatsView(props: {
       void refreshDms();
     }
   }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
+
+  // Ends the DM's registry row through the exact leaveSharedChannel mechanism
+  // (#742). The conversation drops out of `dms` immediately; the next
+  // syncDms poll's classifyDmRequests puts it back in the request lane
+  // because no workspace holds a live row for its shareId anymore. Routes
+  // through goBack for its nav + composer-draft cleanup (#742 P1-B): without
+  // it, the next DM opened after leaving could show this one's unsent draft,
+  // and Send could reach the wrong person.
+  const leaveDmConversation = useCallback(
+    async (dm: DmRecord) => {
+      const shareId = dm.shareId;
+      if (!shareId) return;
+      const token = liveToken.current;
+      try {
+        // Presence leave BEFORE the row ends (#742 P2-E): once leaveDm ends
+        // the share, this DM's presence scope rejects further publish/leave
+        // calls (the same ended-grant gate messages use), so the effect
+        // cleanup's later best-effort leave would be rejected and peers would
+        // read this client as present until the relay's presence TTL.
+        await presence.leave();
+        await bridge().leaveDm({ workspaceId, shareId });
+        if (token !== liveToken.current) return;
+        setLeavingDm(null);
+        setDms((current) =>
+          current.filter((candidate) => candidate.channelId !== dm.channelId),
+        );
+        goBack();
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(ipcErrorMessage(error, "dohc could not leave that conversation."));
+      }
+    },
+    [goBack, presence.leave, props, workspaceId],
+  );
 
   const reactionsByMessage = useMemo(() => {
     const result = new Map<string, ChatReactionRecord[]>();
@@ -4414,10 +4446,15 @@ export function ChatsView(props: {
           testId="chats-dm"
           onBack={goBack}
           icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
-          // A participant (shareId set) has a workspace placement to reverse
-          // (#742); the owner side (shareId null) never accepted a grant here.
+          // A CONNECTED participant (shareId set, not already ended) has a
+          // live placement to reverse (#742); the owner side (shareId null)
+          // never accepted a grant here, and an already-ended row (owner
+          // revoked, or already left) has nothing live to end — confirming
+          // would re-end a tombstone and promise a request that, for an
+          // owner-revoked grant, can never appear (its grant is gone from
+          // the relay's received listing).
           action={
-            dm.shareId ? (
+            dm.shareId && dm.connected ? (
               <button
                 type="button"
                 data-testid="chats-dm-leave"

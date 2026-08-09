@@ -103,6 +103,7 @@ const bridgeMock = {
   acceptDm: vi.fn(),
   declineDm: vi.fn(),
   requestDmAgain: vi.fn(),
+  leaveDm: vi.fn(),
   writeClipboardText: vi.fn(),
   onWorkspaceActivity: vi.fn(),
 };
@@ -439,9 +440,13 @@ describe("ChatsView presence (MU-C1)", () => {
 // each publish with the scope it went out on — so a test can assert which relay
 // presence scope (workspace vs share) a conversation lands in, and prove the
 // memoized transport is only rebuilt on a real scope switch.
-function recordingCollab() {
+// onLeave (optional) fires synchronously when the presence transport's
+// leave() is invoked — used to pin ordering against another async call (e.g.
+// #742 P2-E: presence must leave before the leaveDm IPC ends the row).
+function recordingCollab(onLeave?: (topic: string) => void) {
   const calls: PresenceScope[] = [];
   const publishes: { scope: PresenceScope; topic: string }[] = [];
+  const leaves: { scope: PresenceScope; topic: string }[] = [];
   const collaboration: ChatPresenceCollaboration = {
     transportForScope: (scope) => {
       calls.push(scope);
@@ -450,7 +455,10 @@ function recordingCollab() {
           publishes.push({ scope, topic });
           return { version: 0, peers: [] };
         },
-        async leave() {},
+        async leave({ topic }) {
+          leaves.push({ scope, topic });
+          onLeave?.(topic);
+        },
         poll: ({ signal }) =>
           new Promise<PresenceSnapshot>((resolve) => {
             if (signal.aborted) return resolve({ version: 0, peers: [] });
@@ -463,7 +471,7 @@ function recordingCollab() {
     clientId: "me",
     displayName: "Me",
   };
-  return { collaboration, calls, publishes };
+  return { collaboration, calls, publishes, leaves };
 }
 
 function scopeKey(scope: PresenceScope): string {
@@ -745,6 +753,37 @@ describe("ChatsView presence scope selection (DM)", () => {
     for (let i = 1; i < keys.length; i += 1) expect(keys[i]).not.toBe(keys[i - 1]);
     expect(keys).toContain("share:dm-share-1");
     expect(keys).toContain("ws:workspace-a");
+  });
+
+  // #742 P2-E: leaveDm ends the DM's share, and an ended scope rejects
+  // further presence calls (the same ended-grant gate messages use) — so the
+  // presence leave must reach the transport BEFORE leaveDm, or peers would
+  // read this client as present until the relay's presence TTL.
+  it("leaves the DM's presence scope before ending the row", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participantDm] });
+    const order: string[] = [];
+    const rec = recordingCollab(() => order.push("presence-leave"));
+    bridgeMock.leaveDm.mockImplementation(async () => {
+      order.push("leave-dm");
+    });
+    const user = userEvent.setup();
+    render(
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        collaboration={rec.collaboration}
+      />,
+    );
+    await openDmByChannelId(user, "dm-local");
+    await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-dm")).toBe(true));
+    await user.click(await screen.findByTestId("chats-dm-leave"));
+    await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
+
+    await waitFor(() => expect(bridgeMock.leaveDm).toHaveBeenCalled());
+    expect(rec.leaves).toEqual([{ scope: { kind: "share", shareId: "dm-share-1" }, topic: "wire-dm" }]);
+    expect(order).toEqual(["presence-leave", "leave-dm"]);
   });
 });
 

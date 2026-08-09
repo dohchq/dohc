@@ -47,6 +47,13 @@ export interface PresenceResult {
   typingNames: string[];
   // Report local typing state; publishes immediately and self-clears on idle.
   setTyping: (typing: boolean) => void;
+  // Imperative early stop, for an action that will make this scope reject
+  // presence calls once it completes (#742 P2-E: leaving a DM ends its share,
+  // and an ended-scope transport rejects the leave the effect cleanup would
+  // otherwise send later — the peer would then read as present until the
+  // relay's TTL). Await this BEFORE that action. A no-op if presence was
+  // never active (channelRef is null) or already stopped.
+  leave: () => Promise<void>;
 }
 
 function peerState(peer: PresencePeer): Partial<PresenceLocalState> {
@@ -138,5 +145,10 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
     };
   }, [displayName, typingIdleMs]);
 
-  return { others, typingNames, setTyping };
+  const leave = useMemo(
+    () => () => channelRef.current?.stop() ?? Promise.resolve(),
+    [],
+  );
+
+  return { others, typingNames, setTyping, leave };
 }

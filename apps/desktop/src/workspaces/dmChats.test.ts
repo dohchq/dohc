@@ -12,6 +12,7 @@ import {
   requireShareableChatChannel,
   resolveDmKinds,
   shareIdsToWithholdFromOrdinaryInvites,
+  withholdDmsInRequestLanes,
   type ShareLogPage,
 } from "./dmChats";
 import {
@@ -1290,5 +1291,33 @@ describe("listDmRecords", () => {
       shareId: null,
       peerLabel: "bob@x.com",
     });
+  });
+});
+
+// #742 P1-A: without this, leaving a DM ends its row but the SAME conversation
+// stays visible twice — once as the readable-tombstone row the test above
+// just proved listDmRecords keeps (connected:false), and once as the pending
+// request classifyDmRequests re-lists once no workspace holds a live row.
+// "One identity, one place" — the request-lane representation wins.
+describe("withholdDmsInRequestLanes", () => {
+  it("drops a dm whose shareId is pending or declined, keeps everything else", () => {
+    const endedLeft = { shareId: "share-left", connected: false };
+    const endedDeclined = { shareId: "share-declined", connected: false };
+    const liveOther = { shareId: "share-other", connected: true };
+    const owned = { shareId: null, connected: true };
+    const result = withholdDmsInRequestLanes(
+      [endedLeft, endedDeclined, liveOther, owned],
+      new Set(["share-left", "share-declined"]),
+    );
+    expect(result).toEqual([liveOther, owned]);
+  });
+
+  it("leaves an owner-revoked ended row alone: its shareId never reaches the request lanes", () => {
+    // The owner-revoked case: the grant is gone from the relay's received
+    // listing, so classifyDmRequests never re-lists it — requestShareIds
+    // simply does not contain it, and the filter is a no-op here.
+    const revoked = { shareId: "share-revoked", connected: false };
+    const result = withholdDmsInRequestLanes([revoked], new Set());
+    expect(result).toEqual([revoked]);
   });
 });

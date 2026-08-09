@@ -414,7 +414,28 @@ describe("main-process chat authorization", () => {
     expect(classifyAt).toBeGreaterThan(-1);
     expect(listAcceptedAt).toBeGreaterThan(classifyAt);
     expect(resultAt).toBeGreaterThan(listAcceptedAt);
-    expect(handler.slice(resultAt)).toContain("dms: dms.map(dmRecordForIpc)");
+    expect(handler.slice(resultAt)).toContain(
+      "dms: withholdDmsInRequestLanes(dms, requestShareIds).map(dmRecordForIpc)",
+    );
+  });
+
+  // #742 P1-A: without this, a DM whose row Leave just ended stays visible in
+  // BOTH `dms` (listDmRecords' readable-tombstone row, connected:false) and
+  // `pending` (classifyDmRequests re-listing it) — the same conversation
+  // shown twice. The withhold set must be keyed off pending AND declined
+  // (declining a re-request must not un-hide the old list entry either), and
+  // computed AFTER classifyDmRequests, from what it actually returned.
+  it("withholds a DM from the list once its shareId reaches either request lane", () => {
+    const handler = handlerSource("syncDms");
+    const classifyAt = handler.indexOf("await classifyDmRequests({");
+    const requestShareIdsAt = handler.indexOf("const requestShareIds = new Set(");
+    const resultAt = handler.indexOf("return SyncDmsResult.parse({");
+    expect(classifyAt).toBeGreaterThan(-1);
+    expect(requestShareIdsAt).toBeGreaterThan(classifyAt);
+    expect(resultAt).toBeGreaterThan(requestShareIdsAt);
+    expect(handler.slice(requestShareIdsAt, resultAt)).toContain(
+      "[...pending, ...declined].map((row) => row.shareId)",
+    );
   });
 
   it("checks renderer trust on every DM request mutation", () => {

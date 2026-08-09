@@ -353,6 +353,7 @@ import {
   resolveDmKinds,
   runningThread,
   shareIdsToWithholdFromOrdinaryInvites,
+  withholdDmsInRequestLanes,
   type DmPeekResult,
   type DmRecordInfo,
   type ShareLogPage,
@@ -7262,9 +7263,12 @@ function registerIpcHandlers(
       store,
       sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
     });
+    const requestShareIds = new Set(
+      [...pending, ...declined].map((row) => row.shareId),
+    );
     return SyncDmsResult.parse({
       available: relay !== null,
-      dms: dms.map(dmRecordForIpc),
+      dms: withholdDmsInRequestLanes(dms, requestShareIds).map(dmRecordForIpc),
       pending,
       declined,
     });
