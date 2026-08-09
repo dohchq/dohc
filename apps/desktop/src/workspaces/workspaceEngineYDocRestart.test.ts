@@ -3132,16 +3132,22 @@ it("an external delete observed before a debt registers cancels it at the door i
   // already gone: its own ladder can recreate the deleted file from the
   // canonical Y.Doc, or (if it later stands down) strand a marker
   // blocking an unrelated file recreated at that same path.
+  //
+  // The session opens FIRST, then the delete lands (#681 round 8): the
+  // registration door now discriminates by session age, so the session
+  // under test must genuinely predate the delete it is meant to be
+  // cancelled by — swapped from this test's original delete-then-open
+  // order once that order stopped matching what the fix actually checks.
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-late-registration-",
   );
+  const { session } = await openWithOneEdit(capture, "would resurrect this");
 
-  // The watcher observes the external delete first — no session has even
-  // opened yet, so no debt exists for it.
+  // The watcher observes the external delete before this session's own
+  // close ever registers a debt.
   capture.captureBatch([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
-  const { session } = await openWithOneEdit(capture, "would resurrect this");
   state.locked = true;
   state.replicated = true;
 
@@ -3164,6 +3170,149 @@ it("an external delete observed before a debt registers cancels it at the door i
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.generation).toBe(1);
   expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 15_000);
+
+it("a recreated path's own session arms its debt normally instead of being cancelled by an earlier delete", async () => {
+  // #681 round 8, codex P1 (real, corrected mid-round): the round-7
+  // tombstone is path-keyed, so a delete-then-recreate landing inside its
+  // TTL left it armed for the NEW file too. A first attempt fixed this by
+  // having any non-delete event INVALIDATE the tombstone outright — wrong
+  // shape, reverted before shipping: the certifier's S2(b) showed it lets
+  // an OLD session, still mid-retry-ladder when the recreation lands,
+  // arm a late debt that settles its STALE canonical doc over the NEW
+  // file — the exact resurrection-over-live-content corruption this whole
+  // PR exists to prevent. The correct discriminator is THIS session's own
+  // open time against the tombstone's: a session that opened AFTER the
+  // delete (this one) was never the delete's victim, so it must arm
+  // normally regardless of whether a recreation happened at all — see the
+  // sibling pin for the OLD session, which must still cancel.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-tombstone-recreate-",
+  );
+
+  // The path is deleted (no debt exists yet, so the tombstone is set),
+  // then recreated — both before this test's own session ever opens.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  await capture.flush();
+
+  // A NEW session — opened after both events — hits a genuine transient
+  // lock on close.
+  const { session } = await openWithOneEdit(capture, "a real pending edit");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // RED before the fix: the stale tombstone, still armed, was consumed
+  // here and cancelled this genuine pending write instead of arming it.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("removed the path while a pending write waited"),
+    ),
+  ).toBe(false);
+
+  // The lock releases, and the ladder — armed normally — lands the write.
+  state.locked = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["a real pending edit"]);
+  await capture.stop();
+}, 20_000);
+
+it("a stale session's late debt still cancels at the door despite a later recreation of its path", async () => {
+  // #681 round 8, codex P1 pin (b) — the corruption guard. An OLD session
+  // opens BEFORE the delete and is still closing (its own transient retry
+  // ladder running off the chain) when the path is deleted AND recreated.
+  // This session's registration must STILL cancel: its content is exactly
+  // what the delete orphaned, and the sibling pin above is what proves a
+  // GENUINELY new session at the same path is unaffected — together they
+  // show the door discriminates by session age, not by whether a
+  // recreation happened.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-tombstone-stale-session-",
+  );
+
+  // The old session opens first — before anything else happens to its
+  // path.
+  const { session } = await openWithOneEdit(capture, "the stale content");
+
+  // The path is deleted, then recreated, while the old session has not
+  // closed yet (its own registration has not run).
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  await capture.flush();
+
+  // NOW the old session's close hits a transient lock, registering LATE —
+  // exactly the round-7 shape, with a recreation now sitting in between.
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+
+  // This old session's debt is still cancelled: it opened before the
+  // delete, so it is the incarnation the tombstone actually names.
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.filter((message) =>
+          message.includes("removed the path while a pending write waited"),
+        ),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(1);
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 20_000);
+
+it("a late-registering debt's cancellation trace names dohc's own removal, not a fabricated external delete", async () => {
+  // #681 round 8, certifier's cosmetic finding (folded): the no-debt
+  // tombstone recorded EXPECTED deletes (an engine-owned removal, e.g. a
+  // version switch's own materialization) the same as external ones, so a
+  // debt registering within the tombstone's memory always blamed "an
+  // external delete" — even when dohc itself removed the path. The
+  // recorder is the only place that verdict is still known once this
+  // becomes a bare memory; thread it through instead of guessing at the
+  // door.
+  // The session opens FIRST (#681 round 8: the registration door
+  // discriminates by session age, so the session under test must
+  // genuinely predate the removal it is meant to be cancelled by).
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-tombstone-expected-",
+  );
+  const { session } = await openWithOneEdit(capture, "would resurrect this");
+
+  // The engine registers the removal as expected, then the watcher
+  // observes it — the same sequence materialize() uses for a version
+  // switch's own delete operation.
+  capture.registerExpectedEngineEvents([
+    { path: "note.md", operation: "delete" },
+  ]);
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // RED before the fix: this cancellation always said "an external
+  // delete", even though the recorder knew the removal was dohc's own.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("dohc's own removal of note.md removed the path"),
+    ),
+  ).toBe(true);
+  state.locked = false;
   await capture.stop();
 }, 15_000);
 

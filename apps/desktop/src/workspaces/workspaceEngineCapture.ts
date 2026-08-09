@@ -1485,27 +1485,68 @@ export function createWorkspaceEngineCapture(
   // retry ladder runs OFF the capture chain for as long as
   // TEARDOWN_RETRY_CAP_MS allows — seconds wide in production — and can
   // still register a FRESH debt for that same path afterward. Recording
-  // the path here (not a raw disk stat, which cannot tell "deleted" from
-  // "never written yet" — the same absence either way) lets the
+  // the deletion here (not a raw disk stat, which cannot tell "deleted"
+  // from "never written yet" — the same absence either way) lets the
   // registration door (`scheduleDetachedLockedSettle`) ask "did the
-  // watcher JUST tell me this exact path is gone" instead. Expiring
-  // entries (mirrors `registerExpectedEngineEvents`'s own TTL) keep a
-  // stale deletion from blocking an unrelated LATER write to a path the
-  // user legitimately recreated.
-  let recentExternalDeletesWithNoDebt = new Map<string, number>();
-  function noteExternalDeleteWithNoDebt(path: string): void {
-    recentExternalDeletesWithNoDebt.set(path, now() + EXPECTED_ENGINE_EVENT_EXPIRY_MS);
-  }
-  function consumeRecentExternalDeleteWithNoDebt(path: string): boolean {
+  // watcher JUST tell me this exact path is gone" instead.
+  //
+  // NOT invalidated by a later recreation (#681 round 8, codex P1 —
+  // reverted a same-round attempt at that shape once the certifier's S2(b)
+  // named the corruption it opens: a session that opened BEFORE the
+  // delete can still be mid-retry-ladder when a DIFFERENT session
+  // recreates the path; invalidating the tombstone on recreation would
+  // let the OLD session's late debt arm and settle its stale canonical
+  // doc over the NEW file). The memory discriminates by WHICH session is
+  // registering instead: `deletedAtMs` is compared against that session's
+  // own open time at the consuming door, so a session that opened before
+  // the delete (the stale one) still cancels, and a session that opened
+  // after it (the recreation's own) arms normally — see
+  // `consumeRecentExternalDeleteWithNoDebt`.
+  let recentExternalDeletesWithNoDebt = new Map<
+    string,
+    { deletedAtMs: number; expiresAtMs: number; expected: boolean }
+  >();
+  // Pruned on every insert (#681 round 8, codex P2), not only on the rare
+  // consume: a long-lived workspace that deletes many files without ever
+  // registering a late debt for them would otherwise retain one entry per
+  // delete forever. Pruning here keeps the map small by construction —
+  // bounded by unique deletes within one TTL window, not by the
+  // workspace's whole lifetime.
+  function pruneRecentExternalDeletesWithNoDebt(): void {
     const nowMs = now();
     recentExternalDeletesWithNoDebt = new Map(
       [...recentExternalDeletesWithNoDebt].filter(
-        ([, expiresAtMs]) => expiresAtMs > nowMs,
+        ([, entry]) => entry.expiresAtMs > nowMs,
       ),
     );
-    if (!recentExternalDeletesWithNoDebt.has(path)) return false;
+  }
+  function noteExternalDeleteWithNoDebt(path: string, expected: boolean): void {
+    pruneRecentExternalDeletesWithNoDebt();
+    const deletedAtMs = now();
+    recentExternalDeletesWithNoDebt.set(path, {
+      deletedAtMs,
+      expiresAtMs: deletedAtMs + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+      expected,
+    });
+  }
+  // Consumes the memory only for a session whose OWN open predates the
+  // recorded delete — the stale incarnation this delete actually orphaned.
+  // A session opened AFTER the delete (the path's later recreation, or any
+  // fresh open past that point) reads no match and arms normally: its
+  // content is not what the deletion removed. Returns the reason the
+  // recorder itself observed (`expected`: dohc's own removal, e.g. a
+  // version switch's materialization; or external), so the cancellation
+  // trace can name which — the recorder is the only place that verdict is
+  // still known once the debt itself would otherwise treat it as generic.
+  function consumeRecentExternalDeleteWithNoDebt(
+    path: string,
+    sessionOpenedAtMs: number,
+  ): { expected: boolean } | null {
+    pruneRecentExternalDeletesWithNoDebt();
+    const entry = recentExternalDeletesWithNoDebt.get(path);
+    if (entry === undefined || sessionOpenedAtMs >= entry.deletedAtMs) return null;
     recentExternalDeletesWithNoDebt.delete(path);
-    return true;
+    return { expected: entry.expected };
   }
 
   // Take matching debts OUT of the registry without deciding their fate: the
@@ -2603,8 +2644,15 @@ export function createWorkspaceEngineCapture(
       // that registers LATER (#681 round 7) does not treat this as news.
       // Scoped to the "delete" operation only (no disk read needed) to
       // keep every other path, secrets included, untouched by this door
-      // (#681 round 5).
-      if (event.operation === "delete") noteExternalDeleteWithNoDebt(event.path);
+      // (#681 round 5). `peekExpectedEvent` decides EXPECTED vs EXTERNAL
+      // here too (#681 round 8) — the recorder is the only place that
+      // verdict is still known once this becomes a bare memory.
+      if (event.operation === "delete") {
+        noteExternalDeleteWithNoDebt(
+          event.path,
+          peekExpectedEvent("delete", event.path),
+        );
+      }
       return;
     }
     if (event.operation === "delete") {
@@ -3264,6 +3312,15 @@ export function createWorkspaceEngineCapture(
       );
 
       async function openYDocSessionTask(): Promise<WorkspaceEngineYDocProviderSession> {
+        // This session's own place in time, captured before anything else
+        // runs (#681 round 8, codex P1): the registration door
+        // (`scheduleDetachedLockedSettle`, far below) compares this against
+        // a delete tombstone's own timestamp to tell a STALE incarnation
+        // (opened before the delete — its content is what the deletion
+        // orphaned) from this path's later recreation (opened after it —
+        // arms normally, since a tombstone recorded before this session
+        // began says nothing about what THIS session holds).
+        const sessionOpenedAtMs = now();
         const removal = removalWindowFor(input.path);
         if (removal) {
           throw new YDocRemovalInProgressError(
@@ -4009,6 +4066,21 @@ export function createWorkspaceEngineCapture(
         // means "deleted" and "never written yet" identically, and most
         // pending writes ARE their document's first materialization.
         //
+        // THIS session's own age is what keeps that memory from also
+        // cancelling a path's later RECREATION (#681 round 8, codex P1 —
+        // a same-round attempt to invalidate the memory on any recreation
+        // was reverted once the certifier's S2(b) named the corruption it
+        // opened: an OLD session can still be mid-retry-ladder when a
+        // DIFFERENT session recreates the path, and invalidating on the
+        // recreation event alone would let the OLD session's late debt
+        // arm and settle its stale canonical doc OVER the new file).
+        // `consumeRecentExternalDeleteWithNoDebt` only matches a session
+        // that opened BEFORE the recorded delete — the incarnation that
+        // deletion actually orphaned. A session opened AFTER it (this
+        // path's recreation, or any fresh open past that point) reads no
+        // match here and registers normally: its content is not what the
+        // deletion removed.
+        //
         // BEST-EFFORT, not a fence: the watcher's own memory expires
         // (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`), and a delete landing after
         // that window, or after this door already registered, is not
@@ -4016,14 +4088,16 @@ export function createWorkspaceEngineCapture(
         // authoritative door for those.
         const scheduleDetachedLockedSettle = (): void => {
           if (stopped) return;
-          if (
-            !writeCancelled &&
-            consumeRecentExternalDeleteWithNoDebt(input.path)
-          ) {
+          const tombstone = writeCancelled
+            ? null
+            : consumeRecentExternalDeleteWithNoDebt(input.path, sessionOpenedAtMs);
+          if (tombstone !== null) {
             onError(
               `ydoc close retry of ${input.path}`,
               new Error(
-                `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`,
+                tombstone.expected
+                  ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
+                  : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`,
               ),
             );
             return;
