@@ -93,14 +93,15 @@ const PATH_STRING = z.string().min(1).max(4096);
 // engine owns the real limit and re-checks it.
 export const ENGINE_TEXT_MAX_CHARS = 10 * 1024 * 1024;
 function engineStoredText(label: string) {
-  return z.string().refine(
-    (text) => text.length <= ENGINE_TEXT_MAX_CHARS,
-    (text) => ({
+  return z.string().superRefine((text, ctx) => {
+    if (text.length <= ENGINE_TEXT_MAX_CHARS) return;
+    ctx.addIssue({
+      code: "custom",
       message:
         `${label} is ${text.length} characters; the IPC bridge carries at most ` +
         `${ENGINE_TEXT_MAX_CHARS} characters (the engine's 10 MiB UTF-8 text cap)`,
-    }),
-  );
+    });
+  });
 }
 
 const SITE_ROOT_STRING = PATH_STRING.superRefine((value, ctx) => {
@@ -653,7 +654,7 @@ const DatabaseColumnView = z.object({
 const DatabaseTableView = z.object({
   name: z.string(),
   columns: z.array(DatabaseColumnView),
-  rows: z.array(z.record(z.unknown())),
+  rows: z.array(z.record(z.string(), z.unknown())),
 });
 
 export const DatabaseSnapshotResult = z.object({
@@ -676,7 +677,7 @@ export const ApplyDatabaseEditPayload = z.object({
     op: z.enum(["insert", "update", "upsert", "delete"]),
     pkColumn: SQL_IDENT,
     rowId: z.union([z.string().max(4096), z.number()]),
-    payload: z.record(z.unknown()).optional(),
+    payload: z.record(z.string(), z.unknown()).optional(),
   }),
 });
 export type ApplyDatabaseEditPayload = z.infer<typeof ApplyDatabaseEditPayload>;
@@ -1163,7 +1164,7 @@ export type ChatRunRecordsForThreadPayload = z.infer<
 >;
 
 export const ChatRunRecordsForThreadResult = z.object({
-  runs: z.record(ChatRunRecord).describe(
+  runs: z.record(z.string(), ChatRunRecord).describe(
     "Run records linked to messages from the thread's 200 most recent runs, newest first.",
   ),
 });
@@ -2292,8 +2293,8 @@ export const OpenExternalUrlPayload = z.object({
 export type OpenExternalUrlPayload = z.infer<typeof OpenExternalUrlPayload>;
 
 export const CloudLoginStartPayload = z.object({
-  serverUrl: z.string().url().max(2048).optional(),
-  relayUrl: z.string().url().max(2048).optional(),
+  serverUrl: z.url().max(2048).optional(),
+  relayUrl: z.url().max(2048).optional(),
 });
 export type CloudLoginStartPayload = z.infer<typeof CloudLoginStartPayload>;
 
@@ -2361,7 +2362,7 @@ export const CloudJoinWorkspaceResult = z.object({
 });
 export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 
-const EMAIL_STRING = z.string().email().max(320);
+const EMAIL_STRING = z.email().max(320);
 const SHARE_ID = z.string().min(1).max(200);
 
 // ---- Relay shares (PR 18, the engine-native cloud) ----
@@ -3179,8 +3180,8 @@ export type EngineYDocRemoteUpdateEventSchema = z.infer<
 // Test-only snapshot of the main-process mark/measure recorder (Phase 16):
 // named marks as wall-clock epochs, measures as durations between marks.
 export const DesktopMarksResult = z.object({
-  marks: z.record(z.number()),
-  measures: z.record(z.number()),
+  marks: z.record(z.string(), z.number()),
+  measures: z.record(z.string(), z.number()),
 });
 export type DesktopMarksResult = z.infer<typeof DesktopMarksResult>;
 

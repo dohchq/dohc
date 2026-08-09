@@ -12,6 +12,8 @@ import {
   ChatDispatchStateForThreadPayload,
   ChatDispatchStateForThreadResult,
   ChatReactionRecord,
+  DatabaseSnapshotResult,
+  DesktopMarksResult,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
@@ -269,6 +271,30 @@ describe("workspace graph IPC contract", () => {
       WorkspaceGraphResult.safeParse(
         graph({ ...common, path: "a.md", threadId: "thread-on-file" }),
       ).success,
+    ).toBe(false);
+  });
+});
+
+describe("record IPC contracts", () => {
+  it("accepts string-keyed records and validates each value", () => {
+    expect(
+      DatabaseSnapshotResult.parse({
+        path: "workspace.db",
+        tables: [
+          {
+            name: "tasks",
+            columns: [],
+            rows: [{ "task title": "Ship Zod 4", priority: 1, done: false }],
+          },
+        ],
+      }).tables[0]?.rows[0],
+    ).toEqual({ "task title": "Ship Zod 4", priority: 1, done: false });
+
+    expect(
+      DesktopMarksResult.safeParse({
+        marks: { appReady: 100 },
+        measures: { startup: "fast" },
+      }).success,
     ).toBe(false);
   });
 });
