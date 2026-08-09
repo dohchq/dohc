@@ -614,18 +614,8 @@ pub fn fold_resolution_into_ydoc_in_tx(
         // doc and the transaction are already in hand, so the check is one
         // projection, and it covers every construct the parser will ever
         // fail to model rather than the ones known today.
-        // SIZE FIRST (#660). The update exists by now, so its size is a
-        // length compare, while the verification below is a whole second
-        // projection. Running the projection first put the named refusal out
-        // of reach: since #643 an oversized doc trips the materialization cap
-        // inside `project`, which answers a bare `InvalidInput` naming no
-        // constraint, no limit and no usage — so the caller learned nothing it
-        // could act on, and the guard right below it never ran.
-        //
-        // The order also decides which refusal an update that is BOTH
-        // oversized and unrepresentable reports, and size is the right answer:
-        // it is the constraint the caller can do something about, and
-        // representability of an update we will never record is moot.
+        // SIZE FIRST (#660): check length before the projection below — an
+        // oversized doc trips a bare, limit-less `InvalidInput` there (#643).
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(SyncError::BlobTooLarge {
                 constraint: "MAX_YDOC_UPDATE_BYTES (conflict resolution fold)",
@@ -1499,21 +1489,24 @@ fn map_collab_hard_error(error: CollabError) -> SyncError {
 
 fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncError {
     match error {
-        // A size refusal is a caller mistake, not corruption (#656): with no
-        // arm here it reaches the hard catch-all below as
-        // `StorageError::corrupt_public`. It belongs in the SAME class as the
-        // other caller mistakes because only `InvalidInput` is ACKNOWLEDGED —
-        // the apply path answers it with `RefusedRetainingMutation` and
-        // `share_disposition` skips it. A measured variant aborts the
-        // transaction instead, so the relay redelivers the same coordinate
-        // forever with every later operation stuck behind it.
-        DomainError::InvalidText { .. }
-        | DomainError::InvalidPath { .. }
-        | DomainError::PayloadTooLarge { .. } => SyncError::InvalidInput { reason },
+        // The one HARD exception living inside `InvalidInput`: an object-alias
+        // collision names corrupt state, not a caller mistake, so it must be
+        // checked before the variant-wide arm below would catch it.
         hard @ DomainError::InvalidInput {
             reason: "object_id is already bound to another object",
         } => map_domain_hard_error(hard),
-        DomainError::InvalidInput { .. } => SyncError::InvalidInput { reason },
+        // The acknowledged caller-mistake union (#656). A size refusal joins
+        // it for the same reason `InvalidText`/`InvalidPath` are here: only
+        // `InvalidInput` is ACKNOWLEDGED — the apply path answers it with
+        // `RefusedRetainingMutation` and `share_disposition` skips it. A
+        // measured variant would instead abort the transaction, and the
+        // relay would redeliver the same coordinate forever with every later
+        // operation stuck behind it.
+        DomainError::InvalidText { .. }
+        | DomainError::InvalidPath { .. }
+        | DomainError::PayloadTooLarge { .. }
+        | DomainError::InvalidInput { .. } => SyncError::InvalidInput { reason },
+        // Everything else is a hard failure.
         hard => map_domain_hard_error(hard),
     }
 }
