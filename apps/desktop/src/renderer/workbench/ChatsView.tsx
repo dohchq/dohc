@@ -1237,6 +1237,98 @@ function AcceptDmDialog(props: {
   );
 }
 
+// The DM placement reverse path's confirmation (#742): reversible but
+// disruptive, so it states what happens before it runs (product invariant).
+function LeaveDmDialog(props: {
+  dm: DmRecord;
+  workspaceLabel: string;
+  // #742 P2 (round 6): a send composed for THIS conversation, still in
+  // flight when Leave ends the row, would have its own revalidation reject
+  // AFTER the row is gone — and goBack's context change (#742 P1-B) then
+  // suppresses that rejection, so the message vanishes with no warning.
+  // Disabling confirm until the send settles means the user always sees
+  // either the message land or the existing "Could not send" error, never
+  // silence.
+  sendInFlight: boolean;
+  onConfirm: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+
+  async function confirm() {
+    if (busyRef.current || props.sendInFlight) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      await props.onConfirm();
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Overlay
+      onClose={() => {
+        if (!busyRef.current) props.onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="chats-leave-dm-title"
+        data-testid="chats-leave-dm-dialog"
+        // #742 P2-D: this dialog owns Escape. Without the marker, the Chats
+        // root's own Escape handler (onKeyDownCapture, capture phase — it
+        // runs before this) walks the DM view back before this dialog ever
+        // sees the key, leaving it open over whatever conversation goBack
+        // lands on next.
+        data-chat-escape-local="true"
+        onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          event.stopPropagation();
+          if (!busyRef.current) props.onClose();
+        }}
+        className="dohc-elevated flex w-105 max-w-[80vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
+      >
+        <div className="flex flex-col gap-1">
+          <h2
+            id="chats-leave-dm-title"
+            className="m-0 text-sm font-semibold text-ink"
+          >
+            {`Leave your conversation with ${props.dm.peerLabel}?`}
+          </h2>
+          <p className="m-0 text-xs text-muted">
+            {`The conversation leaves ${props.workspaceLabel}. It appears again as a message request, so you can add it to a workspace later. Your messages are kept.`}
+          </p>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            data-testid="chats-leave-dm-cancel"
+            autoFocus
+            disabled={busy}
+            onClick={props.onClose}
+            className="rounded border border-line px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            data-testid="chats-leave-dm-confirm"
+            disabled={busy || props.sendInFlight}
+            onClick={() => void confirm()}
+            className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
+          >
+            Leave conversation
+          </button>
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
 function DmRequestListItem(props: {
   request: DmRequestRow;
   state: "pending" | "declined";
@@ -1435,6 +1527,7 @@ export function ChatsView(props: {
     workspaceLabel: string;
   } | null>(null);
   const [dmRequestBusy, setDmRequestBusy] = useState<string | null>(null);
+  const [leavingDm, setLeavingDm] = useState<DmRecord | null>(null);
   const [dmRecipients, setDmRecipients] = useState("");
   const [dmDraft, setDmDraft] = useState("");
   const [startingDm, setStartingDm] = useState(false);
@@ -3254,6 +3347,26 @@ export function ChatsView(props: {
     return () => clearInterval(interval);
   }, [nav, refreshOpenDm]);
 
+  // #742 P2-D belt: LeaveDmDialog owns Escape itself, but this clears
+  // leavingDm on any navigation away from the DM it was opened for — leaving
+  // this DM, opening a different one, or leaving Chats entirely — so a stale
+  // confirmation can never reappear over a conversation it wasn't opened for.
+  // Also clears it the moment a field-level refresh of the SAME open DM
+  // (refreshOpenDm) reports connected:false (round 5): an owner revocation
+  // mid-dialog leaves the channelId unchanged, so the nav-change check alone
+  // would leave the dialog open — confirming would re-end an already-ended
+  // tombstone and promise a request that, for an owner-revoked grant, can
+  // never appear.
+  useEffect(() => {
+    setLeavingDm((current) => {
+      if (current === null) return current;
+      if (nav.level === "dm" && nav.dm.channelId === current.channelId && nav.dm.connected) {
+        return current;
+      }
+      return null;
+    });
+  }, [nav]);
+
   const sendDmMessage = useCallback(async () => {
     if (nav.level !== "dm" || !nav.dm.threadId || !nav.dm.connected) return;
     const body = composer.trim();
@@ -3843,6 +3956,54 @@ export function ChatsView(props: {
     }
   }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
 
+  // Ends the DM's registry row through the exact leaveSharedChannel mechanism
+  // (#742). The conversation drops out of `dms` immediately; the next
+  // syncDms poll's classifyDmRequests puts it back in the request lane
+  // because no workspace holds a live row for its shareId anymore. Routes
+  // through goBack for its nav + composer-draft cleanup (#742 P1-B): without
+  // it, the next DM opened after leaving could show this one's unsent draft,
+  // and Send could reach the wrong person.
+  const leaveDmConversation = useCallback(
+    async (dm: DmRecord) => {
+      const shareId = dm.shareId;
+      // The belt effect above already closes the dialog the moment the
+      // record it was opened for loses connected (#742 P2-D, round 5); this
+      // is the same guard at the one call site that can reach here, closing
+      // the last sliver of a click/effect race. sendingRef mirrors this
+      // DM's own send state the same way the confirm button's disabled prop
+      // does (#742 P2, round 6) — the dialog only ever opens for the
+      // currently-viewed DM, so it IS this DM's in-flight state.
+      if (!shareId || !dm.connected || sendingRef.current) return;
+      const token = liveToken.current;
+      try {
+        // Presence leave BEFORE the row ends (#742 P2-E): once leaveDm ends
+        // the share, this DM's presence scope rejects further publish/leave
+        // calls (the same ended-grant gate messages use), so the effect
+        // cleanup's later best-effort leave would be rejected and peers would
+        // read this client as present until the relay's presence TTL.
+        await presence.leave();
+        await bridge().leaveDm({ workspaceId, shareId });
+        if (token !== liveToken.current) return;
+        setLeavingDm(null);
+        setDms((current) =>
+          current.filter((candidate) => candidate.channelId !== dm.channelId),
+        );
+        goBack();
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        // Re-arm presence (#742 P2, round 3): if leaveDm rejected, the row
+        // never ended and this conversation stays open, but presence.leave()
+        // already stopped the channel — without this the client goes
+        // invisible to peers until it navigates away and back.
+        presence.restart();
+        props.onError(
+          ipcErrorMessage(error, "dohc could not leave that conversation. Try again."),
+        );
+      }
+    },
+    [goBack, presence.leave, presence.restart, props, workspaceId],
+  );
+
   const reactionsByMessage = useMemo(() => {
     const result = new Map<string, ChatReactionRecord[]>();
     for (const reaction of reactions) {
@@ -4313,6 +4474,25 @@ export function ChatsView(props: {
           testId="chats-dm"
           onBack={goBack}
           icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
+          // A CONNECTED participant (shareId set, not already ended) has a
+          // live placement to reverse (#742); the owner side (shareId null)
+          // never accepted a grant here, and an already-ended row (owner
+          // revoked, or already left) has nothing live to end — confirming
+          // would re-end a tombstone and promise a request that, for an
+          // owner-revoked grant, can never appear (its grant is gone from
+          // the relay's received listing).
+          action={
+            dm.shareId && dm.connected ? (
+              <button
+                type="button"
+                data-testid="chats-dm-leave"
+                onClick={() => setLeavingDm(dm)}
+                className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+              >
+                Leave
+              </button>
+            ) : undefined
+          }
           trailing={<PresenceFaces others={presence.others} />}
         />
         {/* Presence (MU-C1): "viewing" faces + "typing…" for this DM, keyed by
@@ -4375,6 +4555,22 @@ export function ChatsView(props: {
             </ComposerNotice>
           )}
         </div>
+        {leavingDm ? (
+          <LeaveDmDialog
+            key={leavingDm.channelId}
+            dm={leavingDm}
+            workspaceLabel={
+              props.workspaces.find((candidate) => candidate.workspaceId === workspaceId)
+                ?.label ?? workspaceId
+            }
+            // The dialog only ever opens for the currently-viewed DM (the
+            // P2-D belt enforces this), so `sending` — already scoped to the
+            // active send context — IS this DM's own in-flight state.
+            sendInFlight={sending}
+            onConfirm={() => leaveDmConversation(leavingDm)}
+            onClose={() => setLeavingDm(null)}
+          />
+        ) : null}
       </div>
     );
   }

@@ -326,7 +326,7 @@ describe("main-process chat authorization", () => {
 
   it("keeps received DMs as requests until acceptDm chooses a workspace", () => {
     const sync = handlerSource("syncDms");
-    expect(sync).toContain("await classifyDmRequests({");
+    expect(sync).toContain("return classifyDmRequests({");
     expect(sync).toContain("pending,");
     expect(sync).toContain("declined,");
     expect(sync).not.toContain("mergeJoinedChannel(");
@@ -405,7 +405,7 @@ describe("main-process chat authorization", () => {
 
   it("keeps accepted DMs in syncDms when the declined-request store is unreadable", () => {
     const handler = handlerSource("syncDms");
-    const classifyAt = handler.indexOf("await classifyDmRequests({");
+    const classifyAt = handler.indexOf("classify: async () => {");
     const listAcceptedAt = handler.indexOf("const dms = await listDmRecords({");
     const resultAt = handler.indexOf("return SyncDmsResult.parse({");
     expect(handler).toContain(
@@ -414,17 +414,162 @@ describe("main-process chat authorization", () => {
     expect(classifyAt).toBeGreaterThan(-1);
     expect(listAcceptedAt).toBeGreaterThan(classifyAt);
     expect(resultAt).toBeGreaterThan(listAcceptedAt);
-    expect(handler.slice(resultAt)).toContain("dms: dms.map(dmRecordForIpc)");
+    expect(handler.slice(resultAt)).toContain("dms: withholdDmsInRequestLanes({");
+    expect(handler.slice(resultAt)).toContain("}).map(dmRecordForIpc)");
+  });
+
+  // #742 P1-A / round 4 / round 6: without this, a DM whose row Leave just
+  // ended stays visible in BOTH `dms` (listDmRecords' readable-tombstone
+  // row, connected:false) and a request lane (classifyDmRequests re-listing
+  // it) OR held live by another workspace under the SAME shareId or the
+  // SAME channelWireId (a re-grant mints a new shareId — round 6) — the
+  // same conversation shown twice either way. requestShareIds is keyed off
+  // pending AND declined; both holder snapshots are derived AFTER classify
+  // resolves (dmRequests.ts's own executing tests cover the filter's actual
+  // arithmetic and the stale-snapshot risk in detail — this pin only checks
+  // main.ts wires the pieces in the right order).
+  it("wires the withhold call with request lanes AND post-classify share/wire holder snapshots", () => {
+    const handler = handlerSource("syncDms");
+    const classifyAt = handler.indexOf("classify: async () => {");
+    const requestShareIdsAt = handler.indexOf("const requestShareIds = new Set(");
+    const holdersAt = handler.indexOf(
+      "const holdersByShareId = liveSharedChannelHoldersByShareId(listWorkspaces());",
+    );
+    const holdersByWireAt = handler.indexOf(
+      "const holdersByWireId = liveSharedChannelHoldersByWireId(listWorkspaces());",
+    );
+    const withholdAt = handler.indexOf("dms: withholdDmsInRequestLanes({");
+    expect(classifyAt).toBeGreaterThan(-1);
+    expect(requestShareIdsAt).toBeGreaterThan(classifyAt);
+    expect(holdersAt).toBeGreaterThan(requestShareIdsAt);
+    expect(holdersByWireAt).toBeGreaterThan(holdersAt);
+    expect(withholdAt).toBeGreaterThan(holdersByWireAt);
+    expect(handler.slice(requestShareIdsAt, withholdAt)).toContain(
+      "[...pending, ...declined].map((row) => row.shareId)",
+    );
+    expect(handler.slice(withholdAt)).toContain("requestShareIds,");
+    expect(handler.slice(withholdAt)).toContain("holdersByShareId,");
+    expect(handler.slice(withholdAt)).toContain("holdersByWireId,");
+    expect(handler.slice(withholdAt)).toContain(
+      "workspaceId: workspace.workspaceId,",
+    );
+  });
+
+  // #742 P1 (rounds 3–4): the fallback/staleness ARITHMETIC now has real
+  // executing coverage (classifyDmRequestsWithFallback /
+  // createLastKnownDmRequestLanesCache in dmChats.test.ts, per the #737
+  // precedent for anything main.ts cannot be imported to exercise directly).
+  // This pin only checks main.ts's WIRING: syncDms routes classify through
+  // the shared fallback cache, keyed per workspace, guarded by the
+  // credential generation (round 6: the mid-classify session-transition
+  // race — dmChats.test.ts drives that arithmetic executingly too).
+  it("routes syncDms's classify through classifyDmRequestsWithFallback with the shared cache and generation guard", () => {
+    const handler = handlerSource("syncDms");
+    expect(handler).toContain("await classifyDmRequestsWithFallback({");
+    expect(handler).toContain("workspaceId: workspace.workspaceId,");
+    expect(handler).toContain("cache: lastKnownDmRequestLanes,");
+    expect(handler).toContain(
+      "credentialGeneration: () => credentialCacheGeneration,",
+    );
+    expect(mainSource).toContain(
+      "const lastKnownDmRequestLanes = createLastKnownDmRequestLanesCache();",
+    );
+  });
+
+  // #742 P1 SECURITY (rounds 4–5): a NEW account's first failed poll must
+  // never be served the PREVIOUS account's cached request rows, sender
+  // emails included. Every session transition that clears the credential
+  // cache also clears the DM lanes cache — centralized INSIDE
+  // clearCachedCredentials() itself (round 5), not duplicated at each of its
+  // three call sites, so login adoption, logout, AND a current-session 401
+  // (round 5: also a real session end — main's own comment above it says so)
+  // can never bypass it by routing around the shared function.
+  it("clears the DM request-lanes cache from inside clearCachedCredentials, and every session-transition site routes through it", () => {
+    const clearFnStart = mainSource.indexOf(
+      "function clearCachedCredentials(): void {",
+    );
+    const clearFnEnd = mainSource.indexOf("\n}", clearFnStart);
+    expect(clearFnStart).toBeGreaterThan(-1);
+    expect(clearFnEnd).toBeGreaterThan(clearFnStart);
+    expect(mainSource.slice(clearFnStart, clearFnEnd)).toContain(
+      "lastKnownDmRequestLanes.clear();",
+    );
+
+    // Every session-transition site calls the shared function — none
+    // inlines its own credentialSessionCache.clear() that would bypass it.
+    const sites = mainSource.match(/clearCachedCredentials: \(\) => [^\n]+/gu) ?? [];
+    expect(sites.length).toBeGreaterThanOrEqual(3);
+    for (const site of sites) {
+      expect(site).toBe("clearCachedCredentials: () => clearCachedCredentials(),");
+    }
   });
 
   it("checks renderer trust on every DM request mutation", () => {
-    for (const channel of ["acceptDm", "declineDm", "requestDmAgain"]) {
+    for (const channel of ["acceptDm", "declineDm", "requestDmAgain", "leaveDm"]) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain("assertTrustedSender(event);");
       expect(handler.indexOf("assertTrustedSender(event);"), channel).toBeLessThan(
         handler.indexOf(".parse(payload)"),
       );
     }
+  });
+
+  // #742: the DM surface's leave control must end the SAME row
+  // leaveSharedChannel ends — a parallel ending mechanism (e.g. deleting the
+  // row, or writing its own "ended" field by hand) would drift from the
+  // reversibility contract endJoinedChannel and its tests already prove.
+  it("ends a DM's registry row through the same mechanism leaveSharedChannel uses", () => {
+    const helperStart = mainSource.indexOf(
+      "function endWorkspaceJoinedChannel(",
+    );
+    const helperEnd = mainSource.indexOf(
+      "ipcMain.handle(CHANNELS.leaveSharedChannel",
+      helperStart,
+    );
+    expect(helperStart).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    const helper = mainSource.slice(helperStart, helperEnd);
+    expect(helper).toContain("endJoinedChannel(entry.sharedChannels ?? [], shareId)");
+    expect(helper).toContain("setWorkspaceSharedChannels(");
+
+    const leaveShared = handlerSource("leaveSharedChannel");
+    const leaveDm = handlerSource("leaveDm");
+    for (const [label, handler] of [
+      ["leaveSharedChannel", leaveShared],
+      ["leaveDm", leaveDm],
+    ] as const) {
+      expect(handler, label).toContain(
+        "endWorkspaceJoinedChannel(input.workspaceId, input.shareId);",
+      );
+      // Neither handler duplicates the ending logic inline.
+      expect(handler, label).not.toContain("endJoinedChannel(");
+      expect(handler, label).not.toContain("ended: true");
+    }
+  });
+
+  // #742 P1 (round 5): the fallback cache's own arithmetic (seed/overwrite/
+  // idempotent-insert) has real executing coverage in dmChats.test.ts, per
+  // the #737 precedent. This pin only checks main.ts's WIRING: leaveDm reads
+  // the row's granterEmail BEFORE ending it (endJoinedChannel only flips
+  // `ended`, so the row itself still carries it either way, but reading
+  // first keeps the intent obvious) and records the leave in the SAME cache
+  // syncDms falls back to.
+  it("records a locally-known leave in the last-known lanes cache", () => {
+    const handler = handlerSource("leaveDm");
+    const leftRowAt = handler.indexOf("const leftRow = (");
+    const endAt = handler.indexOf(
+      "endWorkspaceJoinedChannel(input.workspaceId, input.shareId);",
+    );
+    const markAt = handler.indexOf("markLeftInLastKnownLanes(");
+    expect(leftRowAt).toBeGreaterThan(-1);
+    expect(endAt).toBeGreaterThan(leftRowAt);
+    expect(markAt).toBeGreaterThan(endAt);
+    expect(handler.slice(markAt)).toContain(
+      "markLeftInLastKnownLanes(lastKnownDmRequestLanes, input.workspaceId, {",
+    );
+    expect(handler.slice(markAt)).toContain(
+      "granterEmail: leftRow?.granterEmail ?? null,",
+    );
   });
 
   it("filters confirmed DMs from the ordinary received-channel lane", () => {

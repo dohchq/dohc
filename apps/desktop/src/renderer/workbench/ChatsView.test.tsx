@@ -15,6 +15,7 @@ import {
   reconcileResolvedChatDecision,
   type ChatsNav,
 } from "./ChatsView";
+import { withholdDmsInRequestLanes } from "../../workspaces/dmRequests";
 
 type TestChatsViewProps = Omit<
   Parameters<typeof ProductionChatsView>[0],
@@ -161,6 +162,7 @@ const bridgeMock = {
   declineDm: vi.fn(),
   requestDmAgain: vi.fn(),
   startDm: vi.fn(),
+  leaveDm: vi.fn(),
   chatDispatchStateForThread: vi.fn(),
   stopAgentRun: vi.fn(),
   resumeThreadDispatch: vi.fn(),
@@ -6140,6 +6142,358 @@ describe("ChatsView direct messages", () => {
     await user.click(screen.getByTestId("chats-dm-back"));
     await screen.findByTestId("chats-dm-item");
     expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
+  });
+
+  // #742: the placement a participant picked when they accepted has a
+  // visible reverse path. The owner side (shareId null) never accepted a
+  // grant into a workspace, so it has nothing to reverse.
+  describe("leaving a conversation (#742)", () => {
+    it("shows Leave only for a participant's accepted DM, never the owner's own", async () => {
+      const user = userEvent.setup();
+      bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await screen.findByTestId("chats-dm-view");
+      expect(screen.queryByTestId("chats-dm-leave")).toBeNull();
+    });
+
+    it("states the pinned copy and does not end the row on cancel", async () => {
+      const user = userEvent.setup();
+      const participant = dm({
+        role: "participant",
+        shareId: "share-dm-1",
+        peerLabel: "alice@example.com",
+      });
+      bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participant] });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await user.click(await screen.findByTestId("chats-dm-leave"));
+
+      const dialog = await screen.findByTestId("chats-leave-dm-dialog");
+      expect(dialog.textContent).toContain(
+        "Leave your conversation with alice@example.com?",
+      );
+      expect(dialog.textContent).toContain(
+        "The conversation leaves Work. It appears again as a message request, so you can add it to a workspace later. Your messages are kept.",
+      );
+
+      await user.click(screen.getByTestId("chats-leave-dm-cancel"));
+      expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
+      expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
+      // Still on the DM, unchanged.
+      expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+    });
+
+    it("ends the row, drops the conversation from the list, and returns to Chats on confirm", async () => {
+      const user = userEvent.setup();
+      const participant = dm({ role: "participant", shareId: "share-dm-1" });
+      // #742 P1-A: listDmRecords deliberately keeps an ended participant row
+      // readable (connected:false — the same owner-revoked tombstone rule),
+      // so main's real post-leave syncDms response carries BOTH this row AND
+      // the reappeared pending request for the same shareId. Building the
+      // mock through the actual withholdDmsInRequestLanes (not a hand-typed
+      // `dms: []`) is what makes this a real flow: a no-op filter would leave
+      // the ended row in `dms` and this test would go red on "shows only the
+      // request" below.
+      const endedRow = dm({ role: "participant", shareId: "share-dm-1", connected: false });
+      const reappearedRequest = { shareId: "share-dm-1", granterEmail: "alice@example.com" };
+      bridgeMock.syncDms
+        .mockResolvedValueOnce({ available: true, dms: [participant], pending: [], declined: [] })
+        .mockResolvedValue({
+          available: true,
+          dms: withholdDmsInRequestLanes({
+            dms: [endedRow],
+            requestShareIds: new Set(["share-dm-1"]),
+            holdersByShareId: new Map(),
+            holdersByWireId: new Map(),
+            workspaceId: "workspace-a",
+          }),
+          pending: [reappearedRequest],
+          declined: [],
+        });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      bridgeMock.leaveDm.mockResolvedValue(undefined);
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await user.click(await screen.findByTestId("chats-dm-leave"));
+      await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
+
+      await waitFor(() =>
+        expect(bridgeMock.leaveDm).toHaveBeenCalledWith({
+          workspaceId: "workspace-a",
+          shareId: "share-dm-1",
+        }),
+      );
+      await waitFor(() => expect(screen.queryByTestId("chats-dm-view")).toBeNull());
+      // One identity, one place: the request-lane representation wins.
+      await screen.findByTestId("chats-dm-request-item");
+      expect(screen.queryByTestId("chats-dm-item")).toBeNull();
+    });
+
+    it("clears the composer draft on leave, so the next DM opened starts empty (P1-B)", async () => {
+      const user = userEvent.setup();
+      const leaving = dm({
+        channelId: "channel-dm-1",
+        channelWireId: "wire-dm-1",
+        role: "participant",
+        shareId: "share-dm-1",
+        peerLabel: "alice@example.com",
+      });
+      const other = dm({
+        channelId: "channel-dm-2",
+        channelWireId: "wire-dm-2",
+        threadId: "thread-dm-2",
+        peerLabel: "bob@example.com",
+        name: "bob@example.com",
+      });
+      bridgeMock.syncDms
+        .mockResolvedValueOnce({
+          available: true,
+          dms: [leaving, other],
+          pending: [],
+          declined: [],
+        })
+        .mockResolvedValue({
+          available: true,
+          dms: [other],
+          pending: [{ shareId: "share-dm-1", granterEmail: "alice@example.com" }],
+          declined: [],
+        });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      bridgeMock.leaveDm.mockResolvedValue(undefined);
+      renderView();
+
+      const items = await screen.findAllByTestId("chats-dm-item");
+      await user.click(
+        items.find((el) => el.getAttribute("data-channel-id") === "channel-dm-1")!,
+      );
+      await screen.findByTestId("chats-dm-view");
+      await user.type(screen.getByTestId("chats-dm-composer"), "unsent draft for alice");
+      expect(
+        (screen.getByTestId("chats-dm-composer") as HTMLTextAreaElement).value,
+      ).toBe("unsent draft for alice");
+
+      await user.click(await screen.findByTestId("chats-dm-leave"));
+      await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
+      await waitFor(() => expect(bridgeMock.leaveDm).toHaveBeenCalled());
+      await waitFor(() => expect(screen.queryByTestId("chats-dm-view")).toBeNull());
+
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await screen.findByTestId("chats-dm-view");
+      expect(
+        (screen.getByTestId("chats-dm-composer") as HTMLTextAreaElement).value,
+      ).toBe("");
+    });
+
+    it("gates Leave on a live placement, not merely a shareId (P2-C)", async () => {
+      const user = userEvent.setup();
+      const live = dm({
+        channelId: "channel-dm-1",
+        channelWireId: "wire-dm-1",
+        role: "participant",
+        shareId: "share-dm-1",
+        connected: true,
+      });
+      // An already-ended participant row (owner revoked, or already left):
+      // confirming Leave here would re-end a tombstone and promise a request
+      // that, for an owner-revoked grant, can never appear.
+      const ended = dm({
+        channelId: "channel-dm-2",
+        channelWireId: "wire-dm-2",
+        role: "participant",
+        shareId: "share-dm-2",
+        connected: false,
+      });
+      bridgeMock.syncDms.mockResolvedValue({
+        available: true,
+        dms: [live, ended],
+        pending: [],
+        declined: [],
+      });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      renderView();
+
+      const items = await screen.findAllByTestId("chats-dm-item");
+      await user.click(
+        items.find((el) => el.getAttribute("data-channel-id") === "channel-dm-1")!,
+      );
+      await screen.findByTestId("chats-dm-view");
+      expect(await screen.findByTestId("chats-dm-leave")).toBeTruthy();
+
+      await user.click(screen.getByTestId("chats-dm-back"));
+      const itemsAgain = await screen.findAllByTestId("chats-dm-item");
+      await user.click(
+        itemsAgain.find((el) => el.getAttribute("data-channel-id") === "channel-dm-2")!,
+      );
+      await screen.findByTestId("chats-dm-view");
+      expect(screen.queryByTestId("chats-dm-leave")).toBeNull();
+    });
+
+    it("closes on Escape without navigating away or ending the row (P2-D)", async () => {
+      const user = userEvent.setup();
+      const participant = dm({ role: "participant", shareId: "share-dm-1" });
+      bridgeMock.syncDms.mockResolvedValue({
+        available: true,
+        dms: [participant],
+        pending: [],
+        declined: [],
+      });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await user.click(await screen.findByTestId("chats-dm-leave"));
+      await screen.findByTestId("chats-leave-dm-dialog");
+
+      // The dialog auto-focuses Cancel, so Escape targets an element inside
+      // its own marked subtree — the Chats root's onKeyDownCapture must skip
+      // it (data-chat-escape-local), leaving the dialog's own handler to close it.
+      await user.keyboard("{Escape}");
+
+      expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
+      // Still on the DM: Escape closed the dialog, it did not walk the view
+      // back the way the root's Escape handler otherwise would.
+      expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+      expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
+    });
+
+    it("clears a stale leave dialog on navigation away, so opening a different DM never shows it (P2-D belt)", async () => {
+      const user = userEvent.setup();
+      const leaving = dm({
+        channelId: "channel-dm-1",
+        channelWireId: "wire-dm-1",
+        role: "participant",
+        shareId: "share-dm-1",
+      });
+      const other = dm({
+        channelId: "channel-dm-2",
+        channelWireId: "wire-dm-2",
+        threadId: "thread-dm-2",
+      });
+      bridgeMock.syncDms.mockResolvedValue({
+        available: true,
+        dms: [leaving, other],
+        pending: [],
+        declined: [],
+      });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      renderView();
+
+      const items = await screen.findAllByTestId("chats-dm-item");
+      await user.click(
+        items.find((el) => el.getAttribute("data-channel-id") === "channel-dm-1")!,
+      );
+      await screen.findByTestId("chats-dm-view");
+      await user.click(await screen.findByTestId("chats-dm-leave"));
+      await screen.findByTestId("chats-leave-dm-dialog");
+
+      // Navigate away a path OTHER than the dialog's own Escape/Cancel — the
+      // header Back button — while the dialog is still open.
+      await user.click(screen.getByTestId("chats-dm-back"));
+      expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
+
+      const itemsAgain = await screen.findAllByTestId("chats-dm-item");
+      await user.click(
+        itemsAgain.find((el) => el.getAttribute("data-channel-id") === "channel-dm-2")!,
+      );
+      await screen.findByTestId("chats-dm-view");
+      expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
+    });
+
+    // #742 P2-D, round 5: an owner revocation mid-dialog leaves the
+    // channelId unchanged, so the round-2 belt (keyed only on nav change)
+    // would leave the confirmation open — confirming would re-end an
+    // already-ended tombstone and promise a request that, for an
+    // owner-revoked grant, can never appear.
+    it("closes the confirmation the moment the record it was opened for loses connected", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+        const participant = dm({ role: "participant", shareId: "share-dm-1" });
+        const revoked = { ...participant, connected: false };
+        bridgeMock.syncDms
+          .mockResolvedValueOnce({
+            available: true,
+            dms: [participant],
+            pending: [],
+            declined: [],
+          })
+          .mockResolvedValue({
+            available: true,
+            dms: [revoked],
+            pending: [],
+            declined: [],
+          });
+        bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+        renderView();
+        await user.click(await screen.findByTestId("chats-dm-item"));
+        await user.click(await screen.findByTestId("chats-dm-leave"));
+        await screen.findByTestId("chats-leave-dm-dialog");
+
+        // The per-open-DM refresh interval (refreshOpenDm, every 4s) is what
+        // would deliver the owner's revocation while the dialog is open.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+
+        expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
+        expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
+        // Still on the DM — the revocation itself doesn't navigate away, it
+        // only makes the conversation read-only.
+        expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // #742 P2 (round 6): Leave during an in-flight send would end the row
+    // before sendChatMessage's revalidation, whose rejection then gets
+    // suppressed by goBack's context change (#742 P1-B) — the message
+    // vanishes with no warning. Confirm is disabled until the send settles,
+    // so the user always sees either the message land or the existing
+    // "Could not send" error, never silence.
+    it("disables the leave confirm while a send is in flight for this DM, so the message can never silently vanish", async () => {
+      const user = userEvent.setup();
+      const participant = dm({ role: "participant", shareId: "share-dm-1" });
+      bridgeMock.syncDms.mockResolvedValue({
+        available: true,
+        dms: [participant],
+        pending: [],
+        declined: [],
+      });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      let resolveSend!: (result: { message: ChatMessageRecord }) => void;
+      const sendGate = new Promise<{ message: ChatMessageRecord }>((resolve) => {
+        resolveSend = resolve;
+      });
+      bridgeMock.sendChatMessage.mockReturnValue(sendGate);
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await user.type(screen.getByTestId("chats-dm-composer"), "hello{Enter}");
+      await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
+
+      await user.click(await screen.findByTestId("chats-dm-leave"));
+      await screen.findByTestId("chats-leave-dm-dialog");
+      await waitFor(() =>
+        expect(
+          (screen.getByTestId("chats-leave-dm-confirm") as HTMLButtonElement).disabled,
+        ).toBe(true),
+      );
+
+      await user.click(screen.getByTestId("chats-leave-dm-confirm"));
+      // Disabled: the click must not have reached leaveDm.
+      expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
+
+      resolveSend({
+        message: message({ id: "m-1", threadId: "thread-dm-1", body: "hello" }),
+      });
+      await waitFor(() =>
+        expect(
+          (screen.getByTestId("chats-leave-dm-confirm") as HTMLButtonElement).disabled,
+        ).toBe(false),
+      );
+    });
   });
 
   it("keeps syncing an open pending DM until its thread arrives", async () => {

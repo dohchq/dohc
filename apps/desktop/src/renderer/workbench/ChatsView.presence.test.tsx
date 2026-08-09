@@ -103,6 +103,7 @@ const bridgeMock = {
   acceptDm: vi.fn(),
   declineDm: vi.fn(),
   requestDmAgain: vi.fn(),
+  leaveDm: vi.fn(),
   writeClipboardText: vi.fn(),
   onWorkspaceActivity: vi.fn(),
 };
@@ -439,9 +440,13 @@ describe("ChatsView presence (MU-C1)", () => {
 // each publish with the scope it went out on — so a test can assert which relay
 // presence scope (workspace vs share) a conversation lands in, and prove the
 // memoized transport is only rebuilt on a real scope switch.
-function recordingCollab() {
+// onLeave (optional) fires synchronously when the presence transport's
+// leave() is invoked — used to pin ordering against another async call (e.g.
+// #742 P2-E: presence must leave before the leaveDm IPC ends the row).
+function recordingCollab(onLeave?: (topic: string) => void) {
   const calls: PresenceScope[] = [];
   const publishes: { scope: PresenceScope; topic: string }[] = [];
+  const leaves: { scope: PresenceScope; topic: string }[] = [];
   const collaboration: ChatPresenceCollaboration = {
     transportForScope: (scope) => {
       calls.push(scope);
@@ -450,7 +455,10 @@ function recordingCollab() {
           publishes.push({ scope, topic });
           return { version: 0, peers: [] };
         },
-        async leave() {},
+        async leave({ topic }) {
+          leaves.push({ scope, topic });
+          onLeave?.(topic);
+        },
         poll: ({ signal }) =>
           new Promise<PresenceSnapshot>((resolve) => {
             if (signal.aborted) return resolve({ version: 0, peers: [] });
@@ -463,7 +471,7 @@ function recordingCollab() {
     clientId: "me",
     displayName: "Me",
   };
-  return { collaboration, calls, publishes };
+  return { collaboration, calls, publishes, leaves };
 }
 
 function scopeKey(scope: PresenceScope): string {
@@ -745,6 +753,114 @@ describe("ChatsView presence scope selection (DM)", () => {
     for (let i = 1; i < keys.length; i += 1) expect(keys[i]).not.toBe(keys[i - 1]);
     expect(keys).toContain("share:dm-share-1");
     expect(keys).toContain("ws:workspace-a");
+  });
+
+  // #742 P2-E (round 3): leaveDm ends the DM's share, and an ended scope
+  // rejects further presence calls (the same ended-grant gate messages use)
+  // — so leaveDm must not fire until the presence leave has genuinely
+  // SETTLED at the transport, not merely been dispatched. A transport whose
+  // leave() resolves synchronously (or a hook-level spy) cannot tell a
+  // fire-and-forget void-launch from a real await — both would show
+  // "presence-leave" before "leave-dm" in the order array. This transport's
+  // leave() hangs until the test releases it, and only records itself AFTER
+  // that await — so a void-launch upstream would let leaveDm fire while the
+  // release is still pending, which the assertion below catches directly.
+  it("awaits the transport leave settling before ending the row", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participantDm] });
+    const order: string[] = [];
+    const leaves: { scope: PresenceScope; topic: string }[] = [];
+    let releaseLeave!: () => void;
+    const leaveGate = new Promise<void>((resolve) => {
+      releaseLeave = resolve;
+    });
+    const collaboration: ChatPresenceCollaboration = {
+      transportForScope: (scope) => ({
+        async publish() {
+          return { version: 0, peers: [] };
+        },
+        async leave({ topic }) {
+          await leaveGate;
+          leaves.push({ scope, topic });
+          order.push("presence-leave-settled");
+        },
+        poll: ({ signal }) =>
+          new Promise<PresenceSnapshot>((resolve) => {
+            if (signal.aborted) return resolve({ version: 0, peers: [] });
+            signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
+              once: true,
+            });
+          }),
+      }),
+      clientId: "me",
+      displayName: "Me",
+    };
+    bridgeMock.leaveDm.mockImplementation(async () => {
+      order.push("leave-dm");
+    });
+    const user = userEvent.setup();
+    render(
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        collaboration={collaboration}
+      />,
+    );
+    await openDmByChannelId(user, "dm-local");
+    await user.click(await screen.findByTestId("chats-dm-leave"));
+    await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
+
+    // The transport leave is still gated: give any (incorrect) fire-and-forget
+    // path several ticks to reach leaveDm, then prove it has NOT.
+    await act(async () => {
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    });
+    expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
+    expect(leaves).toEqual([]);
+
+    releaseLeave();
+    await waitFor(() => expect(bridgeMock.leaveDm).toHaveBeenCalled());
+    expect(leaves).toEqual([{ scope: { kind: "share", shareId: "dm-share-1" }, topic: "wire-dm" }]);
+    expect(order).toEqual(["presence-leave-settled", "leave-dm"]);
+  });
+
+  // #742 P2 (round 3): leave() already stopped the channel before leaveDm was
+  // even called. If leaveDm rejects, the row never ended and this DM stays
+  // open — presence must re-arm, or this client reads as gone to peers until
+  // it navigates away and back.
+  it("re-arms presence with a fresh publish if leaveDm rejects", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participantDm] });
+    const rec = recordingCollab();
+    bridgeMock.leaveDm.mockRejectedValue(new Error("relay unreachable"));
+    const user = userEvent.setup();
+    render(
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        collaboration={rec.collaboration}
+      />,
+    );
+    await openDmByChannelId(user, "dm-local");
+    await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-dm")).toBe(true));
+    const publishesBeforeLeave = rec.publishes.length;
+
+    await user.click(await screen.findByTestId("chats-dm-leave"));
+    await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
+    await waitFor(() => expect(bridgeMock.leaveDm).toHaveBeenCalled());
+
+    // Still on the DM (leaveDm failed, goBack never ran) — and a fresh
+    // channel has published again for the SAME topic/scope.
+    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+    await waitFor(() =>
+      expect(rec.publishes.length).toBeGreaterThan(publishesBeforeLeave),
+    );
+    expect(rec.publishes.at(-1)).toEqual({
+      scope: { kind: "share", shareId: "dm-share-1" },
+      topic: "wire-dm",
+    });
   });
 });
 

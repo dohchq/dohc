@@ -113,6 +113,68 @@ export function isShareAcceptedInWorkspace(
   );
 }
 
+function hasOtherLiveHolder(
+  holdersByShareId: ReadonlyMap<string, ReadonlySet<string>>,
+  shareId: string,
+  workspaceId: string,
+): boolean {
+  const holders = holdersByShareId.get(shareId);
+  if (!holders) return false;
+  for (const holder of holders) {
+    if (holder !== workspaceId) return true;
+  }
+  return false;
+}
+
+// One identity, one place: an ended participant row is withheld from the DM
+// list while its share is EITHER a pending/declined request OR held LIVE by
+// another workspace (#742 P1-A / round 4). Without the request-lane half,
+// Leave would end the row but the same conversation stays visible here too —
+// listDmRecords keeps an ended participant row readable (connected:false) on
+// purpose, so an owner-revoked grant's history survives after the owner ends
+// it, and Leave doesn't revoke anything, so the grant stays "received" and
+// classifyDmRequests re-lists it. Without the live-elsewhere half: leave in
+// workspace A, accept the SAME request into workspace B, and the share
+// leaves the request lanes the moment B holds it live — A's request-lane
+// check alone would stop withholding and the ended row would reappear in A's
+// list. holdersByShareId is built the same way classifyDmRequests's own
+// holdersByShareId callback builds it (liveSharedChannelHoldersByShareId) —
+// but derive it FRESH, after classify resolves, not reused from before:
+// classify itself re-derives its own copy mid-call specifically to catch a
+// grant accepted elsewhere while it awaits (PR #737 round 6), so a snapshot
+// taken any earlier can already be stale by the time this runs. An
+// owner-revoked row is unaffected by either check: no request (its grant
+// left the relay's received listing) and no other live holder (nobody
+// accepted anything). Also checks holdersByWireId (#742, round 6): a
+// re-grant mints a NEW shareId for the same channelWireId (PR #737 round 5),
+// so end in A under share A1, then accept the SAME conversation elsewhere
+// under a re-granted share B1 — A1 itself is never held live by anyone (B
+// holds B1, a different shareId), so the shareId-only check would miss it
+// and A's ended A1 row would reappear. The wire id is the conversation's
+// real, stable identity across that re-grant; the share id is not.
+export function withholdDmsInRequestLanes<
+  T extends { shareId: string | null; channelWireId: string },
+>(input: {
+  dms: readonly T[];
+  requestShareIds: ReadonlySet<string>;
+  holdersByShareId: ReadonlyMap<string, ReadonlySet<string>>;
+  holdersByWireId: ReadonlyMap<string, ReadonlySet<string>>;
+  workspaceId: string;
+}): T[] {
+  return input.dms.filter((dm) => {
+    if (dm.shareId === null) return true;
+    if (input.requestShareIds.has(dm.shareId)) return false;
+    if (hasOtherLiveHolder(input.holdersByShareId, dm.shareId, input.workspaceId)) {
+      return false;
+    }
+    return !hasOtherLiveHolder(
+      input.holdersByWireId,
+      dm.channelWireId,
+      input.workspaceId,
+    );
+  });
+}
+
 export async function classifyDmRequests(input: {
   received: readonly ReceivedDmGrantRow[];
   kindCache: Map<string, "dm" | "not-dm">;
@@ -169,6 +231,96 @@ export async function classifyDmRequests(input: {
     pending: requests.filter((row) => !declinedShareIds.has(row.shareId)),
     declined: requests.filter((row) => declinedShareIds.has(row.shareId)),
   };
+}
+
+export interface DmRequestLanes {
+  pending: DmRequestRow[];
+  declined: DmRequestRow[];
+}
+
+// #742 P1 (rounds 3–4): the last successfully classified request lanes, per
+// workspace. Staleness contract: last-known-until-next-success OR
+// session-transition. set() is called only after a SUCCESSFUL classify —
+// never on failure, which is what makes "last known" mean something. clear()
+// must run at every credential-cache-clearing session transition (logout,
+// login adoption) — main.ts wires this in beside its own credential cache
+// clear, so a new account's first failed poll is never served the previous
+// account's cached request rows (a real cross-account leak: sender emails
+// included).
+export function createLastKnownDmRequestLanesCache() {
+  const lanes = new Map<string, DmRequestLanes>();
+  return {
+    get(workspaceId: string): DmRequestLanes | undefined {
+      return lanes.get(workspaceId);
+    },
+    set(workspaceId: string, next: DmRequestLanes): void {
+      lanes.set(workspaceId, next);
+    },
+    // Account-wide: a session transition is never scoped to one workspace.
+    clear(): void {
+      lanes.clear();
+    },
+  };
+}
+export type LastKnownDmRequestLanesCache = ReturnType<
+  typeof createLastKnownDmRequestLanesCache
+>;
+
+// Resolve a workspace's request lanes, falling back to the cache on failure
+// and recording a fresh cache entry on success. classify() carries every
+// side effect (the relay fetch, logging) — this stays pure so it is testable
+// without a relay, a workspace, or main.ts's Electron-only closures.
+//
+// #742 P1 SECURITY (round 6): the cache WRITE below runs AFTER classify()'s
+// own awaits — a session transition (account switch) can land while an OLD
+// account's classify is still in flight. Without a guard, that stale result
+// would repopulate the cache right after the transition just cleared it,
+// silently reopening the round-4/5 cross-account leak. credentialGeneration
+// is main.ts's own credentialCacheGeneration — the SAME stale-work guard
+// this codebase already uses elsewhere (e.g. remoteForWorkspace): captured
+// before classify() starts, compared again after it resolves. A mismatch
+// means the session changed mid-classify, so the write is dropped. The
+// RETURNED result is unaffected — a stale response is the caller's own
+// session-generation guard to catch, same as every other IPC result here.
+export async function classifyDmRequestsWithFallback(input: {
+  workspaceId: string;
+  cache: LastKnownDmRequestLanesCache;
+  classify: () => Promise<DmRequestLanes>;
+  credentialGeneration: () => number;
+}): Promise<DmRequestLanes> {
+  const startedAtGeneration = input.credentialGeneration();
+  try {
+    const result = await input.classify();
+    if (input.credentialGeneration() === startedAtGeneration) {
+      input.cache.set(input.workspaceId, result);
+    }
+    return result;
+  } catch {
+    return input.cache.get(input.workspaceId) ?? { pending: [], declined: [] };
+  }
+}
+
+// #742 P1 (round 5): the cache's last recorded lanes were classified while
+// the DM was still accepted, so they EXCLUDE the just-left share — a relay
+// outage right after Leave would then fall back to those stale lanes and the
+// ended row would reappear (classifyDmRequestsWithFallback has nothing else
+// to fall back to). But a local leave is knowable without the relay at all:
+// call this on leaveDm's success, so the fallback serves lanes CONSISTENT
+// with the leave instead of the pre-leave snapshot. Idempotent — leaving
+// twice, or a poll racing the leave, never duplicates the pending row.
+export function markLeftInLastKnownLanes(
+  cache: LastKnownDmRequestLanesCache,
+  workspaceId: string,
+  row: DmRequestRow,
+): void {
+  const current = cache.get(workspaceId) ?? { pending: [], declined: [] };
+  if (current.pending.some((existing) => existing.shareId === row.shareId)) {
+    return;
+  }
+  cache.set(workspaceId, {
+    pending: [...current.pending, row],
+    declined: current.declined,
+  });
 }
 
 export async function reserveAndPullSharedChannel(input: {

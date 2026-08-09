@@ -171,6 +171,7 @@ import {
   SyncDmsResult,
   StartDmPayload,
   StartDmResult,
+  LeaveDmPayload,
   PresencePublishPayload,
   PresencePollPayload,
   PresenceCancelPayload,
@@ -364,13 +365,16 @@ import {
 } from "./workspaces/dmRequestStore";
 import {
   classifyDmRequests,
+  classifyDmRequestsWithFallback,
+  createLastKnownDmRequestLanesCache,
   isShareAcceptedInWorkspace,
   liveSharedChannelHoldersByShareId,
   liveSharedChannelHoldersByWireId,
+  markLeftInLastKnownLanes,
   otherLiveSharedChannelHolder,
   otherLiveSharedChannelHolderByWireId,
   reserveAndPullSharedChannel,
-  type DmRequestRow,
+  withholdDmsInRequestLanes,
 } from "./workspaces/dmRequests";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import {
@@ -1278,8 +1282,22 @@ function warmCredentialCache(): Promise<void> {
 function setCachedCredentials(credentials: CloudSessionCredentials): void {
   credentialSessionCache.set(credentials);
 }
+// #742 P1 (rounds 3–5): the last successfully classified DM request lanes,
+// per workspace — see createLastKnownDmRequestLanesCache's own comment for
+// the staleness contract. Declared at module scope (not inside the IPC
+// registration closure) so relayShareJsonWithCredentials — a top-level
+// function, its own separate closure — can clear it from the 401 path below.
+const lastKnownDmRequestLanes = createLastKnownDmRequestLanesCache();
 function clearCachedCredentials(): void {
   credentialSessionCache.clear();
+  // #742 P1 SECURITY (rounds 4–5): every credential-cache clear is a session
+  // transition (login adoption, logout, or a current-session 401 — all three
+  // call this one function). Clearing here, not at each call site
+  // individually, is what makes sure a NEW account's first failed poll can
+  // never be served the PREVIOUS account's cached request rows, sender
+  // emails included, regardless of which of the three paths ended the
+  // session.
+  lastKnownDmRequestLanes.clear();
 }
 async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials | null> {
   const loaded = await credentialSessionCache.adoptCurrent(() =>
@@ -4855,15 +4873,22 @@ function registerIpcHandlers(
 
   // Member-initiated leave: purely local — the channel stops syncing and its
   // rows stay readable. Keep an ended tombstone so participant provenance and
-  // the read-only write gate survive after live grant data is gone.
+  // the read-only write gate survive after live grant data is gone. Shared by
+  // leaveSharedChannel and leaveDm (#742) — a DM's accepted row IS a
+  // JoinedSharedChannel row in the same registry, so ending it is the same
+  // operation regardless of which surface asked.
+  function endWorkspaceJoinedChannel(workspaceId: string, shareId: string): void {
+    const entry = requireWorkspace(workspaceId);
+    setWorkspaceSharedChannels(
+      workspaceId,
+      endJoinedChannel(entry.sharedChannels ?? [], shareId),
+    );
+  }
+
   ipcMain.handle(CHANNELS.leaveSharedChannel, async (event, payload) => {
     assertTrustedSender(event);
     const input = LeaveSharedChannelPayload.parse(payload);
-    const entry = requireWorkspace(input.workspaceId);
-    setWorkspaceSharedChannels(
-      input.workspaceId,
-      endJoinedChannel(entry.sharedChannels ?? [], input.shareId),
-    );
+    endWorkspaceJoinedChannel(input.workspaceId, input.shareId);
     return undefined;
   });
 
@@ -7209,10 +7234,16 @@ function registerIpcHandlers(
     await warmCredentialCache();
     const relay = dmRelayConnection();
     const store = linkedChatStoreFor(workspace);
-    let pending: DmRequestRow[] = [];
-    let declined: DmRequestRow[] = [];
-    if (relay) {
-      try {
+    const { pending, declined } = await classifyDmRequestsWithFallback({
+      workspaceId: workspace.workspaceId,
+      cache: lastKnownDmRequestLanes,
+      // #742 P1 SECURITY (round 6): see classifyDmRequestsWithFallback's own
+      // comment — this is the guard against an old account's in-flight
+      // classify repopulating a just-cleared cache after a session
+      // transition.
+      credentialGeneration: () => credentialCacheGeneration,
+      classify: async () => {
+        if (!relay) throw new Error("DM sync is unavailable: not signed in.");
         const listing = await relayShareJson<{
           received?: Array<{
             shareId?: unknown;
@@ -7220,7 +7251,11 @@ function registerIpcHandlers(
             selector?: { kind?: unknown; channelWireId?: unknown };
           }>;
         }>("/sync/shares");
-        ({ pending, declined } = await classifyDmRequests({
+        // Re-derived on EVERY call, not a snapshot taken once: classifyDmRequests
+        // calls this twice, before and after its own async peek, specifically to
+        // catch a grant accepted elsewhere mid-poll (PR #737 round 6) — freezing
+        // it here would silently reopen that race.
+        return classifyDmRequests({
           received: listing.received ?? [],
           kindCache: peekedReceivedGrantKinds,
           peekKind: (shareId) => peekReceivedGrantKindForShare(relay, shareId),
@@ -7229,7 +7264,11 @@ function registerIpcHandlers(
           holdersByWireId: () =>
             liveSharedChannelHoldersByWireId(listWorkspaces()),
           declinedShareIds: readDeclinedDms(dmRequestFile()),
-        }));
+        });
+      },
+    });
+    if (relay) {
+      try {
         // Push the member's local ops, pull everyone else's, for the joined
         // DMs (and other shared channels) this bounded pass reaches. The DM the
         // caller has OPEN is named, so the 4 s poll behind an open conversation
@@ -7245,7 +7284,9 @@ function registerIpcHandlers(
         activity.queueCloudSync(workspace.workspaceId);
       } catch (error) {
         // Offline degradation: never a crash, never a blocked Chats view — the
-        // local DM list still serves and the next pass retries.
+        // local DM list still serves and the next pass retries. Unrelated to
+        // pending/declined above, which classifyDmRequestsWithFallback already
+        // resolved (freshly, or from the last-known cache).
         console.error(`[desktop] DM sync failed for ${workspace.rootPath}:`, error);
       }
     }
@@ -7254,9 +7295,22 @@ function registerIpcHandlers(
       store,
       sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
     });
+    const requestShareIds = new Set(
+      [...pending, ...declined].map((row) => row.shareId),
+    );
+    // Fresh, AFTER classify resolves — not reused from before it, which could
+    // be stale by the time the withhold decision actually needs it.
+    const holdersByShareId = liveSharedChannelHoldersByShareId(listWorkspaces());
+    const holdersByWireId = liveSharedChannelHoldersByWireId(listWorkspaces());
     return SyncDmsResult.parse({
       available: relay !== null,
-      dms: dms.map(dmRecordForIpc),
+      dms: withholdDmsInRequestLanes({
+        dms,
+        requestShareIds,
+        holdersByShareId,
+        holdersByWireId,
+        workspaceId: workspace.workspaceId,
+      }).map(dmRecordForIpc),
       pending,
       declined,
     });
@@ -7369,6 +7423,26 @@ function registerIpcHandlers(
     if (!clearDeclinedDm(dmRequestFile(), input.shareId)) {
       throw new Error("dohc could not save this choice. Try again.");
     }
+    return undefined;
+  });
+
+  // The DM surface's reverse path for placement (#742): ends the SAME row
+  // leaveSharedChannel ends. The next syncDms poll's classifyDmRequests finds
+  // no live holder for this shareId, so the conversation reappears as a
+  // request and can be accepted into any workspace, including this one.
+  ipcMain.handle(CHANNELS.leaveDm, (event, payload) => {
+    assertTrustedSender(event);
+    const input = LeaveDmPayload.parse(payload);
+    const leftRow = (
+      requireWorkspace(input.workspaceId).sharedChannels ?? []
+    ).find((channel) => channel.shareId === input.shareId);
+    endWorkspaceJoinedChannel(input.workspaceId, input.shareId);
+    // #742 P1 (round 5): the leave is locally knowable without the relay —
+    // see markLeftInLastKnownLanes's own comment for why this must run here.
+    markLeftInLastKnownLanes(lastKnownDmRequestLanes, input.workspaceId, {
+      shareId: input.shareId,
+      granterEmail: leftRow?.granterEmail ?? null,
+    });
     return undefined;
   });
 

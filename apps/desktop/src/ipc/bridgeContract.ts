@@ -1527,6 +1527,16 @@ export type DeclineDmPayload = z.infer<typeof DeclineDmPayload>;
 export const RequestDmAgainPayload = z.object({ shareId: SHARE_ID });
 export type RequestDmAgainPayload = z.infer<typeof RequestDmAgainPayload>;
 
+// A participant's reverse path for where an accepted DM lives (#742): ends
+// the SAME JoinedSharedChannel row leaveSharedChannel ends, keyed by DM
+// shareId. The owner side has no shareId (DmRecord.shareId is null for the
+// owner) and never calls this.
+export const LeaveDmPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  shareId: SHARE_ID,
+});
+export type LeaveDmPayload = z.infer<typeof LeaveDmPayload>;
+
 export const StartDmPayload = z.object({
   workspaceId: WORKSPACE_ID,
   // One or more recipient emails ("a@x.com, b@y.com") — parsed/validated in
@@ -3448,6 +3458,7 @@ export interface DohcDesktopBridge {
   declineDm(payload: DeclineDmPayload): Promise<void>;
   requestDmAgain(payload: RequestDmAgainPayload): Promise<void>;
   startDm(payload: StartDmPayload): Promise<StartDmResult>;
+  leaveDm(payload: LeaveDmPayload): Promise<void>;
   // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token stays in
   // main. publish (or leave) a presence state and long-poll for peer changes;
   // presenceCancel aborts an in-flight poll on unmount / workspace switch.
