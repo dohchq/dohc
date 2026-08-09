@@ -19,9 +19,6 @@
     "test:sites:e2e": "pnpm run build && node scripts/run-playwright.mjs --config playwright.config.ts --grep @sites",
     "typecheck": "tsc --noEmit"
   },
-  "dependencyNotes": {
-    "jsdom": "Pinned to 27.x because newer majors break the current Vitest 2 desktop harness. Upgrade jsdom with the repo-wide Vitest migration."
-  },
   "devDependencies": {
     "@dohc/performance": "workspace:*",
     "@electron/asar": "^4.2.1",
@@ -39,11 +36,11 @@
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "js-yaml": "^5.2.3",
-    "jsdom": "^27.4.0",
+    "jsdom": "^30.0.1",
     "playwright": "^1.62.1",
     "tailwindcss": "^4.3.3",
     "vite": "^8.2.1",
-    "vitest": "^2.1.9"
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",
