@@ -1,6 +1,6 @@
 import * as Y from "yjs";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import {
@@ -2292,7 +2292,10 @@ it("announces a recovered edit exactly once when both arm points run", async () 
 // adoption's replay is EMPTY, which is exactly the gap #595 names: nothing
 // arms a settle on the replacement, and the pending locked write would sit
 // stale until an unrelated edit.
-async function lockedRebindCapture(prefix: string) {
+async function lockedRebindCapture(
+  prefix: string,
+  options?: { daemonOwnsCapture?: boolean },
+) {
   // #630's scratch, like every other harness in this file: the run root is
   // swept even when a test fails, and an unremovable tree fails the suite
   // instead of being left behind under a green run.
@@ -2541,6 +2544,7 @@ async function lockedRebindCapture(prefix: string) {
         error instanceof Error ? error.message : String(error),
       );
     },
+    ...(options?.daemonOwnsCapture ? { daemonOwnsCapture: true } : {}),
   });
   return { capture, state, loopback, workspaceId, rootPath };
 }
@@ -2948,6 +2952,78 @@ it("the version fence drops a detached locked retry after a switch", async () =>
   await capture.stop();
 }, 20_000);
 
+it("a rename after a version-switch stand-down refuses instead of saving stale content", async () => {
+  // #681, active-version-branch door: `standDownFromWrite` used to delete
+  // the debt entry the same way the other two doors did, so `beginFileRename`
+  // read the fence's stand-down as a landed write and would have recorded
+  // the STALE pre-lock disk artifact under the new name.
+  //
+  // Round 2 lifecycle check: this door's own comment says the RUST engine's
+  // fence (`materialize_replay_pending_for_fence`, lib.rs) already replays
+  // this write before a switch can succeed — but that replay is a daemon-
+  // internal operation this desktop session never opens a provider for, so
+  // it never reaches `onSettled` and never clears this JS-side marker. The
+  // shared refusal copy stays plainly true from where this rename stands:
+  // relative to the version now active, this path's disk content still
+  // never came from this debt's write — the fence's own copy already landed
+  // it under the OLD version, not this one.
+  const { capture, state, loopback, workspaceId, rootPath } =
+    await lockedRebindCapture("dohc-ydoc-fence-rename-");
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "old version edit");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  const ensured = await loopback.sendRequest({
+    id: 9_101,
+    method: "versions.ensureMain",
+    workspace: workspaceId,
+    params: { workspaceId },
+  });
+  const main = ensured.result as { id?: string };
+  const created = await loopback.sendRequest({
+    id: 9_102,
+    method: "versions.createNamed",
+    workspace: workspaceId,
+    params: {
+      workspaceId,
+      name: "fence-rename-target",
+      fromVersionId: main.id ?? "main",
+    },
+    idempotencyKey: "fence-rename-create-1",
+  } as Parameters<typeof loopback.sendRequest>[0]);
+  const createdVersion = created.result as { id?: string };
+  await loopback.sendRequest({
+    id: 9_103,
+    method: "versions.setActive",
+    workspace: workspaceId,
+    params: { workspaceId, versionId: createdVersion.id! },
+  });
+  state.locked = false;
+
+  await expect
+    .poll(
+      () => state.errors.filter((context) => context.includes("close retry")),
+      { timeout: 15_000 },
+    )
+    .toHaveLength(1);
+
+  // RED against current main: absence read as landed, so this resolved and
+  // recorded renamed.md from the stale pre-lock text instead of refusing.
+  await expect(
+    capture.beginFileRename("note.md", "renamed.md"),
+  ).rejects.toThrow(
+    "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then rename note.md again.",
+  );
+  await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 25_000);
+
 it("a reopen before the timer fires receives the locked debt, not silence", async () => {
   // #595 round 5 P2: opening a document settles nothing by itself, so a
   // stand-down that merely SEES the live session would strand the pending
@@ -3042,6 +3118,261 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
   expect(state.settledMarkdowns).toEqual([]);
   await capture.stop();
 }, 15_000);
+
+it("an external delete observed before a debt registers cancels it at the door instead of arming a resurrecting ladder", async () => {
+  // #681 round 7, codex P1 (real): a debt used to register unconditionally
+  // at its one door — `scheduleDetachedLockedSettle`, reached directly (a
+  // release that succeeds over a failed settle) and again after a
+  // transient close retry ladder that runs OFF the capture chain for as
+  // long as TEARDOWN_RETRY_CAP_MS allows (seconds wide in production,
+  // unlike the chain-serialized delete/move seams #697 already fences).
+  // An external delete landing anywhere in that window finds no debt yet
+  // (`cleanupDetachedDebtForEvent`'s has(path) gate correctly skips it),
+  // and the LATE registration that follows then owns a path that is
+  // already gone: its own ladder can recreate the deleted file from the
+  // canonical Y.Doc, or (if it later stands down) strand a marker
+  // blocking an unrelated file recreated at that same path.
+  //
+  // The session opens FIRST, then the delete lands (#681 round 8): the
+  // registration door now discriminates by session age, so the session
+  // under test must genuinely predate the delete it is meant to be
+  // cancelled by — swapped from this test's original delete-then-open
+  // order once that order stopped matching what the fix actually checks.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-late-registration-",
+  );
+  const { session } = await openWithOneEdit(capture, "would resurrect this");
+
+  // The watcher observes the external delete before this session's own
+  // close ever registers a debt.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  state.locked = true;
+  state.replicated = true;
+
+  // RED before the fix: nothing remembered the earlier delete, so this
+  // close's own registration armed a fresh, un-cancelled debt.
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+
+  // The cancel trace names the absence, not a fabricated lock.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+
+  // And the ladder never armed: no reopen, no settle, ever — the deleted
+  // path stays deleted.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(1);
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 15_000);
+
+it("a recreated path's own session arms its debt normally instead of being cancelled by an earlier delete", async () => {
+  // #681 round 8, codex P1 (real, corrected mid-round): the round-7
+  // tombstone is path-keyed, so a delete-then-recreate landing inside its
+  // TTL left it armed for the NEW file too. A first attempt fixed this by
+  // having any non-delete event INVALIDATE the tombstone outright — wrong
+  // shape, reverted before shipping: the certifier's S2(b) showed it lets
+  // an OLD session, still mid-retry-ladder when the recreation lands,
+  // arm a late debt that settles its STALE canonical doc over the NEW
+  // file — the exact resurrection-over-live-content corruption this whole
+  // PR exists to prevent. The correct discriminator is THIS session's own
+  // open time against the tombstone's: a session that opened AFTER the
+  // delete (this one) was never the delete's victim, so it must arm
+  // normally regardless of whether a recreation happened at all — see the
+  // sibling pin for the OLD session, which must still cancel.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-tombstone-recreate-",
+  );
+
+  // The path is deleted (no debt exists yet, so the tombstone is set),
+  // then recreated — both before this test's own session ever opens.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  await capture.flush();
+
+  // A NEW session — opened after both events — hits a genuine transient
+  // lock on close.
+  const { session } = await openWithOneEdit(capture, "a real pending edit");
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // RED before the fix: the stale tombstone, still armed, was consumed
+  // here and cancelled this genuine pending write instead of arming it.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("removed the path while a pending write waited"),
+    ),
+  ).toBe(false);
+
+  // The lock releases, and the ladder — armed normally — lands the write.
+  state.locked = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["a real pending edit"]);
+  await capture.stop();
+}, 20_000);
+
+it("a stale session's late debt still cancels at the door despite a later recreation of its path", async () => {
+  // #681 round 8, codex P1 pin (b) — the corruption guard. An OLD session
+  // opens BEFORE the delete and is still closing (its own transient retry
+  // ladder running off the chain) when the path is deleted AND recreated.
+  // This session's registration must STILL cancel: its content is exactly
+  // what the delete orphaned, and the sibling pin above is what proves a
+  // GENUINELY new session at the same path is unaffected — together they
+  // show the door discriminates by session age, not by whether a
+  // recreation happened.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-tombstone-stale-session-",
+  );
+
+  // The old session opens first — before anything else happens to its
+  // path.
+  const { session } = await openWithOneEdit(capture, "the stale content");
+
+  // The path is deleted, then recreated, while the old session has not
+  // closed yet (its own registration has not run).
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  await capture.flush();
+
+  // NOW the old session's close hits a transient lock, registering LATE —
+  // exactly the round-7 shape, with a recreation now sitting in between.
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+
+  // This old session's debt is still cancelled: it opened before the
+  // delete, so it is the incarnation the tombstone actually names.
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.filter((message) =>
+          message.includes("removed the path while a pending write waited"),
+        ),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(1);
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 20_000);
+
+it("a late-registering debt's cancellation trace names dohc's own removal, not a fabricated external delete", async () => {
+  // #681 round 8, certifier's cosmetic finding (folded): the no-debt
+  // tombstone recorded EXPECTED deletes (an engine-owned removal, e.g. a
+  // version switch's own materialization) the same as external ones, so a
+  // debt registering within the tombstone's memory always blamed "an
+  // external delete" — even when dohc itself removed the path. The
+  // recorder is the only place that verdict is still known once this
+  // becomes a bare memory; thread it through instead of guessing at the
+  // door.
+  // The session opens FIRST (#681 round 8: the registration door
+  // discriminates by session age, so the session under test must
+  // genuinely predate the removal it is meant to be cancelled by).
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-tombstone-expected-",
+  );
+  const { session } = await openWithOneEdit(capture, "would resurrect this");
+
+  // The engine registers the removal as expected, then the watcher
+  // observes it — the same sequence materialize() uses for a version
+  // switch's own delete operation.
+  capture.registerExpectedEngineEvents([
+    { path: "note.md", operation: "delete" },
+  ]);
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // RED before the fix: this cancellation always said "an external
+  // delete", even though the recorder knew the removal was dohc's own.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("dohc's own removal of note.md removed the path"),
+    ),
+  ).toBe(true);
+  state.locked = false;
+  await capture.stop();
+}, 15_000);
+
+it("a materialized settle retires a session's deletion fence, so post-recovery edits arm normally", async () => {
+  // #681 round 9, codex P1 (real): a session is classified once, at open,
+  // against a delete it predates — but round 8's discriminator never
+  // revisits that classification. A session opened before a delete can
+  // still recover mid-session: one of its OWN settles can rematerialize
+  // the path, proving the deletion's premise is gone. Without retiring
+  // the tombstone there, a LATER transient close failure over edits made
+  // AFTER that recovery still reads as belonging to the deleted
+  // incarnation and gets wrongly cancelled — the post-recovery edits get
+  // no retry and the artifact stays stale.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-tombstone-rematerialize-",
+  );
+
+  // The session opens, then the path is deleted externally — this
+  // session predates the delete, so the discriminator alone would
+  // classify it "old" for the rest of its life.
+  const { session, mirror } = await openWithOneEdit(capture, "first edit");
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // The SAME session settles for real — no lock, no failure — and its
+  // materialized write proves note.md exists again.
+  await expect(session.settleNow()).resolves.toMatchObject({
+    markdown: "first edit",
+  });
+
+  // More edits land on this session, made AFTER the recovery above.
+  const before = Y.encodeStateVector(mirror);
+  mirror
+    .getText("plainText")
+    .insert(mirror.getText("plainText").length, " second edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
+
+  // This close hits a genuine transient lock.
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // RED before the fix: the tombstone from before the recovery, still
+  // classifying this session as "old," was consumed here and cancelled
+  // these genuinely pending post-recovery edits instead of arming them.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("removed the path while a pending write waited"),
+    ),
+  ).toBe(false);
+
+  // The lock releases, and the ladder — armed normally — lands the write.
+  state.locked = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["first edit", "first edit second edit"]);
+  await capture.stop();
+}, 20_000);
 
 it("a delete refuses the open that could register a debt while disk work is in flight", async () => {
   // #696 rescanned for debts registered after its suspension snapshot. #697
@@ -4152,6 +4483,50 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
   await capture.stop();
 }, 40_000);
 
+it("a rename after a terminal settle refusal refuses instead of saving stale content", async () => {
+  // #681, terminal-settle door (conflict-stale-target branch):
+  // `standDownFromWrite` used to delete the debt entry here too, so a rename
+  // right after this stand-down would have read the STALE pre-lock disk
+  // artifact as proof the write landed and recorded it under the new name.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-terminal-rename-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "conflicting edit");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.settleFailure = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+    new Error("daemon response"),
+  );
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.filter((message) =>
+          message.includes("changed outside dohc"),
+        ),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // RED against current main: absence read as landed, so this resolved and
+  // recorded renamed.md from the stale pre-lock text instead of refusing.
+  await expect(
+    capture.beginFileRename("note.md", "renamed.md"),
+  ).rejects.toThrow(
+    "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then rename note.md again.",
+  );
+  await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 25_000);
+
 it("a settle that committed but wrote nothing stops the ladder and names the symlink", async () => {
   // #651. A settle RESOLVING is the adjacent operation, not the write: the
   // engine commits the lineage and answers materialized: false for a target it
@@ -4213,6 +4588,859 @@ it("a settle that committed but wrote nothing stops the ladder and names the sym
   expect(state.generation).toBe(generationAtStandDown);
   await capture.stop();
 }, 40_000);
+
+it("a rename after a symlink stand-down refuses instead of saving stale content", async () => {
+  // #681, blocked-target door: `standDownFromBlockedTarget` reaches the same
+  // `standDownFromWrite` as the other two doors, which used to delete the
+  // debt entry. `beginFileRename` read that absence as proof the write
+  // landed, read the moved-from disk (the STALE pre-lock text a symlinked
+  // target never received), and would have recorded it as a new moment
+  // before renaming — the exact silent stale moment #681 names.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-symlink-rename-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // RED against current main: absence read as landed, so this resolved and
+  // recorded renamed.md from the stale pre-lock text instead of refusing.
+  await expect(
+    capture.beginFileRename("note.md", "renamed.md"),
+  ).rejects.toThrow(
+    "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then rename note.md again.",
+  );
+  await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
+  expect(state.settledMarkdowns).toHaveLength(0);
+  await capture.stop();
+}, 25_000);
+
+it("reopening a stood-down path without a real settle leaves the marker refusing", async () => {
+  // #681 round 2, P1 (codex): an open alone used to clear the marker, but
+  // it proves only that no conflicting lease survives — not that anything
+  // reached disk. Closing with settle:false runs no settle at all, so disk
+  // stays exactly as stale as the stand-down left it. Clearing here was the
+  // defect recreated: this exact sequence used to make the next rename
+  // record that stale artifact as landed.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-standdown-noclear-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // The refusal is live before recovery.
+  await expect(
+    capture.beginFileRename("note.md", "renamed.md"),
+  ).rejects.toThrow(/dohc gave up on writing note\.md earlier/);
+
+  // The user reopens the path but the close that follows settles nothing.
+  state.unmaterialized = false;
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await reopened.close({ settle: false });
+
+  // RED before the redesign: the open alone had already cleared the
+  // marker, so this resolved instead of refusing.
+  await expect(
+    capture.beginFileRename("note.md", "renamed.md"),
+  ).rejects.toThrow(/dohc gave up on writing note\.md earlier/);
+  await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
+  await capture.stop();
+}, 25_000);
+
+it("onSettled clearing a stood-down flag does not strand a debt still awaiting its own release", async () => {
+  // #681 round 4, O3 (certifier, required): round 3's onSettled fix
+  // (clear `stoodDown`, not delete the entry) had no pin of its own —
+  // mutating it back to entry-deletion left every other test green.
+  //
+  // The reachable interleaving: a debt stands down over a version switch
+  // WHILE its own retry session's release is STILL being refused —
+  // `standDownFromWrite` cancels W but explicitly leaves L's ladder armed
+  // when a lease is still held. A different session then settles for real
+  // at the same path (simplified here to a plain reopen — a rename onto
+  // the path first reaches the identical state, since round 3's fix
+  // leaves a destination-side stood-down debt untouched). If THAT settle's
+  // `onSettled` deletes the whole entry instead of clearing the flag, the
+  // first debt's still-retrying release ladder loses its only owner: its
+  // next timer tick's ownership check finds nothing to match, stops
+  // retrying, and the daemon lease strands at ydoc-session-busy.
+  const { capture, state, loopback, workspaceId } = await lockedRebindCapture(
+    "dohc-ydoc-onsettled-strand-",
+  );
+  const { session } = await openWithOneEdit(capture, "object A");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The retry settles (materialized), a peer update outruns it, and the
+  // release is refused: pendingRelease is now set, the write not yet
+  // cancelled — the same setup as "a cancelled debt whose release is
+  // refused keeps retrying that release", above.
+  state.locked = false;
+  state.emitUpdateAfterSettle = true;
+  state.closeFailure = new Error("ydoc-unsettled-close");
+  await expect
+    .poll(
+      () => state.closeCalls.filter((generation) => generation === 2).length,
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(0);
+
+  // Before the next retry fires, the workspace moves to a new version.
+  // That retry's version check trips FIRST, ahead of its own
+  // pendingRelease check, so it stands down the write while L is still
+  // unresolved.
+  const ensured = await loopback.sendRequest({
+    id: 9_301,
+    method: "versions.ensureMain",
+    workspace: workspaceId,
+    params: { workspaceId },
+  });
+  const main = ensured.result as { id?: string };
+  const created = await loopback.sendRequest({
+    id: 9_302,
+    method: "versions.createNamed",
+    workspace: workspaceId,
+    params: {
+      workspaceId,
+      name: "strand-target",
+      fromVersionId: main.id ?? "main",
+    },
+    idempotencyKey: "strand-create-1",
+  } as Parameters<typeof loopback.sendRequest>[0]);
+  const createdVersion = created.result as { id?: string };
+  await loopback.sendRequest({
+    id: 9_303,
+    method: "versions.setActive",
+    workspace: workspaceId,
+    params: { workspaceId, versionId: createdVersion.id! },
+  });
+
+  // The stand-down fired: W gave up. L (the refused release) survives it.
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.filter((message) =>
+          message.includes("the version fence replay owns pending writes"),
+        ),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // A different session lands at the same path and settles for real.
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, reopened.initialUpdate);
+  const before = Y.encodeStateVector(mirror);
+  mirror.getText("plainText").insert(0, "object B");
+  await reopened.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
+  await reopened.settleNow();
+
+  // RED under the entry-deletion mutant: the first debt's release ladder
+  // finds nothing to match on its next tick and stops retrying, so this
+  // never lands even once the daemon accepts the release.
+  const releasesBeforeRecovery = state.closesWithSettleFalse;
+  state.closeFailure = null;
+  await expect
+    .poll(() => state.closesWithSettleFalse, { timeout: 25_000 })
+    .toBeGreaterThan(releasesBeforeRecovery);
+
+  await reopened.close({ settle: false });
+  await capture.stop();
+}, 45_000);
+
+it("a recovered debt with no retained release does not linger for a later delete to falsely cancel", async () => {
+  // #681 round 6, codex P2-A (real, small): `onSettled`'s recovery only
+  // flipped `stoodDown`. When the retry session's release had ALREADY
+  // completed — the symlink-block door never holds one open at all, per
+  // its own `pendingRelease` reasoning — no lease obligation remained,
+  // yet the entry lingered forever anyway. A later delete of the
+  // recovered path then found it and traced a cancellation for a write
+  // that had already landed, and the closure graph stayed retained past
+  // workspace stop.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-recovered-no-lease-",
+  );
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // The user replaces the symlink, reopens, and settles for real — this
+  // door never holds a lease open, so recovery leaves nothing owed.
+  state.unmaterialized = false;
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, reopened.initialUpdate);
+  const before = Y.encodeStateVector(mirror);
+  mirror.getText("plainText").insert(0, "recovered, nothing owed");
+  await reopened.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
+  await reopened.settleNow();
+  // Anti-vacuity: the recovery settle actually reached disk — otherwise
+  // the entry could be retired for an unrelated reason and this test
+  // would still pass on the negative trace assertion alone. (The doc
+  // carries the journaled "never written" text too — the recovery
+  // session's seed, per the fake's own replay of durable state.)
+  expect(
+    state.settledMarkdowns.some((text) => text.includes("recovered, nothing owed")),
+  ).toBe(true);
+  await reopened.close({ settle: false });
+  // Drain the chain so recovery's own enqueued pay() retires the entry
+  // before the delete below.
+  await capture.flush();
+
+  // An external program deletes the recovered path.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // RED before the fix: the entry lingered after recovery, so this
+  // delete found it and traced a cancellation for a write that had
+  // already landed.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("removed the path while a pending write waited"),
+    ),
+  ).toBe(false);
+  await capture.stop();
+}, 25_000);
+
+it("a materialized settle after reopening a stood-down path clears the marker and re-enables the rename", async () => {
+  // #681 round 2's honest lifecycle end: only PROOF clears the marker — a
+  // settle the engine reports as materialized, which is the moment "its
+  // last edit reached disk" becomes true. This is the recovery every
+  // stand-down message already prescribes ("open it to write it again"),
+  // finished all the way through to a real save instead of stopping at
+  // the open.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-standdown-settle-clears-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  state.unmaterialized = false;
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, reopened.initialUpdate);
+  const before = Y.encodeStateVector(mirror);
+  mirror.getText("plainText").insert(0, "recovered edit");
+  await reopened.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
+  await reopened.settleNow();
+  // Anti-vacuity: THIS settle is what cleared it, not some unrelated path.
+  // (The doc carries the journaled "never written" text too — the recovery
+  // session's seed, per the fake's own replay of durable state.)
+  expect(
+    state.settledMarkdowns.some((text) => text.includes("recovered edit")),
+  ).toBe(true);
+
+  // The marker is gone: the rename now proceeds like any ordinary one.
+  const finish = await capture.beginFileRename("note.md", "renamed.md");
+  await finish(true);
+  await reopened.close({ settle: false });
+  await capture.stop();
+}, 25_000);
+
+it("a rename's own vacate settle clears a stood-down marker for a session still mid-recovery", async () => {
+  // #681 round 2, P1 follow-up: `beginFileRename` now vacates live sessions
+  // over its endpoints BEFORE draining detached debts, exactly so a
+  // session that reopened a stood-down path but has not settled on its own
+  // yet gets that chance here rather than being refused on a marker its
+  // own vacate settle is about to clear.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-standdown-vacate-clears-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // The user reopens and edits, but the rename arrives before they settle
+  // or close it themselves.
+  state.unmaterialized = false;
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, reopened.initialUpdate);
+  const before = Y.encodeStateVector(mirror);
+  mirror.getText("plainText").insert(0, "recovered mid-rename");
+  await reopened.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
+
+  // RED under the original drain-then-vacate order: the drain would see
+  // the marker still set (this session never settled anything itself) and
+  // refuse before its own vacate ever ran.
+  const finish = await capture.beginFileRename("note.md", "renamed.md");
+  await finish(true);
+  // Anti-vacuity: the vacate's OWN settle is what cleared it.
+  expect(
+    state.settledMarkdowns.some((text) => text.includes("recovered mid-rename")),
+  ).toBe(true);
+  await capture.stop();
+}, 25_000);
+
+it("a cancelled debt's registry entry does not survive its own release landing", async () => {
+  // #681 round 2, P2 (codex, verified): `discardDetachedLockedDebt`
+  // re-registers a NONTERMINAL entry (stoodDown: false) when the release it
+  // owes is refused (#595 round 11). Once that release finally lands, only
+  // L was ever left to finish. Leaving the entry in place made a later
+  // rename over the same, already-removed path falsely claim another
+  // program still held it.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-cancel-release-clears-",
+  );
+  const { session } = await openWithOneEdit(capture, "leased and deleted");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // The retry settles, a peer update outruns it, and the release is
+  // refused — the same setup as "a cancelled debt whose release is refused
+  // keeps retrying that release", above.
+  state.locked = false;
+  state.emitUpdateAfterSettle = true;
+  state.closeFailure = new Error("ydoc-unsettled-close");
+  await expect
+    .poll(
+      () => state.closeCalls.filter((generation) => generation === 2).length,
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(0);
+
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+  finishDelete(true);
+  await expect
+    .poll(() => state.errors.filter((c) => c.includes("close retry")), {
+      timeout: 15_000,
+    })
+    .not.toHaveLength(0);
+
+  const releasesBeforeLanding = state.closesWithSettleFalse;
+  state.closeFailure = null;
+  await expect
+    .poll(() => state.closesWithSettleFalse, { timeout: 20_000 })
+    .toBeGreaterThan(releasesBeforeLanding);
+
+  // Poll the OUTCOME rather than sleep a fixed window past the release: a
+  // refused call throws before `openRemovalWindow` ever opens (a retry
+  // registers nothing to clean up), so retrying here is safe, and this
+  // does not depend on how many ticks the ownership check actually needs.
+  //
+  // RED before the fix: the stale nonterminal entry never left the
+  // registry, so this kept rejecting "Another program still has note.md
+  // open" even though nothing holds it anymore.
+  let finish: Awaited<ReturnType<typeof capture.beginFileRename>> | undefined;
+  await expect
+    .poll(
+      async () => {
+        try {
+          finish = await capture.beginFileRename("note.md", "elsewhere.md");
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 20_000 },
+    )
+    .toBe(true);
+  expect(typeof finish).toBe("function");
+  await capture.stop();
+}, 60_000);
+
+it("a watcher-captured external delete cancels a stood-down debt instead of leaving it immortal", async () => {
+  // #681 round 2, P2 (codex, verified): the delete/move seams suspend and
+  // cancel a debt on removal, but an EXTERNAL delete — never runs through
+  // them — left a stood-down marker sitting at a dead path forever. Since
+  // `beginFileRename`'s endpointMatch checks the destination too, renaming
+  // any OTHER file onto that freed path would have refused with an
+  // instruction naming a file no longer there.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-external-delete-",
+  );
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // An external program deletes the path directly; the watcher observes it.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // RED before the fix: nothing cancelled the marker or traced its removal.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+
+  // And it stays cancelled: no reopen, no resurrection.
+  const generationAtDelete = state.generation;
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.generation).toBe(generationAtDelete);
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 20_000);
+
+it("an engine-materialized delete of a stood-down path also cancels its debt", async () => {
+  // #681 round 4, codex P2 (real): a version switch whose target omits the
+  // file, or a relay fast-forward delete, removes the path through
+  // `materialize()` — which registers the deletion as an EXPECTED engine
+  // event (its own `registerExpectedEngineEvents` call, same as this test
+  // does directly) so it never re-journals as a new moment. The round-3
+  // cleanup was gated on `isExternalDelete`, so this exact door left the
+  // marker behind: the ENGINE removing a path is exactly as terminal for
+  // the abandoned write as an external delete — only the reason differs.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-materialized-delete-",
+  );
+
+  // note.md must be TRACKED before the debt exists: a stray journal from
+  // the Q1b mutant (the hoisted cleanup's peek reverted to a consume) is
+  // observable only if there is something for `deleteIfTracked` to
+  // record — an untracked path's delete is a silent no-op either way.
+  await writeFile(join(rootPath, "note.md"), "already tracked\n", "utf8");
+  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  await capture.flush();
+
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // The engine registers the removal as expected — exactly what
+  // `materialize()` does for a delete operation during a version switch —
+  // then the watcher observes the disk change that follows.
+  capture.registerExpectedEngineEvents([
+    { path: "note.md", operation: "delete" },
+  ]);
+  await rm(join(rootPath, "note.md"));
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // RED before the fix: cleanup was gated on isExternalDelete, so an
+  // EXPECTED delete never reached it and this trace never appeared.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("dohc's own removal of note.md removed the path"),
+    ),
+  ).toBe(true);
+
+  // Q1b (certifier, required): a peek-to-consume regression on the
+  // hoisted cleanup keeps the trace above correct — peek and consume
+  // return the identical verdict — but steals the token before
+  // `captureOnePath`'s own real consumption. That leaves the engine's
+  // own removal reading as external THERE, and `deleteIfTracked` records
+  // a spurious new "delete" moment for a path the engine already knows
+  // is gone. Assert the journal, not just the trace.
+  const page = await capture.listMoments();
+  const strayDeletes = page.moments.filter(
+    (moment) => moment.path === "note.md" && moment.operation === "delete",
+  );
+  expect(strayDeletes).toHaveLength(0);
+
+  // The path is recreated (the version now active has a file there, or
+  // the user made a new one) and a rename now proceeds — no stale refusal.
+  await writeFile(join(rootPath, "note.md"), "fresh content\n", "utf8");
+  const finish = await capture.beginFileRename("note.md", "renamed.md");
+  expect(typeof finish).toBe("function");
+  await capture.stop();
+}, 20_000);
+
+it("in the daemon-owned production configuration, an external delete still cancels a stood-down debt", async () => {
+  // #681 round 6, codex P2-B (real — the same class as #736's dead fence):
+  // production constructs capture with `daemonOwnsCapture: true`
+  // (engineCaptureGate.ts:65), under which `captureBatch` used to return
+  // before ever calling `captureOnePath` — the function that carried
+  // rounds 3-5's entire debt-cleanup fix. Every prior external-removal
+  // pin drove this file's JS-capture harness (`daemonOwnsCapture`
+  // unset), so none of them proved the SHIPPED configuration behaved the
+  // same way. Detached debts arise independently of which side captures
+  // disk content — they come from a Y.Doc session's own close failure,
+  // which `daemonOwnsCapture` never gates — so the cleanup has to run
+  // for them regardless.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-daemon-owned-cleanup-",
+    { daemonOwnsCapture: true },
+  );
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // An external program deletes the path. The watcher still reports the
+  // same event in daemon-owned mode — only the disk-to-engine CAPTURE is
+  // the daemon's job, not this registry's own cleanup. `flush()` is not
+  // usable here: in daemon-owned mode it also flushes the DAEMON's own
+  // capture over the wire, which this loopback harness does not model —
+  // poll the observable trace instead.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+
+  // RED before the fix: `captureBatch` returned before `captureOnePath`
+  // ever ran, so this trace never appeared and the marker never cleared.
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.some((message) =>
+          message.includes("an external delete of note.md removed the path"),
+        ),
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+
+  // The path is recreated and a rename now proceeds cleanly — no stale
+  // refusal, in the same configuration the app actually ships.
+  await writeFile(join(rootPath, "note.md"), "fresh content\n", "utf8");
+  const finish = await capture.beginFileRename("note.md", "elsewhere.md");
+  expect(typeof finish).toBe("function");
+  // No `capture.stop()`/`flush()` here: in daemon-owned mode both also
+  // flush the DAEMON's own capture over the wire (a real RPC this
+  // loopback harness does not model). `session.close()` above DID arm a
+  // detached retry timer regardless of `capture.start()` — but the
+  // external delete's own cancellation already cleared it
+  // (`discardDetachedLockedDebt`, reached through `cancelSuspendedDebts`),
+  // so nothing is left running past this test.
+}, 20_000);
+
+it("a stood-down debt on the rename's destination survives a move that fails because the destination exists", async () => {
+  // #681 round 3, P1 (codex, real — the round-2 destination cancel rested
+  // on a false premise). `movePath` REFUSES an existing destination
+  // (workspaceFiles.ts, `destExists`) — moves never overwrite. Cancelling
+  // the destination's stood-down debt at PREPARE time, before the disk
+  // move even runs, destroyed the marker for a move that could then FAIL —
+  // leaving the abandoned write undefended even though nothing about it
+  // had actually changed.
+  //
+  // The fix leaves the destination's debt alone: an existing destination
+  // makes `movePath` fail on its own with the standard, followable
+  // "Destination already exists" refusal; an externally removed one is
+  // already cleared by the watcher's own delete-cancel. Neither scenario
+  // needs this seam to touch the marker at all.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-dest-move-fails-",
+  );
+  await writeFile(join(rootPath, "source.md"), "moving in\n", "utf8");
+  await writeFile(join(rootPath, "target.md"), "still there\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "never written", "target.md");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // Prepare does not refuse and does not touch the destination's marker —
+  // the disk-level check is what decides, once the move is attempted.
+  const finish = await capture.beginFileRename("source.md", "target.md");
+  // The disk move fails: target.md is still there. main.ts reports that
+  // outcome to the finisher.
+  await finish(false);
+
+  // RED before the fix: the marker was already cancelled at prepare time
+  // (before the failed move even ran), so this resolved instead of
+  // refusing.
+  await expect(
+    capture.beginFileRename("target.md", "elsewhere.md"),
+  ).rejects.toThrow(
+    "dohc could not rename target.md. dohc gave up on writing target.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open target.md to write them again. Then rename target.md again.",
+  );
+  await capture.stop();
+}, 25_000);
+
+it("a write-classified event over an already-absent stood-down path also cancels its debt", async () => {
+  // #681 round 3 (cert N4b): the "absent" branch — a write-classified
+  // watcher event that, once read, turns out to have no file — is a
+  // SEPARATE door from the explicit "delete" operation branch above it.
+  // Both call cancelSuspendedDebts with the same trace, but only the
+  // "delete" branch had a pin: severing this one's call left every
+  // existing restart test green.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-absent-branch-delete-",
+  );
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // The symlink stand-down never materialized note.md, so no file exists
+  // at rootPath/note.md — an "update"-classified event resolves to
+  // disk.kind === "absent" once captureOnePath reads it: the write-
+  // classified door, not the explicit "delete" operation one.
+  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  await capture.flush();
+
+  // RED under a sever of just this branch's cancel call: nothing traces
+  // the removal, so this assertion is what catches it.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+
+  // Pin the outcome, not only the trace: a change that keeps the log but
+  // leaves the entry in `detachedLockedDebts` would still pass the
+  // assertion above.
+  const finish = await capture.beginFileRename("note.md", "renamed.md");
+  expect(typeof finish).toBe("function");
+  await capture.stop();
+}, 20_000);
+
+it("a watcher-captured external delete of a policy-excluded path still cancels its stood-down debt", async () => {
+  // #681 round 3, P2 (codex, real): the cleanup ran AFTER
+  // `captureOnePath`'s policy-tracking gate, so an excluded path's
+  // external delete could never reach it — the same immortal-marker gap
+  // as the tracked case (round 2), through a different door. A debt can
+  // exist for an excluded path regardless: opening a live session is never
+  // gated by policy, only capture is (policyTracksPath has no call site in
+  // `openYDocSessionTask`).
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-excluded-external-delete-",
+  );
+  const { session } = await openWithOneEdit(
+    capture,
+    "never written",
+    "node_modules/pkg/index.js",
+  );
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // An external program deletes the excluded path directly.
+  capture.captureBatch([
+    { path: "node_modules/pkg/index.js", operation: "delete" },
+  ]);
+  await capture.flush();
+
+  // Anti-vacuity: the cleanup ran, not just "nothing refused by accident".
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes(
+        "an external delete of node_modules/pkg/index.js removed the path",
+      ),
+    ),
+  ).toBe(true);
+
+  // RED before the fix: policyTracksPath("node_modules/...") is false, so
+  // the cleanup never ran and this rejected instead of resolving.
+  const finish = await capture.beginFileRename(
+    "node_modules/pkg/index.js",
+    "node_modules/pkg/renamed.js",
+  );
+  expect(typeof finish).toBe("function");
+  await capture.stop();
+}, 20_000);
+
+it("a write-classified event over an already-absent, policy-excluded stood-down path also cancels its debt", async () => {
+  // #681 round 4, O4 (certifier, required): round 3's hoist moved the
+  // "delete" OPERATION branch's cleanup ahead of the policy gate, but the
+  // "absent" branch — reached only after `readDiskTextState`, which itself
+  // only ran after that same gate — stayed behind it. An excluded path
+  // whose removal arrives write-classified (the watcher's classification
+  // lagging disk, exactly like the tracked case above) could still never
+  // reach it: the racy stat-then-read door the round-3 hoist missed.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-excluded-absent-branch-",
+  );
+  const { session } = await openWithOneEdit(
+    capture,
+    "never written",
+    "node_modules/pkg/index.js",
+  );
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // No file exists at rootPath/node_modules/pkg/index.js (never
+  // materialized), so an "update"-classified event resolves to absent once
+  // read — the write-classified door, on an excluded path.
+  capture.captureBatch([
+    { path: "node_modules/pkg/index.js", operation: "update" },
+  ]);
+  await capture.flush();
+
+  // RED before the fix: the disk read (and the cleanup gated on it) ran
+  // only after the policy-tracking gate, so this excluded path's cleanup
+  // never fired.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes(
+        "an external delete of node_modules/pkg/index.js removed the path",
+      ),
+    ),
+  ).toBe(true);
+
+  const finish = await capture.beginFileRename(
+    "node_modules/pkg/index.js",
+    "node_modules/pkg/renamed.js",
+  );
+  expect(typeof finish).toBe("function");
+  await capture.stop();
+}, 20_000);
 
 it("a settle refused because peers outran it keeps the write ladder alive", async () => {
   // #650. `ydoc-remote-updates-pending` reports a RACE — remote edits drained

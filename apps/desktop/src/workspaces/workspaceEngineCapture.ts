@@ -1460,8 +1460,112 @@ export function createWorkspaceEngineCapture(
     // refused release puts the debt back — release-only — rather than
     // letting go of it. Rejects when the lease is still held.
     discard: () => Promise<void>;
+    // Set once the write is abandoned for good. A stood-down debt used to
+    // DELETE this entry, and `beginFileRename` read that absence as proof
+    // the write landed — recording the stale pre-lock artifact as if it had
+    // (#681). Keeping the entry with this flag set is what lets the rename
+    // seam tell "abandoned" from "landed" instead of reading both as
+    // silence; `onError` already carries the stand-down's message, so
+    // nothing here needs to repeat it.
+    //
+    // Not immortal, and cleared only by PROOF, never by attempt: a
+    // materialized settle of this exact path (`onSettled`) is the moment
+    // "its last edit reached disk" becomes true, so that is what clears it —
+    // an open alone proves only that no lease is held, not that anything
+    // landed. The delete/move seams and the watcher's own external-delete
+    // capture all cancel a debt outright (never restore a cancelled one), so
+    // a removed path drops its marker the same way.
+    stoodDown: boolean;
   }
   const detachedLockedDebts = new Map<string, DetachedLockedDebt>();
+
+  // A delete-shaped watcher event that named a path with no debt to clean
+  // up YET (#681 round 7, codex P1): `cleanupDetachedDebtForEvent`'s own
+  // `has(path)` gate correctly does nothing there, but a close's transient
+  // retry ladder runs OFF the capture chain for as long as
+  // TEARDOWN_RETRY_CAP_MS allows — seconds wide in production — and can
+  // still register a FRESH debt for that same path afterward. Recording
+  // the deletion here (not a raw disk stat, which cannot tell "deleted"
+  // from "never written yet" — the same absence either way) lets the
+  // registration door (`scheduleDetachedLockedSettle`) ask "did the
+  // watcher JUST tell me this exact path is gone" instead.
+  //
+  // NOT invalidated by a later recreation (#681 round 8, codex P1 —
+  // reverted a same-round attempt at that shape once the certifier's S2(b)
+  // named the corruption it opens: a session that opened BEFORE the
+  // delete can still be mid-retry-ladder when a DIFFERENT session
+  // recreates the path; invalidating the tombstone on recreation would
+  // let the OLD session's late debt arm and settle its stale canonical
+  // doc over the NEW file). The memory discriminates by WHICH session is
+  // registering instead: `deletedAtMs` is compared against that session's
+  // own open time at the consuming door, so a session that opened before
+  // the delete (the stale one) still cancels, and a session that opened
+  // after it (the recreation's own) arms normally — see
+  // `consumeRecentExternalDeleteWithNoDebt`.
+  const recentExternalDeletesWithNoDebt = new Map<
+    string,
+    { deletedAtMs: number; expiresAtMs: number; expected: boolean }
+  >();
+  // Swept in place, at most once per PRUNE window (#681 round 9, codex
+  // P2 — round 8's version rebuilt the whole map, via a spread + filter +
+  // new Map, on EVERY insert. A bulk deletion of a large tree calls
+  // `noteExternalDeleteWithNoDebt` once per path, and every one of those
+  // paths is fresh — nothing has crossed its own 10s TTL yet within the
+  // same burst — so that rebuild was quadratic busywork that found nothing
+  // to prune. Throttling to once per window turns a burst of N inserts
+  // into one O(map size) sweep instead of N of them; a sweep this throws
+  // away is still safe because `consumeRecentExternalDeleteWithNoDebt`
+  // checks its own entry's expiry directly, so a throttled sweep can never
+  // let an expired tombstone match.
+  const RECENT_EXTERNAL_DELETE_PRUNE_INTERVAL_MS = 1_000;
+  let recentExternalDeletesPrunedAtMs = -Infinity;
+  function pruneRecentExternalDeletesWithNoDebt(): void {
+    const nowMs = now();
+    if (nowMs - recentExternalDeletesPrunedAtMs < RECENT_EXTERNAL_DELETE_PRUNE_INTERVAL_MS) {
+      return;
+    }
+    recentExternalDeletesPrunedAtMs = nowMs;
+    for (const [path, entry] of recentExternalDeletesWithNoDebt) {
+      if (entry.expiresAtMs <= nowMs) recentExternalDeletesWithNoDebt.delete(path);
+    }
+  }
+  function noteExternalDeleteWithNoDebt(path: string, expected: boolean): void {
+    pruneRecentExternalDeletesWithNoDebt();
+    const deletedAtMs = now();
+    recentExternalDeletesWithNoDebt.set(path, {
+      deletedAtMs,
+      expiresAtMs: deletedAtMs + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+      expected,
+    });
+  }
+  // Consumes the memory only for a session whose OWN open predates the
+  // recorded delete — the stale incarnation this delete actually orphaned.
+  // A session opened AFTER the delete (the path's later recreation, or any
+  // fresh open past that point) reads no match and arms normally: its
+  // content is not what the deletion removed. Returns the reason the
+  // recorder itself observed (`expected`: dohc's own removal, e.g. a
+  // version switch's materialization; or external), so the cancellation
+  // trace can name which — the recorder is the only place that verdict is
+  // still known once the debt itself would otherwise treat it as generic.
+  // Checks the entry's OWN expiry here too, not only via the throttled
+  // sweep above: this is the door correctness actually depends on, so it
+  // must never trust a sweep that may have been skipped this window.
+  function consumeRecentExternalDeleteWithNoDebt(
+    path: string,
+    sessionOpenedAtMs: number,
+  ): { expected: boolean } | null {
+    pruneRecentExternalDeletesWithNoDebt();
+    const entry = recentExternalDeletesWithNoDebt.get(path);
+    if (
+      entry === undefined ||
+      entry.expiresAtMs <= now() ||
+      sessionOpenedAtMs >= entry.deletedAtMs
+    ) {
+      return null;
+    }
+    recentExternalDeletesWithNoDebt.delete(path);
+    return { expected: entry.expected };
+  }
 
   // Take matching debts OUT of the registry without deciding their fate: the
   // caller is about to attempt a removal, and only its OUTCOME says whether
@@ -2361,6 +2465,26 @@ export function createWorkspaceEngineCapture(
     return true;
   }
 
+  // Same verdict as `consumeExpectedEvent`, without spending the token: a
+  // caller that only needs to KNOW whether an event is expected — not to be
+  // the one downstream gate that acts on it — must not steal the answer
+  // from whichever gate consumes it for real (#681 round 5, CodeRabbit
+  // Major). The single consumption stays at each branch's original site.
+  function peekExpectedEvent(
+    operation: "write" | "delete",
+    path: string,
+    sha256?: string,
+  ): boolean {
+    const nowMs = now();
+    return expectedEvents.some(
+      (event) =>
+        event.expiresAtMs > nowMs &&
+        event.path === path &&
+        event.operation === operation &&
+        (operation === "delete" || event.sha256 === sha256),
+    );
+  }
+
   function registerExpectedEngineEvents(
     events: readonly ExpectedEngineEvent[],
   ): () => void {
@@ -2489,6 +2613,87 @@ export function createWorkspaceEngineCapture(
     });
   }
 
+  // A detached-debt marker's cleanup on removal must not depend on whether
+  // policy tracks the path, or on any other capture-side gate: a debt can
+  // exist for a path policy later excludes (or one that was tracked when
+  // the session opened it and is not now), and running this after such a
+  // gate left an external delete of an excluded path unable to ever clear
+  // the marker it left behind (#681 round 3, codex P2). Cleanup runs
+  // whether the delete is EXTERNAL or EXPECTED (#681 round 4, codex P2):
+  // an engine-materialized removal — a version switch whose target omits
+  // the file, a relay fast-forward delete — is registered as an expected
+  // event so it never re-journals as a new moment, but it is exactly as
+  // terminal for an abandoned write as an external delete. The path is
+  // gone either way; only the REASON differs, and only the trace needs to
+  // say which.
+  //
+  // A SEPARATE function from `captureOnePath`, called for every batched
+  // event regardless of `daemonOwnsCapture` (#681 round 6, codex P2-B):
+  // registry maintenance is not capture. Production sets
+  // `daemonOwnsCapture: true` (engineCaptureGate.ts), under which
+  // `captureBatch` never calls `captureOnePath` at all — the daemon
+  // performs the disk-to-engine write itself — but a detached debt is
+  // purely JS-side bookkeeping about a Y.Doc session's own close failure,
+  // unrelated to which side captures disk content, and the watcher
+  // reports the same events either way. Living inside `captureOnePath`
+  // left this entire mechanism (rounds 3-5) dead in the shipped
+  // configuration; every prior test exercised the JS-capture harness.
+  //
+  // GATED ON A DEBT EXISTING (#681 round 5, CodeRabbit Major + security).
+  // Only a path with a registered debt needs this early answer at all —
+  // every OTHER path, secrets included, must see the capture-side gates
+  // (secret floor, then live-session, then policy) completely untouched.
+  // Consuming the expected-event token here for a path with no debt stole
+  // it from whichever gate owns that path's own verdict — a secret path's
+  // removal read as external and recorded a spurious protected "Deleted"
+  // moment, because `captureSecretPath` never got the chance to consume
+  // its own token. Reading disk here unconditionally also meant reading
+  // secret plaintext through the plaintext reader before the secret
+  // floor, and charging a disk read to every excluded/deferred path on
+  // every event. PEEK decides the trace and whether to cancel; the single
+  // real consumption stays at `captureOnePath`'s own original site (or
+  // inside `captureSecretPath`, for the — believed unreachable — case of
+  // a secret path somehow carrying a debt: peeking rather than consuming
+  // leaves that path's own verdict intact either way).
+  async function cleanupDetachedDebtForEvent(event: WatcherEvent): Promise<void> {
+    if (!detachedLockedDebts.has(event.path)) {
+      // A confirmed "delete" operation still means the path is gone, even
+      // with no debt registered yet to clean up: remember it, so a debt
+      // that registers LATER (#681 round 7) does not treat this as news.
+      // Scoped to the "delete" operation only (no disk read needed) to
+      // keep every other path, secrets included, untouched by this door
+      // (#681 round 5). `peekExpectedEvent` decides EXPECTED vs EXTERNAL
+      // here too (#681 round 8) — the recorder is the only place that
+      // verdict is still known once this becomes a bare memory.
+      if (event.operation === "delete") {
+        noteExternalDeleteWithNoDebt(
+          event.path,
+          peekExpectedEvent("delete", event.path),
+        );
+      }
+      return;
+    }
+    if (event.operation === "delete") {
+      const isExternalDelete = !peekExpectedEvent("delete", event.path);
+      cancelSuspendedDebts(
+        suspendDetachedDebts((path) => path === event.path),
+        isExternalDelete
+          ? `an external delete of ${event.path}`
+          : `dohc's own removal of ${event.path}`,
+      );
+      return;
+    }
+    const peeked = await readDiskTextState(rootPath, event.path);
+    if (peeked.kind !== "absent") return;
+    const isExternalAbsence = !peekExpectedEvent("delete", event.path);
+    cancelSuspendedDebts(
+      suspendDetachedDebts((path) => path === event.path),
+      isExternalAbsence
+        ? `an external delete of ${event.path}`
+        : `dohc's own removal of ${event.path}`,
+    );
+  }
+
   async function captureOnePath(
     engine: VersionedTextStore,
     versionId: string,
@@ -2540,7 +2745,9 @@ export function createWorkspaceEngineCapture(
     if (!policyTracksPath(event.path, policy)) return;
     // Deletes trust the watcher's confirmed-absent check; updates re-read the
     // CURRENT disk state so rapid successive writes coalesce to the final
-    // content instead of replaying stale event snapshots.
+    // content instead of replaying stale event snapshots. This is the ONE
+    // real consumption of the expected-event token for this event — the
+    // debt cleanup above only ever peeked.
     if (event.operation === "delete") {
       if (consumeExpectedEvent("delete", event.path)) return;
       await deleteIfTracked(engine, versionId, event.path, metadata, author);
@@ -3018,8 +3225,22 @@ export function createWorkspaceEngineCapture(
 
     captureBatch(events) {
       if (events.length === 0) return;
-      if (options.daemonOwnsCapture) return;
       const batch = events.map((event) => ({ ...event }));
+      // Registry maintenance, not capture (#681 round 6, codex P2-B): runs
+      // for every batch regardless of `daemonOwnsCapture`, ahead of the
+      // early return below. See `cleanupDetachedDebtForEvent`'s own
+      // comment for why a debt's cleanup cannot be skipped just because
+      // the daemon owns the disk-to-engine write.
+      enqueue("detached-debt cleanup", async () => {
+        for (const event of batch) {
+          try {
+            await cleanupDetachedDebtForEvent(event);
+          } catch (error) {
+            onError(`detached-debt cleanup of ${event.path}`, error);
+          }
+        }
+      });
+      if (options.daemonOwnsCapture) return;
       // Attribution is decided HERE, at settle (captureBatch runs on the
       // watcher's settle path), not when the chain task executes — the legacy
       // recorder's rule, kept: a dohc-tracked run owns every batch that
@@ -3109,6 +3330,15 @@ export function createWorkspaceEngineCapture(
       );
 
       async function openYDocSessionTask(): Promise<WorkspaceEngineYDocProviderSession> {
+        // This session's own place in time, captured before anything else
+        // runs (#681 round 8, codex P1): the registration door
+        // (`scheduleDetachedLockedSettle`, far below) compares this against
+        // a delete tombstone's own timestamp to tell a STALE incarnation
+        // (opened before the delete — its content is what the deletion
+        // orphaned) from this path's later recreation (opened after it —
+        // arms normally, since a tombstone recorded before this session
+        // began says nothing about what THIS session holds).
+        const sessionOpenedAtMs = now();
         const removal = removalWindowFor(input.path);
         if (removal) {
           throw new YDocRemovalInProgressError(
@@ -3245,6 +3475,50 @@ export function createWorkspaceEngineCapture(
             );
             reportSaveState("error", token);
             return;
+          }
+          // The engine just wrote this path's settled content to disk — the
+          // proof a stand-down marker denies (#681). This fires for every
+          // settle on this session, including the pre-close one a rename's
+          // vacate runs, so a mid-session rename over a recovered path is
+          // covered too. An open alone is not this proof: it shows no
+          // conflicting lease, not that anything reached disk.
+          //
+          // The same proof also retires this path's no-debt tombstone (#681
+          // round 9, codex P1): a session is classified once, at open,
+          // against a delete it predates, and stays classified that way
+          // forever otherwise — even after landing THIS settle proves the
+          // deletion's premise (the path is gone) no longer holds. Without
+          // this, a still-later transient close failure for the SAME
+          // session, over edits made AFTER this recovery, would read as
+          // belonging to the deleted incarnation and get wrongly cancelled.
+          recentExternalDeletesWithNoDebt.delete(input.path);
+          //
+          // Clear the ABANDONMENT, not the debt (CodeRabbit): this entry may
+          // belong to an OLDER generation whose own release is still being
+          // refused (L). That entry is L's only owner — deleting it here
+          // strands the lease at ydoc-session-busy until the daemon
+          // restarts, exactly what the surrounding comments guard against.
+          const clearedStandDown = detachedLockedDebts.get(input.path);
+          if (clearedStandDown?.stoodDown) {
+            clearedStandDown.stoodDown = false;
+            // The flag alone does not say whether L is still owed — only
+            // that OLDER generation's own closure knows that (#681 round 6,
+            // codex P2-A). Ask it, on the chain (this settle's completion
+            // runs off it): with nothing owed, paying now just retires the
+            // entry — the `writeCancelled` branch below already does that
+            // for a non-stood-down debt, and skipping this left a fully
+            // discharged debt lingering forever (a later delete then traced
+            // a cancellation for a write that was never pending, and the
+            // closure graph stayed retained past workspace stop). With a
+            // release still refused, the same call re-arms that retry
+            // exactly as it would have on its own schedule — the O3 case
+            // this settle must never strand. Fire-and-forget: a stalled
+            // release here must never fail THIS settle's own success.
+            enqueue(`ydoc close retry of ${input.path}`, () =>
+              clearedStandDown.pay().catch((error: unknown) => {
+                onError(`ydoc close retry of ${input.path}`, error);
+              }),
+            );
           }
           // #338. The ENGINE owns the artifact: a settle it reports as
           // materialized either wrote the file or found those bytes already
@@ -3472,13 +3746,16 @@ export function createWorkspaceEngineCapture(
         // Give up on W and say why — the user is the last one who can act on
         // this. L is untouched: the debt survives whenever a lease is still
         // held, so the ladder keeps retrying the release alone.
+        //
+        // The entry stays, marked stood-down, instead of being deleted
+        // (#681): a stood-down debt refuses the rename instead of reading
+        // as paid.
         const standDownFromWrite = (message: string): void => {
           writeCancelled = true;
           onError(`ydoc close retry of ${input.path}`, new Error(message));
-          if (pendingRelease === null) {
-            detachedLockedDebts.delete(input.path);
-            return;
-          }
+          const debt = detachedLockedDebts.get(input.path);
+          if (debt) debt.stoodDown = true;
+          if (pendingRelease === null) return;
           armDetachedLockedRetry();
         };
 
@@ -3575,7 +3852,16 @@ export function createWorkspaceEngineCapture(
               // debt names is gone, or its write is refused for good, and
               // reopening it would recreate what the user removed.
               await releaseRetainedSession();
-              detachedLockedDebts.delete(input.path);
+              // This release proves the lease, not the write. A stood-down
+              // debt's marker survives it (#681) — but a debt cancelled by
+              // the delete/move seam (`discardDetachedLockedDebt`, no
+              // marker) had only its lease left to finish: drop the entry
+              // now, or it sits forever and a later rename onto this freed
+              // path would read it as still locked.
+              const debt = detachedLockedDebts.get(input.path);
+              if (debt && !debt.stoodDown) {
+                detachedLockedDebts.delete(input.path);
+              }
               return;
             }
             const live = liveYDocSessions.get(input.path);
@@ -3784,12 +4070,71 @@ export function createWorkspaceEngineCapture(
             throw error;
           }
         };
+        // The registration door (#681 round 7, codex P1). A close can reach
+        // here two ways: directly, when a release SUCCEEDS over a failed
+        // settle (this debt is fresh — `writeCancelled` is still false);
+        // or off the chain, after a transient close retry ladder that runs
+        // for as long as TEARDOWN_RETRY_CAP_MS allows — seconds wide in
+        // production, unlike the delete/move seams #697 already fences on
+        // the chain. `discardDetachedLockedDebt`'s own re-registration
+        // (`writeCancelled` already true) is release-only by then — no
+        // write is left to resurrect anything, so it always registers.
+        //
+        // A FRESH debt is different: its ladder can reopen the canonical
+        // Y.Doc and settle it back to disk, recreating a file an external
+        // delete removed anywhere in that window. `cleanupDetachedDebtForEvent`
+        // cannot have cleaned up a debt that did not exist yet when the
+        // delete's watcher event ran, but it DOES remember the path
+        // (`noteExternalDeleteWithNoDebt`) — consuming that memory here,
+        // at the door, is what cancels this write with the same trace the
+        // watcher's own cleanup uses, instead of arming a ladder that
+        // would resurrect the file (or, if it later stood down instead,
+        // strand a marker blocking an unrelated file recreated at this
+        // path). A raw disk stat cannot stand in for this: an absent path
+        // means "deleted" and "never written yet" identically, and most
+        // pending writes ARE their document's first materialization.
+        //
+        // THIS session's own age is what keeps that memory from also
+        // cancelling a path's later RECREATION (#681 round 8, codex P1 —
+        // a same-round attempt to invalidate the memory on any recreation
+        // was reverted once the certifier's S2(b) named the corruption it
+        // opened: an OLD session can still be mid-retry-ladder when a
+        // DIFFERENT session recreates the path, and invalidating on the
+        // recreation event alone would let the OLD session's late debt
+        // arm and settle its stale canonical doc OVER the new file).
+        // `consumeRecentExternalDeleteWithNoDebt` only matches a session
+        // that opened BEFORE the recorded delete — the incarnation that
+        // deletion actually orphaned. A session opened AFTER it (this
+        // path's recreation, or any fresh open past that point) reads no
+        // match here and registers normally: its content is not what the
+        // deletion removed.
+        //
+        // BEST-EFFORT, not a fence: the watcher's own memory expires
+        // (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`), and a delete landing after
+        // that window, or after this door already registered, is not
+        // caught here — `cleanupDetachedDebtForEvent` remains the
+        // authoritative door for those.
         const scheduleDetachedLockedSettle = (): void => {
           if (stopped) return;
+          const tombstone = writeCancelled
+            ? null
+            : consumeRecentExternalDeleteWithNoDebt(input.path, sessionOpenedAtMs);
+          if (tombstone !== null) {
+            onError(
+              `ydoc close retry of ${input.path}`,
+              new Error(
+                tombstone.expected
+                  ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
+                  : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`,
+              ),
+            );
+            return;
+          }
           detachedLockedDebts.set(input.path, {
             pay: payDetachedLockedDebt,
             arm: armDetachedLockedRetry,
             discard: discardDetachedLockedDebt,
+            stoodDown: false,
           });
           armDetachedLockedRetry();
         };
@@ -5453,8 +5798,26 @@ export function createWorkspaceEngineCapture(
       // payment is the one payment this move NEEDS to land.
       let closeRemovalWindow: () => void = () => undefined;
       return enqueueResult("prepare rename", async () => {
+        // A live Y.Doc session over either endpoint is vacated FIRST, ahead
+        // of the detached-debt drain below (#681 round 2). A session
+        // recovering a stood-down path (reopened, per every stand-down's
+        // own instruction) proves nothing by merely existing — only a real
+        // settle does — so it needs its chance to settle here, on the
+        // chain, before the drain reads whatever marker it left behind.
+        // Without this order, reopening and immediately renaming would
+        // refuse on a marker the session was about to clear itself.
+        //
+        // WS-G2-C-2 (gate fix 3): required regardless — a live session over
+        // either endpoint must be flushed + released before the file moves,
+        // or a later settle would write the OLD path, resurrecting the
+        // moved-from file / orphaning the object. Vacate first (a teardown
+        // failure fails the rename).
+        await settleAndCloseLiveYDocSessions(
+          (p) => p === fromPath || p === toPath,
+          "Saved latest edits before renaming",
+        );
         // A DETACHED locked-write debt is another live thing a
-        // rename must vacate — its session is gone, so the vacate below
+        // rename must vacate — its session is gone, so the vacate above
         // cannot see it, and without this drain the rename would read the
         // STALE pre-lock artifact, record old bytes, and leave the retry
         // targeting the moved-from path. We are on the chain, so nothing
@@ -5468,52 +5831,60 @@ export function createWorkspaceEngineCapture(
         // is the proof: still named after the payment means it did not land,
         // so the rename REFUSES and the debt survives for the retry ladder.
         //
-        // Read it in that direction ONLY. A stand-down clears the entry too,
-        // and the rename then does record the stale artifact — deliberately:
-        // no pending write is left to wait for, the newer text stays in the
-        // object's history (writeIfChanged adds a moment and the engine rename
-        // keeps the object id), and the stand-down already told the user.
-        // Refusing there would strand the rename on a condition that no longer
-        // changes.
+        // Read it in that direction ONLY. Absence still means paid — a
+        // stood-down debt on the SOURCE refuses the rename instead (#681),
+        // below. One on the DESTINATION is left ALONE: `movePath` never
+        // overwrites an existing destination (workspaceFiles.ts, `destExists`)
+        // — a move onto a path that is still there fails on its own with the
+        // standard, followable "Destination already exists" refusal, before
+        // this debt is ever relevant. Cancelling it here at PREPARE time
+        // (before the disk move even runs) destroyed the marker for a move
+        // that could then FAIL, leaving the abandoned write undefended
+        // (#681 round 3, codex P1) — the two scenarios that actually need
+        // covering are handled elsewhere: an externally removed destination
+        // clears through the watcher's own delete-cancel, and an existing
+        // one is `movePath`'s refusal, not this one's.
         // DESCENDANTS too: this method also serves directory
         // moves, so a debt for `dir/note.md` rides a move of `dir`. Left
         // behind, its delayed payment reopens the moved-from path and
         // recreates the tree the user just moved away — the same prefix rule
         // the delete seam already applies.
+        const isSourceSide = (candidate: string): boolean =>
+          candidate === fromPath || candidate.startsWith(`${fromPath}/`);
         const endpointMatch = (candidate: string): boolean =>
-          candidate === fromPath ||
+          isSourceSide(candidate) ||
           candidate === toPath ||
-          candidate.startsWith(`${fromPath}/`) ||
           candidate.startsWith(`${toPath}/`);
         for (const endpoint of [...detachedLockedDebts.keys()]) {
           if (!endpointMatch(endpoint)) continue;
           const debt = detachedLockedDebts.get(endpoint);
           if (!debt) continue;
           await debt.pay();
-          if (detachedLockedDebts.has(endpoint)) {
-            // WHY the payment did not land decides what the user is told. A
-            // removal window over the endpoint holds every payment for it, so
-            // the lock may be long gone and "close that program" would send
-            // the user after nothing.
-            const removal = removalWindowFor(endpoint);
+          const after = detachedLockedDebts.get(endpoint);
+          if (!after) continue;
+          if (after.stoodDown) {
+            // Destination-side: leave it. See the comment above.
+            if (!isSourceSide(endpoint)) continue;
+            // Explorer renders this verbatim (docs/brand/copy.md): what
+            // happened, why, then one instruction per sentence.
             throw new Error(
-              // Explorer renders this verbatim, so it follows
-              // docs/brand/copy.md: what happened, why, then ONE instruction
-              // per sentence.
-              removal
-                ? `dohc could not rename ${fromPath}. ${removal.inProgress} Wait for that to finish. Then rename again.`
-                : `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
+              `dohc could not rename ${fromPath}. dohc gave up on writing ${endpoint} earlier, so its last edits never reached disk. The edits stay in the document's history. Open ${endpoint} to write them again. Then rename ${fromPath} again.`,
             );
           }
+          // WHY the payment did not land decides what the user is told. A
+          // removal window over the endpoint holds every payment for it, so
+          // the lock may be long gone and "close that program" would send
+          // the user after nothing.
+          const removal = removalWindowFor(endpoint);
+          throw new Error(
+            // Explorer renders this verbatim, so it follows
+            // docs/brand/copy.md: what happened, why, then ONE instruction
+            // per sentence.
+            removal
+              ? `dohc could not rename ${fromPath}. ${removal.inProgress} Wait for that to finish. Then rename again.`
+              : `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
+          );
         }
-        // WS-G2-C-2 (gate fix 3): a live Y.Doc session over either endpoint must
-        // be flushed + released before the file moves, or a later settle would
-        // write the OLD path — resurrecting the moved-from file / orphaning the
-        // object. Vacate first (a teardown failure fails the rename).
-        await settleAndCloseLiveYDocSessions(
-          (p) => p === fromPath || p === toPath,
-          "Saved latest edits before renaming",
-        );
         // The drain above sees only the debts that exist NOW. The filesystem
         // move runs off this chain, after the finisher is handed back, so an
         // open of the source can land on the chain inside that window, meet

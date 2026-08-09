@@ -6,6 +6,17 @@ import {
 } from "@dohc/workspace-engine-client";
 import type { SecretFileStore } from "@dohc/workspace-contracts/engine";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
+
+// A built-in ESM module's namespace is not configurable, so `vi.spyOn`
+// cannot wrap it directly — `vi.mock` with `importOriginal` is the
+// supported way to keep the real implementation while tracking calls
+// (used only by the plaintext-reader isolation pin below; every other
+// test in this file calls through unchanged).
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
@@ -214,6 +225,75 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     // Absence claim: `currentText`/`incomingText` are the fields a text change
     // carries, so this catches a protected change routed as text.
     expect(JSON.stringify(changes).includes(MARKER)).toBe(false);
+    await engine.stop();
+  });
+});
+
+describe("#681 round 5: the stand-down marker cleanup must never touch secret paths", () => {
+  it("an engine-owned removal of a secret path does not record a spurious protected delete", async () => {
+    // #681 round 5, CodeRabbit Major (real). The round-4 hoist consumed the
+    // expected-delete token for EVERY event, before the secret floor gate —
+    // stealing it from `captureSecretPath`'s own `consumeExpectedEvent`
+    // check (workspaceEngineCapture.ts). An engine-owned removal — a
+    // version switch whose target omits the file, a relay fast-forward
+    // delete — registers this SAME token via `registerExpectedEngineEvents`
+    // before the disk delete, exactly like `materialize()` does for a
+    // text-file delete operation. With the token stolen, the removal read
+    // as EXTERNAL and recorded a spurious "Deleted .env" protected moment
+    // on every version switch that drops a secret file.
+    const root = await tempRoot();
+    await write(root, ".env", ENV_A);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = daemonCapture(root, loopback);
+    engine.start();
+    await engine.flush();
+
+    let page = await engine.listMoments();
+    expect(page.moments.filter((moment) => moment.protected)).toHaveLength(1);
+
+    engine.registerExpectedEngineEvents([{ path: ".env", operation: "delete" }]);
+    await rm(join(root, ".env"));
+    engine.captureBatch([{ path: ".env", operation: "delete" }]);
+    await engine.flush();
+
+    // RED before the fix: the hoist consumed the token first, so this
+    // recorded a spurious second "Deleted .env" protected moment.
+    page = await engine.listMoments();
+    const protectedMoments = page.moments.filter((moment) => moment.protected);
+    expect(protectedMoments).toHaveLength(1);
+    await engine.stop();
+  });
+
+  it("a secret path's watcher event never reaches the plaintext reader", async () => {
+    // #681 round 5, CodeRabbit security trivial (real, security-significant
+    // despite the tag). The round-4 hoist called the plaintext reader
+    // (readDiskTextState) unconditionally, before the secret floor —
+    // reading secret bytes through the reader with no secret-store
+    // awareness, and charging a redundant disk read to every secret event.
+    // Both readers ultimately call node:fs/promises readFile on the same
+    // absolute path, so a stray plaintext-reader call shows up as a SECOND
+    // readFile call for .env — readDiskSecretState's own read, inside
+    // captureSecretPath, is the only legitimate one.
+    const root = await tempRoot();
+    await write(root, ".env", ENV_A);
+    const loopback = new VersionedLoopbackEngine();
+    const engine = daemonCapture(root, loopback);
+    engine.start();
+    await engine.flush();
+
+    const envAbsolute = join(root, ".env");
+    const trackedReadFile = vi.mocked(fsPromises.readFile);
+    trackedReadFile.mockClear();
+    await write(root, ".env", ENV_B);
+    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    await engine.flush();
+
+    const envReads = trackedReadFile.mock.calls.filter(
+      (call) => call[0] === envAbsolute,
+    );
+    // RED before the fix: readDiskTextState's own extra read of .env's
+    // bytes, ahead of the secret floor, doubled this count.
+    expect(envReads).toHaveLength(1);
     await engine.stop();
   });
 });
