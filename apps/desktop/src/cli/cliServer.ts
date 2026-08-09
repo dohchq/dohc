@@ -193,6 +193,10 @@ export interface CliServerOptions {
     workspace: CliWorkspaceContext,
     target?: { channelId: string } | { threadId: string },
   ): void | Promise<void>;
+  // A chat read has no renderer poll behind it — with no window open, nothing
+  // else ever runs a sync pass for it (#731). AWAITED before the verb reads the
+  // store, the same bounded rotating pass the renderer's reads trigger.
+  onRead?(workspace: CliWorkspaceContext): void | Promise<void>;
   onError?(error: unknown): void;
   onDebug?(message: string): void;
   nowMs?: () => number;
@@ -941,6 +945,35 @@ async function notifyWrite(
   } catch (error) {
     options.onError?.(error);
   }
+}
+
+// A hook failure must never block a read for local data that already exists —
+// the same offline-degrades-silently contract the sync pass itself keeps.
+async function notifyRead(
+  options: CliServerOptions,
+  context: CliWorkspaceContext,
+): Promise<void> {
+  try {
+    await options.onRead?.(context);
+  } catch (error) {
+    options.onError?.(error);
+  }
+}
+
+// Every verb that reads chat content before doing anything else. `moments` and
+// `moment` read workspace-version history, not chat, so they sit outside it.
+function isChatReadVerb(verb: CliRequest["verb"]): boolean {
+  return (
+    verb === "channels" ||
+    verb === "threads" ||
+    verb === "inbox" ||
+    verb === "show" ||
+    verb === "grep" ||
+    verb === "export" ||
+    verb === "fileChats" ||
+    verb === "chat" ||
+    verb === "channelsFull"
+  );
 }
 
 type RunMessageLinkInput = {
@@ -2206,7 +2239,11 @@ async function workspaceContextForRequest(
   if (workspace.readOnly && writeRequest) {
     throw new CliCommandError("chats are not available in a read-only shared view");
   }
-  return options.openWorkspace(workspace);
+  const context = await options.openWorkspace(workspace);
+  if (isChatReadVerb(request.verb)) {
+    await notifyRead(options, context);
+  }
+  return context;
 }
 
 export async function handleCliRequestLine(

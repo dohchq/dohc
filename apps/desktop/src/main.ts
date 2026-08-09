@@ -2698,6 +2698,13 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
         console.error("[desktop] CLI dispatch scan:", error);
       });
     },
+    // No renderer poll runs the sync pass on the CLI's or MCP's behalf (#731):
+    // AWAIT the same bounded rotating pass listChatChannels does before a chat
+    // read serves the store. Never throws — offline, it returns fast and the
+    // local rows answer.
+    onRead: async (workspace) => {
+      await syncWorkspaceSharedChannels(workspace.workspaceId);
+    },
     onRunMessageLinkPending: (link) => {
       pendingCliRunMessageLinks.add(cliRunMessageLinkKey(link));
     },
