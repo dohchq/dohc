@@ -3667,8 +3667,31 @@ it("a folder move settles and closes a live child session before opening its win
   await session.close();
   expect(state.settleCalls).toHaveLength(settlesAtClose);
 
-  // Refusal side: the window still covers the child by prefix, so a reopen
-  // cannot slip in and recreate the very race the vacate just closed off.
+  // Refusal side, on the settle door itself: a stray settle on the SAME
+  // handle — the shape a straggling debounced timer would produce — still
+  // meets the removal window and refuses there, independent of the vacate
+  // above.
+  //
+  // MUTATION: drop the removal-window check from the settle door (capture.ts
+  // ~2137-2145) -> this settle reaches the daemon instead of refusing.
+  const settleRefusal = await session.settleNow().then(
+    () => null,
+    (error: unknown) => error,
+  );
+  expect(settleRefusal).toMatchObject({
+    name: "YDocRemovalInProgressError",
+    code: "removal-in-progress",
+    workspacePath: "dir/note.md",
+    operation: "settle",
+    removalOperation: "move",
+  });
+  expect((settleRefusal as Error).message).toBe(
+    "dohc could not save dir/note.md. dohc is still moving dir. Wait for that to finish. Then save again.",
+  );
+
+  // Refusal side, on the open door: the window still covers the child by
+  // prefix, so a reopen cannot slip in and recreate the very race the
+  // vacate just closed off.
   await expectRemovalOpenRefused(
     capture,
     "dir/note.md",

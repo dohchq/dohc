@@ -292,7 +292,7 @@ CREATE TABLE materialization_jobs (
     preimage_present  INTEGER NOT NULL,
     preimage_sha256   TEXT,
     target_generation INTEGER NOT NULL,
-    -- 'pending' | 'complete' | 'conflict'. Only 'pending' is replayed.
+    -- 'pending' | 'complete' | 'conflict' | 'cancelled'. Only 'pending' is replayed.
     status            TEXT    NOT NULL DEFAULT 'pending',
     created_at_ms     INTEGER NOT NULL,
     completed_at_ms   INTEGER,
