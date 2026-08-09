@@ -173,6 +173,7 @@ describe("CLI socket server", () => {
   let server: CliServerHandle | null;
   let token: string;
   let calls: CallCounts;
+  let writeTargets: Array<{ channelId: string } | { threadId: string } | undefined>;
   let errors: unknown[];
   let debugLines: string[];
   let registryWorkspace: CliRegistryWorkspace;
@@ -341,6 +342,7 @@ describe("CLI socket server", () => {
       writable: 0,
       writes: 0,
     };
+    writeTargets = [];
     errors = [];
     debugLines = [];
     const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
@@ -386,8 +388,9 @@ describe("CLI socket server", () => {
           reactionAuthorId: "verified-user-id",
         };
       },
-      async onWrite() {
+      async onWrite(_workspace, target) {
         calls.writes += 1;
+        writeTargets.push(target);
       },
       onError(error) {
         errors.push(error);
@@ -1218,6 +1221,45 @@ describe("CLI socket server", () => {
     await expect(stat(join(sharedRoot, "AGENTS.md"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  // #718: the shared-channel pass a write triggers must cover the channel that
+  // was written, and it only can when the write names its own target. A CLI
+  // send that reports a bare workspace leaves the message to the rotation.
+  it("names the chat target of every message-bearing CLI write", async () => {
+    const opened = await post({
+      actor: "human",
+      title: "Target-bearing thread",
+      body: "First message from the terminal",
+    });
+    // The target must be the identity the registry lookup resolves — a CLI-facing
+    // id would name nothing. Assert it by resolving it, not by its spelling.
+    const postedTarget = writeTargets.at(-1);
+    expect(postedTarget).toBeDefined();
+    expect(
+      await store!.getChannelWireId({
+        workspaceId: WORKSPACE_ID,
+        channelId: (postedTarget as { channelId: string }).channelId,
+      }),
+    ).toEqual(expect.any(String));
+
+    writeTargets.length = 0;
+    await invoke("reply", {
+      cwd: workspaceRoot,
+      actor: "human",
+      thread: opened.threadId,
+      attachments: [],
+      needsDecision: false,
+      body: "Reply from the terminal",
+    });
+    const repliedTarget = writeTargets.at(-1);
+    expect(repliedTarget).toBeDefined();
+    expect(
+      await store!.findThreadChannelId({
+        workspaceId: WORKSPACE_ID,
+        threadId: (repliedTarget as { threadId: string }).threadId,
+      }),
+    ).toEqual(expect.any(String));
   });
 
   it("round-trips post, reply, and show with main-derived identity and CLI origin", async () => {

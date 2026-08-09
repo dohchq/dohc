@@ -187,7 +187,12 @@ export interface CliServerOptions {
     workspaceId: string,
     target?: { channelId: string } | { threadId: string },
   ): Promise<CliMainIdentity>;
-  onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
+  // A message-bearing write names its chat target, so the shared-channel push
+  // it triggers covers that channel instead of waiting for the sync rotation.
+  onWrite?(
+    workspace: CliWorkspaceContext,
+    target?: { channelId: string } | { threadId: string },
+  ): void | Promise<void>;
   onError?(error: unknown): void;
   onDebug?(message: string): void;
   nowMs?: () => number;
@@ -929,9 +934,10 @@ function safePathSegment(value: string): string {
 async function notifyWrite(
   options: CliServerOptions,
   context: CliWorkspaceContext,
+  target?: { channelId: string } | { threadId: string },
 ): Promise<void> {
   try {
-    await options.onWrite?.(context);
+    await options.onWrite?.(context, target);
   } catch (error) {
     options.onError?.(error);
   }
@@ -1582,7 +1588,7 @@ async function dispatch(
             : {}),
           body: request.args.body,
         });
-        await notifyWrite(options, context);
+        await notifyWrite(options, context, target);
         return {
           ok: true as const,
           channel: {
@@ -1617,7 +1623,7 @@ async function dispatch(
             : {}),
           body: request.args.body,
         });
-        await notifyWrite(options, context);
+        await notifyWrite(options, context, target);
         return { ok: true as const, message: rawChatMessage(message) };
       } catch (error) {
         return mcpFailure(
@@ -1841,7 +1847,7 @@ async function dispatch(
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: started.message.id,
       }, options);
-      await notifyWrite(options, context);
+      await notifyWrite(options, context, { channelId: channel.engine.id });
       return {
         channel: channel.cli,
         threadId: cliThreadId(started.thread.id),
@@ -1933,7 +1939,7 @@ async function dispatch(
           options.onError?.(error);
         }
       }
-      await notifyWrite(options, context);
+      await notifyWrite(options, context, target);
       if (decisionMessage && resolutionFailure) {
         throw new CliCommandError(
           `reply ${cliMessageId(message.id)} was posted, but decision ` +
