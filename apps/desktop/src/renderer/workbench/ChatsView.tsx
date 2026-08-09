@@ -1189,7 +1189,7 @@ function AcceptDmDialog(props: {
             {title}
           </h2>
           <p className="m-0 text-xs text-muted">
-            The conversation lives in the workspace you pick, and stays there.
+            The conversation stays in the workspace you pick.
           </p>
         </div>
         <fieldset className="m-0 grid gap-1 border-0 p-0" disabled={busy}>

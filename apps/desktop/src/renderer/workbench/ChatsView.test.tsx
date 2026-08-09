@@ -5607,7 +5607,7 @@ describe("ChatsView direct messages", () => {
 
     expect(await screen.findByTestId("chats-accept-dm-dialog")).toBeTruthy();
     expect(screen.getByText(
-      "The conversation lives in the workspace you pick, and stays there.",
+      "The conversation stays in the workspace you pick.",
     )).toBeTruthy();
     const options = screen.getAllByTestId("chats-accept-dm-workspace-option");
     const currentOption = options.find(
