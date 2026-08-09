@@ -2377,6 +2377,26 @@ export function createWorkspaceEngineCapture(
     return true;
   }
 
+  // Same verdict as `consumeExpectedEvent`, without spending the token: a
+  // caller that only needs to KNOW whether an event is expected — not to be
+  // the one downstream gate that acts on it — must not steal the answer
+  // from whichever gate consumes it for real (#681 round 5, CodeRabbit
+  // Major). The single consumption stays at each branch's original site.
+  function peekExpectedEvent(
+    operation: "write" | "delete",
+    path: string,
+    sha256?: string,
+  ): boolean {
+    const nowMs = now();
+    return expectedEvents.some(
+      (event) =>
+        event.expiresAtMs > nowMs &&
+        event.path === path &&
+        event.operation === operation &&
+        (operation === "delete" || event.sha256 === sha256),
+    );
+  }
+
   function registerExpectedEngineEvents(
     events: readonly ExpectedEngineEvent[],
   ): () => void {
@@ -2520,9 +2540,6 @@ export function createWorkspaceEngineCapture(
     // when the session opened it and is not now), and running this AFTER
     // the tracking gate left an external delete of an excluded path unable
     // to ever clear the marker it left behind (#681 round 3, codex P2).
-    // `consumeExpectedEvent` is consumed here, once, so the "delete"
-    // handling below reads the same verdict instead of re-asking it.
-    //
     // Cleanup runs whether the delete is EXTERNAL or EXPECTED (#681 round 4,
     // codex P2): an engine-materialized removal — a version switch whose
     // target omits the file, a relay fast-forward delete — is registered as
@@ -2530,37 +2547,43 @@ export function createWorkspaceEngineCapture(
     // exactly as terminal for an abandoned write as an external delete. The
     // path is gone either way; only the REASON differs, and only the trace
     // needs to say which.
-    const isDeleteEvent = event.operation === "delete";
-    const isExternalDelete =
-      isDeleteEvent && !consumeExpectedEvent("delete", event.path);
-    if (isDeleteEvent) {
-      cancelSuspendedDebts(
-        suspendDetachedDebts((path) => path === event.path),
-        isExternalDelete
-          ? `an external delete of ${event.path}`
-          : `dohc's own removal of ${event.path}`,
-      );
-    }
-    // A write-classified event can ALSO resolve to absence once read — the
-    // watcher's own classification lagging disk (captureOnePath's "absent"
-    // branch, below). Same cleanup obligation, same reason it cannot wait
-    // on the gates below (#681 round 4, O4): the racy stat-then-read door
-    // the round-3 hoist missed, because this branch's disk read only ran
-    // AFTER the secret/live-session/policy gates. Read disk ONCE, here,
-    // unconditionally for a non-delete event, and reuse the result below
-    // instead of reading twice.
-    let diskState: Awaited<ReturnType<typeof readDiskTextState>> | undefined;
-    let isExternalAbsence = false;
-    if (!isDeleteEvent) {
-      diskState = await readDiskTextState(rootPath, event.path);
-      if (diskState.kind === "absent") {
-        isExternalAbsence = !consumeExpectedEvent("delete", event.path);
+    //
+    // GATED ON A DEBT EXISTING (#681 round 5, CodeRabbit Major + security).
+    // Only a path with a registered debt needs this early answer at all —
+    // every OTHER path, secrets included, must see the ORIGINAL gate order
+    // (secret floor, then live-session, then policy) completely untouched.
+    // Consuming the expected-event token here for a path with no debt stole
+    // it from whichever gate below owns that path's own verdict — a secret
+    // path's removal read as external and recorded a spurious protected
+    // "Deleted" moment, because `captureSecretPath` never got the chance to
+    // consume its own token. Reading disk here unconditionally also meant
+    // reading secret plaintext through the plaintext reader before the
+    // secret floor, and charging a disk read to every excluded/deferred
+    // path on every event. PEEK decides the trace and whether to cancel;
+    // the single real consumption stays at each branch's original site
+    // below (or inside `captureSecretPath`, for the — believed unreachable —
+    // case of a secret path somehow carrying a debt: peeking rather than
+    // consuming leaves that path's own verdict intact either way).
+    if (detachedLockedDebts.has(event.path)) {
+      if (event.operation === "delete") {
+        const isExternalDelete = !peekExpectedEvent("delete", event.path);
         cancelSuspendedDebts(
           suspendDetachedDebts((path) => path === event.path),
-          isExternalAbsence
+          isExternalDelete
             ? `an external delete of ${event.path}`
             : `dohc's own removal of ${event.path}`,
         );
+      } else {
+        const peeked = await readDiskTextState(rootPath, event.path);
+        if (peeked.kind === "absent") {
+          const isExternalAbsence = !peekExpectedEvent("delete", event.path);
+          cancelSuspendedDebts(
+            suspendDetachedDebts((path) => path === event.path),
+            isExternalAbsence
+              ? `an external delete of ${event.path}`
+              : `dohc's own removal of ${event.path}`,
+          );
+        }
       }
     }
     // The secret floor outranks policy: secret paths route to the encrypted
@@ -2605,25 +2628,18 @@ export function createWorkspaceEngineCapture(
     if (!policyTracksPath(event.path, policy)) return;
     // Deletes trust the watcher's confirmed-absent check; updates re-read the
     // CURRENT disk state so rapid successive writes coalesce to the final
-    // content instead of replaying stale event snapshots.
+    // content instead of replaying stale event snapshots. This is the ONE
+    // real consumption of the expected-event token for this event — the
+    // debt cleanup above only ever peeked.
     if (event.operation === "delete") {
-      // The debt cleanup above already consumed this verdict; an EXPECTED
-      // delete (our own) reads false here and stops, same as before.
-      if (!isExternalDelete) return;
+      if (consumeExpectedEvent("delete", event.path)) return;
       await deleteIfTracked(engine, versionId, event.path, metadata, author);
       return;
     }
-    // Computed unconditionally above, before the gates this event just
-    // passed — not re-read here (a second read could TOCTOU-disagree with
-    // the first, and reading twice per event is waste this hot path
-    // doesn't need).
-    const disk = diskState!;
+    const disk = await readDiskTextState(rootPath, event.path);
     if (disk.kind === "unreadable") return;
     if (disk.kind === "absent") {
-      // The cleanup above already ran and consumed the expected-event
-      // verdict; an EXPECTED removal (ours) reads false here and stops,
-      // same as the delete branch above.
-      if (!isExternalAbsence) return;
+      if (consumeExpectedEvent("delete", event.path)) return;
       await deleteIfTracked(engine, versionId, event.path, metadata, author);
       return;
     }

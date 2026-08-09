@@ -4676,13 +4676,29 @@ it("a cancelled debt's registry entry does not survive its own release landing",
   await expect
     .poll(() => state.closesWithSettleFalse, { timeout: 20_000 })
     .toBeGreaterThan(releasesBeforeLanding);
-  // One more tick past the successful release for the ownership check to run.
-  await new Promise((resolve) => setTimeout(resolve, 500));
 
+  // Poll the OUTCOME rather than sleep a fixed window past the release: a
+  // refused call throws before `openRemovalWindow` ever opens (a retry
+  // registers nothing to clean up), so retrying here is safe, and this
+  // does not depend on how many ticks the ownership check actually needs.
+  //
   // RED before the fix: the stale nonterminal entry never left the
-  // registry, so this rejected "Another program still has note.md open"
-  // even though nothing holds it anymore.
-  const finish = await capture.beginFileRename("note.md", "elsewhere.md");
+  // registry, so this kept rejecting "Another program still has note.md
+  // open" even though nothing holds it anymore.
+  let finish: Awaited<ReturnType<typeof capture.beginFileRename>> | undefined;
+  await expect
+    .poll(
+      async () => {
+        try {
+          finish = await capture.beginFileRename("note.md", "elsewhere.md");
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 20_000 },
+    )
+    .toBe(true);
   expect(typeof finish).toBe("function");
   await capture.stop();
 }, 60_000);
@@ -4882,6 +4898,12 @@ it("a write-classified event over an already-absent stood-down path also cancels
       message.includes("an external delete of note.md removed the path"),
     ),
   ).toBe(true);
+
+  // Pin the outcome, not only the trace: a change that keeps the log but
+  // leaves the entry in `detachedLockedDebts` would still pass the
+  // assertion above.
+  const finish = await capture.beginFileRename("note.md", "renamed.md");
+  expect(typeof finish).toBe("function");
   await capture.stop();
 }, 20_000);
 
