@@ -3872,7 +3872,7 @@ export function ChatsView(props: {
         await refreshDms();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not leave that conversation."));
+        props.onError(ipcErrorMessage(error, "dohc could not leave that conversation."));
       }
     },
     [props, refreshDms, workspaceId],
