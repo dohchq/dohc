@@ -145,21 +145,31 @@ function hasOtherLiveHolder(
 // taken any earlier can already be stale by the time this runs. An
 // owner-revoked row is unaffected by either check: no request (its grant
 // left the relay's received listing) and no other live holder (nobody
-// accepted anything).
-export function withholdDmsInRequestLanes<T extends { shareId: string | null }>(
-  input: {
-    dms: readonly T[];
-    requestShareIds: ReadonlySet<string>;
-    holdersByShareId: ReadonlyMap<string, ReadonlySet<string>>;
-    workspaceId: string;
-  },
-): T[] {
+// accepted anything). Also checks holdersByWireId (#742, round 6): a
+// re-grant mints a NEW shareId for the same channelWireId (PR #737 round 5),
+// so end in A under share A1, then accept the SAME conversation elsewhere
+// under a re-granted share B1 — A1 itself is never held live by anyone (B
+// holds B1, a different shareId), so the shareId-only check would miss it
+// and A's ended A1 row would reappear. The wire id is the conversation's
+// real, stable identity across that re-grant; the share id is not.
+export function withholdDmsInRequestLanes<
+  T extends { shareId: string | null; channelWireId: string },
+>(input: {
+  dms: readonly T[];
+  requestShareIds: ReadonlySet<string>;
+  holdersByShareId: ReadonlyMap<string, ReadonlySet<string>>;
+  holdersByWireId: ReadonlyMap<string, ReadonlySet<string>>;
+  workspaceId: string;
+}): T[] {
   return input.dms.filter((dm) => {
     if (dm.shareId === null) return true;
     if (input.requestShareIds.has(dm.shareId)) return false;
+    if (hasOtherLiveHolder(input.holdersByShareId, dm.shareId, input.workspaceId)) {
+      return false;
+    }
     return !hasOtherLiveHolder(
-      input.holdersByShareId,
-      dm.shareId,
+      input.holdersByWireId,
+      dm.channelWireId,
       input.workspaceId,
     );
   });
@@ -260,14 +270,30 @@ export type LastKnownDmRequestLanesCache = ReturnType<
 // and recording a fresh cache entry on success. classify() carries every
 // side effect (the relay fetch, logging) — this stays pure so it is testable
 // without a relay, a workspace, or main.ts's Electron-only closures.
+//
+// #742 P1 SECURITY (round 6): the cache WRITE below runs AFTER classify()'s
+// own awaits — a session transition (account switch) can land while an OLD
+// account's classify is still in flight. Without a guard, that stale result
+// would repopulate the cache right after the transition just cleared it,
+// silently reopening the round-4/5 cross-account leak. credentialGeneration
+// is main.ts's own credentialCacheGeneration — the SAME stale-work guard
+// this codebase already uses elsewhere (e.g. remoteForWorkspace): captured
+// before classify() starts, compared again after it resolves. A mismatch
+// means the session changed mid-classify, so the write is dropped. The
+// RETURNED result is unaffected — a stale response is the caller's own
+// session-generation guard to catch, same as every other IPC result here.
 export async function classifyDmRequestsWithFallback(input: {
   workspaceId: string;
   cache: LastKnownDmRequestLanesCache;
   classify: () => Promise<DmRequestLanes>;
+  credentialGeneration: () => number;
 }): Promise<DmRequestLanes> {
+  const startedAtGeneration = input.credentialGeneration();
   try {
     const result = await input.classify();
-    input.cache.set(input.workspaceId, result);
+    if (input.credentialGeneration() === startedAtGeneration) {
+      input.cache.set(input.workspaceId, result);
+    }
     return result;
   } catch {
     return input.cache.get(input.workspaceId) ?? { pending: [], declined: [] };

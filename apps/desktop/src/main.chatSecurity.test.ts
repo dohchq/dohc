@@ -418,32 +418,38 @@ describe("main-process chat authorization", () => {
     expect(handler.slice(resultAt)).toContain("}).map(dmRecordForIpc)");
   });
 
-  // #742 P1-A / round 4: without this, a DM whose row Leave just ended stays
-  // visible in BOTH `dms` (listDmRecords' readable-tombstone row,
-  // connected:false) and a request lane (classifyDmRequests re-listing it)
-  // OR held live by another workspace (accepted elsewhere) — the same
-  // conversation shown twice either way. requestShareIds is keyed off
-  // pending AND declined; holdersByShareId is derived AFTER classify
+  // #742 P1-A / round 4 / round 6: without this, a DM whose row Leave just
+  // ended stays visible in BOTH `dms` (listDmRecords' readable-tombstone
+  // row, connected:false) and a request lane (classifyDmRequests re-listing
+  // it) OR held live by another workspace under the SAME shareId or the
+  // SAME channelWireId (a re-grant mints a new shareId — round 6) — the
+  // same conversation shown twice either way. requestShareIds is keyed off
+  // pending AND declined; both holder snapshots are derived AFTER classify
   // resolves (dmRequests.ts's own executing tests cover the filter's actual
   // arithmetic and the stale-snapshot risk in detail — this pin only checks
   // main.ts wires the pieces in the right order).
-  it("wires the withhold call with request lanes AND a post-classify holders snapshot", () => {
+  it("wires the withhold call with request lanes AND post-classify share/wire holder snapshots", () => {
     const handler = handlerSource("syncDms");
     const classifyAt = handler.indexOf("classify: async () => {");
     const requestShareIdsAt = handler.indexOf("const requestShareIds = new Set(");
     const holdersAt = handler.indexOf(
       "const holdersByShareId = liveSharedChannelHoldersByShareId(listWorkspaces());",
     );
+    const holdersByWireAt = handler.indexOf(
+      "const holdersByWireId = liveSharedChannelHoldersByWireId(listWorkspaces());",
+    );
     const withholdAt = handler.indexOf("dms: withholdDmsInRequestLanes({");
     expect(classifyAt).toBeGreaterThan(-1);
     expect(requestShareIdsAt).toBeGreaterThan(classifyAt);
     expect(holdersAt).toBeGreaterThan(requestShareIdsAt);
-    expect(withholdAt).toBeGreaterThan(holdersAt);
+    expect(holdersByWireAt).toBeGreaterThan(holdersAt);
+    expect(withholdAt).toBeGreaterThan(holdersByWireAt);
     expect(handler.slice(requestShareIdsAt, withholdAt)).toContain(
       "[...pending, ...declined].map((row) => row.shareId)",
     );
     expect(handler.slice(withholdAt)).toContain("requestShareIds,");
     expect(handler.slice(withholdAt)).toContain("holdersByShareId,");
+    expect(handler.slice(withholdAt)).toContain("holdersByWireId,");
     expect(handler.slice(withholdAt)).toContain(
       "workspaceId: workspace.workspaceId,",
     );
@@ -454,12 +460,17 @@ describe("main-process chat authorization", () => {
   // createLastKnownDmRequestLanesCache in dmChats.test.ts, per the #737
   // precedent for anything main.ts cannot be imported to exercise directly).
   // This pin only checks main.ts's WIRING: syncDms routes classify through
-  // the shared fallback cache, keyed per workspace.
-  it("routes syncDms's classify through classifyDmRequestsWithFallback with the shared cache", () => {
+  // the shared fallback cache, keyed per workspace, guarded by the
+  // credential generation (round 6: the mid-classify session-transition
+  // race — dmChats.test.ts drives that arithmetic executingly too).
+  it("routes syncDms's classify through classifyDmRequestsWithFallback with the shared cache and generation guard", () => {
     const handler = handlerSource("syncDms");
     expect(handler).toContain("await classifyDmRequestsWithFallback({");
     expect(handler).toContain("workspaceId: workspace.workspaceId,");
     expect(handler).toContain("cache: lastKnownDmRequestLanes,");
+    expect(handler).toContain(
+      "credentialGeneration: () => credentialCacheGeneration,",
+    );
     expect(mainSource).toContain(
       "const lastKnownDmRequestLanes = createLastKnownDmRequestLanesCache();",
     );

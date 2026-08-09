@@ -25,6 +25,7 @@ import {
   otherLiveSharedChannelHolderByWireId,
   reserveAndPullSharedChannel,
   withholdDmsInRequestLanes,
+  type DmRequestLanes,
 } from "./dmRequests";
 import type { JoinedSharedChannel } from "./registryStore";
 import { endJoinedChannel } from "./sharedChannels";
@@ -1304,14 +1305,19 @@ describe("listDmRecords", () => {
 // "One identity, one place" — the request-lane representation wins.
 describe("withholdDmsInRequestLanes", () => {
   it("drops a dm whose shareId is pending or declined, keeps everything else", () => {
-    const endedLeft = { shareId: "share-left", connected: false };
-    const endedDeclined = { shareId: "share-declined", connected: false };
-    const liveOther = { shareId: "share-other", connected: true };
-    const owned = { shareId: null, connected: true };
+    const endedLeft = { shareId: "share-left", channelWireId: "wire-left", connected: false };
+    const endedDeclined = {
+      shareId: "share-declined",
+      channelWireId: "wire-declined",
+      connected: false,
+    };
+    const liveOther = { shareId: "share-other", channelWireId: "wire-other", connected: true };
+    const owned = { shareId: null, channelWireId: "wire-owned", connected: true };
     const result = withholdDmsInRequestLanes({
       dms: [endedLeft, endedDeclined, liveOther, owned],
       requestShareIds: new Set(["share-left", "share-declined"]),
       holdersByShareId: new Map(),
+      holdersByWireId: new Map(),
       workspaceId: "workspace-a",
     });
     expect(result).toEqual([liveOther, owned]);
@@ -1320,12 +1326,13 @@ describe("withholdDmsInRequestLanes", () => {
   it("leaves the owner-revoked tombstone case alone: no request AND no other live holder", () => {
     // The owner-revoked case: the grant is gone from the relay's received
     // listing (no request), and nobody accepted it anywhere (no live
-    // holder) — both checks pass it through.
-    const revoked = { shareId: "share-revoked", connected: false };
+    // holder, by either shareId or wire) — every check passes it through.
+    const revoked = { shareId: "share-revoked", channelWireId: "wire-revoked", connected: false };
     const result = withholdDmsInRequestLanes({
       dms: [revoked],
       requestShareIds: new Set(),
       holdersByShareId: new Map(),
+      holdersByWireId: new Map(),
       workspaceId: "workspace-a",
     });
     expect(result).toEqual([revoked]);
@@ -1352,13 +1359,15 @@ describe("withholdDmsInRequestLanes", () => {
       { workspaceId: "workspace-b", rootPath: "/b", sharedChannels: [liveInB] },
     ];
     const holdersByShareId = liveSharedChannelHoldersByShareId(workspaces);
+    const holdersByWireId = liveSharedChannelHoldersByWireId(workspaces);
     expect(holdersByShareId.get("share-x")).toEqual(new Set(["workspace-b"]));
 
     const result = withholdDmsInRequestLanes({
-      dms: [{ shareId: "share-x", connected: false }],
+      dms: [{ shareId: "share-x", channelWireId: "wire-x", connected: false }],
       // Accepted elsewhere: the share is no longer a request anywhere.
       requestShareIds: new Set(),
       holdersByShareId,
+      holdersByWireId,
       workspaceId: "workspace-a",
     });
     expect(result).toEqual([]);
@@ -1370,13 +1379,59 @@ describe("withholdDmsInRequestLanes", () => {
       { workspaceId: "workspace-a", rootPath: "/a", sharedChannels: [liveHere] },
     ];
     const holdersByShareId = liveSharedChannelHoldersByShareId(workspaces);
+    const holdersByWireId = liveSharedChannelHoldersByWireId(workspaces);
     const result = withholdDmsInRequestLanes({
-      dms: [{ shareId: "share-y", connected: true }],
+      dms: [{ shareId: "share-y", channelWireId: "wire-y", connected: true }],
       requestShareIds: new Set(),
       holdersByShareId,
+      holdersByWireId,
       workspaceId: "workspace-a",
     });
-    expect(result).toEqual([{ shareId: "share-y", connected: true }]);
+    expect(result).toEqual([{ shareId: "share-y", channelWireId: "wire-y", connected: true }]);
+  });
+
+  // #742 (round 6): a re-grant mints a NEW shareId for the SAME
+  // channelWireId (PR #737 round 5) — end in A under share A1, then accept
+  // the SAME conversation elsewhere under a re-granted share B1. A1 itself
+  // is never held live by anyone (B holds B1, a different shareId, and A1's
+  // grant is revoked so it never re-enters the request lanes either) — the
+  // shareId-only checks would both miss this and A's ended A1 row would
+  // reappear. Only the wire id, the conversation's real stable identity
+  // across the re-grant, catches it.
+  it("withholds an ended row via wire identity when a re-grant gave the live holder a DIFFERENT shareId", () => {
+    const endedInA = joined({
+      shareId: "share-a1",
+      channelWireId: "wire-shared",
+      ended: true,
+    });
+    const liveInBUnderNewShare = joined({
+      shareId: "share-b1",
+      channelWireId: "wire-shared",
+    });
+    const workspaces = [
+      { workspaceId: "workspace-a", rootPath: "/a", sharedChannels: [endedInA] },
+      {
+        workspaceId: "workspace-b",
+        rootPath: "/b",
+        sharedChannels: [liveInBUnderNewShare],
+      },
+    ];
+    const holdersByShareId = liveSharedChannelHoldersByShareId(workspaces);
+    const holdersByWireId = liveSharedChannelHoldersByWireId(workspaces);
+    // The share-id map alone misses this: nobody holds "share-a1" live.
+    expect(holdersByShareId.get("share-a1")).toBeUndefined();
+    expect(holdersByWireId.get("wire-shared")).toEqual(new Set(["workspace-b"]));
+
+    const result = withholdDmsInRequestLanes({
+      dms: [{ shareId: "share-a1", channelWireId: "wire-shared", connected: false }],
+      // share-a1's grant is revoked (superseded by share-b1), so it never
+      // re-enters the request lanes either.
+      requestShareIds: new Set(),
+      holdersByShareId,
+      holdersByWireId,
+      workspaceId: "workspace-a",
+    });
+    expect(result).toEqual([]);
   });
 });
 
@@ -1388,12 +1443,17 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
   const laneA = { pending: [{ shareId: "share-a", granterEmail: "a@x.com" }], declined: [] };
   const laneB = { pending: [{ shareId: "share-b", granterEmail: "b@x.com" }], declined: [] };
 
+  // A stable generation for tests that aren't exercising round 6's
+  // mid-classify session-transition guard.
+  const stableGeneration = () => 1;
+
   it("seeds from the cache on a classify failure (offline / relay error)", async () => {
     const cache = createLastKnownDmRequestLanesCache();
     cache.set("workspace-a", laneA);
     const result = await classifyDmRequestsWithFallback({
       workspaceId: "workspace-a",
       cache,
+      credentialGeneration: stableGeneration,
       classify: async () => {
         throw new Error("relay unreachable");
       },
@@ -1406,6 +1466,7 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
     const result = await classifyDmRequestsWithFallback({
       workspaceId: "workspace-a",
       cache,
+      credentialGeneration: stableGeneration,
       classify: async () => {
         throw new Error("relay unreachable");
       },
@@ -1419,6 +1480,7 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
     const succeeded = await classifyDmRequestsWithFallback({
       workspaceId: "workspace-a",
       cache,
+      credentialGeneration: stableGeneration,
       classify: async () => laneB,
     });
     expect(succeeded).toEqual(laneB);
@@ -1426,6 +1488,7 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
     const fellBack = await classifyDmRequestsWithFallback({
       workspaceId: "workspace-a",
       cache,
+      credentialGeneration: stableGeneration,
       classify: async () => {
         throw new Error("relay unreachable");
       },
@@ -1438,6 +1501,7 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
     await classifyDmRequestsWithFallback({
       workspaceId: "workspace-a",
       cache,
+      credentialGeneration: stableGeneration,
       classify: async () => {
         throw new Error("relay unreachable");
       },
@@ -1460,6 +1524,7 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
       await classifyDmRequestsWithFallback({
         workspaceId: "workspace-a",
         cache,
+        credentialGeneration: stableGeneration,
         classify: async () => {
           throw new Error("no relay yet for the new account");
         },
@@ -1469,6 +1534,7 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
       await classifyDmRequestsWithFallback({
         workspaceId: "workspace-b",
         cache,
+        credentialGeneration: stableGeneration,
         classify: async () => {
           throw new Error("no relay yet for the new account");
         },
@@ -1482,6 +1548,58 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
     cache.set("workspace-b", laneB);
     expect(cache.get("workspace-a")).toEqual(laneA);
     expect(cache.get("workspace-b")).toEqual(laneB);
+  });
+
+  // #742 P1 SECURITY (round 6): the cache WRITE happens AFTER classify()'s
+  // own awaits — a session transition (account switch) can land while an
+  // OLD account's classify is still in flight. Without the generation
+  // guard, that stale result would repopulate the cache right after the
+  // transition just cleared it, silently reopening the round-4/5
+  // cross-account leak. This drives the exact sequence: start sync as
+  // account A, transition to B mid-await (bump the generation AND clear the
+  // cache, exactly as main.ts's clearCachedCredentials does), then resolve
+  // A's classify — the cache must stay empty.
+  it("drops the cache write if the credential generation changed mid-classify (a session transition raced the poll)", async () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    let generation = 1; // account A
+    let resolveClassify!: (lanes: DmRequestLanes) => void;
+    const classifyGate = new Promise<DmRequestLanes>((resolve) => {
+      resolveClassify = resolve;
+    });
+    const resultPromise = classifyDmRequestsWithFallback({
+      workspaceId: "workspace-a",
+      cache,
+      credentialGeneration: () => generation,
+      classify: () => classifyGate,
+    });
+
+    // The session transitions to account B WHILE classify is still in
+    // flight — main.ts's clearCachedCredentials() would run exactly this:
+    // bump the generation (a new credential snapshot) and clear the cache.
+    generation = 2;
+    cache.clear();
+
+    // Account A's classify FINALLY resolves, after the transition.
+    resolveClassify(laneA);
+    const result = await resultPromise;
+
+    // The stale result is still RETURNED (the caller's own session
+    // guard handles a stale IPC response, same as everywhere else) — but
+    // the cache write is dropped.
+    expect(result).toEqual(laneA);
+    expect(cache.get("workspace-a")).toBeUndefined();
+  });
+
+  it("still records the write when the generation is unchanged (the common case)", async () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    const result = await classifyDmRequestsWithFallback({
+      workspaceId: "workspace-a",
+      cache,
+      credentialGeneration: stableGeneration,
+      classify: async () => laneA,
+    });
+    expect(result).toEqual(laneA);
+    expect(cache.get("workspace-a")).toEqual(laneA);
   });
 });
 
@@ -1546,6 +1664,7 @@ describe("markLeftInLastKnownLanes", () => {
     const result = await classifyDmRequestsWithFallback({
       workspaceId: "workspace-a",
       cache,
+      credentialGeneration: () => 1,
       classify: async () => {
         throw new Error("relay unreachable");
       },
@@ -1559,12 +1678,13 @@ describe("markLeftInLastKnownLanes", () => {
     const requestShareIds = new Set(
       [...result.pending, ...result.declined].map((row) => row.shareId),
     );
-    const endedRow = { shareId: "share-left", connected: false };
+    const endedRow = { shareId: "share-left", channelWireId: "wire-left", connected: false };
     expect(
       withholdDmsInRequestLanes({
         dms: [endedRow],
         requestShareIds,
         holdersByShareId: new Map(),
+        holdersByWireId: new Map(),
         workspaceId: "workspace-a",
       }),
     ).toEqual([]);

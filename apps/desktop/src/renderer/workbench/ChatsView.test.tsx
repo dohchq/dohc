@@ -6207,6 +6207,7 @@ describe("ChatsView direct messages", () => {
             dms: [endedRow],
             requestShareIds: new Set(["share-dm-1"]),
             holdersByShareId: new Map(),
+            holdersByWireId: new Map(),
             workspaceId: "workspace-a",
           }),
           pending: [reappearedRequest],
@@ -6444,6 +6445,54 @@ describe("ChatsView direct messages", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    // #742 P2 (round 6): Leave during an in-flight send would end the row
+    // before sendChatMessage's revalidation, whose rejection then gets
+    // suppressed by goBack's context change (#742 P1-B) — the message
+    // vanishes with no warning. Confirm is disabled until the send settles,
+    // so the user always sees either the message land or the existing
+    // "Could not send" error, never silence.
+    it("disables the leave confirm while a send is in flight for this DM, so the message can never silently vanish", async () => {
+      const user = userEvent.setup();
+      const participant = dm({ role: "participant", shareId: "share-dm-1" });
+      bridgeMock.syncDms.mockResolvedValue({
+        available: true,
+        dms: [participant],
+        pending: [],
+        declined: [],
+      });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      let resolveSend!: (result: { message: ChatMessageRecord }) => void;
+      const sendGate = new Promise<{ message: ChatMessageRecord }>((resolve) => {
+        resolveSend = resolve;
+      });
+      bridgeMock.sendChatMessage.mockReturnValue(sendGate);
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await user.type(screen.getByTestId("chats-dm-composer"), "hello{Enter}");
+      await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
+
+      await user.click(await screen.findByTestId("chats-dm-leave"));
+      await screen.findByTestId("chats-leave-dm-dialog");
+      await waitFor(() =>
+        expect(
+          (screen.getByTestId("chats-leave-dm-confirm") as HTMLButtonElement).disabled,
+        ).toBe(true),
+      );
+
+      await user.click(screen.getByTestId("chats-leave-dm-confirm"));
+      // Disabled: the click must not have reached leaveDm.
+      expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
+
+      resolveSend({
+        message: message({ id: "m-1", threadId: "thread-dm-1", body: "hello" }),
+      });
+      await waitFor(() =>
+        expect(
+          (screen.getByTestId("chats-leave-dm-confirm") as HTMLButtonElement).disabled,
+        ).toBe(false),
+      );
     });
   });
 

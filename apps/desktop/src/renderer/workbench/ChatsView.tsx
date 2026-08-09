@@ -1242,6 +1242,14 @@ function AcceptDmDialog(props: {
 function LeaveDmDialog(props: {
   dm: DmRecord;
   workspaceLabel: string;
+  // #742 P2 (round 6): a send composed for THIS conversation, still in
+  // flight when Leave ends the row, would have its own revalidation reject
+  // AFTER the row is gone — and goBack's context change (#742 P1-B) then
+  // suppresses that rejection, so the message vanishes with no warning.
+  // Disabling confirm until the send settles means the user always sees
+  // either the message land or the existing "Could not send" error, never
+  // silence.
+  sendInFlight: boolean;
   onConfirm: () => Promise<void>;
   onClose: () => void;
 }) {
@@ -1249,7 +1257,7 @@ function LeaveDmDialog(props: {
   const busyRef = useRef(false);
 
   async function confirm() {
-    if (busyRef.current) return;
+    if (busyRef.current || props.sendInFlight) return;
     busyRef.current = true;
     setBusy(true);
     try {
@@ -1309,7 +1317,7 @@ function LeaveDmDialog(props: {
           <button
             type="button"
             data-testid="chats-leave-dm-confirm"
-            disabled={busy}
+            disabled={busy || props.sendInFlight}
             onClick={() => void confirm()}
             className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
           >
@@ -3961,8 +3969,11 @@ export function ChatsView(props: {
       // The belt effect above already closes the dialog the moment the
       // record it was opened for loses connected (#742 P2-D, round 5); this
       // is the same guard at the one call site that can reach here, closing
-      // the last sliver of a click/effect race.
-      if (!shareId || !dm.connected) return;
+      // the last sliver of a click/effect race. sendingRef mirrors this
+      // DM's own send state the same way the confirm button's disabled prop
+      // does (#742 P2, round 6) — the dialog only ever opens for the
+      // currently-viewed DM, so it IS this DM's in-flight state.
+      if (!shareId || !dm.connected || sendingRef.current) return;
       const token = liveToken.current;
       try {
         // Presence leave BEFORE the row ends (#742 P2-E): once leaveDm ends
@@ -4552,6 +4563,10 @@ export function ChatsView(props: {
               props.workspaces.find((candidate) => candidate.workspaceId === workspaceId)
                 ?.label ?? workspaceId
             }
+            // The dialog only ever opens for the currently-viewed DM (the
+            // P2-D belt enforces this), so `sending` — already scoped to the
+            // active send context — IS this DM's own in-flight state.
+            sendInFlight={sending}
             onConfirm={() => leaveDmConversation(leavingDm)}
             onClose={() => setLeavingDm(null)}
           />

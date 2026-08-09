@@ -7237,6 +7237,11 @@ function registerIpcHandlers(
     const { pending, declined } = await classifyDmRequestsWithFallback({
       workspaceId: workspace.workspaceId,
       cache: lastKnownDmRequestLanes,
+      // #742 P1 SECURITY (round 6): see classifyDmRequestsWithFallback's own
+      // comment — this is the guard against an old account's in-flight
+      // classify repopulating a just-cleared cache after a session
+      // transition.
+      credentialGeneration: () => credentialCacheGeneration,
       classify: async () => {
         if (!relay) throw new Error("DM sync is unavailable: not signed in.");
         const listing = await relayShareJson<{
@@ -7296,12 +7301,14 @@ function registerIpcHandlers(
     // Fresh, AFTER classify resolves — not reused from before it, which could
     // be stale by the time the withhold decision actually needs it.
     const holdersByShareId = liveSharedChannelHoldersByShareId(listWorkspaces());
+    const holdersByWireId = liveSharedChannelHoldersByWireId(listWorkspaces());
     return SyncDmsResult.parse({
       available: relay !== null,
       dms: withholdDmsInRequestLanes({
         dms,
         requestShareIds,
         holdersByShareId,
+        holdersByWireId,
         workspaceId: workspace.workspaceId,
       }).map(dmRecordForIpc),
       pending,
