@@ -104,8 +104,15 @@ describe("createPresenceChannel", () => {
     });
     await flush();
     peers.mockClear();
-    channel.stop();
+    // pollController.abort() happens synchronously inside stop(), before it
+    // awaits any in-flight publish (#742 P2, round 5) — but leave() no
+    // longer dispatches synchronously, so it is checked after a flush, not
+    // synchronously. stop()'s own returned promise is NOT awaited here: it
+    // additionally waits on loopDone, which (in this fake) only settles once
+    // resolvePoll runs below — awaiting it here would deadlock the test.
+    void channel.stop();
     expect(f.pollAborted()).toBe(true);
+    await flush();
     expect(f.leaves).toEqual([{ topic: "general", clientId: "c1" }]);
     // A poll that resolves AFTER stop must not repaint.
     await f.resolvePoll({ version: 99, peers: [{ userId: "x", clientId: "cx", state: {}, updatedAtMs: 0 }] });
@@ -207,6 +214,63 @@ describe("createPresenceChannel", () => {
     await flush();
     await expect(channel.stop()).resolves.toBeUndefined();
     await flush(); // any unhandled rejection would fail the test run here
+  });
+
+  // #742 P2, round 5: awaiting transport.leave alone does not order it after
+  // a publish already in flight when stop() is called — a late-arriving
+  // publish (a heartbeat, or setState) can reach the transport AFTER leave
+  // does, reviving presence the instant after it left (ghost until the
+  // relay's TTL). This transport hangs its SECOND publish (the kickoff's
+  // first publish settles immediately, matching real startup) until the test
+  // releases it, and proves leave is withheld for the whole hang — not just
+  // dispatched-then-reordered, which a transport-level spy on call order
+  // alone could not distinguish from a real wait.
+  it("waits out an in-flight publish before sending leave", async () => {
+    let releasePublish!: (snapshot: PresenceSnapshot) => void;
+    const publishGate = new Promise<PresenceSnapshot>((resolve) => {
+      releasePublish = resolve;
+    });
+    const leaves: Array<{ topic: string; clientId: string }> = [];
+    let publishCalls = 0;
+    const transport: PresenceTransport = {
+      publish: () => {
+        publishCalls += 1;
+        return publishCalls === 1
+          ? Promise.resolve({ version: 1, peers: [] })
+          : publishGate;
+      },
+      async leave(input) {
+        leaves.push(input);
+      },
+      poll: (input) =>
+        new Promise((resolve) => {
+          input.signal.addEventListener(
+            "abort",
+            () => resolve({ version: 0, peers: [] }),
+            { once: true },
+          );
+        }),
+    };
+    const channel = createPresenceChannel({
+      transport,
+      topic: "general",
+      clientId: "c1",
+      initialState: {},
+      onPeers: vi.fn(),
+    });
+    await flush();
+    // A second publish, in flight and hanging — e.g. a heartbeat or setState
+    // firing right as stop() is about to run.
+    channel.setState({ typing: true });
+    expect(publishCalls).toBe(2);
+
+    const stopped = channel.stop();
+    await flush();
+    expect(leaves).toEqual([]);
+
+    releasePublish({ version: 2, peers: [] });
+    await stopped;
+    expect(leaves).toEqual([{ topic: "general", clientId: "c1" }]);
   });
 });
 

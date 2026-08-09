@@ -21,6 +21,7 @@ import {
   isShareAcceptedInWorkspace,
   liveSharedChannelHoldersByShareId,
   liveSharedChannelHoldersByWireId,
+  markLeftInLastKnownLanes,
   otherLiveSharedChannelHolderByWireId,
   reserveAndPullSharedChannel,
   withholdDmsInRequestLanes,
@@ -1481,5 +1482,91 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
     cache.set("workspace-b", laneB);
     expect(cache.get("workspace-a")).toEqual(laneA);
     expect(cache.get("workspace-b")).toEqual(laneB);
+  });
+});
+
+// #742 P1 (round 5): the cache's last recorded lanes were classified while
+// the DM was still accepted, so an outage right after Leave falls back to
+// stale pre-leave lanes that still call the share accepted — the ended row
+// would reappear. markLeftInLastKnownLanes closes that gap: leaveDm records
+// the leave in the cache itself, without needing the relay at all.
+describe("markLeftInLastKnownLanes", () => {
+  it("inserts the left share into the cache's pending lane", () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    cache.set("workspace-a", {
+      pending: [],
+      declined: [{ shareId: "share-other", granterEmail: null }],
+    });
+    markLeftInLastKnownLanes(cache, "workspace-a", {
+      shareId: "share-left",
+      granterEmail: "alice@example.com",
+    });
+    expect(cache.get("workspace-a")).toEqual({
+      pending: [{ shareId: "share-left", granterEmail: "alice@example.com" }],
+      declined: [{ shareId: "share-other", granterEmail: null }],
+    });
+  });
+
+  it("starts from empty lanes when nothing was cached for this workspace yet", () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    markLeftInLastKnownLanes(cache, "workspace-a", {
+      shareId: "share-left",
+      granterEmail: "alice@example.com",
+    });
+    expect(cache.get("workspace-a")).toEqual({
+      pending: [{ shareId: "share-left", granterEmail: "alice@example.com" }],
+      declined: [],
+    });
+  });
+
+  it("is idempotent: leaving twice never duplicates the pending row", () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    const row = { shareId: "share-left", granterEmail: "alice@example.com" };
+    markLeftInLastKnownLanes(cache, "workspace-a", row);
+    markLeftInLastKnownLanes(cache, "workspace-a", row);
+    expect(cache.get("workspace-a")?.pending).toEqual([row]);
+  });
+
+  // The real flow the pin describes: leave, then a relay outage — the
+  // fallback must serve the conversation as a pending request, not silently
+  // keep calling it accepted.
+  it("REAL FLOW: leave -> relay rejects on the next poll -> the fallback lanes list the conversation as pending", async () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    // Before leaving: the DM was accepted, so its shareId was never in any
+    // classified lane.
+    cache.set("workspace-a", { pending: [], declined: [] });
+
+    // leaveDm's local, relay-free side effect.
+    markLeftInLastKnownLanes(cache, "workspace-a", {
+      shareId: "share-left",
+      granterEmail: "alice@example.com",
+    });
+
+    // The very next syncDms poll: the relay rejects.
+    const result = await classifyDmRequestsWithFallback({
+      workspaceId: "workspace-a",
+      cache,
+      classify: async () => {
+        throw new Error("relay unreachable");
+      },
+    });
+
+    expect(result.pending).toEqual([
+      { shareId: "share-left", granterEmail: "alice@example.com" },
+    ]);
+    // Consistent with withholdDmsInRequestLanes (#742 P1-A): the ended row is
+    // now withheld from the list, because its shareId IS a pending request.
+    const requestShareIds = new Set(
+      [...result.pending, ...result.declined].map((row) => row.shareId),
+    );
+    const endedRow = { shareId: "share-left", connected: false };
+    expect(
+      withholdDmsInRequestLanes({
+        dms: [endedRow],
+        requestShareIds,
+        holdersByShareId: new Map(),
+        workspaceId: "workspace-a",
+      }),
+    ).toEqual([]);
   });
 });

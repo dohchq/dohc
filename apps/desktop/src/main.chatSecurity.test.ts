@@ -465,31 +465,32 @@ describe("main-process chat authorization", () => {
     );
   });
 
-  // #742 P1 SECURITY (round 4): a NEW account's first failed poll must never
-  // be served the PREVIOUS account's cached request rows, sender emails
-  // included. The cache clears at the exact two sites that clear the
-  // credential cache — login adoption and logout — never at the 401 path
-  // (a token refresh within the SAME account, not an account change).
-  it("clears the DM request-lanes cache at both credential-cache session transitions", () => {
-    const adoptStart = mainSource.indexOf(
-      "await adoptCompletedCloudLoginSession({",
+  // #742 P1 SECURITY (rounds 4–5): a NEW account's first failed poll must
+  // never be served the PREVIOUS account's cached request rows, sender
+  // emails included. Every session transition that clears the credential
+  // cache also clears the DM lanes cache — centralized INSIDE
+  // clearCachedCredentials() itself (round 5), not duplicated at each of its
+  // three call sites, so login adoption, logout, AND a current-session 401
+  // (round 5: also a real session end — main's own comment above it says so)
+  // can never bypass it by routing around the shared function.
+  it("clears the DM request-lanes cache from inside clearCachedCredentials, and every session-transition site routes through it", () => {
+    const clearFnStart = mainSource.indexOf(
+      "function clearCachedCredentials(): void {",
     );
-    const adoptEnd = mainSource.indexOf("stopEngines: async () => await activity.stopEngines(),", adoptStart);
-    expect(adoptStart).toBeGreaterThan(-1);
-    expect(adoptEnd).toBeGreaterThan(adoptStart);
-    expect(mainSource.slice(adoptStart, adoptEnd)).toContain(
+    const clearFnEnd = mainSource.indexOf("\n}", clearFnStart);
+    expect(clearFnStart).toBeGreaterThan(-1);
+    expect(clearFnEnd).toBeGreaterThan(clearFnStart);
+    expect(mainSource.slice(clearFnStart, clearFnEnd)).toContain(
       "lastKnownDmRequestLanes.clear();",
     );
 
-    const logoutStart = mainSource.indexOf(
-      "await runCloudLogoutTransition({",
-    );
-    const logoutEnd = mainSource.indexOf("logout: () => cloudLogin().logout(),", logoutStart);
-    expect(logoutStart).toBeGreaterThan(-1);
-    expect(logoutEnd).toBeGreaterThan(logoutStart);
-    expect(mainSource.slice(logoutStart, logoutEnd)).toContain(
-      "lastKnownDmRequestLanes.clear();",
-    );
+    // Every session-transition site calls the shared function — none
+    // inlines its own credentialSessionCache.clear() that would bypass it.
+    const sites = mainSource.match(/clearCachedCredentials: \(\) => [^\n]+/gu) ?? [];
+    expect(sites.length).toBeGreaterThanOrEqual(3);
+    for (const site of sites) {
+      expect(site).toBe("clearCachedCredentials: () => clearCachedCredentials(),");
+    }
   });
 
   it("checks renderer trust on every DM request mutation", () => {
@@ -533,6 +534,31 @@ describe("main-process chat authorization", () => {
       expect(handler, label).not.toContain("endJoinedChannel(");
       expect(handler, label).not.toContain("ended: true");
     }
+  });
+
+  // #742 P1 (round 5): the fallback cache's own arithmetic (seed/overwrite/
+  // idempotent-insert) has real executing coverage in dmChats.test.ts, per
+  // the #737 precedent. This pin only checks main.ts's WIRING: leaveDm reads
+  // the row's granterEmail BEFORE ending it (endJoinedChannel only flips
+  // `ended`, so the row itself still carries it either way, but reading
+  // first keeps the intent obvious) and records the leave in the SAME cache
+  // syncDms falls back to.
+  it("records a locally-known leave in the last-known lanes cache", () => {
+    const handler = handlerSource("leaveDm");
+    const leftRowAt = handler.indexOf("const leftRow = (");
+    const endAt = handler.indexOf(
+      "endWorkspaceJoinedChannel(input.workspaceId, input.shareId);",
+    );
+    const markAt = handler.indexOf("markLeftInLastKnownLanes(");
+    expect(leftRowAt).toBeGreaterThan(-1);
+    expect(endAt).toBeGreaterThan(leftRowAt);
+    expect(markAt).toBeGreaterThan(endAt);
+    expect(handler.slice(markAt)).toContain(
+      "markLeftInLastKnownLanes(lastKnownDmRequestLanes, input.workspaceId, {",
+    );
+    expect(handler.slice(markAt)).toContain(
+      "granterEmail: leftRow?.granterEmail ?? null,",
+    );
   });
 
   it("filters confirmed DMs from the ordinary received-channel lane", () => {

@@ -3343,12 +3343,18 @@ export function ChatsView(props: {
   // leavingDm on any navigation away from the DM it was opened for — leaving
   // this DM, opening a different one, or leaving Chats entirely — so a stale
   // confirmation can never reappear over a conversation it wasn't opened for.
-  // A field-level refresh of the SAME open DM (refreshOpenDm) leaves leavingDm
-  // alone.
+  // Also clears it the moment a field-level refresh of the SAME open DM
+  // (refreshOpenDm) reports connected:false (round 5): an owner revocation
+  // mid-dialog leaves the channelId unchanged, so the nav-change check alone
+  // would leave the dialog open — confirming would re-end an already-ended
+  // tombstone and promise a request that, for an owner-revoked grant, can
+  // never appear.
   useEffect(() => {
     setLeavingDm((current) => {
       if (current === null) return current;
-      if (nav.level === "dm" && nav.dm.channelId === current.channelId) return current;
+      if (nav.level === "dm" && nav.dm.channelId === current.channelId && nav.dm.connected) {
+        return current;
+      }
       return null;
     });
   }, [nav]);
@@ -3952,7 +3958,11 @@ export function ChatsView(props: {
   const leaveDmConversation = useCallback(
     async (dm: DmRecord) => {
       const shareId = dm.shareId;
-      if (!shareId) return;
+      // The belt effect above already closes the dialog the moment the
+      // record it was opened for loses connected (#742 P2-D, round 5); this
+      // is the same guard at the one call site that can reach here, closing
+      // the last sliver of a click/effect race.
+      if (!shareId || !dm.connected) return;
       const token = liveToken.current;
       try {
         // Presence leave BEFORE the row ends (#742 P2-E): once leaveDm ends

@@ -126,15 +126,18 @@ export interface PresenceChannelOptions {
 export interface PresenceChannel {
   // Update the local state and publish it immediately (e.g. typing on/off).
   setState(state: unknown): void;
-  // Stop heartbeating + polling, abort any in-flight poll, and best-effort
-  // leave. Idempotent. After this, onPeers never fires again. Resolves once
-  // the internal poll loop has fully exited (including a pending retry
-  // sleep) AND the leave call has settled (#742 P2, round 3: a caller about
-  // to do something that will make this scope reject further presence calls
-  // — e.g. ending the DM's share — must be able to await the leave actually
-  // reaching the transport, not just being launched) — so teardown is
-  // deterministic and nothing dangles. The leave itself stays best-effort: a
-  // rejecting transport.leave never throws out of stop().
+  // Stop heartbeating + polling, abort any in-flight poll, wait out any
+  // publish already in flight, and best-effort leave — in that order (#742
+  // P2, round 5: sending leave before an earlier publish settles lets that
+  // publish reach the transport AFTER leave does, reviving presence the
+  // instant after it left). Idempotent. After this, onPeers never fires
+  // again. Resolves once the internal poll loop has fully exited (including
+  // a pending retry sleep) AND the leave call has settled (#742 P2, round 3:
+  // a caller about to do something that will make this scope reject further
+  // presence calls — e.g. ending the DM's share — must be able to await the
+  // leave actually reaching the transport, not just being launched) — so
+  // teardown is deterministic and nothing dangles. The leave itself stays
+  // best-effort: a rejecting transport.leave never throws out of stop().
   stop(): Promise<void>;
 }
 
@@ -156,6 +159,12 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
   let retryResolve: (() => void) | null = null;
   let pollController: AbortController | null = null;
   let loopDone: Promise<void> | null = null;
+  // The most recently STARTED publish, so stop() can wait it out before
+  // sending leave (#742 P2, round 5): awaiting transport.leave alone does not
+  // order it after a publish/heartbeat already in flight when stop() is
+  // called — a late-arriving publish can reach the transport AFTER leave
+  // does, reviving presence the instant after it left (ghost until TTL).
+  let inFlightPublish: Promise<void> = Promise.resolve();
 
   function emit(snapshot: PresenceSnapshot): void {
     if (stopped) return;
@@ -163,18 +172,22 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
     options.onPeers(snapshot.peers);
   }
 
-  async function publishNow(): Promise<void> {
-    if (stopped) return;
-    try {
-      const snapshot = await options.transport.publish({
-        topic: options.topic,
-        clientId: options.clientId,
-        state,
-      });
-      emit(snapshot);
-    } catch {
-      // Presence is best-effort; a failed publish just means we appear later.
-    }
+  function publishNow(): Promise<void> {
+    if (stopped) return Promise.resolve();
+    const publish = (async () => {
+      try {
+        const snapshot = await options.transport.publish({
+          topic: options.topic,
+          clientId: options.clientId,
+          state,
+        });
+        emit(snapshot);
+      } catch {
+        // Presence is best-effort; a failed publish just means we appear later.
+      }
+    })();
+    inFlightPublish = publish;
+    return publish;
   }
 
   function scheduleHeartbeat(): void {
@@ -230,6 +243,9 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
         // returns; clearing the timer alone would strand it forever.
         retryResolve?.();
         pollController?.abort();
+        // Wait out any publish already in flight BEFORE sending leave (#742
+        // P2, round 5) — see inFlightPublish's own comment.
+        await inFlightPublish;
         // Best-effort explicit leave so peers see the departure before the
         // TTL — AWAITED (#742 P2, round 3), not fire-and-forget: a caller can
         // rely on this having actually reached the transport once stop()'s

@@ -21,6 +21,7 @@ import {
   type MainChatIpcHandler,
 } from "./mainChatIpcHandlers";
 import { scopeJoinedChannels } from "./workspaces/sharedChannels";
+import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 
 interface TestEvent {
   trusted: boolean;
@@ -1105,6 +1106,31 @@ describe("handleRelayUnauthorized", () => {
     });
     expect(acted).toBe(true);
     expect(steps).toEqual(["clear", "notify changing", "notify ready"]);
+  });
+
+  // #742 P1 SECURITY, round 5: a current-session 401 IS an account-session
+  // end — main.ts's clearCachedCredentials() (called here as
+  // clearCachedCredentials, exactly as main.ts wires it) also clears the DM
+  // request-lanes cache, so a new account's first failed poll can never be
+  // served the previous account's cached request rows. Driven through the
+  // REAL createLastKnownDmRequestLanesCache, not a string log, so this
+  // proves the cache itself ends up empty, not just that some callback fired.
+  it("clears a real DM request-lanes cache when the current-session 401 path runs", async () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    cache.set("workspace-a", {
+      pending: [{ shareId: "share-a", granterEmail: "a@x.com" }],
+      declined: [],
+    });
+    const acted = await handleRelayUnauthorized({
+      requestCredentials: sessionA,
+      currentCredentials: sessionA,
+      clearCachedCredentials: () => cache.clear(),
+      notifySessionChanging: () => undefined,
+      notifyCloudSessionChanged: () => undefined,
+      invalidatePersistedSessionIf: async () => undefined,
+    });
+    expect(acted).toBe(true);
+    expect(cache.get("workspace-a")).toBeUndefined();
   });
 });
 

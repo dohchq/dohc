@@ -6399,6 +6399,52 @@ describe("ChatsView direct messages", () => {
       await screen.findByTestId("chats-dm-view");
       expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
     });
+
+    // #742 P2-D, round 5: an owner revocation mid-dialog leaves the
+    // channelId unchanged, so the round-2 belt (keyed only on nav change)
+    // would leave the confirmation open — confirming would re-end an
+    // already-ended tombstone and promise a request that, for an
+    // owner-revoked grant, can never appear.
+    it("closes the confirmation the moment the record it was opened for loses connected", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+        const participant = dm({ role: "participant", shareId: "share-dm-1" });
+        const revoked = { ...participant, connected: false };
+        bridgeMock.syncDms
+          .mockResolvedValueOnce({
+            available: true,
+            dms: [participant],
+            pending: [],
+            declined: [],
+          })
+          .mockResolvedValue({
+            available: true,
+            dms: [revoked],
+            pending: [],
+            declined: [],
+          });
+        bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+        renderView();
+        await user.click(await screen.findByTestId("chats-dm-item"));
+        await user.click(await screen.findByTestId("chats-dm-leave"));
+        await screen.findByTestId("chats-leave-dm-dialog");
+
+        // The per-open-DM refresh interval (refreshOpenDm, every 4s) is what
+        // would deliver the owner's revocation while the dialog is open.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_000);
+        });
+
+        expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
+        expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
+        // Still on the DM — the revocation itself doesn't navigate away, it
+        // only makes the conversation read-only.
+        expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it("keeps syncing an open pending DM until its thread arrives", async () => {

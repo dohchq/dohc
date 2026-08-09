@@ -370,6 +370,7 @@ import {
   isShareAcceptedInWorkspace,
   liveSharedChannelHoldersByShareId,
   liveSharedChannelHoldersByWireId,
+  markLeftInLastKnownLanes,
   otherLiveSharedChannelHolder,
   otherLiveSharedChannelHolderByWireId,
   reserveAndPullSharedChannel,
@@ -1281,8 +1282,22 @@ function warmCredentialCache(): Promise<void> {
 function setCachedCredentials(credentials: CloudSessionCredentials): void {
   credentialSessionCache.set(credentials);
 }
+// #742 P1 (rounds 3–5): the last successfully classified DM request lanes,
+// per workspace — see createLastKnownDmRequestLanesCache's own comment for
+// the staleness contract. Declared at module scope (not inside the IPC
+// registration closure) so relayShareJsonWithCredentials — a top-level
+// function, its own separate closure — can clear it from the 401 path below.
+const lastKnownDmRequestLanes = createLastKnownDmRequestLanesCache();
 function clearCachedCredentials(): void {
   credentialSessionCache.clear();
+  // #742 P1 SECURITY (rounds 4–5): every credential-cache clear is a session
+  // transition (login adoption, logout, or a current-session 401 — all three
+  // call this one function). Clearing here, not at each call site
+  // individually, is what makes sure a NEW account's first failed poll can
+  // never be served the PREVIOUS account's cached request rows, sender
+  // emails included, regardless of which of the three paths ended the
+  // session.
+  lastKnownDmRequestLanes.clear();
 }
 async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials | null> {
   const loaded = await credentialSessionCache.adoptCurrent(() =>
@@ -4231,15 +4246,7 @@ function registerIpcHandlers(
       // credential snapshot instead of letting an existing engine keep the
       // previous token.
       await adoptCompletedCloudLoginSession({
-        // #742 P1 SECURITY (round 4): clear the DM request-lanes cache at the
-        // same session transition the credential cache clears at — otherwise
-        // a NEW account's first failed /sync/shares poll (no relay yet, or a
-        // transient failure) would be served the PREVIOUS account's cached
-        // request rows, sender emails included.
-        clearCachedCredentials: () => {
-          clearCachedCredentials();
-          lastKnownDmRequestLanes.clear();
-        },
+        clearCachedCredentials: () => clearCachedCredentials(),
         stopEngines: async () => await activity.stopEngines(),
         closeRelayTransportWorkspaces: async () =>
           await closeAllRelayTransportWorkspaces(),
@@ -4295,12 +4302,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.cloudLogout, async (event) => {
     assertTrustedSender(event);
     await runCloudLogoutTransition({
-      // #742 P1 SECURITY (round 4): see the login-adoption site's comment —
-      // same reasoning, same fix.
-      clearCachedCredentials: () => {
-        clearCachedCredentials();
-        lastKnownDmRequestLanes.clear();
-      },
+      clearCachedCredentials: () => clearCachedCredentials(),
       logout: () => cloudLogin().logout(),
       stopEngines: () => activity.stopEngines(),
       closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces(),
@@ -7196,13 +7198,6 @@ function registerIpcHandlers(
   // retryable because a grant can arrive before its channel bootstrap ops.
   const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
 
-  // #742 P1 (rounds 3–4): the last successfully classified request lanes,
-  // per workspace — see createLastKnownDmRequestLanesCache's own comment for
-  // the staleness contract. Cleared at the same two sites that clear the
-  // credential cache (login adoption, logout): a new account's first failed
-  // poll must never be served the previous account's cached request rows.
-  const lastKnownDmRequestLanes = createLastKnownDmRequestLanesCache();
-
   // Peek a received chat-channel grant's kind without mutating the local store.
   // The share-log GET paginates raw rows before the
   // share filter, so the peek must PAGE through nextCursor until the first
@@ -7431,7 +7426,16 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.leaveDm, (event, payload) => {
     assertTrustedSender(event);
     const input = LeaveDmPayload.parse(payload);
+    const leftRow = (
+      requireWorkspace(input.workspaceId).sharedChannels ?? []
+    ).find((channel) => channel.shareId === input.shareId);
     endWorkspaceJoinedChannel(input.workspaceId, input.shareId);
+    // #742 P1 (round 5): the leave is locally knowable without the relay —
+    // see markLeftInLastKnownLanes's own comment for why this must run here.
+    markLeftInLastKnownLanes(lastKnownDmRequestLanes, input.workspaceId, {
+      shareId: input.shareId,
+      granterEmail: leftRow?.granterEmail ?? null,
+    });
     return undefined;
   });
 

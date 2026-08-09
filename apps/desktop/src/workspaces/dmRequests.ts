@@ -274,6 +274,29 @@ export async function classifyDmRequestsWithFallback(input: {
   }
 }
 
+// #742 P1 (round 5): the cache's last recorded lanes were classified while
+// the DM was still accepted, so they EXCLUDE the just-left share — a relay
+// outage right after Leave would then fall back to those stale lanes and the
+// ended row would reappear (classifyDmRequestsWithFallback has nothing else
+// to fall back to). But a local leave is knowable without the relay at all:
+// call this on leaveDm's success, so the fallback serves lanes CONSISTENT
+// with the leave instead of the pre-leave snapshot. Idempotent — leaving
+// twice, or a poll racing the leave, never duplicates the pending row.
+export function markLeftInLastKnownLanes(
+  cache: LastKnownDmRequestLanesCache,
+  workspaceId: string,
+  row: DmRequestRow,
+): void {
+  const current = cache.get(workspaceId) ?? { pending: [], declined: [] };
+  if (current.pending.some((existing) => existing.shareId === row.shareId)) {
+    return;
+  }
+  cache.set(workspaceId, {
+    pending: [...current.pending, row],
+    declined: current.declined,
+  });
+}
+
 export async function reserveAndPullSharedChannel(input: {
   relay: SyncRelayConnection;
   shareId: string;
