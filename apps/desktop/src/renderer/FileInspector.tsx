@@ -1224,13 +1224,12 @@ function MarkdownView(props: {
   readOnlyRef.current = readOnly;
   // The single question all three write paths ask. Both refs, because they
   // close different gaps: `readOnlyRef` a flip this component rendered,
-  // `writesRefusedRef` an engine refusal or unapplied switch resync that a
-  // long-lived closure may never get to render.
+  // `writesRefusedRef` an engine refusal or unapplied switch resync (already
+  // folded into its OR-chain by the parent — reading `switchUnresyncedRef`
+  // here too would shadow it) that a long-lived closure may never get to
+  // render.
   const { writesRefusedRef } = props;
-  const writesBlocked = () =>
-    readOnlyRef.current ||
-    writesRefusedRef.current ||
-    props.switchUnresyncedRef.current;
+  const writesBlocked = () => readOnlyRef.current || writesRefusedRef.current;
   const engineMode = engine.available && engine.doc !== null;
 
   // "View markdown as source" (engine mode): a READ-ONLY projection of the

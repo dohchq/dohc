@@ -354,7 +354,14 @@ export function useEngineDoc(input: {
             setDeletion({ token, draftId: deletionDraftId });
           }
         })
-        .catch(() => undefined);
+        .catch((error: unknown) => {
+          // This draft is the last copy of the user's text — a load failure
+          // here must not disappear silently.
+          console.error(
+            `[desktop] could not write a recovery draft for ${workspaceId}:${path} after deletion:`,
+            error,
+          );
+        });
     };
 
     const captureDeletion = (doc: Y.Doc): void => {
