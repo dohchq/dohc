@@ -32,13 +32,13 @@ dohc-engine-storage = { path = "../dohc-engine-storage" }
 # read_with/write_with seams. Pinned to storage's exact rusqlite so the shared
 # Connection/Transaction types unify (the `bundled` SQLite comes from storage
 # via feature unification; this crate declares no features of its own).
-rusqlite = "0.37"
+rusqlite = "0.40"
 # The CRDT. Pinned to the exact spike version; every wire-facing Doc is built
 # with OffsetKind::Utf16 (binding constraint 1).
 yrs = "=0.27.3"
 # Content-addressing of markdown projections and provenance state vectors, and
 # the canonical-content fingerprint used by the convergence checks.
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 # Canonical content JSON (the semantic convergence surface shared with yjs, and
 # the frontmatter projection).
@@ -48,7 +48,7 @@ serde_json = "1"
 [dev-dependencies]
 dohc-test-scratch = { path = "../dohc-test-scratch" }
 # Decoding the base64 real-yjs fixture blobs in the cross-engine tests.
-base64 = "0.22"
+base64 = "0.23"
 # `MAX_TEXT_BYTES` — the largest document body the store accepts, which is what
 # `MAX_YDOC_UPDATE_BYTES` is measured against (#549). A dev-dependency on
 # purpose: the relationship is a checked fact in `ydoc_full_state_size.rs`, not

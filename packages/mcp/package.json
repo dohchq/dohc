@@ -16,12 +16,12 @@
     "@dohc/sqlite-worker": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/node": "^22.19.19",
-    "tsx": "^4.22.3",
+    "@types/node": "^24.13.3",
+    "tsx": "^4.23.11",
     "typescript": "^5.9.3",
     "vitest": "^2.1.9"
   }

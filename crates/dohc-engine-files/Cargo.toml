@@ -20,7 +20,7 @@ fault-injection = ["dohc-engine-storage/fault-injection"]
 dohc-engine-storage = { path = "../dohc-engine-storage" }
 # Streaming content hashing — same crate/version the storage slice content-
 # addresses with, so a scan hash and a stored blob hash are byte-identical.
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 # The actor command loop. The blocking scan/hash work stays on ONE dedicated
 # OS thread (never the async runtime); commands flow over tokio::sync channels
@@ -52,7 +52,7 @@ file-id = "0.2"
 # table was a `BTreeMap` and the two ports disagreed about which error a user's
 # agent reads first. `search_policy::js_property_order` puts the array-index half
 # of that rule back; document order is the half only the parser can supply.
-toml = { version = "0.9", features = ["preserve_order"] }
+toml = { version = "1.1", features = ["preserve_order"] }
 
 [target.'cfg(unix)'.dependencies]
 # Safe descriptor-relative filesystem operations. On Linux this also exposes
@@ -66,7 +66,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Drives the async FilesActor traces (cancellation + deadline through the tokio
 # loop). Also recomputes expected hashes via a second code path (non-tautology).
-sha2 = "0.10"
+sha2 = "0.11"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-test-scratch = { path = "../dohc-test-scratch" }

@@ -34,7 +34,7 @@ services:
       POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
     command: >
       sh -lc "corepack enable &&
-      corepack prepare pnpm@10.24.0 --activate &&
+      corepack prepare pnpm@11.20.0 --activate &&
       pnpm install --frozen-lockfile &&
       pnpm migrate"
     volumes:
@@ -58,7 +58,7 @@ services:
       WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://workspace-api:1786}
     command: >
       sh -lc "corepack enable &&
-      corepack prepare pnpm@10.24.0 --activate &&
+      corepack prepare pnpm@11.20.0 --activate &&
       pnpm install --frozen-lockfile &&
       pnpm --filter @dohc/workspace-api dev"
     ports:
@@ -84,7 +84,7 @@ services:
       SYNC_RELAY_DB_PATH: /data/sync-relay.sqlite
     command: >
       sh -lc "corepack enable &&
-      corepack prepare pnpm@10.24.0 --activate &&
+      corepack prepare pnpm@11.20.0 --activate &&
       pnpm install --frozen-lockfile &&
       pnpm --filter @dohc/sync-relay dev"
     ports:

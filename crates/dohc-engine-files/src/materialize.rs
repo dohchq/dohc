@@ -2045,7 +2045,7 @@ fn probe_delete_open(target: &Path) -> DeleteProbe {
 fn resolve_replace_exhaustion(
     err: std::io::Error,
     target: &Path,
-    reattempt: &mut dyn FnMut() -> std::io::Result<()>,
+    _reattempt: &mut dyn FnMut() -> std::io::Result<()>,
 ) -> Result<(), MaterializeError> {
     if matches!(err.raw_os_error(), Some(32) | Some(33)) {
         return Err(MaterializeError::FileLocked);
@@ -2055,7 +2055,7 @@ fn resolve_replace_exhaustion(
         match probe_delete_open(target) {
             DeleteProbe::Contended => return Err(MaterializeError::FileLocked),
             DeleteProbe::Opened => {
-                return match reattempt() {
+                return match _reattempt() {
                     Ok(()) => Ok(()),
                     Err(retry_err) if matches!(retry_err.raw_os_error(), Some(32) | Some(33)) => {
                         Err(MaterializeError::FileLocked)
@@ -2541,7 +2541,7 @@ mod tests {
         use std::os::fd::OwnedFd;
 
         let scratch = Scratch::new("secret-walk-nofollow");
-        let root = scratch.root.as_path();
+        let root = scratch.root.path();
         let real = root.join("real");
         std::fs::create_dir_all(real.join("nested")).expect("real tree");
         // `link` -> `real`, so walking `link/nested` must be refused at `link`.
@@ -2569,7 +2569,7 @@ mod tests {
     #[test]
     fn secret_parent_openat2_refuses_a_symlinked_component_directly() {
         let scratch = Scratch::new("secret-openat2-no-symlinks");
-        let root = scratch.root.as_path();
+        let root = scratch.root.path();
         let redirected_parent = root.join("real").join("nested");
         std::fs::create_dir_all(&redirected_parent).expect("real tree");
         let outside = Scratch::new("secret-openat2-outside");

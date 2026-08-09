@@ -44,7 +44,7 @@ libc = "0.2"
 dohc-test-scratch = { path = "../dohc-test-scratch" }
 # Base64 alphabet checks in tests only; production base64 is hand-rolled in
 # `base64.rs` to reproduce Node Buffer's forgiving-decode semantics exactly.
-base64 = "0.22"
+base64 = "0.23"
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

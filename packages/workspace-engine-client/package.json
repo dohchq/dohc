@@ -16,10 +16,10 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
-    "yjs": "^13.6.30"
+    "yjs": "13.6.30"
   },
   "devDependencies": {
-    "@types/node": "22.19.19",
+    "@types/node": "24.13.3",
     "typescript": "5.9.3",
     "vitest": "2.1.9"
   }

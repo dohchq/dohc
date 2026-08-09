@@ -219,7 +219,13 @@ fn is_secret_path(path: &str) -> bool {
 fn hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// (everTracked, secret byte length, head (content_kind, binary sha)).

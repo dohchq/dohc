@@ -3,7 +3,7 @@
 ## Requirements
 
 - Node `24.14.0` through `.node-version` or `.nvmrc`.
-- pnpm `10.24.0`.
+- pnpm `11.20.0`.
 - The Rust toolchain in `rust-toolchain.toml`.
 - Docker only for the opt-in sync stack.
 

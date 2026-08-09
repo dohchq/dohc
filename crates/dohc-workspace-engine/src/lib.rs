@@ -2371,7 +2371,13 @@ impl EngineService {
             digest.update((field.len() as u64).to_le_bytes());
             digest.update(field);
         }
-        format!("{prefix}-{:x}", digest.finalize())
+        let digest = digest.finalize();
+        let mut hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+        }
+        format!("{prefix}-{hex}")
     }
 
     /// Acquire the ordering guard shared with `ydoc.open` before probing a
