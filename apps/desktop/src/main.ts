@@ -2,6 +2,7 @@ import {
   defaultWorkspaceRoot,
   isSharedWithMePath,
   normalizeAbsolutePath,
+  validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
 import {
@@ -3580,7 +3581,18 @@ function registerIpcHandlers(
       const result = await deletePath(workspace.rootPath, input.relativePath, (p) =>
         shell.trashItem(p),
       );
-      notifyEngineYDocSessionsDeleted(workspace.workspaceId, input.relativePath);
+      // `deletePath` matches its own disk target against the CANONICAL form
+      // `validateUserWritePath` normalizes to (a trailing slash stripped, for
+      // example) — but the schema for this payload does not enforce that
+      // normalization, so a raw "notes/" would otherwise widen its own
+      // prefix match to "notes//" and miss every live session under it.
+      const validatedDeletePath = validateUserWritePath(input.relativePath);
+      notifyEngineYDocSessionsDeleted(
+        workspace.workspaceId,
+        validatedDeletePath.ok
+          ? validatedDeletePath.normalized
+          : input.relativePath,
+      );
       finishDebts?.(true);
       return DeleteWorkspacePathResult.parse(result);
     } catch (error) {

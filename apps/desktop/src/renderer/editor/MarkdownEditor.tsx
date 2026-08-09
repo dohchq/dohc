@@ -675,7 +675,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     );
 
     useEffect(() => {
-      editor?.setEditable(!readOnly);
+      // Tiptap 3's setEditable defaults emitUpdate to true — an editability
+      // flip alone must not run the update pipeline (dirty tracking, save
+      // scheduling) in non-collab mode; nothing about the document changed.
+      editor?.setEditable(!readOnly, false);
     }, [editor, readOnly]);
 
     useEffect(() => {

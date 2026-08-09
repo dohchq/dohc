@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
-import { resetOrphanedDrafts } from "../orphanedDrafts";
+import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
 import { useEngineDoc } from "./useEngineDoc";
 
 // `useEngineDoc` backs every FileInspector. `@dohc/ydoc-projection`
@@ -19,29 +19,46 @@ import { useEngineDoc } from "./useEngineDoc";
 // chain from useEngineDoc.ts down to the projection module would already
 // have run the factory below before any `it()` executes.
 let projectionLoads = 0;
+// A held gate: while armed, the mocked import does not resolve until the
+// test releases it — the only way to prove what is durable BEFORE the
+// projection module answers, not just eventually.
+let projectionGate: { promise: Promise<void>; release: () => void } | null =
+  null;
 vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
   projectionLoads += 1;
+  if (projectionGate) await projectionGate.promise;
   return importOriginal();
 });
+
+function armProjectionGate(): () => void {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  projectionGate = { promise, release };
+  return release;
+}
 
 afterEach(cleanup);
 
 type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 
-function harnessBridge() {
+function harnessBridge(initialUpdate?: Uint8Array) {
   const saveStateListeners = new Set<SaveStateListener>();
+  const applied: Array<{ sessionId: string; seq: number }> = [];
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
   doc.getMap("meta").set("contentKind", "plain-text");
   doc.getText("plainText").insert(0, "seed");
+  const seedUpdate = initialUpdate ?? Y.encodeStateAsUpdate(doc);
 
   const api = {
     async openEngineYDocSession(payload: { sessionId: string }) {
       openedSessionId = payload.sessionId;
-      return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) };
+      return { available: true, initialUpdate: seedUpdate };
     },
-    async applyEngineYDocUpdate() {
-      return undefined;
+    async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
+      applied.push({ sessionId: payload.sessionId, seq: payload.seq });
     },
     onEngineYDocRemoteUpdate: () => () => undefined,
     onEngineYDocSaveState: (listener: SaveStateListener) => {
@@ -53,8 +70,20 @@ function harnessBridge() {
     },
   };
 
+  function emitNow(
+    state: "settling" | "saved" | "error" | "file-locked" | "deleted",
+    seq: number,
+  ): void {
+    if (openedSessionId === null) throw new Error("session not open yet");
+    for (const listener of [...saveStateListeners]) {
+      listener({ sessionId: openedSessionId, state, seq });
+    }
+  }
+
   return {
     api,
+    applied,
+    emitNow,
     sessionId: () => openedSessionId,
   };
 }
@@ -65,9 +94,22 @@ function Harness(props: { workspaceId: string; path: string }) {
     path: props.path,
     enabled: true,
   });
+  const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   return (
     <div>
       <span data-testid="available">{String(engine.available)}</span>
+      <span data-testid="draft">{drafts.at(-1)?.text ?? "none"}</span>
+      <span data-testid="draft-count">{drafts.length}</span>
+      <button
+        type="button"
+        data-testid="type"
+        onClick={() => {
+          const text = engine.doc?.getText("plainText");
+          text?.insert(text.length, "!");
+        }}
+      >
+        type
+      </button>
     </div>
   );
 }
@@ -76,6 +118,7 @@ let harness: ReturnType<typeof harnessBridge>;
 
 beforeEach(() => {
   harness = harnessBridge();
+  projectionGate = null;
   vi.stubGlobal("dohcDesktop", harness.api);
   resetOrphanedDrafts();
 });
@@ -83,6 +126,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   resetOrphanedDrafts();
+  projectionGate = null;
 });
 
 it("does not load the Tiptap projection module merely by importing useEngineDoc", () => {
@@ -94,8 +138,61 @@ it("does not load the Tiptap projection module merely by importing useEngineDoc"
   expect(projectionLoads).toBe(0);
 });
 
+// A rich-text doc, so the crude walk (raw text, no markdown syntax) and the
+// faithful projection (real heading syntax) visibly differ — the only way to
+// prove an upgrade happened rather than the same value read twice.
+function richTextInitialUpdate(): Uint8Array {
+  const doc = new Y.Doc();
+  const frag = doc.getXmlFragment("body");
+  const heading = new Y.XmlElement("heading");
+  heading.setAttribute("level", "1");
+  const text = new Y.XmlText();
+  text.insert(0, "My Heading");
+  heading.insert(0, [text]);
+  frag.insert(0, [heading]);
+  return Y.encodeStateAsUpdate(doc);
+}
+
+// MUST run before any test that lets a real projection load complete:
+// `useEngineDoc.ts`'s own `loadProjectionModule` caches the promise at
+// module scope, for the lifetime of this whole test FILE — once resolved by
+// an earlier test, a later "held" gate has nothing left to hold.
+it("persists a crude-text draft synchronously, before the held projection import resolves", async () => {
+  // #697 Codex P1: while the projection chunk is loading, the deletion
+  // snapshot must not exist ONLY in the queue's promise closure — a
+  // renderer close/reload/crash in that window would lose the text, with
+  // the file already deleted and no draft for the recovery close guard to
+  // find. Hold the import so the faithful path can never complete inside
+  // this test, and prove the crude path already persisted regardless.
+  const release = armProjectionGate();
+  harness = harnessBridge(richTextInitialUpdate());
+  vi.stubGlobal("dohcDesktop", harness.api);
+
+  render(<Harness workspaceId="ws-1" path="notes/rich.md" />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  harness.emitNow("deleted", 0);
+
+  // MUTATION: skip the synchronous captureOrphanedDraft call in
+  // captureDeletion -> this reads "none" because nothing is durable yet;
+  // the only route to a draft would be the still-held projection import.
+  await waitFor(() =>
+    expect(screen.getByTestId("draft-count").textContent).toBe("1"),
+  );
+  expect(screen.getByTestId("draft").textContent).toBe("My Heading");
+
+  release();
+  await waitFor(() =>
+    expect(screen.getByTestId("draft").textContent).toBe("# My Heading"),
+  );
+  // Upgraded in place, not appended: still exactly one row for this path.
+  expect(screen.getByTestId("draft-count").textContent).toBe("1");
+});
+
 it("preloads the projection module once a session binds, but not before", async () => {
-  expect(projectionLoads).toBe(0);
   render(<Harness workspaceId="ws-1" path="notes/big.md" />);
   await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
   // The bind fires the preload fire-and-forget; give its microtask a turn.

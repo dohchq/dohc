@@ -21,6 +21,15 @@ import * as Y from "yjs";
 // (initial state, forwarded remote deltas). The local-edit observer ignores it.
 const ENGINE_SOURCED_ORIGIN: unique symbol = Symbol("dohc.engineSourcedUpdate");
 
+// One name for one concept, shared by the transport's open answer and the
+// binding it produces (and re-exported from useEngineDoc.ts) — three inline
+// copies of the same shape could drift silently if a third operation joins
+// delete/move.
+export type EngineRemovalInProgress = {
+  operation: "delete" | "move";
+  message: string;
+};
+
 export interface EngineYDocTransport {
   // Open the engine session in main. available:false => not an engine-backed
   // doc (unflagged workspace, secret path, or already live) — the caller falls
@@ -37,10 +46,7 @@ export interface EngineYDocTransport {
     engineMayHoldDocument?: boolean;
     // A destructive operation owns this path for an interval. Falling back to
     // the plain editor would let its autosave race that operation.
-    removalInProgress?: {
-      operation: "delete" | "move";
-      message: string;
-    };
+    removalInProgress?: EngineRemovalInProgress;
   }>;
   // Ship a local editor update to main, where it is journaled via recordUpdate.
   applyLocalUpdate(update: Uint8Array): void;
@@ -65,10 +71,7 @@ export interface EngineYDocBinding {
   readonly engineMayHoldDocument: boolean;
   // A delete or move owns the path for an interval. The caller keeps the
   // document read-only and offers a fresh open after the interval ends.
-  readonly removalInProgress: {
-    operation: "delete" | "move";
-    message: string;
-  } | null;
+  readonly removalInProgress: EngineRemovalInProgress | null;
   // Tear down: stop shipping edits, unsubscribe, close the engine session, and
   // destroy the mirror doc. Idempotent.
   destroy(): Promise<void>;

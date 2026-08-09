@@ -8,9 +8,12 @@ import {
 } from "../orphanedDrafts";
 import {
   bindEngineYDoc,
+  type EngineRemovalInProgress,
   type EngineYDocBinding,
   type EngineYDocTransport,
 } from "./engineYDocProvider";
+
+export type { EngineRemovalInProgress };
 
 // `@dohc/ydoc-projection` statically pulls in the full Tiptap stack and
 // builds its schema at module load. `useEngineDoc` backs every FileInspector,
@@ -21,7 +24,15 @@ type ProjectionModule = typeof import("@dohc/ydoc-projection");
 let projectionModulePromise: Promise<ProjectionModule> | null = null;
 function loadProjectionModule(): Promise<ProjectionModule> {
   if (projectionModulePromise === null) {
-    projectionModulePromise = import("@dohc/ydoc-projection");
+    // A rejected import must not be cached: a transient chunk-fetch failure
+    // (a bundle replaced mid-session by an update, for example) would
+    // otherwise fail every later deletion's faithful capture for the rest of
+    // the session. Clearing on rejection lets the next deletion retry.
+    const pending = import("@dohc/ydoc-projection");
+    projectionModulePromise = pending;
+    void pending.catch(() => {
+      if (projectionModulePromise === pending) projectionModulePromise = null;
+    });
   }
   return projectionModulePromise;
 }
@@ -36,6 +47,46 @@ function markdownFromSnapshot(snapshot: Uint8Array): Promise<string> {
     Y.applyUpdate(rebuilt, snapshot);
     return yDocToMarkdown(rebuilt);
   });
+}
+
+// The crude fallback the deletion boundary persists BEFORE the projection
+// module is even guaranteed to load — pure yjs, no Tiptap, so it never waits
+// on the chunk this whole lazy-load exists to defer. Faithful markdown
+// (frontmatter ordering, table/list formatting, escaping) replaces this the
+// moment `markdownFromSnapshot` resolves; this only has to outlast a crash.
+function crudeMarkdownFromDoc(doc: Y.Doc): string {
+  const meta = doc.getMap("meta");
+  if (meta.get("contentKind") === "plain-text") {
+    return doc.getText("plainText").toString();
+  }
+  const frontmatter = doc.getMap("frontmatter");
+  const frontmatterLines: string[] = [];
+  for (const [key, value] of frontmatter.entries()) {
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      frontmatterLines.push(`${key}: ${String(value)}`);
+    }
+  }
+  const frontmatterText =
+    frontmatterLines.length > 0
+      ? `---\n${frontmatterLines.join("\n")}\n---\n\n`
+      : "";
+  const blockText = (node: Y.XmlText | Y.XmlElement | Y.XmlHook): string => {
+    if (node instanceof Y.XmlText) return node.toString();
+    if (node instanceof Y.XmlElement) {
+      return node.toArray().map(blockText).join("");
+    }
+    return "";
+  };
+  const blocks = doc
+    .getXmlFragment("body")
+    .toArray()
+    .map(blockText)
+    .filter((text) => text.length > 0);
+  return frontmatterText + blocks.join("\n\n");
 }
 
 function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -84,11 +135,6 @@ export type EngineDocSaveState =
   | "read-only"
   | "changed-on-disk"
   | "deleted";
-
-export type EngineRemovalInProgress = {
-  operation: "delete" | "move";
-  message: string;
-};
 
 export type UseEngineDoc = {
   // True once the engine session is open and the mirror doc is bound. false =>
@@ -372,7 +418,20 @@ export function useEngineDoc(input: {
       const bytes = Y.encodeStateAsUpdate(doc);
       deletionSnapshotBytes = bytes;
       const forceCreate = saveStateRef.current !== "saved";
-      setDeletion({ token, draftId: null });
+      if (forceCreate) {
+        // Persisted NOW, before the projection module is even guaranteed to
+        // load: a renderer close/reload/crash while that import is still in
+        // flight must not lose text that exists only in this queue's promise
+        // closure, with the file already gone and no draft for the recovery
+        // close guard to find. The queue below upgrades this row to the
+        // faithful markdown a microtask later; it never creates a second one.
+        deletionDraftId = captureOrphanedDraft(
+          workspaceId,
+          path,
+          crudeMarkdownFromDoc(doc),
+        );
+      }
+      setDeletion({ token, draftId: deletionDraftId });
       reportSaveState("deleted");
       enqueueDeletionSnapshot(bytes, forceCreate);
     };
