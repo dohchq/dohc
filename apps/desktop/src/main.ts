@@ -1534,8 +1534,10 @@ async function runSharedChannelSyncPass(
   workspaceId: string,
   priorityChannelWireId?: string,
 ): Promise<number> {
-  // Live rows this pass is responsible for. A pass that dies before finishing
-  // refreshed none of them, and must say so rather than report a clean sweep.
+  // Live rows this pass is responsible for. A pass that dies before finishing —
+  // or never starts, because the account is signed out — refreshed none of them,
+  // and must say so rather than report a clean sweep. Seeded before the
+  // credential work so a rejection there still knows the count.
   let liveRows = 0;
   try {
     const entry = findWorkspace(workspaceId);
@@ -1548,14 +1550,19 @@ async function runSharedChannelSyncPass(
       reportSharedChannelPassCoveredEverything(workspaceId);
       return 0;
     }
+    liveRows = channels.length;
     await warmCredentialCache();
     const syncCredentials = cachedCredentials;
-    if (!syncCredentials?.relayUrl) return 0;
+    // Signed out, or signed in to a server this workspace does not sync with:
+    // the rows are joined and none of them got refreshed.
+    if (!syncCredentials?.relayUrl) return liveRows;
     const relayUrl = syncCredentials.relayUrl;
     // A joined channel syncs only for the relay account that joined it.
     const matching = channels.filter((channel) =>
       joinedChannelMatchesCredentials(channel, syncCredentials),
     );
+    // No row belongs to this account's relay, so no row is in this pass's remit
+    // — nothing was left behind by a bound, and nothing can be.
     if (matching.length === 0) {
       reportSharedChannelPassCoveredEverything(workspaceId);
       return 0;

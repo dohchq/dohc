@@ -124,6 +124,25 @@ describe("the shared-channel sync pass is bounded in production", () => {
     );
   });
 
+  // Signed out, a workspace with joined rows refreshed none of them — but the
+  // count was seeded after the credential work, so that exit reported a clean
+  // sweep and the snapshot read as fully fresh. The count is seeded from the
+  // ended-filtered rows BEFORE any credential work, so a rejection there knows
+  // it too.
+  it("reports every joined row when the account cannot sync them", () => {
+    const seed = passSource.indexOf("liveRows = channels.length;");
+    const credentials = passSource.indexOf("await warmCredentialCache();");
+    expect(seed).toBeGreaterThan(-1);
+    expect(seed).toBeLessThan(credentials);
+    expect(passSource).toContain(
+      "if (!syncCredentials?.relayUrl) return liveRows;",
+    );
+    // A workspace with no rows at all still claims nothing.
+    expect(passSource).toContain(
+      "if (!entry || channels.length === 0) {\n      reportSharedChannelPassCoveredEverything(workspaceId);\n      return 0;\n    }",
+    );
+  });
+
   // A pass that reached its rows and refreshed none of them (offline) reported
   // a clean sweep, and every snapshot built on it read as fully fresh.
   it("reports rows a pass failed to refresh, and everything when a pass dies", () => {
