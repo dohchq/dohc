@@ -18,7 +18,6 @@ export default defineConfig({
     // so the suite can no longer go red without naming a test (#635).
     setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
     maxWorkers: WORKER_CAP,
-    minWorkers: 1,
     // Without this vitest stubs every *.css import to "" — including the
     // `styles.css?raw` source text tokens.test.ts parses for the
     // tokens.ts ⟷ styles.css sync guard.
@@ -28,9 +27,6 @@ export default defineConfig({
     // provided without a valid path") and shadows jsdom's real Storage, so
     // renderer tests using localStorage (theme.test.ts) fail. Disable node's
     // copy in the test workers; jsdom's localStorage takes over.
-    poolOptions: {
-      forks: { execArgv: ["--no-experimental-webstorage"] },
-      threads: { execArgv: ["--no-experimental-webstorage"] },
-    },
+    execArgv: ["--no-experimental-webstorage"],
   },
 });

@@ -11,6 +11,7 @@ import {
   type SetStateAction,
 } from "react";
 import { Extension, type Editor } from "@tiptap/core";
+import { serializeRichdocBody } from "@dohc/ydoc-projection";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -37,7 +38,7 @@ import {
   escapeHighlightMarkdown,
   type DohcImageStorage,
 } from "./extensions";
-import { FenceWideningCodeBlock } from "./import-export";
+import { FenceWideningCodeBlock, getDohcYDocSelectionSeed } from "./import-export";
 import type { ImageSrcContext } from "./imageSrc";
 import {
   handleImageDrop,
@@ -612,11 +613,31 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     );
 
     const collabActive = Boolean(collab?.ydoc && collaborationExtensions);
+    // Recomputed on the SAME deps as useEditor's own rebuild trigger below
+    // ([extensions, collabActive]), not just [collab?.ydoc]: extensions
+    // changes (and useEditor tears down and rebuilds the editor) whenever
+    // awareness is added, removed, or swapped — a stale seed keyed on ydoc
+    // identity alone would reseed the rebuild from the doc's shape at MOUNT
+    // time, recreating the invalid-selection bug on a doc whose leading
+    // structure has since changed to a taskList.
+    const collabInitialContent = useMemo(
+      () => (collab?.ydoc ? getDohcYDocSelectionSeed(collab.ydoc) : undefined),
+      [collab?.ydoc, extensions, collabActive],
+    );
 
     const editor = useEditor(
       {
         extensions,
-        content: collabActive ? undefined : value,
+        // y-tiptap preserves the initial numeric selection without finding a
+        // valid text cursor. This structural seed (first-node path only, not
+        // the full body) puts Selection.atStart at the same inline depth as
+        // the bound document, so the selection y-tiptap restores after sync
+        // still resolves into inline content there too — trimmed to one path
+        // rather than the whole document so mounting doesn't build the full
+        // DOM twice per open (once for the seed, once for the synced body).
+        // undefined (empty/frontmatter-only body) falls back to the normal
+        // empty-doc path below, same as non-collab mounts.
+        content: collabActive ? collabInitialContent : value,
         contentType: collabActive ? undefined : "markdown",
         // Register the image node view's per-editor context BEFORE the
         // ProseMirror view is built (createView reads the extension's storage),
@@ -808,7 +829,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     useEffect(() => {
       if (!editor || collabActive || !pendingUndo) return;
       if (appliedPendingUndoToken.current === pendingUndo.token) return;
-      const current = editor.getMarkdown();
+      const current = serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON()));
       if (current !== pendingUndo.restoredText) {
         onPendingUndoConsumed?.(pendingUndo.token);
         return;
@@ -878,14 +899,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           editor?.commands.focus(position);
         },
         getMarkdown() {
-          // `editor.markdown` is @tiptap/markdown's documented public accessor
-          // for the MarkdownManager (it's the same instance as the internal
-          // `editor.storage.markdown.manager`, just the stable surface).
-          if (!editor?.markdown) return value;
+          if (!editor) return value;
           // Escape literal `==` inside highlight marks before serializing so a
           // WYSIWYG highlight over text containing `==` saves as an unambiguous,
           // losslessly reversible `==a\=\=b==` (matches import-export.ts).
-          return editor.markdown.serialize(escapeHighlightMarkdown(editor.getJSON()));
+          return serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON()));
         },
       }),
       [editor, value],

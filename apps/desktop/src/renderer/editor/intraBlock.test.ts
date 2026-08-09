@@ -104,18 +104,21 @@ describe("a match deep in a long block lands the matched line", () => {
   });
 
   it("rejects a same-count list whose matched child holds different text", () => {
-    const body = "1. x\n- a\n```\n1. x";
-    const doc = editorDoc(body);
-    const list = doc.child(0);
-    expect(blockTargetForLine(body, 2)).toEqual({
+    const body = "1. x\n2. a";
+    const target = blockTargetForLine(body, 2);
+    const list = editorDoc("1. x\n2. b").child(0);
+    expect(target).toEqual({
       index: 0,
-      match: { lines: ["1. x", "- a"], offset: 1 },
+      match: { lines: ["1. x", "2. a"], offset: 1 },
     });
     expect(list.type.name).toBe("orderedList");
     expect(list.childCount).toBe(2);
-    expect(list.child(0).textContent).toBe("xa");
-    expect(list.child(1).textContent).toBe("x");
-    expect(revealed(body, 2)).toBeNull();
+    expect(list.child(1).textContent).toBe("b");
+    expect(
+      intraBlockRange(list, 0, target.match!, (source) =>
+        editorDoc(source).textContent,
+      ),
+    ).toBeNull();
   });
 
   it("lands the item above a blank line inside the list", () => {

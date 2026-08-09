@@ -8,9 +8,9 @@ import {
 import type { JoinedChannelAnswer } from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 
-// MU-C4 shared channels — the desktop's refresh pass over every shared
-// channel a workspace has JOINED: push the member's locally-authored channel
-// ops through the share's member-append route, then pull everyone else's.
+// MU-C4 shared channels — the desktop's refresh pass over a bounded window of
+// the shared channels a workspace has JOINED: push the member's locally-authored
+// channel ops through the share's member-append route, then pull everyone else's.
 // Best-effort by design: one failing share never blocks the others (or the
 // workspace's own sync pass), and a revoked share is reported as ENDED so the
 // caller can mark it in the registry — the local copy stays readable, it just
@@ -109,16 +109,33 @@ export function scopeJoinedChannels(
 // that refused a join could not stop the relay granting one either — it could
 // only make the user's own channel unreachable, which is how the same cap
 // produced three permanent-refusal defects in one review cycle.
+//
+// The replacement happens IN PLACE. A re-granted channel is the same channel,
+// and the sync rotation reads its position from this array — appending it would
+// move it to the end, which strands every row the rotation had not reached yet
+// (#718). Only a channel this workspace has never joined is appended.
 export function mergeJoinedChannel(
   existing: readonly JoinedSharedChannel[],
   joined: JoinedSharedChannel,
 ): JoinedSharedChannel[] {
-  const kept = existing.filter(
-    (channel) =>
+  const merged: JoinedSharedChannel[] = [];
+  let replaced = false;
+  for (const channel of existing) {
+    if (
       channel.shareId !== joined.shareId &&
-      channel.channelWireId !== joined.channelWireId,
-  );
-  return [...kept, joined];
+      channel.channelWireId !== joined.channelWireId
+    ) {
+      merged.push(channel);
+      continue;
+    }
+    // A second stale row for the same channel (one matched by share, one by
+    // wire) collapses into the first: one channel, one row.
+    if (replaced) continue;
+    replaced = true;
+    merged.push(joined);
+  }
+  if (!replaced) merged.push(joined);
+  return merged;
 }
 
 // Member leave stops sync but keeps a durable provenance tombstone. The local
@@ -197,6 +214,47 @@ export async function assertSharedChannelWritable(
   }
 }
 
+// How many live joined rows one pass covers (#718). listChatChannels awaits the
+// pass, and the pass is sequential whatever it does: EngineRelayClient chains
+// every relay RPC for a workspace (engineRelayClient.ts:591, 1020-1037), so
+// running the rows concurrently could not overlap a round trip.
+//
+// Its cost is therefore rows x requests. Each request already had a bound — a
+// 15 s fetch timeout and a 30 s daemon deadline — and a row costs one pull, or a
+// push plus a paged pull at 500 ops a page (sync-relay/src/server.ts:87,
+// dohc-engine-sync/src/model.rs:7). Rows were the only unbounded multiplier.
+// Sixteen caps a pass near 32 requests: what the pass already spends on ONE
+// channel carrying an 8,000-op backlog. A pass that a write triggered adds that
+// one share on top, so the true ceiling is 17 rows.
+export const SHARED_CHANNEL_SYNC_PASS_ROWS = 16;
+
+// A pass that left rows behind must say so, naming the constraint, the limit,
+// the unit, and what it covered. The DM poll runs every 5 s, so the notice
+// repeats only when the remainder changes.
+export function createPassCoverageReporter(
+  report: (message: string) => void,
+): (input: {
+  workspaceId: string;
+  live: number;
+  uncovered: number;
+  passRows: number;
+}) => void {
+  const reported = new Map<string, number>();
+  return ({ workspaceId, live, uncovered, passRows }) => {
+    if (uncovered <= 0) {
+      reported.delete(workspaceId);
+      return;
+    }
+    if (reported.get(workspaceId) === uncovered) return;
+    reported.set(workspaceId, uncovered);
+    report(
+      `[desktop] shared channel sync covered ${live - uncovered} of ${live} joined channels this pass ` +
+        `(limit SHARED_CHANNEL_SYNC_PASS_ROWS=${passRows} rotation rows/pass, plus 1 row for a channel ` +
+        `a write named); ${uncovered} resume on the next pass.`,
+    );
+  };
+}
+
 export interface SyncJoinedSharedChannelsResult {
   // Shares whose relay view closed (revoked / gone): mark ended, stop syncing.
   endedShareIds: string[];
@@ -205,13 +263,35 @@ export interface SyncJoinedSharedChannelsResult {
   readOnlyShareIds: string[];
   // True when any pull applied new ops — the caller should refresh the UI.
   changed: boolean;
+  // Live rows the rotation did not reach this pass.
+  uncovered: number;
+  // Rows the pass DID reach and could not refresh (offline, relay hiccup).
+  // They stay in the rotation — a failure must not stall the window — but they
+  // are not fresh, so a caller reporting freshness must count them too.
+  failedRows: number;
+  // The channel the rotation stopped on, or null when the pass covered no live
+  // row. A CHANNEL, not a grant: a share id dies with its grant, and a revoked
+  // and re-granted channel would lose the rotation's place with it.
+  resumeAfterChannelWireId: string | null;
 }
 
 export async function syncJoinedSharedChannels(input: {
   rootDir: string;
   workspaceId: string;
   relay: SyncRelayConnection;
+  // The rows this pass may sync: live, and syncable by the current account.
   channels: readonly JoinedSharedChannel[];
+  // Every row the workspace has ever joined, in registry order, tombstones
+  // included. This fixes the rotation's positions; `channels` is the work set.
+  // The two are separate because a row can leave the work set — revoked, or
+  // joined under another account — while the rotation still needs its place.
+  registryOrder: readonly JoinedSharedChannel[];
+  passRows: number;
+  resumeAfterChannelWireId?: string;
+  // The CHANNEL whose write triggered this pass. Always covered, and covered in
+  // ADDITION to the rotation's rows. A channel, not a grant: the pass may wait
+  // in a queue, and a revoke plus re-grant replaces the share id while it does.
+  priorityChannelWireId?: string;
   // Required factory-selected operations prevent a rooted sync pass from
   // silently falling back to the legacy TypeScript relay client.
   pull: (input: {
@@ -233,8 +313,57 @@ export async function syncJoinedSharedChannels(input: {
   const endedShareIds: string[] = [];
   const readOnlyShareIds: string[] = [];
   let changed = false;
-  for (const channel of input.channels) {
-    if (channel.ended) continue;
+  let failedRows = 0;
+  // The window rotates: this pass resumes after the row the last one stopped on
+  // and wraps, so freshness decays evenly instead of the pass growing with the
+  // registry. Above the window, every row is reached within
+  // ceil(live / passRows) passes, and the caller is told how many it did not
+  // reach — a partial pass never reads as a full refresh.
+  const live = input.channels.filter((channel) => channel.ended !== true);
+  // Rotation positions come from the registry, so a row that left the work set
+  // between passes keeps its place. Resolving the cursor inside the work set
+  // loses that place the moment the cursor's own channel is revoked, and the
+  // next pass restarts at the front, re-covering the prefix it just did.
+  const registryPosition = new Map(
+    input.registryOrder.map(
+      (channel, index) => [channel.channelWireId, index] as const,
+    ),
+  );
+  const cursorPosition = input.resumeAfterChannelWireId
+    ? (registryPosition.get(input.resumeAfterChannelWireId) ?? -1)
+    : -1;
+  const afterCursor =
+    cursorPosition < 0
+      ? -1
+      : live.findIndex(
+          (channel) =>
+            (registryPosition.get(channel.channelWireId) ?? -1) > cursorPosition,
+        );
+  const startIndex = afterCursor < 0 ? 0 : afterCursor;
+  // The rotation always gets the whole window. A write's own share is EXTRA
+  // work — it has to go out now, and charging it a rotation slot would make the
+  // coverage promise depend on write traffic: repeated writes to one channel
+  // would starve the tail of the registry forever. So a pass costs at most
+  // passRows + 1 rows, and ceil(live / passRows) holds whatever the writes do.
+  const rotationBudget = Math.min(Math.max(input.passRows, 0), live.length);
+  const priority = input.priorityChannelWireId
+    ? (live.find(
+        (channel) => channel.channelWireId === input.priorityChannelWireId,
+      ) ?? null)
+    : null;
+  const rotation: JoinedSharedChannel[] = [];
+  for (let offset = 0; rotation.length < rotationBudget && offset < live.length; offset += 1) {
+    const channel = live[(startIndex + offset) % live.length]!;
+    if (channel.channelWireId === priority?.channelWireId) continue;
+    rotation.push(channel);
+  }
+  const covered = priority ? [priority, ...rotation] : rotation;
+  const uncovered = live.length - covered.length;
+  // The cursor follows the ROTATION only. A priority row is covered out of
+  // order, so letting it move the cursor would skip whatever it jumped over.
+  const resumeAfterChannelWireId =
+    rotation.at(-1)?.channelWireId ?? input.resumeAfterChannelWireId ?? null;
+  for (const channel of covered) {
     const target = {
       rootDir: input.rootDir,
       workspaceId: input.workspaceId,
@@ -262,12 +391,21 @@ export async function syncJoinedSharedChannels(input: {
         continue;
       }
       // Transient failures (offline, relay hiccup) are logged and retried on
-      // the next pass; they must not fail the workspace's own sync.
+      // the next pass; they must not fail the workspace's own sync. The row
+      // keeps its place in the rotation and is reported as unrefreshed.
+      failedRows += 1;
       console.error(
         `[desktop] shared channel sync failed (share ${channel.shareId}):`,
         error,
       );
     }
   }
-  return { endedShareIds, readOnlyShareIds, changed };
+  return {
+    endedShareIds,
+    readOnlyShareIds,
+    changed,
+    uncovered,
+    failedRows,
+    resumeAfterChannelWireId,
+  };
 }

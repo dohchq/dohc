@@ -264,8 +264,8 @@ describe("main-process chat authorization", () => {
       // removed under landed data is a channel that reads as locally owned
       // and writable — the reservation's own defect, through the cleanup
       // path. The row is the write gate: it may never be absent while channel
-      // data exists locally. syncJoinedSharedChannels finishes or ends the
-      // row on a later pass, so the held slot is temporary.
+      // data exists locally. Rotating syncJoinedSharedChannels passes finish
+      // or end the row later, so the held slot is temporary.
       const afterPull = source.slice(pullAt);
       expect(afterPull, label).not.toContain("releaseJoinedSharedChannel(");
       expect(afterPull, label).not.toContain("sharedChannels.filter(");
@@ -299,13 +299,12 @@ describe("main-process chat authorization", () => {
 
   // Reserving the row before the pull makes it VISIBLE to any sync pass that
   // starts meanwhile — a relay cadence, listChatChannels, a syncDms refresh —
-  // and that pass pulls every live row. Without the shared serializer two
-  // pulls of the same share run concurrently and race the per-share cursor and
-  // peer updates the serializer exists to protect. Both join paths run outside
-  // a pass, so this queues rather than deadlocking.
+  // and a rotating pass can pull the same row. Without the shared serializer,
+  // two pulls of the same share race the per-share cursor and peer updates.
+  // Both join paths run outside a pass, so this queues rather than deadlocking.
   it("runs each join's first pull under the same per-workspace serializer as the sync pass", () => {
     expect(mainSource).toContain(
-      "return serializeSharedChannelSync(workspaceId, () =>\n    runSharedChannelSyncPass(workspaceId),",
+      "return serializeSharedChannelSync(workspaceId, () =>\n    runSharedChannelSyncPass(workspaceId, priorityChannelWireId),",
     );
 
     const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");

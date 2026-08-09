@@ -23,10 +23,9 @@
 //    content column, and the next chunk of an indented code block. A list's
 //    identity is its marker, its kind, AND whether its items carry checkboxes
 //    — a checklist is a different node from a bullet list, and inverts this
-//    rule: a blank line SPLITS one. Any of the three changing starts a new
-//    list, except under a `.`-ordered list, which absorbs whatever list line
-//    follows it and takes a continuation at any indent. That leniency is the
-//    tokenizer's, measured; `1)` behaves like a bullet instead.
+//    rule: a blank line SPLITS one. Ordered delimiters share an identity, and
+//    ordered items accept any indented continuation. A bullet or task item
+//    still starts a new list.
 //  - A quote absorbs an UNQUOTED line as a lazy continuation until something
 //    ends that. Inside it: a quoted blank or a quoted fence for any quote, and
 //    for a callout every quoted block start. On the unquoted line itself: a
@@ -206,7 +205,8 @@ function definitionEnd(lines: string[], start: number): number | null {
 }
 
 function listMarker(text: string): string {
-  return (BULLET_RE.exec(text)?.[1] ?? ORDERED_RE.exec(text)?.[1]) ?? "";
+  if (ORDERED_RE.test(text)) return "ordered";
+  return BULLET_RE.exec(text)?.[1] ?? "";
 }
 
 /** The column reached after `end` characters of `text`, counting a tab as the
@@ -228,13 +228,12 @@ export function leadingColumns(text: string): number {
 }
 
 /** The column a continuation line must reach to stay inside this list item.
- *  Measured against the tokenizer rather than derived: a bullet or a
- *  `)`-ordered item wants its content column, while a `.`-ordered item takes
- *  any indent at all. */
+ *  Measured against the tokenizer rather than derived: an ordered item takes
+ *  any indent, while a bullet or task item wants its content column. */
 function continuationIndent(text: string): number {
   const match = LIST_MARKER_RE.exec(text);
   if (!match) return 1;
-  if (listMarker(text) === ".") return 1;
+  if (ORDERED_RE.test(text)) return 1;
   const spaces = /^[ \t]*/.exec(text.slice(match[0].length))?.[0] ?? "";
   return columnAt(text, match[0].length + spaces.length);
 }
@@ -450,14 +449,12 @@ export function blockForLine(body: string, line: number): LineBlock {
           kind === "quote" ||
           kind === "table" ||
           (kind === "ordered" && INTERRUPTING_ORDERED_RE.test(text)))) ||
-      // What ends an open LIST with no blank line: a quote, and a list whose
-      // marker or kind has changed. Not a `.`-ordered list, which absorbs
-      // whatever follows it — the same leniency that gives it a one-column
-      // continuation indent.
+      // What ends an open LIST with no blank line: a list whose marker or kind
+      // has changed, and a quote under a bullet or task list. The ordered-list
+      // tokenizer keeps a quote inside its current item.
       (open &&
         listOpen &&
-        openMarker !== "." &&
-        (kind === "quote" ||
+        ((kind === "quote" && openKind !== "ordered") ||
           ((kind === "bullet" || kind === "task" || kind === "ordered") &&
             (kind !== openKind || marker !== openMarker)))) ||
       // An UNQUOTED line under a lazily-continuing quote. This is not the
