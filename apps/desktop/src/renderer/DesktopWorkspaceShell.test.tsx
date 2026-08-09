@@ -94,14 +94,12 @@ const WORKSPACE: Workspace = {
   mode: "local-first",
 };
 
-const SYNC_STATUS = {
-  state: "synced" as const,
+const SYNC_STATUS: SyncStatusResult = {
+  state: "synced",
   pendingChangeCount: 0,
   lastSyncedAtMs: null,
   // Required on the contract (#505, #540): every status states whether the
-  // recorder failed to build and whether the workspace is a shared view. This
-  // fake is not type-checked against SyncStatusResult, so it declares the
-  // causes by hand rather than shipping a payload main could never produce.
+  // recorder failed to build and whether the workspace is a shared view.
   historyRecordingUnavailable: false,
   historyShareView: false,
 };
@@ -226,8 +224,8 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       ],
       folders: [] as string[],
     })),
-    openWorkspace: vi.fn(async (): Promise<SyncStatusResult> => SYNC_STATUS),
-    getSyncStatus: vi.fn(async (): Promise<SyncStatusResult> => SYNC_STATUS),
+    openWorkspace: vi.fn(async () => SYNC_STATUS),
+    getSyncStatus: vi.fn(async () => SYNC_STATUS),
     // Typed to the contract, not to this idle default: a freshness test drives
     // a real running agent through it.
     getAgentRunStatus: vi.fn(
