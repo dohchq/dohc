@@ -23,6 +23,7 @@ import {
   reserveAndPullSharedChannel,
 } from "./dmRequests";
 import type { JoinedSharedChannel } from "./registryStore";
+import { endJoinedChannel } from "./sharedChannels";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { createTestScratch } from "./testTemp";
 
@@ -940,6 +941,98 @@ describe("DM request decisions", () => {
     });
     expect(writeSharedChannels.mock.calls[0]?.[1]?.[0]?.ended).toBeUndefined();
     expect(pull).toHaveBeenCalledOnce();
+  });
+
+  // #742: drives the leave control's own reversibility flow end-to-end,
+  // starting from a LIVE accepted row (not a pre-fabricated ended fixture)
+  // and calling endJoinedChannel — the exact function leaveDm/
+  // leaveSharedChannel call — so this proves the NEW control's mechanism,
+  // not just that an already-ended row is reversible.
+  it("leaving a live row (endJoinedChannel) makes it a request again and lets another workspace accept it", async () => {
+    const live = joined({ shareId: "share-live", channelWireId: "wire-live" });
+    const workspaces = [
+      { workspaceId: "workspace-a", rootPath: "/a", sharedChannels: [live] },
+      { workspaceId: "workspace-b", rootPath: "/b", sharedChannels: [] },
+    ];
+
+    // Before leaving: workspace-a holds it, so it is not a pending request.
+    const beforeLeave = await classifyDmRequests({
+      received: [
+        {
+          shareId: "share-live",
+          granterEmail: "x@example.com",
+          selector: { kind: "chat-channel", channelWireId: "wire-live" },
+        },
+      ],
+      kindCache: new Map(),
+      peekKind: async () => "dm",
+      holdersByShareId: () => liveSharedChannelHoldersByShareId(workspaces),
+      holdersByWireId: () => liveSharedChannelHoldersByWireId(workspaces),
+      declinedShareIds: new Set(),
+    });
+    expect(beforeLeave.pending).toEqual([]);
+
+    // Leave: the same endJoinedChannel call leaveDm's IPC handler makes.
+    workspaces[0]!.sharedChannels = endJoinedChannel(
+      workspaces[0]!.sharedChannels,
+      "share-live",
+    );
+    expect(isShareAcceptedInWorkspace(workspaces[0]!.sharedChannels, "share-live")).toBe(
+      false,
+    );
+
+    // After leaving: no workspace holds it, so it reappears as a request.
+    const afterLeave = await classifyDmRequests({
+      received: [
+        {
+          shareId: "share-live",
+          granterEmail: "x@example.com",
+          selector: { kind: "chat-channel", channelWireId: "wire-live" },
+        },
+      ],
+      kindCache: new Map([["share-live", "dm" as const]]),
+      peekKind: async () => "dm",
+      holdersByShareId: () => liveSharedChannelHoldersByShareId(workspaces),
+      holdersByWireId: () => liveSharedChannelHoldersByWireId(workspaces),
+      declinedShareIds: new Set(),
+    });
+    expect(afterLeave.pending.map((row) => row.shareId)).toEqual(["share-live"]);
+
+    // Accepting elsewhere (workspace-b) succeeds.
+    const writeSharedChannels = vi.fn(
+      (workspaceId: string, channels: JoinedSharedChannel[]) => {
+        const workspace = workspaces.find(
+          (candidate) => candidate.workspaceId === workspaceId,
+        );
+        if (workspace) workspace.sharedChannels = channels;
+      },
+    );
+    const revived = await reserveAndPullSharedChannel({
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      shareId: "share-live",
+      workspaceId: "workspace-b",
+      rootPath: "/b",
+      recipientUserId: "user-b",
+      relayUrl: "http://relay.test",
+      readSharedChannels: (workspaceId) =>
+        workspaces.find((workspace) => workspace.workspaceId === workspaceId)
+          ?.sharedChannels ?? [],
+      writeSharedChannels,
+      fetchInfo: async () => ({
+        shareId: "share-live",
+        granterUserId: "granter",
+        granterEmail: "x@example.com",
+        channelWireId: "wire-live",
+        access: "read-write",
+        createdAtMs: 1,
+      }),
+      pull: async () => ({ applied: 0 }),
+      serialize: async (_workspaceId, run) => await run(),
+    });
+    expect(revived).toMatchObject({ shareId: "share-live", channelWireId: "wire-live" });
+    expect(
+      isShareAcceptedInWorkspace(workspaces[1]!.sharedChannels, "share-live"),
+    ).toBe(true);
   });
 });
 

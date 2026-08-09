@@ -1237,6 +1237,79 @@ function AcceptDmDialog(props: {
   );
 }
 
+// The DM placement reverse path's confirmation (#742): reversible but
+// disruptive, so it states what happens before it runs (product invariant).
+function LeaveDmDialog(props: {
+  dm: DmRecord;
+  workspaceLabel: string;
+  onConfirm: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+
+  async function confirm() {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      await props.onConfirm();
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Overlay
+      onClose={() => {
+        if (!busyRef.current) props.onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="chats-leave-dm-title"
+        data-testid="chats-leave-dm-dialog"
+        className="dohc-elevated flex w-105 max-w-[80vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
+      >
+        <div className="flex flex-col gap-1">
+          <h2
+            id="chats-leave-dm-title"
+            data-testid="chats-leave-dm-title"
+            className="m-0 text-sm font-semibold text-ink"
+          >
+            {`Leave your conversation with ${props.dm.peerLabel}?`}
+          </h2>
+          <p className="m-0 text-xs text-muted">
+            {`The conversation leaves ${props.workspaceLabel}. It appears again as a message request, so you can add it to a workspace later. Messages stay on the relay.`}
+          </p>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            data-testid="chats-leave-dm-cancel"
+            disabled={busy}
+            onClick={props.onClose}
+            className="rounded border border-line px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            data-testid="chats-leave-dm-confirm"
+            disabled={busy}
+            onClick={() => void confirm()}
+            className="rounded bg-danger px-3 py-1.5 text-xs text-white disabled:opacity-50"
+          >
+            Leave conversation
+          </button>
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
 function DmRequestListItem(props: {
   request: DmRequestRow;
   state: "pending" | "declined";
@@ -1435,6 +1508,10 @@ export function ChatsView(props: {
     workspaceLabel: string;
   } | null>(null);
   const [dmRequestBusy, setDmRequestBusy] = useState<string | null>(null);
+  // The DM placement reverse path (#742): a participant confirms before
+  // ending their accepted row (reversible but disruptive — the conversation
+  // leaves this workspace's list until re-accepted).
+  const [leavingDm, setLeavingDm] = useState<DmRecord | null>(null);
   const [dmRecipients, setDmRecipients] = useState("");
   const [dmDraft, setDmDraft] = useState("");
   const [startingDm, setStartingDm] = useState(false);
@@ -3773,6 +3850,34 @@ export function ChatsView(props: {
     [props, refreshOverview, workspaceId],
   );
 
+  // Ends the DM's registry row through the exact leaveSharedChannel mechanism
+  // (#742). The conversation drops out of `dms` immediately; the next
+  // syncDms poll's classifyDmRequests puts it back in the request lane
+  // because no workspace holds a live row for its shareId anymore.
+  const leaveDmConversation = useCallback(
+    async (dm: DmRecord) => {
+      const shareId = dm.shareId;
+      if (!shareId) return;
+      const token = liveToken.current;
+      try {
+        await bridge().leaveDm({ workspaceId, shareId });
+        if (token !== liveToken.current) return;
+        setLeavingDm(null);
+        setDms((current) =>
+          current.filter((candidate) => candidate.channelId !== dm.channelId),
+        );
+        // The completion is the user's command landing (see openConversation).
+        props.onNavCommand?.({ level: "channels" });
+        setNav({ level: "channels" });
+        await refreshDms();
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(ipcErrorMessage(error, "Could not leave that conversation."));
+      }
+    },
+    [props, refreshDms, workspaceId],
+  );
+
   const createChannel = useCallback(
     async (name: string) => {
       const trimmed = name.trim();
@@ -4301,6 +4406,9 @@ export function ChatsView(props: {
 
   if (nav.level === "dm") {
     const dm = nav.dm;
+    const currentWorkspaceLabel =
+      props.workspaces.find((candidate) => candidate.workspaceId === workspaceId)
+        ?.label ?? workspaceId;
     return (
       <div
         data-testid="chats-dm-view"
@@ -4313,6 +4421,21 @@ export function ChatsView(props: {
           testId="chats-dm"
           onBack={goBack}
           icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
+          // A participant (shareId set) has a workspace placement to reverse
+          // (#742); the owner side (shareId null) never accepted a grant here.
+          action={
+            dm.shareId ? (
+              <button
+                type="button"
+                data-testid="chats-dm-leave"
+                title="Leave conversation"
+                onClick={() => setLeavingDm(dm)}
+                className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+              >
+                Leave
+              </button>
+            ) : undefined
+          }
           trailing={<PresenceFaces others={presence.others} />}
         />
         {/* Presence (MU-C1): "viewing" faces + "typing…" for this DM, keyed by
@@ -4375,6 +4498,15 @@ export function ChatsView(props: {
             </ComposerNotice>
           )}
         </div>
+        {leavingDm ? (
+          <LeaveDmDialog
+            key={leavingDm.channelId}
+            dm={leavingDm}
+            workspaceLabel={currentWorkspaceLabel}
+            onConfirm={() => leaveDmConversation(leavingDm)}
+            onClose={() => setLeavingDm(null)}
+          />
+        ) : null}
       </div>
     );
   }

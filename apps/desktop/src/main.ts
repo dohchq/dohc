@@ -171,6 +171,7 @@ import {
   SyncDmsResult,
   StartDmPayload,
   StartDmResult,
+  LeaveDmPayload,
   PresencePublishPayload,
   PresencePollPayload,
   PresenceCancelPayload,
@@ -4855,15 +4856,22 @@ function registerIpcHandlers(
 
   // Member-initiated leave: purely local — the channel stops syncing and its
   // rows stay readable. Keep an ended tombstone so participant provenance and
-  // the read-only write gate survive after live grant data is gone.
+  // the read-only write gate survive after live grant data is gone. Shared by
+  // leaveSharedChannel and leaveDm (#742) — a DM's accepted row IS a
+  // JoinedSharedChannel row in the same registry, so ending it is the same
+  // operation regardless of which surface asked.
+  function endWorkspaceJoinedChannel(workspaceId: string, shareId: string): void {
+    const entry = requireWorkspace(workspaceId);
+    setWorkspaceSharedChannels(
+      workspaceId,
+      endJoinedChannel(entry.sharedChannels ?? [], shareId),
+    );
+  }
+
   ipcMain.handle(CHANNELS.leaveSharedChannel, async (event, payload) => {
     assertTrustedSender(event);
     const input = LeaveSharedChannelPayload.parse(payload);
-    const entry = requireWorkspace(input.workspaceId);
-    setWorkspaceSharedChannels(
-      input.workspaceId,
-      endJoinedChannel(entry.sharedChannels ?? [], input.shareId),
-    );
+    endWorkspaceJoinedChannel(input.workspaceId, input.shareId);
     return undefined;
   });
 
@@ -7369,6 +7377,17 @@ function registerIpcHandlers(
     if (!clearDeclinedDm(dmRequestFile(), input.shareId)) {
       throw new Error("dohc could not save this choice. Try again.");
     }
+    return undefined;
+  });
+
+  // The DM surface's reverse path for placement (#742): ends the SAME row
+  // leaveSharedChannel ends. The next syncDms poll's classifyDmRequests finds
+  // no live holder for this shareId, so the conversation reappears as a
+  // request and can be accepted into any workspace, including this one.
+  ipcMain.handle(CHANNELS.leaveDm, (event, payload) => {
+    assertTrustedSender(event);
+    const input = LeaveDmPayload.parse(payload);
+    endWorkspaceJoinedChannel(input.workspaceId, input.shareId);
     return undefined;
   });
 

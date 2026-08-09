@@ -161,6 +161,7 @@ const bridgeMock = {
   declineDm: vi.fn(),
   requestDmAgain: vi.fn(),
   startDm: vi.fn(),
+  leaveDm: vi.fn(),
   chatDispatchStateForThread: vi.fn(),
   stopAgentRun: vi.fn(),
   resumeThreadDispatch: vi.fn(),
@@ -6140,6 +6141,83 @@ describe("ChatsView direct messages", () => {
     await user.click(screen.getByTestId("chats-dm-back"));
     await screen.findByTestId("chats-dm-item");
     expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
+  });
+
+  // #742: the placement a participant picked when they accepted has a
+  // visible reverse path. The owner side (shareId null) never accepted a
+  // grant into a workspace, so it has nothing to reverse.
+  describe("leaving a conversation (#742)", () => {
+    it("shows Leave only for a participant's accepted DM, not the owner's own", async () => {
+      const user = userEvent.setup();
+      const participant = dm({ role: "participant", shareId: "share-dm-1" });
+      bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participant] });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      expect(await screen.findByTestId("chats-dm-leave")).toBeTruthy();
+    });
+
+    it("hides Leave on the owner's own DM", async () => {
+      const user = userEvent.setup();
+      bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await screen.findByTestId("chats-dm-view");
+      expect(screen.queryByTestId("chats-dm-leave")).toBeNull();
+    });
+
+    it("states the pinned copy and does not end the row on cancel", async () => {
+      const user = userEvent.setup();
+      const participant = dm({
+        role: "participant",
+        shareId: "share-dm-1",
+        peerLabel: "alice@example.com",
+      });
+      bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participant] });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await user.click(await screen.findByTestId("chats-dm-leave"));
+
+      const dialog = await screen.findByTestId("chats-leave-dm-dialog");
+      expect(screen.getByTestId("chats-leave-dm-title").textContent).toBe(
+        "Leave your conversation with alice@example.com?",
+      );
+      expect(dialog.textContent).toContain(
+        "The conversation leaves Work. It appears again as a message request, so you can add it to a workspace later. Messages stay on the relay.",
+      );
+
+      await user.click(screen.getByTestId("chats-leave-dm-cancel"));
+      expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
+      expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
+      // Still on the DM, unchanged.
+      expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+    });
+
+    it("ends the row, drops the conversation from the list, and returns to Chats on confirm", async () => {
+      const user = userEvent.setup();
+      const participant = dm({ role: "participant", shareId: "share-dm-1" });
+      bridgeMock.syncDms
+        .mockResolvedValueOnce({ available: true, dms: [participant] })
+        .mockResolvedValue({ available: true, dms: [] });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+      bridgeMock.leaveDm.mockResolvedValue(undefined);
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await user.click(await screen.findByTestId("chats-dm-leave"));
+      await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
+
+      await waitFor(() =>
+        expect(bridgeMock.leaveDm).toHaveBeenCalledWith({
+          workspaceId: "workspace-a",
+          shareId: "share-dm-1",
+        }),
+      );
+      await waitFor(() => expect(screen.queryByTestId("chats-dm-view")).toBeNull());
+      await screen.findByTestId("chats-dms-section");
+      expect(screen.queryByTestId("chats-dm-item")).toBeNull();
+    });
   });
 
   it("keeps syncing an open pending DM until its thread arrives", async () => {

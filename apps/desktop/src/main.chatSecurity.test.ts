@@ -418,12 +418,45 @@ describe("main-process chat authorization", () => {
   });
 
   it("checks renderer trust on every DM request mutation", () => {
-    for (const channel of ["acceptDm", "declineDm", "requestDmAgain"]) {
+    for (const channel of ["acceptDm", "declineDm", "requestDmAgain", "leaveDm"]) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain("assertTrustedSender(event);");
       expect(handler.indexOf("assertTrustedSender(event);"), channel).toBeLessThan(
         handler.indexOf(".parse(payload)"),
       );
+    }
+  });
+
+  // #742: the DM surface's leave control must end the SAME row
+  // leaveSharedChannel ends — a parallel ending mechanism (e.g. deleting the
+  // row, or writing its own "ended" field by hand) would drift from the
+  // reversibility contract endJoinedChannel and its tests already prove.
+  it("ends a DM's registry row through the same mechanism leaveSharedChannel uses", () => {
+    const helperStart = mainSource.indexOf(
+      "function endWorkspaceJoinedChannel(",
+    );
+    const helperEnd = mainSource.indexOf(
+      "ipcMain.handle(CHANNELS.leaveSharedChannel",
+      helperStart,
+    );
+    expect(helperStart).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    const helper = mainSource.slice(helperStart, helperEnd);
+    expect(helper).toContain("endJoinedChannel(entry.sharedChannels ?? [], shareId)");
+    expect(helper).toContain("setWorkspaceSharedChannels(");
+
+    const leaveShared = handlerSource("leaveSharedChannel");
+    const leaveDm = handlerSource("leaveDm");
+    for (const [label, handler] of [
+      ["leaveSharedChannel", leaveShared],
+      ["leaveDm", leaveDm],
+    ] as const) {
+      expect(handler, label).toContain(
+        "endWorkspaceJoinedChannel(input.workspaceId, input.shareId);",
+      );
+      // Neither handler duplicates the ending logic inline.
+      expect(handler, label).not.toContain("endJoinedChannel(");
+      expect(handler, label).not.toContain("ended: true");
     }
   });
 
