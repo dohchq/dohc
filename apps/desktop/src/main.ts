@@ -2,6 +2,7 @@ import {
   defaultWorkspaceRoot,
   isSharedWithMePath,
   normalizeAbsolutePath,
+  validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
 import {
@@ -459,6 +460,7 @@ import type {
 } from "./workspaces/workspaceEngineCapture";
 import {
   isYDocPathNotInVersionError,
+  isYDocRemovalInProgressError,
   isYDocSessionUnreleasedError,
 } from "./workspaces/workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
@@ -2721,6 +2723,7 @@ const searchCleanupHooked = new WeakSet<Electron.WebContents>();
 // quit) releases the reservation so the object can reopen.
 interface EngineYDocSessionEntry {
   session: WorkspaceEngineYDocProviderSession;
+  sessionId: string;
   senderId: number;
   workspaceId: string;
   // The document this session holds. A renderer retries a failed open under a
@@ -2739,6 +2742,10 @@ interface EngineYDocSessionEntry {
   // Set by releaseEngineYDocSession when a close failed. The next open of this
   // document retries the release before it binds anything.
   closeFailed?: boolean;
+  // A successful delete removed this path after capture closed the engine
+  // session. Main keeps the renderer entry until its normal close, but every
+  // later update is an inert no-op and repeats the deleted state.
+  deleted?: boolean;
 }
 const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
 
@@ -2778,6 +2785,29 @@ function sendEngineYDocSaveState(
     );
   } catch {
     // A malformed status is DROPPED, never thrown through a status hook.
+  }
+}
+
+function notifyEngineYDocSessionsDeleted(
+  workspaceId: string,
+  pathOrPrefix: string,
+): void {
+  for (const entry of engineYDocSessions.values()) {
+    if (entry.workspaceId !== workspaceId) continue;
+    if (
+      entry.path !== pathOrPrefix &&
+      !entry.path.startsWith(`${pathOrPrefix}/`)
+    ) {
+      continue;
+    }
+    entry.deleted = true;
+    sendEngineYDocSaveState(
+      entry.sender,
+      entry.generation,
+      entry.sessionId,
+      "deleted",
+      entry.saveSeq.dirtySeq,
+    );
   }
 }
 const pendingEngineYDocOpensBySender = new Map<number, Set<Promise<void>>>();
@@ -3550,6 +3580,18 @@ function registerIpcHandlers(
     try {
       const result = await deletePath(workspace.rootPath, input.relativePath, (p) =>
         shell.trashItem(p),
+      );
+      // `deletePath` matches its own disk target against the CANONICAL form
+      // `validateUserWritePath` normalizes to (a trailing slash stripped, for
+      // example) — but the schema for this payload does not enforce that
+      // normalization, so a raw "notes/" would otherwise widen its own
+      // prefix match to "notes//" and miss every live session under it.
+      const validatedDeletePath = validateUserWritePath(input.relativePath);
+      notifyEngineYDocSessionsDeleted(
+        workspace.workspaceId,
+        validatedDeletePath.ok
+          ? validatedDeletePath.normalized
+          : input.relativePath,
       );
       finishDebts?.(true);
       return DeleteWorkspacePathResult.parse(result);
@@ -8252,6 +8294,14 @@ function registerIpcHandlers(
         return OpenEngineYDocSessionResult.parse({
           available: false,
           ...(isYDocPathNotInVersionError(error) ? { notInVersion: true } : {}),
+          ...(isYDocRemovalInProgressError(error)
+            ? {
+                removalInProgress: {
+                  operation: error.removalOperation,
+                  message: error.inProgress,
+                },
+              }
+            : {}),
           ...(isEngineWorkspaceOpenRefusedError(error) ||
           isYDocSessionUnreleasedError(error)
             ? { engineMayHoldDocument: true }
@@ -8260,6 +8310,7 @@ function registerIpcHandlers(
       }
       const entry: EngineYDocSessionEntry = {
         session,
+        sessionId: input.sessionId,
         senderId: sender.id,
         workspaceId: workspace.workspaceId,
         path: input.path,
@@ -8346,6 +8397,16 @@ function registerIpcHandlers(
       engineYDocSessionKey(event.sender.id, input.sessionId),
     );
     if (!entry) return;
+    if (entry.deleted) {
+      sendEngineYDocSaveState(
+        entry.sender,
+        entry.generation,
+        entry.sessionId,
+        "deleted",
+        input.seq,
+      );
+      return;
+    }
     // WS-G2-C-2 (gate fix 4): RE-CHECK the shared-view guard before applying — a
     // workspace can become a read-only shared view after a session opened, and
     // an update must never write into a shared view. The IPC answer stays an

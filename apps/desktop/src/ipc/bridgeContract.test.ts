@@ -18,6 +18,7 @@ import {
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
   ApplyEngineYDocUpdatePayload,
+  OpenEngineYDocSessionResult,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
   InvokeSiteSdkPayload,
@@ -1367,6 +1368,38 @@ describe("document export IPC contract", () => {
 });
 
 describe("engine Y.Doc update IPC contract", () => {
+  it("keeps a removal-window open refusal operation-aware in the renderer", () => {
+    expect(
+      OpenEngineYDocSessionResult.parse({
+        available: false,
+        removalInProgress: {
+          operation: "move",
+          message: "dohc is still moving notes.",
+        },
+      }),
+    ).toEqual({
+      available: false,
+      removalInProgress: {
+        operation: "move",
+        message: "dohc is still moving notes.",
+      },
+    });
+    // The accepted shape alone would still pass this test after the schema
+    // widened operation past delete/move, or dropped message's min(1) bound.
+    expect(
+      OpenEngineYDocSessionResult.safeParse({
+        available: false,
+        removalInProgress: { operation: "rename", message: "x" },
+      }).success,
+    ).toBe(false);
+    expect(
+      OpenEngineYDocSessionResult.safeParse({
+        available: false,
+        removalInProgress: { operation: "delete", message: "" },
+      }).success,
+    ).toBe(false);
+  });
+
   // AUDIT-SILENTSAVE round 2 (D1). The engine Y.Doc apply-update handler is a
   // hardened boundary: for an unknown, foreign, or read-only-shared session it
   // must be an INERT NO-OP that never throws. Zod runs before the session

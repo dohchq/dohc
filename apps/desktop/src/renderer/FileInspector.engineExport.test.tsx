@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { forwardRef, useImperativeHandle } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import type { EngineDocSaveState } from "./collab/useEngineDoc";
+import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 
 // Finding: in engine mode the DocumentMenu export must serialize the LIVE
@@ -13,12 +13,21 @@ import { FileInspector } from "./FileInspector";
 // present or the doc opened in read/truncated mode. We prove this with the
 // properties rendered (the exact state where the old code returned the stale
 // disk body) and assert the exported markdown is the live editor body.
-
-const engineDocState: {
-  available: boolean;
-  doc: Y.Doc | null;
-  saveState: EngineDocSaveState;
-} = { available: false, doc: null, saveState: "saved" };
+//
+// Mocks the full UseEngineDoc contract, not just the fields this file reads —
+// a partial mock silently hands undefined to a `!== null` check elsewhere in
+// FileInspector.tsx (removalInProgress), which is not the same as null.
+const engineDocState: UseEngineDoc = {
+  available: false,
+  opening: false,
+  doc: null,
+  saveState: "saved",
+  notInVersion: false,
+  engineMayHoldDocument: false,
+  deletedWhileEditing: false,
+  deletedDraftId: null,
+  removalInProgress: null,
+};
 
 vi.mock("./collab/useEngineDoc", () => ({
   useEngineDoc: () => engineDocState,

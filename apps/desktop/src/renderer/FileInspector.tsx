@@ -27,6 +27,7 @@ import { bridge } from "./bridge";
 import {
   useEngineDoc,
   type EngineDocSaveState,
+  type EngineRemovalInProgress,
   type UseEngineDoc,
 } from "./collab/useEngineDoc";
 import {
@@ -322,10 +323,8 @@ const LazySourceCodeEditor = lazy(() =>
   })),
 );
 
-// yDocToMarkdown lives in editor/import-export, which statically pulls the
-// Tiptap schema/KaTeX stack the lazy MarkdownEditor split keeps out of this
-// eager chunk — load it on demand (first source-view toggle), documentExport
-// precedent. Cached: every later toggle reuses the loaded module.
+// The source view needs editor/import-export only on demand. Cache the module
+// after the first toggle so later toggles reuse it.
 let importExportPromise: Promise<typeof import("./editor/import-export")> | null = null;
 function loadImportExport(): Promise<typeof import("./editor/import-export")> {
   importExportPromise ??= import("./editor/import-export");
@@ -534,6 +533,11 @@ function CopySourceButton(props: {
 // its row (#579 review, P2). Self-contained on the module store, so every
 // surface where the keyed document view dies — the editor branches AND the
 // not-in-version refusal — can show the same recovery.
+const DELETED_WITH_SET_ASIDE_EDIT_NOTICE =
+  "This file was deleted while you had it open. Copy your set-aside edit to keep it.";
+const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
+  "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.";
+
 function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   if (drafts.length === 0) return null;
@@ -564,6 +568,19 @@ function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function DeletedWhileEditingNotice(props: { hasSetAsideEdit: boolean }) {
+  return (
+    <div
+      data-testid="deleted-while-editing-notice"
+      className="border-b border-line bg-panel px-4 py-1 text-[11px] text-danger"
+    >
+      {props.hasSetAsideEdit
+        ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
+        : DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE}
     </div>
   );
 }
@@ -610,6 +627,7 @@ const MARKDOWN_COMPONENTS = {
 };
 
 type SaveState = "saved" | "saving" | "error";
+export type FileSaveState = SaveState | "deleted";
 
 // The plain-text autosave, used by every NON-markdown editable view (CSV,
 // JSON, text). It carries the same three write seams as MarkdownView — an
@@ -821,6 +839,10 @@ const ENGINE_CHIP: Record<
     title:
       "This file changed outside dohc while it was open. Open History to restore your text.",
   },
+  deleted: {
+    label: "Deleted",
+    title: DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  },
   recovery: {
     label: "Edit set aside",
     title:
@@ -841,7 +863,7 @@ function MarkdownView(props: {
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
   chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
-  onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
+  onSaveStateChange?: (state: FileSaveState) => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
   pendingUndo?: PendingTextUndo;
@@ -1093,18 +1115,14 @@ function MarkdownView(props: {
   // PropertiesPanel, which write straight into the engine Y.Doc's frontmatter
   // MAP — NOT into latestDraft.current, which stays at this mount's initial
   // markdown. Reading latestDraft.current for the frontmatter therefore exports
-  // a stale title. Serialize the LIVE map instead. Reading it directly (rather
-  // than yDocToMarkdown) keeps import-export's heavy schema/KaTeX stack out of
-  // this eager chunk — the mounted WYSIWYG editor already owns the body.
+  // a stale title. Serialize the LIVE map instead and combine it with the body
+  // the mounted WYSIWYG editor already owns.
   const serializeEngineDraft = (): string | null => {
-    // The mounted editor is the ONLY serializer of the canonical Y.Doc, so
-    // without it there is no honest body to emit for an engine-backed
-    // document: `props.body` is the markdown CACHE beside that doc. It lags
-    // every edit the Y.Doc has taken since the read, and on the recovery path
-    // (a failed read whose retry bound the document, #564) it is empty. Both
-    // export a file that is not the user's document while reporting success,
-    // and emptiness was never the thing that made it wrong — the Y.Doc being
-    // canonical is. Refuse; the menu says the document is not ready.
+    // This export path needs the mounted editor's live body. `props.body` is
+    // the markdown cache beside the canonical Y.Doc, so it lags every edit the
+    // document has taken since the read. On the recovery path (a failed read
+    // whose retry bound the document, #564), it is empty. Refuse instead of
+    // exporting stale text; the menu says the document is not ready.
     const editorBody = wysiwygRef.current?.getMarkdown();
     if (editorBody === undefined && engine.doc !== null) return null;
     const body = editorBody ?? markdownEditorBody(props.body);
@@ -1115,6 +1133,10 @@ function MarkdownView(props: {
       : parseFrontmatter(latestDraft.current).meta;
     return applyFrontmatter(body, orderFrontmatter(liveMeta));
   };
+
+  const hasSetAsideEdit =
+    engine.deletedDraftId !== null &&
+    orphanedDrafts.some((draft) => draft.id === engine.deletedDraftId);
 
   useEffect(() => {
     if (surfaceMode === "read") void loadMarkdownEditor();
@@ -1188,6 +1210,8 @@ function MarkdownView(props: {
   const readOnly =
     !!props.forceReadOnly ||
     engine.notInVersion ||
+    engine.deletedWhileEditing ||
+    engine.removalInProgress !== null ||
     // #564: the engine open hit its retry deadline. The plain editor stays
     // read-only — its autosave would race the session the engine may still
     // bind — and the notice below states the reason and offers the retry.
@@ -1200,13 +1224,12 @@ function MarkdownView(props: {
   readOnlyRef.current = readOnly;
   // The single question all three write paths ask. Both refs, because they
   // close different gaps: `readOnlyRef` a flip this component rendered,
-  // `writesRefusedRef` an engine refusal or unapplied switch resync that a
-  // long-lived closure may never get to render.
+  // `writesRefusedRef` an engine refusal or unapplied switch resync (already
+  // folded into its OR-chain by the parent — reading `switchUnresyncedRef`
+  // here too would shadow it) that a long-lived closure may never get to
+  // render.
   const { writesRefusedRef } = props;
-  const writesBlocked = () =>
-    readOnlyRef.current ||
-    writesRefusedRef.current ||
-    props.switchUnresyncedRef.current;
+  const writesBlocked = () => readOnlyRef.current || writesRefusedRef.current;
   const engineMode = engine.available && engine.doc !== null;
 
   // "View markdown as source" (engine mode): a READ-ONLY projection of the
@@ -1517,15 +1540,14 @@ function MarkdownView(props: {
       onSaveStateChange?.(saveState);
       return;
     }
-    // The shell's dot has three states; a read-only, file-locked, or
-    // changed-on-disk refusal is an unsaved document as far as the tab is
-    // concerned.
+    // Deletion is terminal: recovery owns any text worth keeping, and the
+    // shell must not promise a flush to a path that no longer exists.
     onSaveStateChange?.(
-      engine.saveState === "read-only" ||
-        engine.saveState === "file-locked" ||
-        engine.saveState === "changed-on-disk"
-        ? "error"
-        : engine.saveState,
+      engine.saveState === "saved" ||
+        engine.saveState === "saving" ||
+        engine.saveState === "deleted"
+        ? engine.saveState
+        : "error",
     );
   }, [saveState, engine.available, engine.saveState, onSaveStateChange]);
 
@@ -1802,8 +1824,13 @@ function MarkdownView(props: {
   // The restore half of #567: each set-aside draft stays copyable until the
   // user takes it or dismisses it. Rendered in both branches below — the
   // reopen can resolve into either editor.
-  const orphanedDraftNotice = (
-    <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+  const documentNotices = (
+    <>
+      {engine.deletedWhileEditing ? (
+        <DeletedWhileEditingNotice hasSetAsideEdit={hasSetAsideEdit} />
+      ) : null}
+      <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+    </>
   );
 
   // Linked mentions live at the BOTTOM of the document, inside the reading
@@ -1841,7 +1868,11 @@ function MarkdownView(props: {
               <span
                 data-testid="markdown-save-state"
                 data-state={engineChipState}
-                title={ENGINE_CHIP[engineChipState].title}
+                title={
+                  engineChipState === "deleted" && hasSetAsideEdit
+                    ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
+                    : ENGINE_CHIP[engineChipState].title
+                }
                 className={`font-mono text-[11px] ${
                   engineChipState === "saved" || engineChipState === "saving"
                     ? "text-subtle"
@@ -1872,7 +1903,7 @@ function MarkdownView(props: {
           }
         />
         {props.truncatedNotice}
-        {orphanedDraftNotice}
+        {documentNotices}
         {showSource ? (
           // Raw markdown, monospaced and read-only — frontmatter included, so
           // the top-matter zone (which renders the same metadata as chrome)
@@ -1929,11 +1960,14 @@ function MarkdownView(props: {
             <PageIdentity
               ydoc={engine.doc}
               filenameStem={filenameStem(props.path)}
+              readOnly={readOnly}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
-            <Suspense fallback={<PropertiesFallback />}>
-              <LazyPropertiesPanel ydoc={engine.doc} />
-            </Suspense>
+            {readOnly ? null : (
+              <Suspense fallback={<PropertiesFallback />}>
+                <LazyPropertiesPanel ydoc={engine.doc} />
+              </Suspense>
+            )}
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -1958,6 +1992,7 @@ function MarkdownView(props: {
                 onBlockTargetConsumed={retireJump}
                 pendingUndo={editorPendingUndo}
                 onPendingUndoConsumed={props.onPendingUndoConsumed}
+                readOnly={readOnly}
                 collab={{
                   ydoc: engine.doc,
                   // Solo engine editing shows the settle indicator, not presence
@@ -2096,7 +2131,13 @@ function MarkdownView(props: {
       {engine.engineMayHoldDocument ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown />
       ) : null}
-      {orphanedDraftNotice}
+      {engine.removalInProgress ? (
+        <EngineRemovalInProgressNotice
+          removal={engine.removalInProgress}
+          onRetry={props.onRetryEngineOpen}
+        />
+      ) : null}
+      {documentNotices}
       {surfaceMode === "source" ? (
         <textarea
           data-testid="markdown-editor"
@@ -2158,6 +2199,7 @@ function MarkdownView(props: {
                 headingTarget={props.headingTarget}
                 pendingUndo={editorPendingUndo}
                 onPendingUndoConsumed={props.onPendingUndoConsumed}
+                readOnly={readOnly}
                 collab={null}
               />
             </Suspense>
@@ -2813,6 +2855,28 @@ function EngineMayHoldDocumentNotice(props: {
   );
 }
 
+function EngineRemovalInProgressNotice(props: {
+  removal: EngineRemovalInProgress;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      data-testid="engine-removal-in-progress-notice"
+      data-operation={props.removal.operation}
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span>{props.removal.message} Wait for it to finish.</span>
+      <button
+        type="button"
+        onClick={props.onRetry}
+        className="text-subtle hover:text-ink"
+      >
+        Try again
+      </button>
+    </div>
+  );
+}
+
 function TruncatedNotice(props: { workspaceId: string; path: string }) {
   return (
     <div
@@ -2887,7 +2951,7 @@ export function FileInspector(props: {
   onScrollConsumed?: () => void;
   // Editor save-state seam for the tab strip's dirty indicator. Editable
   // source/table/document views all report through the same small contract.
-  onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
+  onSaveStateChange?: (state: FileSaveState) => void;
   // Registers the active editor's draft flush with the shell: explorer ops
   // await it before re-pathing files.
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
@@ -2991,7 +3055,9 @@ export function FileInspector(props: {
     notInVersion ||
     engine.opening ||
     engine.engineMayHoldDocument ||
-    switchUnresyncedRef.current;
+    switchUnresyncedRef.current ||
+    engine.deletedWhileEditing ||
+    engine.removalInProgress !== null;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText
@@ -3086,6 +3152,12 @@ export function FileInspector(props: {
           // no retry on exactly the path where the engine session is the only
           // way back to the content.
           <EngineMayHoldDocumentNotice onRetry={retryEngineOpen} contentShown={false} />
+        ) : null}
+        {engine.removalInProgress ? (
+          <EngineRemovalInProgressNotice
+            removal={engine.removalInProgress}
+            onRetry={retryEngineOpen}
+          />
         ) : null}
         {/* A failed read is exactly when the set-aside text matters most —
             the marker and the close warning must not point at actions this

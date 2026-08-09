@@ -931,6 +931,29 @@ export function isYDocSessionUnreleasedError(
   return error instanceof YDocSessionUnreleasedError;
 }
 
+export class YDocRemovalInProgressError extends Error {
+  readonly code = "removal-in-progress" as const;
+  constructor(
+    readonly workspacePath: string,
+    readonly inProgress: string,
+    readonly operation: "open" | "settle",
+    readonly removalOperation: "delete" | "move",
+  ) {
+    super(
+      operation === "open"
+        ? `dohc could not open ${workspacePath}. ${inProgress}`
+        : `dohc could not save ${workspacePath}. ${inProgress} Wait for that to finish. Then save again.`,
+    );
+    this.name = "YDocRemovalInProgressError";
+  }
+}
+
+export function isYDocRemovalInProgressError(
+  error: unknown,
+): error is YDocRemovalInProgressError {
+  return error instanceof YDocRemovalInProgressError;
+}
+
 // A detached locked-write payment that was cancelled after it started. The
 // payment runs on the capture chain; the edges that cancel it do not, so a
 // delete or move finisher can land while the payment sits in an awaited RPC.
@@ -1513,6 +1536,7 @@ export function createWorkspaceEngineCapture(
   // window needs no drain: refusing the STARTS is the whole fence.
   interface RemovalWindow {
     match: (path: string) => boolean;
+    operation: "delete" | "move";
     // What another operation tells the user when it has to wait for this one.
     inProgress: string;
   }
@@ -2000,11 +2024,25 @@ export function createWorkspaceEngineCapture(
         });
       },
       settleNow(settleOptions) {
-        return append(async () =>
-          await executeWithReconnect(async (session) =>
+        return append(async () => {
+          // The delete seam's own vacate settles on this capture chain before
+          // it opens its removal window. That ordering prevents its settle
+          // from racing its delete. This fence backs every other caller that
+          // can reach the same settle door while another operation already
+          // owns the path.
+          const removal = removalWindowFor(input.path);
+          if (removal) {
+            throw new YDocRemovalInProgressError(
+              input.path,
+              removal.inProgress,
+              "settle",
+              removal.operation,
+            );
+          }
+          return await executeWithReconnect(async (session) =>
             await session.settleNow(settleOptions),
-          ),
-        );
+          );
+        });
       },
       applyExternalMarkdownEdit(markdown) {
         return append(async () => {
@@ -3071,6 +3109,15 @@ export function createWorkspaceEngineCapture(
       );
 
       async function openYDocSessionTask(): Promise<WorkspaceEngineYDocProviderSession> {
+        const removal = removalWindowFor(input.path);
+        if (removal) {
+          throw new YDocRemovalInProgressError(
+            input.path,
+            removal.inProgress,
+            "open",
+            removal.operation,
+          );
+        }
         // An ORPHANED session — one a refused open could not release — still
         // belongs to the daemon, which answers ydoc-session-busy for as long
         // as it stands, so the user's "Try again" would refuse forever.
@@ -4139,6 +4186,7 @@ export function createWorkspaceEngineCapture(
         // only closer this seam needs.
         const closeRemovalWindow = openRemovalWindow({
           match,
+          operation: "delete",
           inProgress: `dohc is still deleting ${pathOrPrefix}.`,
         });
         // Closed LAST. Both branches below are synchronous and append nothing
@@ -5498,6 +5546,7 @@ export function createWorkspaceEngineCapture(
         // stops them from starting for as long as the move is unfinished.
         closeRemovalWindow = openRemovalWindow({
           match: endpointMatch,
+          operation: "move",
           inProgress: `dohc is still moving ${fromPath}.`,
         });
         const policy = await readPolicyForTask();

@@ -399,7 +399,8 @@ export function parseEngineYDocRemoteUpdateEvent(
 // "file-locked" is the transient half of that split: another program holds
 // the file's handle, the settle committed, and the engine retries until the
 // handle releases — the user has nothing to do, so "error"'s advice would be
-// noise and "saved" would be a lie about the disk.
+// noise and "saved" would be a lie about the disk. "deleted" is terminal for
+// this live session: the path is gone and the renderer preserves its draft.
 export const ENGINE_YDOC_SAVE_STATES = [
   "settling",
   "saved",
@@ -407,6 +408,7 @@ export const ENGINE_YDOC_SAVE_STATES = [
   "file-locked",
   "read-only",
   "changed-on-disk",
+  "deleted",
 ] as const;
 export type EngineYDocSaveStateName = (typeof ENGINE_YDOC_SAVE_STATES)[number];
 

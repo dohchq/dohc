@@ -11,6 +11,8 @@ import {
 import { configure } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 
 // These drive userEvent through async UI settles — 67 findBy* awaits across 47
 // tests — so the wall-clock profile is the file, not one test (#372).
@@ -45,7 +47,11 @@ import type {
   WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
-import type { MenuCommandId, SearchResultsEvent } from "../ipc/channels";
+import type {
+  EngineYDocSaveStateEvent,
+  MenuCommandId,
+  SearchResultsEvent,
+} from "../ipc/channels";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
@@ -7985,6 +7991,72 @@ describe("set-aside draft recovery", () => {
     expect(screen.getByTestId("orphaned-draft-notice")).toBeTruthy();
   });
 
+  it("treats a deleted live document as terminal instead of save-first dirty", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+    );
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "v2",
+          name: "Draft two",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: "main",
+    }));
+    const doc = markdownToYDoc("# Doc\n");
+    let sessionId = "";
+    const saveStateListeners = new Set<
+      (event: EngineYDocSaveStateEvent) => void
+    >();
+    Object.assign(bridge, {
+      openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
+        sessionId = payload.sessionId;
+        return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) };
+      }),
+      applyEngineYDocUpdate: vi.fn(async () => undefined),
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(
+        (listener: (event: EngineYDocSaveStateEvent) => void) => {
+          saveStateListeners.add(listener);
+          return () => saveStateListeners.delete(listener);
+        },
+      ),
+    });
+    renderShell(bridge);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    await user.type(screen.getByTestId("page-title"), " changed");
+    await screen.findByTestId("tab-dirty");
+    act(() => {
+      for (const listener of [...saveStateListeners]) {
+        listener({ sessionId, state: "deleted", seq: 1 });
+      }
+    });
+    await screen.findByTestId("deleted-while-editing-notice");
+
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    expect(screen.queryByTestId("version-switch-save-confirm")).toBeNull();
+  });
+
   // #579 review r4: only the mounted inspector can report savable-dirty, but
   // recovery is knowable for EVERY tab — an inactive tab must keep its
   // marker or the user forgets the draft exists.
@@ -8057,7 +8129,11 @@ describe("set-aside draft recovery", () => {
       throw new Error("switch failed mid-way");
     });
     const openEngineYDocSession = vi.fn(async () => ({ available: false }));
-    Object.assign(bridge, { openEngineYDocSession });
+    // Subscribed before every open (#697 P2-E) — a bridge missing this
+    // degrades to not-engine-backed instead of ever attempting the open, so
+    // this mock needs it even though this test never emits through it.
+    const onEngineYDocSaveState = vi.fn(() => () => undefined);
+    Object.assign(bridge, { openEngineYDocSession, onEngineYDocSaveState });
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
@@ -8140,7 +8216,11 @@ describe("set-aside draft recovery", () => {
       return { activeVersionId: "v2", changedFileCount: 0 };
     });
     const openEngineYDocSession = vi.fn(async () => ({ available: false }));
-    Object.assign(bridge, { openEngineYDocSession });
+    // Subscribed before every open (#697 P2-E) — a bridge missing this
+    // degrades to not-engine-backed instead of ever attempting the open, so
+    // this mock needs it even though this test never emits through it.
+    const onEngineYDocSaveState = vi.fn(() => () => undefined);
+    Object.assign(bridge, { openEngineYDocSession, onEngineYDocSaveState });
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));

@@ -1103,7 +1103,7 @@ describe("engine markdown source view", () => {
     const saveStateListeners = new Set<
       (event: {
         sessionId: string;
-        state: "settling" | "saved" | "error";
+        state: "settling" | "saved" | "error" | "deleted";
         seq: number;
       }) => void
     >();
@@ -1140,7 +1140,7 @@ describe("engine markdown source view", () => {
         (
           listener: (event: {
             sessionId: string;
-            state: "settling" | "saved" | "error";
+            state: "settling" | "saved" | "error" | "deleted";
             seq: number;
           }) => void,
         ) => {
@@ -1157,7 +1157,17 @@ describe("engine markdown source view", () => {
       const update = Y.encodeStateAsUpdate(serverDoc, before);
       for (const listener of remoteListeners) listener({ sessionId, update });
     };
-    return { bridgeMock, pushRemoteMarkdown };
+    const pushSaveState = (
+      state: "settling" | "saved" | "error" | "deleted",
+      seq: number,
+    ) => {
+      for (const listener of saveStateListeners) listener({ sessionId, state, seq });
+    };
+    return {
+      bridgeMock,
+      pushRemoteMarkdown,
+      pushSaveState,
+    };
   }
 
   beforeEach(() => {
@@ -1224,6 +1234,154 @@ describe("engine markdown source view", () => {
     await user.click(screen.getByTestId("markdown-source-toggle"));
     expect(screen.getByTestId("view-markdown").hidden).toBe(false);
     expect(screen.queryByTestId("markdown-source-view")).toBeNull();
+  });
+
+  it("shows the plain deletion notice when the last edit settled first", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    await user.type(screen.getByTestId("page-title"), " Retitled");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => pushSaveState("saved", 999));
+    act(() => pushSaveState("deleted", 999));
+
+    expect(
+      (await screen.findByTestId("deleted-while-editing-notice")).textContent,
+    ).toBe(
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+    );
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    expect(screen.queryByTestId("orphaned-draft-copy")).toBeNull();
+    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(true);
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("markdown-editor").getAttribute("contenteditable"),
+      ).toBe("false"),
+    );
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+    );
+  });
+
+  it("does not relabel an older set-aside edit as part of this deletion", async () => {
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    captureOrphanedDraft("ws-1", "a.md", "Older set-aside text");
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    act(() => pushSaveState("deleted", 0));
+
+    expect(
+      (await screen.findByTestId("deleted-while-editing-notice")).textContent,
+    ).toBe(
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
+    );
+    expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
+      "This document reopened before your last edit saved. Copy your text to keep it.",
+    );
+  });
+
+  it("sets aside an edit that races the confirmed deletion", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    await user.type(screen.getByTestId("page-title"), " Retitled");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => pushSaveState("deleted", 1));
+
+    expect(
+      (await screen.findByTestId("deleted-while-editing-notice")).textContent,
+    ).toBe(
+      "This file was deleted while you had it open. Copy your set-aside edit to keep it.",
+    );
+    expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
+      "This document reopened before your last edit saved. Copy your text to keep it.",
+    );
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
+      "This file was deleted while you had it open. Copy your set-aside edit to keep it.",
+    );
+
+    // Reuse #600's existing Copy recovery action and prove it returns the
+    // current Y.Doc text, including the edit that never settled.
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toContain("title: Plan Retitled"),
+    );
+  });
+
+  it("updates the same set-aside draft for a keystroke before read-only commits", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    const title = screen.getByTestId("page-title");
+    await user.type(title, " Retitled");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+
+    // One React batch: the deletion event captures first, then the still-live
+    // title editor accepts one final keystroke before read-only commits.
+    act(() => {
+      pushSaveState("deleted", 1);
+      fireEvent.change(title, { target: { value: "Plan Retitled!" } });
+    });
+
+    await user.click(await screen.findByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toContain(
+        "title: Plan Retitled!",
+      ),
+    );
+    expect(screen.getAllByTestId("orphaned-draft-notice")).toHaveLength(1);
+  });
+
+  it.each([
+    ["delete" as const, "dohc is still deleting a.md."],
+    ["move" as const, "dohc is still moving a.md."],
+  ])("keeps a %s-window open refusal retryable and operation-aware", async (operation, message) => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    const openBound = bridgeMock.openEngineYDocSession;
+    let removalInProgress = true;
+    const refusedBridge = {
+      ...bridgeMock,
+      openEngineYDocSession: vi.fn(async (...args: Parameters<typeof openBound>) =>
+        removalInProgress
+          ? {
+              available: false,
+              removalInProgress: { operation, message },
+            }
+          : await openBound(...args),
+      ),
+    };
+    vi.stubGlobal("dohcDesktop", refusedBridge);
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const notice = await screen.findByTestId("engine-removal-in-progress-notice");
+    expect(notice.getAttribute("data-operation")).toBe(operation);
+    expect(notice.textContent).toContain(`${message} Wait for it to finish.`);
+    expect(screen.queryByTestId("deleted-while-editing-notice")).toBeNull();
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(
+      true,
+    );
+    removalInProgress = false;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    expect(screen.queryByTestId("engine-removal-in-progress-notice")).toBeNull();
+    expect(screen.queryByTestId("deleted-while-editing-notice")).toBeNull();
+    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(
+      false,
+    );
   });
 
   it("re-projects the source live when a remote CRDT delta lands", async () => {

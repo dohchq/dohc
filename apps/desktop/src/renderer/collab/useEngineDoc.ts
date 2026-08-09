@@ -1,11 +1,101 @@
 import { useEffect, useRef, useState } from "react";
-import type * as Y from "yjs";
+import * as Y from "yjs";
+import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { bridge } from "../bridge";
 import {
+  captureOrphanedDraft,
+  replaceOrphanedDraft,
+} from "../orphanedDrafts";
+import {
   bindEngineYDoc,
+  type EngineRemovalInProgress,
   type EngineYDocBinding,
   type EngineYDocTransport,
 } from "./engineYDocProvider";
+
+export type { EngineRemovalInProgress };
+
+// `@dohc/ydoc-projection` statically pulls in the full Tiptap stack and
+// builds its schema at module load. `useEngineDoc` backs every FileInspector,
+// so a static import here put that whole editor stack in the renderer's
+// eager chunk. Loaded once, lazily, and cached — every caller in this module
+// shares the same in-flight/resolved promise instead of re-importing.
+type ProjectionModule = typeof import("@dohc/ydoc-projection");
+let projectionModulePromise: Promise<ProjectionModule> | null = null;
+function loadProjectionModule(): Promise<ProjectionModule> {
+  if (projectionModulePromise === null) {
+    // A rejected import must not be cached: a transient chunk-fetch failure
+    // (a bundle replaced mid-session by an update, for example) would
+    // otherwise fail every later deletion's faithful capture for the rest of
+    // the session. Clearing on rejection lets the next deletion retry.
+    const pending = import("@dohc/ydoc-projection");
+    projectionModulePromise = pending;
+    void pending.catch(() => {
+      if (projectionModulePromise === pending) projectionModulePromise = null;
+    });
+  }
+  return projectionModulePromise;
+}
+
+// A deletion's draft text depends on the projection module, but the BYTES
+// that produce it must not: the live doc can be destroyed (unmount) before
+// the module resolves, so the doc is snapshotted synchronously at the event
+// and projected to markdown lazily, off a reconstructed doc.
+function markdownFromSnapshot(snapshot: Uint8Array): Promise<string> {
+  return loadProjectionModule().then(({ yDocToMarkdown }) => {
+    const rebuilt = new Y.Doc();
+    Y.applyUpdate(rebuilt, snapshot);
+    return yDocToMarkdown(rebuilt);
+  });
+}
+
+// The crude fallback the deletion boundary persists BEFORE the projection
+// module is even guaranteed to load — pure yjs, no Tiptap, so it never waits
+// on the chunk this whole lazy-load exists to defer. Faithful markdown
+// (frontmatter ordering, table/list formatting, escaping) replaces this the
+// moment `markdownFromSnapshot` resolves; this only has to outlast a crash.
+function crudeMarkdownFromDoc(doc: Y.Doc): string {
+  const meta = doc.getMap("meta");
+  if (meta.get("contentKind") === "plain-text") {
+    return doc.getText("plainText").toString();
+  }
+  const frontmatter = doc.getMap("frontmatter");
+  const frontmatterLines: string[] = [];
+  for (const [key, value] of frontmatter.entries()) {
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      frontmatterLines.push(`${key}: ${String(value)}`);
+    }
+  }
+  const frontmatterText =
+    frontmatterLines.length > 0
+      ? `---\n${frontmatterLines.join("\n")}\n---\n\n`
+      : "";
+  const blockText = (node: Y.XmlText | Y.XmlElement | Y.XmlHook): string => {
+    if (node instanceof Y.XmlText) return node.toString();
+    if (node instanceof Y.XmlElement) {
+      return node.toArray().map(blockText).join("");
+    }
+    return "";
+  };
+  const blocks = doc
+    .getXmlFragment("body")
+    .toArray()
+    .map(blockText)
+    .filter((text) => text.length > 0);
+  return frontmatterText + blocks.join("\n\n");
+}
+
+function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 
 // The engine Y.Doc editor hook for rich-text files. Given a workspace + rich
 // file, it opens a
@@ -43,7 +133,8 @@ export type EngineDocSaveState =
   | "error"
   | "file-locked"
   | "read-only"
-  | "changed-on-disk";
+  | "changed-on-disk"
+  | "deleted";
 
 export type UseEngineDoc = {
   // True once the engine session is open and the mirror doc is bound. false =>
@@ -79,6 +170,14 @@ export type UseEngineDoc = {
   // stays read-only, states the reason, and offers a retry (bump retryKey),
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: boolean;
+  // Main confirmed that it removed this file while the live session was
+  // bound. The current document is retained for recovery only.
+  deletedWhileEditing: boolean;
+  // The recovery row created for this deletion, if it still exists.
+  deletedDraftId: number | null;
+  // An open lost to a delete or move interval. This is not a terminal outcome:
+  // the operation can still fail, so the caller stays read-only and retries.
+  removalInProgress: EngineRemovalInProgress | null;
 };
 
 // What ONE open answers: a workspace, a path, the gate, and the active-version
@@ -102,14 +201,15 @@ function engineDocRequestKey(input: {
 
 // The settled result of one open, stamped with the request it answers.
 type EngineDocOpenOutcome =
-  | { key: string; kind: "bound"; doc: Y.Doc }
+  | { key: string; token: number; kind: "bound"; doc: Y.Doc }
   | { key: string; kind: "unavailable" }
   // Their OWN kinds, not flags on "unavailable": every other unavailable
   // answer means "fall back to the plain editor", and these two mean the
   // opposite (#534, #564). Collapsing them would put the branches back
   // behind one flag.
   | { key: string; kind: "not-in-version" }
-  | { key: string; kind: "engine-may-hold-document" };
+  | { key: string; kind: "engine-may-hold-document" }
+  | { key: string; kind: "removal-in-progress"; removal: EngineRemovalInProgress };
 
 let engineDocSessionCounter = 0;
 function nextSessionId(): string {
@@ -126,6 +226,7 @@ function makeTransport(
   // echoes back the seq each settle STARTED at, and only a settle that covers
   // the newest edit may be reported as "Saved".
   localSeq: { current: number },
+  writesRefused: { current: boolean },
 ): EngineYDocTransport {
   return {
     async open() {
@@ -139,9 +240,13 @@ function makeTransport(
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
+        ...(result.removalInProgress
+          ? { removalInProgress: result.removalInProgress }
+          : {}),
       };
     },
     applyLocalUpdate(update) {
+      if (writesRefused.current) return;
       // Fire-and-forget: main journals + settles. A transient IPC error never
       // tears the editor down; the mirror doc keeps the edit and the next update
       // (or close) re-converges. The seq is NOT rolled back on that failure —
@@ -189,6 +294,11 @@ export function useEngineDoc(input: {
   const requestKey = engineDocRequestKey(input);
   const [outcome, setOutcome] = useState<EngineDocOpenOutcome | null>(null);
   const [saveState, setSaveState] = useState<EngineDocSaveState>("saved");
+  const [deletion, setDeletion] = useState<{
+    token: number;
+    draftId: number | null;
+  } | null>(null);
+  const saveStateRef = useRef<EngineDocSaveState>("saved");
   // Monotonic per-open token: only the newest open may set state (the async-
   // state invariant — a stale workspace/path response never repaints).
   const openTokenRef = useRef(0);
@@ -210,8 +320,23 @@ export function useEngineDoc(input: {
   // repaints the document they just entered.
   const notInVersion = settled?.kind === "not-in-version";
   const engineMayHoldDocument = settled?.kind === "engine-may-hold-document";
+  const removalInProgress =
+    settled?.kind === "removal-in-progress" ? settled.removal : null;
+  const deletedWhileEditing =
+    settled?.kind === "bound" && deletion?.token === settled.token;
+  const deletedDraftId = deletedWhileEditing ? deletion.draftId : null;
+  const writesRefused = useRef(false);
+  const writesRefusedKey = useRef(requestKey);
+  if (writesRefusedKey.current !== requestKey) {
+    writesRefusedKey.current = requestKey;
+    writesRefused.current = false;
+  }
+  if (deletedWhileEditing || removalInProgress !== null) {
+    writesRefused.current = true;
+  }
 
   useEffect(() => {
+    saveStateRef.current = "saved";
     setSaveState("saved");
     if (!input.enabled) return;
     const { workspaceId, path } = input;
@@ -220,16 +345,154 @@ export function useEngineDoc(input: {
     // it holds is still the one it asked for.
     const key = requestKey;
     const token = ++openTokenRef.current;
+    setDeletion(null);
     let cancelled = false;
     let binding: EngineYDocBinding | null = null;
     let detachSaveObserver: (() => void) | null = null;
     let unsubscribeSaveState: (() => void) | null = null;
+    // The last snapshot taken for this deletion lifecycle (for change dedup)
+    // and the draft it produced, once the async serialize+capture lands.
+    let deletionSnapshotBytes: Uint8Array | null = null;
+    let deletionDraftId: number | null = null;
+    // Serializes deletion snapshots in the order they were taken: a later
+    // snapshot's capture must never be overwritten by an earlier one that
+    // resolves late (the projection import, and each markdown conversion,
+    // are async now).
+    let deletionQueue: Promise<void> = Promise.resolve();
+    let deletionPending = false;
 
     const sessionId = nextSessionId();
     const localSeq = { current: 0 };
-    const transport = makeTransport(workspaceId, path, sessionId, localSeq);
+    const transport = makeTransport(
+      workspaceId,
+      path,
+      sessionId,
+      localSeq,
+      writesRefused,
+    );
 
-    void bindEngineYDoc(transport)
+    const reportSaveState = (state: EngineDocSaveState): void => {
+      saveStateRef.current = state;
+      setSaveState(state);
+    };
+
+    // `forceCreate` false means: nothing was unsettled at the moment this
+    // snapshot was taken (the dominant delete path, settled before removal)
+    // — no draft is worth creating for it. A later snapshot always forces
+    // creation: it only runs because the doc changed since the last one.
+    const enqueueDeletionSnapshot = (
+      bytes: Uint8Array,
+      forceCreate: boolean,
+    ): void => {
+      deletionQueue = deletionQueue
+        .then(async () => {
+          const text = await markdownFromSnapshot(bytes);
+          if (deletionDraftId === null) {
+            if (!forceCreate) return;
+            deletionDraftId = captureOrphanedDraft(workspaceId, path, text);
+          } else {
+            replaceOrphanedDraft(workspaceId, path, deletionDraftId, text);
+          }
+          // Only the LOCAL render state is guarded by the open token — the
+          // draft itself is already durable in the module-level store above,
+          // unmount or not.
+          if (token === openTokenRef.current) {
+            setDeletion({ token, draftId: deletionDraftId });
+          }
+        })
+        .catch((error: unknown) => {
+          // This draft is the last copy of the user's text — a load failure
+          // here must not disappear silently.
+          console.error(
+            `[desktop] could not write a recovery draft for ${workspaceId}:${path} after deletion:`,
+            error,
+          );
+        });
+    };
+
+    const captureDeletion = (doc: Y.Doc): void => {
+      writesRefused.current = true;
+      // Snapshot NOW, synchronously: the doc can be destroyed (unmount) or
+      // the caller's reference can go stale before a lazily-loaded
+      // serializer would otherwise get to read it.
+      const bytes = Y.encodeStateAsUpdate(doc);
+      deletionSnapshotBytes = bytes;
+      const forceCreate = saveStateRef.current !== "saved";
+      if (forceCreate) {
+        // Persisted NOW, before the projection module is even guaranteed to
+        // load: a renderer close/reload/crash while that import is still in
+        // flight must not lose text that exists only in this queue's promise
+        // closure, with the file already gone and no draft for the recovery
+        // close guard to find. The queue below upgrades this row to the
+        // faithful markdown a microtask later; it never creates a second one.
+        deletionDraftId = captureOrphanedDraft(
+          workspaceId,
+          path,
+          crudeMarkdownFromDoc(doc),
+        );
+      }
+      setDeletion({ token, draftId: deletionDraftId });
+      reportSaveState("deleted");
+      enqueueDeletionSnapshot(bytes, forceCreate);
+    };
+
+    const refreshDeletionDraft = (doc: Y.Doc): void => {
+      if (deletionSnapshotBytes === null) return;
+      const bytes = Y.encodeStateAsUpdate(doc);
+      if (snapshotsEqual(bytes, deletionSnapshotBytes)) return;
+      deletionSnapshotBytes = bytes;
+      enqueueDeletionSnapshot(bytes, true);
+    };
+
+    const onSaveState = (event: EngineYDocSaveStateEvent): void => {
+      if (cancelled || token !== openTokenRef.current) return;
+      if (event.sessionId !== sessionId) return;
+      if (event.state === "deleted") {
+        const doc = binding?.doc;
+        if (!doc) {
+          deletionPending = true;
+          writesRefused.current = true;
+          return;
+        }
+        if (deletionSnapshotBytes !== null) {
+          refreshDeletionDraft(doc);
+          return;
+        }
+        captureDeletion(doc);
+        return;
+      }
+      // Deletion is terminal for this session. A settle/update already in
+      // flight can report after main's deletion notice, but it no longer
+      // describes a path that exists and must not repaint this state.
+      if (writesRefused.current) return;
+      if (event.state === "file-locked") {
+        if (event.seq >= localSeq.current) reportSaveState(event.state);
+        return;
+      }
+      if (
+        event.state === "error" ||
+        event.state === "read-only" ||
+        event.state === "changed-on-disk"
+      ) {
+        reportSaveState(event.state);
+        return;
+      }
+      if (event.state === "settling") {
+        reportSaveState("saving");
+        return;
+      }
+      if (event.seq >= localSeq.current) reportSaveState("saved");
+    };
+
+    const openAttempt = (async (): Promise<EngineYDocBinding> => {
+      // Subscribe before open: main registers the live entry before the IPC
+      // answer returns, so deletion can otherwise notify an empty listener set
+      // in that hand-over window. The async boundary catches an older preload
+      // that does not expose this channel without delaying the open itself.
+      unsubscribeSaveState = bridge().onEngineYDocSaveState(onSaveState);
+      return bindEngineYDoc(transport);
+    })();
+    void openAttempt
       .then((bound) => {
         // A newer open (workspace/path switch) superseded this one, or the effect
         // already cleaned up: never bind the stale doc — close it and bail.
@@ -238,6 +501,12 @@ export function useEngineDoc(input: {
           return;
         }
         binding = bound;
+        // Preload, don't block: by the time any real deletion can arrive,
+        // the module is very likely already resolved, so a draft's markdown
+        // lands within the same microtask as its snapshot. The snapshot in
+        // captureDeletion/refreshDeletionDraft keeps a genuinely cold start
+        // (import still in flight) correct regardless.
+        void loadProjectionModule();
         if (!bound.available || !bound.doc) {
           // Resolved: NOT engine-backed. The caller may offer the plain local
           // editor again — that is what `opening` was holding back. EXCEPT
@@ -245,66 +514,37 @@ export function useEngineDoc(input: {
           // write the phantom the engine just refused (#534), and when the
           // engine may still hold the document, where a plain autosave would
           // race the session it still binds (#564, #657).
-          setOutcome({
-            key,
-            kind: bound.notInVersion
-              ? "not-in-version"
-              : bound.engineMayHoldDocument
-                ? "engine-may-hold-document"
-                : "unavailable",
-          });
+          if (bound.notInVersion) {
+            setOutcome({ key, kind: "not-in-version" });
+          } else if (bound.engineMayHoldDocument) {
+            setOutcome({ key, kind: "engine-may-hold-document" });
+          } else if (bound.removalInProgress) {
+            setOutcome({
+              key,
+              kind: "removal-in-progress",
+              removal: bound.removalInProgress,
+            });
+          } else {
+            setOutcome({ key, kind: "unavailable" });
+          }
           return;
         }
         // An edit is unsaved the instant it happens. Only main's settle report
         // may clear it — nothing here guesses "saved". The seed apply happened
         // before this observer attached, so it never shows a spurious "saving".
+        const doc = bound.doc;
         const onUpdate = () => {
           if (cancelled) return;
-          setSaveState("saving");
+          if (writesRefused.current) {
+            refreshDeletionDraft(doc);
+            return;
+          }
+          reportSaveState("saving");
         };
-        bound.doc.on("update", onUpdate);
-        detachSaveObserver = () => bound.doc?.off("update", onUpdate);
-        // Subscribe only once the session is CONFIRMED live. Nothing can be
-        // missed by waiting: a settle needs an edit, and an edit needs this
-        // bound doc. Doing it here also keeps every bridge call inside the
-        // caught region — a synchronous call in the effect body turned a
-        // bridge without this method (an older preload, a test double) from
-        // graceful "not engine-backed" into a blanked editor.
-        // Guarded by the per-open token AND the per-open sessionId (the
-        // async-state invariant): another document's settle never repaints.
-        unsubscribeSaveState = bridge().onEngineYDocSaveState((event) => {
-          if (cancelled || token !== openTokenRef.current) return;
-          if (event.sessionId !== sessionId) return;
-          // `file-locked` is the one refusal that makes a DURABILITY claim:
-          // its copy tells the user dohc has their edits and is retrying. So
-          // it may only stand for a settle that carries the newest edit. A
-          // keystroke still in flight means this refusal is about older text,
-          // and showing it would promise safety for a sequence the settle
-          // never covered. Same guard "saved" uses, for the same reason —
-          // keep "Saving…" until an event covers the newest edit.
-          if (event.state === "file-locked") {
-            if (event.seq >= localSeq.current) setSaveState(event.state);
-            return;
-          }
-          // These claim nothing about what is held — "error" says the opposite
-          // — so they stand as soon as they arrive, whatever is in flight.
-          if (
-            event.state === "error" ||
-            event.state === "read-only" ||
-            event.state === "changed-on-disk"
-          ) {
-            setSaveState(event.state);
-            return;
-          }
-          if (event.state === "settling") {
-            setSaveState("saving");
-            return;
-          }
-          // "saved" vouches only for edits journaled before that settle began.
-          // Anything typed since is still unsaved — keep showing "Saving…".
-          if (event.seq >= localSeq.current) setSaveState("saved");
-        });
-        setOutcome({ key, kind: "bound", doc: bound.doc });
+        doc.on("update", onUpdate);
+        detachSaveObserver = () => doc.off("update", onUpdate);
+        if (deletionPending) captureDeletion(doc);
+        setOutcome({ key, token, kind: "bound", doc });
       })
       .catch(() => {
         if (cancelled || token !== openTokenRef.current) return;
@@ -312,6 +552,13 @@ export function useEngineDoc(input: {
       });
 
     return () => {
+      // Belt-and-suspenders, not the sole catcher: `onUpdate` below already
+      // snapshots synchronously for any doc mutation once `writesRefused` is
+      // true, local or remote, ahead of this cleanup in the same tick. This
+      // guards a mutation landing between `cancelled = true` and
+      // `detachSaveObserver()` — narrower than reachable through the public
+      // API today, kept for what a future change to that ordering could open.
+      if (binding?.doc) refreshDeletionDraft(binding.doc);
       cancelled = true;
       unsubscribeSaveState?.();
       detachSaveObserver?.();
@@ -335,5 +582,15 @@ export function useEngineDoc(input: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input.workspaceId, input.path, input.enabled, input.reopenKey, input.retryKey]);
 
-  return { available, opening, doc, saveState, notInVersion, engineMayHoldDocument };
+  return {
+    available,
+    opening,
+    doc,
+    saveState,
+    notInVersion,
+    engineMayHoldDocument,
+    deletedWhileEditing,
+    deletedDraftId,
+    removalInProgress,
+  };
 }

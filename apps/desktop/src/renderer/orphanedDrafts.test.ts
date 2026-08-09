@@ -6,6 +6,7 @@ import {
   captureOrphanedDraft,
   dismissOrphanedDraft,
   remapOrphanedDraftPaths,
+  replaceOrphanedDraft,
   resetOrphanedDrafts,
   useOrphanedDrafts,
   type OrphanedDraft,
@@ -122,6 +123,51 @@ describe("orphanedDrafts persistence (#600)", () => {
     ).toEqual(["# Plan\n\nTyped, unsaved.", "# Plan\n\nTyped again."]);
     // A restored draft is durable, so nothing stays behind the close warning.
     expect(next.atRiskOrphanedDraftIds()).toEqual([]);
+  });
+
+  it("replaces a later snapshot of the same deletion without appending", async () => {
+    const id = captureOrphanedDraft("ws-1", "notes/plan.md", "Before");
+    replaceOrphanedDraft("ws-1", "notes/plan.md", id, "After");
+
+    expect(
+      draftsFor(useOrphanedDrafts, "ws-1", "notes/plan.md").map(
+        (draft) => draft.text,
+      ),
+    ).toEqual(["After"]);
+    const next = await relaunch();
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "notes/plan.md").map(
+        (draft) => draft.text,
+      ),
+    ).toEqual(["After"]);
+  });
+
+  it("ignores a replacement for an id that names no draft", () => {
+    captureOrphanedDraft("ws-1", "notes/plan.md", "Before");
+    // A stale/foreign id must not append a second row — that would be a
+    // duplicate recovery notice for a document whose real replacement never
+    // landed.
+    replaceOrphanedDraft("ws-1", "notes/plan.md", 9_999, "Ghost");
+
+    expect(
+      draftsFor(useOrphanedDrafts, "ws-1", "notes/plan.md").map(
+        (draft) => draft.text,
+      ),
+    ).toEqual(["Before"]);
+  });
+
+  it("keeps a protected path's replacement in memory but out of storage", async () => {
+    const id = captureOrphanedDraft("ws-1", ".env", "API_KEY=shh");
+    // `replaceStoredDraft` refuses a non-persistable path, and the function
+    // must drop the id from `storedIds` so the close guard still warns —
+    // otherwise a secret path would read as durably saved when it never was.
+    replaceOrphanedDraft("ws-1", ".env", id, "API_KEY=shh2");
+
+    expect(
+      draftsFor(useOrphanedDrafts, "ws-1", ".env").map((draft) => draft.text),
+    ).toEqual(["API_KEY=shh2"]);
+    const next = await relaunch();
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", ".env")).toEqual([]);
   });
 
   it("never writes a secret-classified path to plaintext storage", async () => {
