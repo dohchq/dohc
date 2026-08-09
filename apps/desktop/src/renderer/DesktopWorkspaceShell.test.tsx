@@ -492,16 +492,46 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
 function renderShell(
   bridge: ReturnType<typeof makeBridge>,
   workspace: Workspace = WORKSPACE,
+  workspaces: Workspace[] = [workspace],
 ) {
   vi.stubGlobal("dohcDesktop", bridge);
   return render(
     <DesktopWorkspaceShell
       workspace={workspace}
-      workspaces={[workspace]}
+      workspaces={workspaces}
       onSwitchWorkspace={() => {}}
     />,
   );
 }
+
+describe("direct message workspace picker", () => {
+  it("does not offer shared-view workspaces for acceptance", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    bridge.syncDms = vi.fn(async () => ({
+      available: true,
+      dms: [],
+      pending: [
+        { shareId: "share-request", granterEmail: "alice@example.com" },
+      ],
+      declined: [],
+    }));
+    const sharedView: Workspace = {
+      ...SHARE_VIEW,
+      workspaceId: "ws-shared-view",
+      rootPath: "/home/ice/dohc/shared-view",
+    };
+
+    renderShell(bridge, WORKSPACE, [WORKSPACE, sharedView]);
+    await user.click(await screen.findByTestId("chats-dm-request-accept"));
+
+    const options = screen.getAllByTestId("chats-accept-dm-workspace-option");
+    expect(options.map((option) => option.dataset.workspaceId)).toEqual([
+      WORKSPACE.workspaceId,
+    ]);
+    expect(screen.queryByText("shared-view")).toBeNull();
+  });
+});
 
 // The status a real shared view carries (capture === null, share cause) and
 // the workspace identity that rides the capture decision.

@@ -3,10 +3,9 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  clearDeclinedDm,
   declineDm,
-  isDmDeclined,
   readDeclinedDms,
-  requestDmAgain,
 } from "./dmRequestStore";
 import { createTestScratch } from "./testTemp";
 
@@ -23,22 +22,20 @@ afterEach(async () => {
 describe("dmRequestStore", () => {
   it("persists decline and request-again changes idempotently", () => {
     expect(readDeclinedDms(file())).toEqual(new Set());
-    expect(isDmDeclined(file(), "share-1")).toBe(false);
 
     expect(declineDm(file(), "share-1")).toBe(true);
     expect(declineDm(file(), "share-1")).toBe(true);
-    expect(isDmDeclined(file(), "share-1")).toBe(true);
     expect(readDeclinedDms(file())).toEqual(new Set(["share-1"]));
 
-    expect(requestDmAgain(file(), "share-1")).toBe(true);
-    expect(requestDmAgain(file(), "share-1")).toBe(true);
-    expect(isDmDeclined(file(), "share-1")).toBe(false);
+    expect(clearDeclinedDm(file(), "share-1")).toBe(true);
+    expect(clearDeclinedDm(file(), "share-1")).toBe(true);
+    expect(readDeclinedDms(file())).toEqual(new Set());
   });
 
   it("keeps independent declined requests across writes", () => {
     expect(declineDm(file(), "share-A")).toBe(true);
     expect(declineDm(file(), "share-B")).toBe(true);
-    expect(requestDmAgain(file(), "share-A")).toBe(true);
+    expect(clearDeclinedDm(file(), "share-A")).toBe(true);
     expect(readDeclinedDms(file())).toEqual(new Set(["share-B"]));
   });
 
@@ -46,7 +43,7 @@ describe("dmRequestStore", () => {
     writeFileSync(file(), "not json");
     expect(readDeclinedDms(file())).toEqual(new Set());
     expect(declineDm(file(), "share-A")).toBe(false);
-    expect(requestDmAgain(file(), "share-A")).toBe(false);
+    expect(clearDeclinedDm(file(), "share-A")).toBe(false);
     expect(readFileSync(file(), "utf8")).toBe("not json");
   });
 
@@ -66,7 +63,7 @@ describe("dmRequestStore", () => {
     }
 
     expect(declineDm(target, "share-B")).toBe(false);
-    expect(requestDmAgain(target, "share-A")).toBe(false);
+    expect(clearDeclinedDm(target, "share-A")).toBe(false);
     chmodSync(target, 0o600);
     expect(readDeclinedDms(target)).toEqual(new Set(["share-A"]));
   });
@@ -78,7 +75,7 @@ describe("dmRequestStore", () => {
     mkdirSync(tmp);
     try {
       expect(declineDm(target, "share-B")).toBe(false);
-      expect(requestDmAgain(target, "share-A")).toBe(false);
+      expect(clearDeclinedDm(target, "share-A")).toBe(false);
       expect(readDeclinedDms(target)).toEqual(new Set(["share-A"]));
     } finally {
       rmSync(tmp, { recursive: true, force: true });

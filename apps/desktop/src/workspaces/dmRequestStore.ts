@@ -54,11 +54,6 @@ export function readDeclinedDms(file: string): ReadonlySet<string> {
   return result.ok ? result.declined : new Set();
 }
 
-export function isDmDeclined(file: string, shareId: string): boolean {
-  const result = readSet(file);
-  return result.ok && result.declined.has(shareId);
-}
-
 export function declineDm(file: string, shareId: string): boolean {
   const result = readSet(file);
   if (!result.ok) return false;
@@ -67,7 +62,7 @@ export function declineDm(file: string, shareId: string): boolean {
   return writeSet(file, result.declined);
 }
 
-export function requestDmAgain(file: string, shareId: string): boolean {
+export function clearDeclinedDm(file: string, shareId: string): boolean {
   const result = readSet(file);
   if (!result.ok) return false;
   if (!result.declined.has(shareId)) return true;

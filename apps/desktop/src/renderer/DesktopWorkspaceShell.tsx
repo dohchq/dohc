@@ -3574,10 +3574,12 @@ export function DesktopWorkspaceShell(props: {
 
   // The editor is the one live conversation surface. It owns presence,
   // drafts, and navigation state.
-  const dmWorkspaceOptions = props.workspaces.map((workspace) => ({
-    workspaceId: workspace.workspaceId,
-    label: workspaceName(workspace),
-  }));
+  const dmWorkspaceOptions = props.workspaces
+    .filter((workspace) => !workspace.shareView)
+    .map((workspace) => ({
+      workspaceId: workspace.workspaceId,
+      label: workspaceName(workspace),
+    }));
   const chatsViewProps = {
     workspaceId,
     workspaces: dmWorkspaceOptions,

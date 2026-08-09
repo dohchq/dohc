@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import { CHATS_METHOD, ChatsLoopbackEngine, type Request } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   dmChannelNameFor,
   grantDmRecipients,
@@ -10,8 +10,16 @@ import {
   parseDmRecipients,
   peekReceivedGrantKind,
   requireShareableChatChannel,
+  resolveDmKinds,
+  shareIdsToWithholdFromOrdinaryInvites,
   type ShareLogPage,
 } from "./dmChats";
+import {
+  classifyDmRequests,
+  isShareAcceptedInWorkspace,
+  liveSharedChannelHoldersByShareId,
+  reserveAndPullSharedChannel,
+} from "./dmRequests";
 import type { JoinedSharedChannel } from "./registryStore";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { createTestScratch } from "./testTemp";
@@ -462,6 +470,175 @@ describe("peekReceivedGrantKind", () => {
   });
 });
 
+describe("resolveDmKinds", () => {
+  it("withholds confirmed DMs and unknown rows from the ordinary invite lane", async () => {
+    const cache = new Map<string, "dm" | "not-dm">();
+
+    await resolveDmKinds({
+      shareIds: ["share-dm", "share-channel", "share-unknown"],
+      cache,
+      peekKind: async (shareId) => {
+        if (shareId === "share-dm") return "dm";
+        if (shareId === "share-channel") return "not-dm";
+        return "unknown";
+      },
+    });
+
+    expect(
+      shareIdsToWithholdFromOrdinaryInvites({
+        shareIds: ["share-dm", "share-channel", "share-unknown"],
+        cache,
+      }),
+    ).toEqual(new Set(["share-dm", "share-unknown"]));
+  });
+
+  it("withholds unresolved grants and retries their peek on the next call", async () => {
+    const cache = new Map<string, "dm" | "not-dm">();
+    const peekKind = vi
+      .fn<(shareId: string) => Promise<"unknown" | "not-dm">>()
+      .mockResolvedValueOnce("unknown")
+      .mockResolvedValueOnce("not-dm");
+
+    await resolveDmKinds({ shareIds: ["share-late"], cache, peekKind });
+    expect(cache.has("share-late")).toBe(false);
+    await resolveDmKinds({ shareIds: ["share-late"], cache, peekKind });
+    expect(cache.get("share-late")).toBe("not-dm");
+    expect(peekKind).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("DM request decisions", () => {
+  it("classifies a poll without any path that can materialize a request", async () => {
+    const kindCache = new Map<string, "dm" | "not-dm">([
+      ["share-claimed", "dm"],
+    ]);
+    const peekKind = vi.fn(async (shareId: string) => {
+      if (shareId === "share-pending" || shareId === "share-declined") return "dm";
+      if (shareId === "share-channel") return "not-dm";
+      return "unknown";
+    });
+    const holdersByShareId = vi.fn(() =>
+      new Map<string, ReadonlySet<string>>([
+        ["share-claimed", new Set(["workspace-a"])],
+      ]),
+    );
+    const input: Parameters<typeof classifyDmRequests>[0] = {
+      received: [
+        { shareId: "share-pending", granterEmail: "pending@example.com", selector: { kind: "chat-channel", channelWireId: "wire-pending" } },
+        { shareId: "share-declined", granterEmail: "declined@example.com", selector: { kind: "chat-channel", channelWireId: "wire-declined" } },
+        { shareId: "share-channel", selector: { kind: "chat-channel", channelWireId: "wire-channel" } },
+        { shareId: "share-unknown", selector: { kind: "chat-channel", channelWireId: "wire-unknown" } },
+        { shareId: "share-claimed", selector: { kind: "chat-channel", channelWireId: "wire-claimed" } },
+      ],
+      kindCache,
+      peekKind,
+      holdersByShareId,
+      declinedShareIds: new Set(["share-declined"]),
+    };
+
+    expect("writeSharedChannels" in input).toBe(false);
+    await expect(classifyDmRequests(input)).resolves.toEqual({
+      pending: [
+        { shareId: "share-pending", granterEmail: "pending@example.com" },
+      ],
+      declined: [
+        { shareId: "share-declined", granterEmail: "declined@example.com" },
+      ],
+    });
+    expect(peekKind).not.toHaveBeenCalledWith("share-claimed");
+    expect(kindCache.has("share-unknown")).toBe(false);
+  });
+
+  it("reserves and pulls in the explicitly chosen workspace", async () => {
+    const registry = new Map<string, JoinedSharedChannel[]>([
+      ["workspace-a", []],
+      ["workspace-b", []],
+      ["workspace-c", []],
+    ]);
+    const writeSharedChannels = vi.fn(
+      (workspaceId: string, channels: JoinedSharedChannel[]) => {
+        registry.set(workspaceId, channels);
+      },
+    );
+    const pull = vi.fn(async () => ({ applied: 1 }));
+
+    await reserveAndPullSharedChannel({
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      shareId: "share-c",
+      workspaceId: "workspace-c",
+      rootPath: "/workspaces/c",
+      recipientUserId: "user-c",
+      relayUrl: "http://relay.test",
+      readSharedChannels: (workspaceId) => registry.get(workspaceId) ?? [],
+      writeSharedChannels,
+      fetchInfo: async () => ({
+        shareId: "share-c",
+        granterUserId: "granter",
+        granterEmail: "granter@example.com",
+        channelWireId: "wire-c",
+        access: "read-write",
+        createdAtMs: 1,
+      }),
+      pull,
+      serialize: async (_workspaceId, run) => await run(),
+    });
+
+    expect(writeSharedChannels).toHaveBeenCalledTimes(1);
+    expect(writeSharedChannels.mock.calls[0]?.[0]).toBe("workspace-c");
+    expect(registry.get("workspace-a")).toEqual([]);
+    expect(registry.get("workspace-b")).toEqual([]);
+    expect(registry.get("workspace-c")?.[0]?.shareId).toBe("share-c");
+  });
+
+  it("treats an ended row as re-requestable and re-accepts it", async () => {
+    const ended = joined({
+      shareId: "share-x",
+      channelWireId: "wire-x",
+      ended: true,
+    });
+    const workspaces = [
+      { workspaceId: "workspace-a", rootPath: "/a", sharedChannels: [ended] },
+      { workspaceId: "workspace-b", rootPath: "/b", sharedChannels: [] },
+    ];
+    const classified = await classifyDmRequests({
+      received: [
+        { shareId: "share-x", granterEmail: "x@example.com", selector: { kind: "chat-channel", channelWireId: "wire-x" } },
+      ],
+      kindCache: new Map(),
+      peekKind: async () => "dm",
+      holdersByShareId: () => liveSharedChannelHoldersByShareId(workspaces),
+      declinedShareIds: new Set(),
+    });
+    expect(classified.pending.map((row) => row.shareId)).toEqual(["share-x"]);
+    expect(isShareAcceptedInWorkspace([ended], "share-x")).toBe(false);
+
+    const pull = vi.fn(async () => ({ applied: 0 }));
+    const writeSharedChannels = vi.fn();
+    await reserveAndPullSharedChannel({
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      shareId: "share-x",
+      workspaceId: "workspace-a",
+      rootPath: "/a",
+      recipientUserId: "user-a",
+      relayUrl: "http://relay.test",
+      readSharedChannels: () => [ended],
+      writeSharedChannels,
+      fetchInfo: async () => ({
+        shareId: "share-x",
+        granterUserId: "granter",
+        granterEmail: "x@example.com",
+        channelWireId: "wire-x",
+        access: "read-write",
+        createdAtMs: 1,
+      }),
+      pull,
+      serialize: async (_workspaceId, run) => await run(),
+    });
+    expect(writeSharedChannels.mock.calls[0]?.[1]?.[0]?.ended).toBeUndefined();
+    expect(pull).toHaveBeenCalledOnce();
+  });
+});
+
 describe("requireShareableChatChannel", () => {
   it("rejects a crafted generic-share request for a DM at runtime", async () => {
     const { store, seed } = await makeStore();
@@ -591,6 +768,73 @@ describe("listDmRecords", () => {
       threadId: null,
       connected: true,
     });
+  });
+
+  it("keeps a pre-existing accepted DM live after the dmHomeStore deletion", async () => {
+    const { store, loopback, seed } = await makeStore();
+    loopback.seedChannel({
+      workspace: WS,
+      channelId: "owner-channel-existing",
+      wireId: "owner-channel-existing",
+      name: "member@example.com",
+      kind: "dm",
+      createdAtMs: 1,
+    });
+    await seed({
+      method: CHATS_METHOD.threadStart,
+      idempotencyKey: "thread-existing:message-existing",
+      params: {
+        channelId: "owner-channel-existing",
+        threadId: "thread-existing",
+        messageId: "message-existing",
+        authorKind: "human",
+        authorDisplayName: "Alice",
+        authorUserId: "user-alice",
+        body: "Existing history",
+        nowMs: 2,
+      },
+    });
+    const registry = [
+      joined({
+        shareId: "share-existing",
+        channelWireId: "owner-channel-existing",
+      }),
+    ];
+
+    const dms = await listDmRecords({
+      workspaceId: WS,
+      store,
+      sharedChannels: registry,
+    });
+    expect(dms).toHaveLength(1);
+    expect(dms[0]).toMatchObject({
+      role: "participant",
+      shareId: "share-existing",
+      threadId: "thread-existing",
+      connected: true,
+    });
+
+    const requests = await classifyDmRequests({
+      received: [
+        {
+          shareId: "share-existing",
+          granterEmail: "alice@x.com",
+          selector: {
+            kind: "chat-channel",
+            channelWireId: "owner-channel-existing",
+          },
+        },
+      ],
+      kindCache: new Map([["share-existing", "dm"]]),
+      peekKind: async () => "dm",
+      holdersByShareId: () =>
+        liveSharedChannelHoldersByShareId([
+          { workspaceId: WS, rootPath: "/accepted", sharedChannels: registry },
+          { workspaceId: "workspace-b", rootPath: "/other", sharedChannels: [] },
+        ]),
+      declinedShareIds: new Set(),
+    });
+    expect(requests).toEqual({ pending: [], declined: [] });
   });
 
   it("derives participant role from a replayed channel and labels it by the GRANTER, not the replicated name", async () => {

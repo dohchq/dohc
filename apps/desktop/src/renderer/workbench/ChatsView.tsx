@@ -11,6 +11,7 @@ import {
   Rss,
   Square,
   Users,
+  X,
 } from "lucide-react";
 import {
   type ReactNode,
@@ -1152,8 +1153,8 @@ function AcceptDmDialog(props: {
     (workspace) => workspace.workspaceId === workspaceId,
   );
   const title = props.request.granterEmail
-    ? `Add ${props.request.granterEmail}'s message to a workspace`
-    : "Add this message to a workspace";
+    ? `Add your conversation with ${props.request.granterEmail} to a workspace`
+    : "Add this conversation to a workspace";
 
   async function accept() {
     if (!chosen || busyRef.current) return;
@@ -1233,6 +1234,66 @@ function AcceptDmDialog(props: {
         </div>
       </div>
     </Overlay>
+  );
+}
+
+function DmRequestListItem(props: {
+  request: DmRequestRow;
+  state: "pending" | "declined";
+  busy: boolean;
+  onAccept: () => void;
+  onDecline: () => void;
+  onRequestAgain: () => void;
+}) {
+  const pending = props.state === "pending";
+  return (
+    <li
+      data-testid={pending ? "chats-dm-request-item" : "chats-dm-declined-item"}
+      className="border-b border-line"
+    >
+      <div className="flex items-center gap-1.5 px-3 py-2">
+        <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12px] font-medium text-ink">
+            {props.request.granterEmail ?? "A teammate"}
+          </span>
+          <span className="block text-[10px] text-subtle">
+            {pending ? "Wants to message you" : "Declined"}
+          </span>
+        </span>
+        {pending ? (
+          <>
+            <button
+              type="button"
+              data-testid="chats-dm-request-accept"
+              onClick={props.onAccept}
+              className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+            >
+              Accept
+            </button>
+            <button
+              type="button"
+              data-testid="chats-dm-request-decline"
+              disabled={props.busy}
+              onClick={props.onDecline}
+              className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+            >
+              Decline
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            data-testid="chats-dm-request-again"
+            disabled={props.busy}
+            onClick={props.onRequestAgain}
+            className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+          >
+            Move back to requests
+          </button>
+        )}
+      </div>
+    </li>
   );
 }
 
@@ -1365,6 +1426,10 @@ export function ChatsView(props: {
   const [acceptingDmRequest, setAcceptingDmRequest] = useState<DmRequestRow | null>(
     null,
   );
+  const [dmAcceptedElsewhere, setDmAcceptedElsewhere] = useState<{
+    granterEmail: string | null;
+    workspaceLabel: string;
+  } | null>(null);
   const [dmRequestBusy, setDmRequestBusy] = useState<string | null>(null);
   const [dmRecipients, setDmRecipients] = useState("");
   const [dmDraft, setDmDraft] = useState("");
@@ -1975,7 +2040,9 @@ export function ChatsView(props: {
   // the sync settles. A drain whose token era ended can commit nothing, so the
   // next caller takes the slot instead of queueing onto it.
   const dmSync = useRef<{ token: number; pending: boolean } | null>(null);
-  const refreshDms = useCallback(async () => {
+  const refreshDms = useCallback(async (options?: {
+    preserveAcceptedElsewhere?: boolean;
+  }) => {
     const active = dmSync.current;
     if (active !== null && active.token === liveToken.current) {
       active.pending = true;
@@ -1995,6 +2062,7 @@ export function ChatsView(props: {
           setDms(result.dms);
           setPendingDmRequests(result.pending);
           setDeclinedDmRequests(result.declined);
+          if (!options?.preserveAcceptedElsewhere) setDmAcceptedElsewhere(null);
         } catch {
           // DMs are optional: Chats stays fully usable without them.
         }
@@ -2061,6 +2129,7 @@ export function ChatsView(props: {
     setPendingDmRequests([]);
     setDeclinedDmRequests([]);
     setAcceptingDmRequest(null);
+    setDmAcceptedElsewhere(null);
     setDmRequestBusy(null);
     setDmRecipients("");
     setDmDraft("");
@@ -3272,17 +3341,32 @@ export function ChatsView(props: {
         });
         if (token !== liveToken.current) return;
         setAcceptingDmRequest(null);
-        props.onNavCommand?.({ level: "dm", dm: result.dm });
-        void openDm(result.dm);
-        void refreshDms();
+        if (chosenWorkspaceId === workspaceId) {
+          props.onNavCommand?.({ level: "dm", dm: result.dm });
+          void openDm(result.dm);
+          void refreshDms();
+        } else {
+          const label =
+            props.workspaces.find(
+              (candidate) => candidate.workspaceId === chosenWorkspaceId,
+            )?.label ?? chosenWorkspaceId;
+          setDmAcceptedElsewhere({
+            granterEmail: request.granterEmail,
+            workspaceLabel: label,
+          });
+          void refreshDms({ preserveAcceptedElsewhere: true });
+        }
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(
-          ipcErrorMessage(error, "Could not add that message to a workspace."),
+          ipcErrorMessage(
+            error,
+            "dohc could not add that conversation to a workspace.",
+          ),
         );
       }
     },
-    [openDm, props, refreshDms],
+    [openDm, props, refreshDms, workspaceId],
   );
 
   const declineDmRequest = useCallback(
@@ -3296,7 +3380,9 @@ export function ChatsView(props: {
         await refreshDms();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not decline that request."));
+        props.onError(
+          ipcErrorMessage(error, "dohc could not decline that message request."),
+        );
       } finally {
         if (token === liveToken.current) setDmRequestBusy(null);
       }
@@ -3316,7 +3402,10 @@ export function ChatsView(props: {
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(
-          ipcErrorMessage(error, "Could not move that message back to requests."),
+          ipcErrorMessage(
+            error,
+            "dohc could not move that message request back to requests.",
+          ),
         );
       } finally {
         if (token === liveToken.current) setDmRequestBusy(null);
@@ -5366,47 +5455,43 @@ export function ChatsView(props: {
             ) : null}
           </div>
         ) : null}
+        {dmAcceptedElsewhere ? (
+          <div
+            data-testid="chats-dm-accepted-elsewhere"
+            className="mx-3 mt-3 flex min-h-7 items-center gap-2 rounded border border-line bg-panel-2 px-2 text-[11px] text-muted"
+          >
+            <span className="min-w-0 flex-1 truncate">
+              {dmAcceptedElsewhere.granterEmail
+                ? `Added your conversation with ${dmAcceptedElsewhere.granterEmail} to ${dmAcceptedElsewhere.workspaceLabel}.`
+                : `Added this conversation to ${dmAcceptedElsewhere.workspaceLabel}.`}
+            </span>
+            <button
+              type="button"
+              data-testid="chats-dm-accepted-elsewhere-dismiss"
+              aria-label="Dismiss notice"
+              onClick={() => setDmAcceptedElsewhere(null)}
+              className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50 hover:text-ink"
+            >
+              <X size={12} aria-hidden />
+            </button>
+          </div>
+        ) : null}
         {pendingDmRequests.length > 0 || declinedDmRequests.length > 0 ? (
           <div data-testid="chats-dm-requests-section">
             <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
-              Message requests
+              Direct message requests
             </p>
             <ul className="m-0 list-none p-0">
               {pendingDmRequests.map((request) => (
-                <li
+                <DmRequestListItem
                   key={request.shareId}
-                  data-testid="chats-dm-request-item"
-                  className="border-b border-line"
-                >
-                  <div className="flex items-center gap-1.5 px-3 py-2">
-                    <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[12px] font-medium text-ink">
-                        {request.granterEmail ?? "A teammate"}
-                      </span>
-                      <span className="block text-[10px] text-subtle">
-                        Wants to message you
-                      </span>
-                    </span>
-                    <button
-                      type="button"
-                      data-testid="chats-dm-request-accept"
-                      onClick={() => setAcceptingDmRequest(request)}
-                      className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
-                    >
-                      Accept
-                    </button>
-                    <button
-                      type="button"
-                      data-testid="chats-dm-request-decline"
-                      disabled={dmRequestBusy !== null}
-                      onClick={() => void declineDmRequest(request)}
-                      className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
-                    >
-                      Decline
-                    </button>
-                  </div>
-                </li>
+                  request={request}
+                  state="pending"
+                  busy={dmRequestBusy !== null}
+                  onAccept={() => setAcceptingDmRequest(request)}
+                  onDecline={() => void declineDmRequest(request)}
+                  onRequestAgain={() => undefined}
+                />
               ))}
             </ul>
             {declinedDmRequests.length > 0 ? (
@@ -5416,30 +5501,15 @@ export function ChatsView(props: {
                 </p>
                 <ul className="m-0 list-none p-0">
                   {declinedDmRequests.map((request) => (
-                    <li
+                    <DmRequestListItem
                       key={request.shareId}
-                      data-testid="chats-dm-declined-item"
-                      className="border-b border-line"
-                    >
-                      <div className="flex items-center gap-1.5 px-3 py-2">
-                        <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[12px] font-medium text-ink">
-                            {request.granterEmail ?? "A teammate"}
-                          </span>
-                          <span className="block text-[10px] text-subtle">Declined</span>
-                        </span>
-                        <button
-                          type="button"
-                          data-testid="chats-dm-request-again"
-                          disabled={dmRequestBusy !== null}
-                          onClick={() => void requestDmAgain(request)}
-                          className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
-                        >
-                          Request again
-                        </button>
-                      </div>
-                    </li>
+                      request={request}
+                      state="declined"
+                      busy={dmRequestBusy !== null}
+                      onAccept={() => undefined}
+                      onDecline={() => undefined}
+                      onRequestAgain={() => void requestDmAgain(request)}
+                    />
                   ))}
                 </ul>
               </div>

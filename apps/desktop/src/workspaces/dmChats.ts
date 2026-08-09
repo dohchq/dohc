@@ -162,6 +162,35 @@ export interface ShareLogPage {
 //               become visible before the owner's bootstrap ops reach relay.
 export type DmPeekResult = "dm" | "not-dm" | "unknown";
 
+// Resolve immutable grant kinds in the shared cache, peeking uncached shares.
+// Unknown and failed peeks stay uncached so the next call retries. A caller
+// that must keep DMs out of an ordinary invite lane withholds every share that
+// is not confirmed "not-dm" after this attempt.
+export async function resolveDmKinds(input: {
+  shareIds: readonly string[];
+  cache: Map<string, "dm" | "not-dm">;
+  peekKind: (shareId: string) => Promise<DmPeekResult>;
+}): Promise<void> {
+  for (const shareId of input.shareIds) {
+    if (input.cache.has(shareId)) continue;
+    try {
+      const kind = await input.peekKind(shareId);
+      if (kind !== "unknown") input.cache.set(shareId, kind);
+    } catch {
+      // A failed peek proves no immutable kind. Retry it on the next call.
+    }
+  }
+}
+
+export function shareIdsToWithholdFromOrdinaryInvites(input: {
+  shareIds: readonly string[];
+  cache: ReadonlyMap<string, "dm" | "not-dm">;
+}): Set<string> {
+  return new Set(
+    input.shareIds.filter((shareId) => input.cache.get(shareId) !== "not-dm"),
+  );
+}
+
 // Peek a received chat-channel grant's KIND without mutating the local store,
 // to decide whether it should AUTO-JOIN (only `kind:"dm"` grants do; a regular
 // shared-channel grant stays manual-join). The share filter serves the
