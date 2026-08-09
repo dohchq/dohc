@@ -806,6 +806,86 @@ describe("the document open's capture-chain hold (#564)", () => {
       await engine.stop();
     });
 
+    // #710/#721 rider F6. The test above pins the disk-size clause of
+    // `captureWillReachPath`; a REAL `.dohc/files.toml` `tracked = false`
+    // rule is what exercises the `policyTracksPath` clause, and only this
+    // fixture severs cleanly from that one alone — the file here is a few
+    // plain bytes, well under every size cap.
+    it("binds a policy-excluded orphan's resurrected lineage the same way", async () => {
+      const root = await tempRoot();
+      const excluded = "small, policy-excluded content\n";
+      await write(root, "note.md", excluded);
+      await write(
+        root,
+        ".dohc/files.toml",
+        '[[rule]]\npath = "note.md"\ntracked = false\n',
+      );
+      const { sessions } = recordingSessions();
+      const doc = new Y.Doc();
+      let evicted = false;
+      let opens = 0;
+      const engine = createWorkspaceEngineCapture({
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        rustEngineSessions: sessions,
+        openRustYDocProviderSession: async () => {
+          opens += 1;
+          return {
+            doc,
+            initialUpdate: Y.encodeStateAsUpdate(doc),
+            contentKind: "plaintext" as const,
+            // The head stays absent forever: no capture will mint one here,
+            // because the policy excludes the path.
+            head: "absent" as const,
+            path: "note.md",
+            lineage: evicted ? ("existing" as const) : ("absent" as const),
+            applyLocalUpdate: async () => undefined,
+            settleNow: async () =>
+              ({ sha256: "a".repeat(64), markdown: "" }) as never,
+            applyExternalMarkdownEdit: async () =>
+              ({ kind: "merged" }) as never,
+            close: async () => {
+              throw new DaemonRefusalError(
+                {
+                  code: "INVALID_PARAMS",
+                  message: "ydoc-unsettled-close",
+                  retry: "no",
+                },
+                undefined,
+              );
+            },
+            evict: async () => {
+              evicted = true;
+            },
+          };
+        },
+      });
+      engine.start();
+      await engine.flush();
+
+      const refusal = await engine
+        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
+        .catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(YDocUncapturedArtifactError);
+      expect(evicted).toBe(true);
+
+      // MUTATION: sever the `policyTracksPath` clause of
+      // `captureWillReachPath` (treat every path as capture-reachable) ->
+      // this second open refuses again instead of binding, because the
+      // disk-size clause alone never excludes a few plain bytes.
+      const session = await engine.openYDocSession({
+        path: "note.md",
+        onRemoteUpdate: () => undefined,
+      });
+      expect(session.doc).toBe(doc);
+      expect(opens).toBe(2);
+      // Nothing was written on the way out.
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(excluded);
+
+      await session.close({ settle: false }).catch(() => undefined);
+      await engine.stop();
+    });
+
     it("refuses to settle an orphan for a lifecycle close either", async () => {
       // codex r21, and the third site of one mechanism — which is why the
       // never-settle rule now lives on the ORPHAN instead of at each caller.
