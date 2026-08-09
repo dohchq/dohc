@@ -266,7 +266,7 @@ mod tests {
     /// all land on the AEAD check rather than on a decode or shape guard.
     ///
     /// Honest about what this adds: it does NOT have a mutation of its own.
-    /// Giving `decrypt_in_place_detached`'s `map_err` a different error kills
+    /// Giving `decrypt_inout_detached`'s `map_err` a different error kills
     /// this test AND `wrong_passphrase_fails_closed` AND
     /// `wrong_workspace_aad_fails_closed`, because all three reach that one
     /// call. What it closes is an INPUT-CLASS gap -- nothing else here feeds

@@ -18,7 +18,7 @@ test-util = []
 # AES-256-GCM AEAD. RustCrypto's `aes-gcm` is the chosen primitive over `ring`
 # because (a) it is pure Rust, so this crate's `#![forbid(unsafe_code)]` holds
 # for our code while the audited unsafe stays inside the dependency, (b) it
-# exposes a DETACHED-tag API (`encrypt_in_place_detached`) that matches the TS
+# exposes a DETACHED-tag API (`encrypt_inout_detached`) that matches the TS
 # storage shape where the 12-byte IV and 16-byte tag live in their own columns
 # separate from the ciphertext, and (c) it shares the RustCrypto stack already
 # vendored via `sha2`. Parameters (256-bit key, 96-bit nonce, 128-bit tag) are

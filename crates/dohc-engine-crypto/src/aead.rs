@@ -5,7 +5,7 @@
 //! Parameters, fixed and non-negotiable for cross-engine parity:
 //! - 256-bit key, 96-bit (12-byte) random IV per write, 128-bit (16-byte) tag.
 //! - The tag is DETACHED: TS stores IV / tag / ciphertext in three separate
-//!   base64 fields, so we use `encrypt_in_place_detached` rather than the
+//!   base64 fields, so we use `encrypt_inout_detached` rather than the
 //!   append-tag `Aead::encrypt`.
 //! - AAD is the UTF-8 bytes of `dohc-secret-v1\0<workspace>\0<path>` — binding
 //!   ciphertext to its workspace AND path so rows cannot be spliced across
