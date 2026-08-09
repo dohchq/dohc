@@ -287,15 +287,12 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
   // routine refactor. Multi-valued so a name declared twice keeps BOTH — see
   // resolveSpecifiers on why that direction is the safe one.
   const stringConsts = new Map<string, readonly string[]>();
+  const stringConstExpressions = new Map<string, t.Expression[]>();
   // Object literals bound to a name, so a Worker's options can be reached
   // through a const rather than only inline.
   const optionObjects = new Map<string, t.ObjectExpression[]>();
-  const addConst = (name: string, values: readonly string[]): void => {
-    if (values.length === 0) return;
-    stringConsts.set(name, [...(stringConsts.get(name) ?? []), ...values]);
-  };
-  // Two passes: import aliases and string consts first, so a const declared
-  // after its use — or a createRequire alias imported below it — still resolves.
+  // Collect declarations before resolving them, so declaration order does not
+  // change which static specifiers the ratchet can see.
   const collectNames = (node: t.Node): void => {
     if (t.isImportDeclaration(node)) {
       for (const specifier of node.specifiers) {
@@ -311,7 +308,10 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
     if (t.isVariableDeclarator(node) && t.isIdentifier(node.id)) {
       const init = node.init;
       if (init !== null && t.isExpression(init)) {
-        addConst(node.id.name, resolveSpecifiers(init, stringConsts));
+        stringConstExpressions.set(node.id.name, [
+          ...(stringConstExpressions.get(node.id.name) ?? []),
+          init,
+        ]);
       }
       const unwrapped = init !== null && t.isExpression(init) ? unwrapExpression(init) : undefined;
       if (unwrapped !== undefined && t.isObjectExpression(unwrapped)) {
@@ -323,6 +323,21 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
     }
   };
   t.traverseFast(sourceFile, collectNames);
+  let resolvedAnotherValue: boolean;
+  do {
+    resolvedAnotherValue = false;
+    for (const [name, expressions] of stringConstExpressions) {
+      const values = new Set(stringConsts.get(name) ?? []);
+      const previousSize = values.size;
+      for (const expression of expressions) {
+        for (const value of resolveSpecifiers(expression, stringConsts)) values.add(value);
+      }
+      if (values.size > previousSize) {
+        stringConsts.set(name, [...values]);
+        resolvedAnotherValue = true;
+      }
+    }
+  } while (resolvedAnotherValue);
   const collectAliases = (node: t.Node): void => {
     if (t.isVariableDeclarator(node) && t.isIdentifier(node.id)) {
       const init = node.init;
@@ -633,6 +648,12 @@ export const m = await import(name);`),
     expect(
       hasRuntimeLegacyImport(`export const m = await import(name);
 const name = "${L}";`),
+    ).toBe(true);
+    // Dependencies between constants are also independent of declaration order.
+    expect(
+      hasRuntimeLegacyImport(`const name = scope + "/workspace-engine";
+const scope = "@dohc";
+export const m = await import(name);`),
     ).toBe(true);
     // Concatenated literals.
     expect(hasRuntimeLegacyImport(`const m = require("@dohc/" + "workspace-engine");`)).toBe(true);
