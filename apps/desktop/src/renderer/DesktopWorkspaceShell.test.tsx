@@ -24,6 +24,7 @@ vi.setConfig({ testTimeout: 15_000 });
 import type {
   AgentRunStatusResult,
   ChatChannelRecord,
+  DismissShareSkipsPayload,
   DmRecord,
   EngineMomentRecord,
   FileChatThreadRecord,
@@ -34,6 +35,9 @@ import type {
   RefreshSharedViewResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
+  SyncDmsPayload,
+  SyncDmsResult,
+  SyncStatusResult,
   TryInVersionStateResult,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
@@ -222,8 +226,8 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       ],
       folders: [] as string[],
     })),
-    openWorkspace: vi.fn(async () => SYNC_STATUS),
-    getSyncStatus: vi.fn(async () => SYNC_STATUS),
+    openWorkspace: vi.fn(async (): Promise<SyncStatusResult> => SYNC_STATUS),
+    getSyncStatus: vi.fn(async (): Promise<SyncStatusResult> => SYNC_STATUS),
     // Typed to the contract, not to this idle default: a freshness test drives
     // a real running agent through it.
     getAgentRunStatus: vi.fn(
@@ -364,7 +368,9 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     }),
     // Typed to the contract, not to this one default: a test that drives a
     // real pull ("updated") must be able to swap the implementation.
-    dismissShareSkips: vi.fn(async () => undefined),
+    dismissShareSkips: vi.fn(
+      async (_payload: DismissShareSkipsPayload): Promise<void> => undefined,
+    ),
     refreshSharedView: vi.fn(
       async (): Promise<RefreshSharedViewResult> => ({
         status: "unchanged",
@@ -470,7 +476,12 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       // Sharing is optional; ChatsView downgrades a rejection to "none".
       throw new Error("sharing unavailable in shell tests");
     }),
-    syncDms: vi.fn(async () => ({ available: false, dms: [] })),
+    syncDms: vi.fn(
+      async (_payload: SyncDmsPayload): Promise<SyncDmsResult> => ({
+        available: false,
+        dms: [],
+      }),
+    ),
     listFileChats: vi.fn(async () => ({ fileObjectId: null, threads: [] })),
   });
 }
@@ -525,9 +536,9 @@ function makeShareBridge(
     "listChatFileMentions",
     "syncDms",
   ] as const) {
-    bridge[call] = vi.fn(async (): Promise<never> => {
-      throw new Error("Chats are not enabled for this workspace.");
-    });
+    bridge[call].mockRejectedValue(
+      new Error("Chats are not enabled for this workspace."),
+    );
   }
   return bridge;
 }
@@ -6791,9 +6802,9 @@ describe("chats surface after a failed capture build", () => {
       "listChatFileMentions",
       "syncDms",
     ] as const) {
-      bridge[call] = vi.fn(async (): Promise<never> => {
-        throw new Error("Chats are not enabled for this workspace.");
-      });
+      bridge[call].mockRejectedValue(
+        new Error("Chats are not enabled for this workspace."),
+      );
     }
     return bridge;
   }
