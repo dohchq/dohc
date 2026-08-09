@@ -17,7 +17,7 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^3.25.76"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
