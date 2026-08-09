@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type * as Y from "yjs";
-import { yDocToMarkdown } from "@dohc/ydoc-projection";
+import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { bridge } from "../bridge";
 import {
@@ -12,6 +11,40 @@ import {
   type EngineYDocBinding,
   type EngineYDocTransport,
 } from "./engineYDocProvider";
+
+// `@dohc/ydoc-projection` statically pulls in the full Tiptap stack and
+// builds its schema at module load. `useEngineDoc` backs every FileInspector,
+// so a static import here put that whole editor stack in the renderer's
+// eager chunk. Loaded once, lazily, and cached — every caller in this module
+// shares the same in-flight/resolved promise instead of re-importing.
+type ProjectionModule = typeof import("@dohc/ydoc-projection");
+let projectionModulePromise: Promise<ProjectionModule> | null = null;
+function loadProjectionModule(): Promise<ProjectionModule> {
+  if (projectionModulePromise === null) {
+    projectionModulePromise = import("@dohc/ydoc-projection");
+  }
+  return projectionModulePromise;
+}
+
+// A deletion's draft text depends on the projection module, but the BYTES
+// that produce it must not: the live doc can be destroyed (unmount) before
+// the module resolves, so the doc is snapshotted synchronously at the event
+// and projected to markdown lazily, off a reconstructed doc.
+function markdownFromSnapshot(snapshot: Uint8Array): Promise<string> {
+  return loadProjectionModule().then(({ yDocToMarkdown }) => {
+    const rebuilt = new Y.Doc();
+    Y.applyUpdate(rebuilt, snapshot);
+    return yDocToMarkdown(rebuilt);
+  });
+}
+
+function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 
 // The engine Y.Doc editor hook for rich-text files. Given a workspace + rich
 // file, it opens a
@@ -271,7 +304,15 @@ export function useEngineDoc(input: {
     let binding: EngineYDocBinding | null = null;
     let detachSaveObserver: (() => void) | null = null;
     let unsubscribeSaveState: (() => void) | null = null;
-    let deletionSnapshot: { id: number | null; text: string } | null = null;
+    // The last snapshot taken for this deletion lifecycle (for change dedup)
+    // and the draft it produced, once the async serialize+capture lands.
+    let deletionSnapshotBytes: Uint8Array | null = null;
+    let deletionDraftId: number | null = null;
+    // Serializes deletion snapshots in the order they were taken: a later
+    // snapshot's capture must never be overwritten by an earlier one that
+    // resolves late (the projection import, and each markdown conversion,
+    // are async now).
+    let deletionQueue: Promise<void> = Promise.resolve();
     let deletionPending = false;
 
     const sessionId = nextSessionId();
@@ -289,34 +330,52 @@ export function useEngineDoc(input: {
       setSaveState(state);
     };
 
-    const captureDeletion = (doc: Y.Doc): void => {
-      const text = yDocToMarkdown(doc);
-      const id =
-        saveStateRef.current === "saved"
-          ? null
-          : captureOrphanedDraft(workspaceId, path, text);
-      deletionSnapshot = { id, text };
-      writesRefused.current = true;
-      setDeletion({ token, draftId: id });
-      reportSaveState("deleted");
+    // `forceCreate` false means: nothing was unsettled at the moment this
+    // snapshot was taken (the dominant delete path, settled before removal)
+    // — no draft is worth creating for it. A later snapshot always forces
+    // creation: it only runs because the doc changed since the last one.
+    const enqueueDeletionSnapshot = (
+      bytes: Uint8Array,
+      forceCreate: boolean,
+    ): void => {
+      deletionQueue = deletionQueue
+        .then(async () => {
+          const text = await markdownFromSnapshot(bytes);
+          if (deletionDraftId === null) {
+            if (!forceCreate) return;
+            deletionDraftId = captureOrphanedDraft(workspaceId, path, text);
+          } else {
+            replaceOrphanedDraft(workspaceId, path, deletionDraftId, text);
+          }
+          // Only the LOCAL render state is guarded by the open token — the
+          // draft itself is already durable in the module-level store above,
+          // unmount or not.
+          if (token === openTokenRef.current) {
+            setDeletion({ token, draftId: deletionDraftId });
+          }
+        })
+        .catch(() => undefined);
     };
 
-    const refreshDeletionDraft = (doc: Y.Doc, reportDraft: boolean): void => {
-      if (!deletionSnapshot) return;
-      const text = yDocToMarkdown(doc);
-      if (text === deletionSnapshot.text) return;
-      if (deletionSnapshot.id === null) {
-        deletionSnapshot = {
-          id: captureOrphanedDraft(workspaceId, path, text),
-          text,
-        };
-      } else {
-        replaceOrphanedDraft(workspaceId, path, deletionSnapshot.id, text);
-        deletionSnapshot = { id: deletionSnapshot.id, text };
-      }
-      if (reportDraft) {
-        setDeletion({ token, draftId: deletionSnapshot.id });
-      }
+    const captureDeletion = (doc: Y.Doc): void => {
+      writesRefused.current = true;
+      // Snapshot NOW, synchronously: the doc can be destroyed (unmount) or
+      // the caller's reference can go stale before a lazily-loaded
+      // serializer would otherwise get to read it.
+      const bytes = Y.encodeStateAsUpdate(doc);
+      deletionSnapshotBytes = bytes;
+      const forceCreate = saveStateRef.current !== "saved";
+      setDeletion({ token, draftId: null });
+      reportSaveState("deleted");
+      enqueueDeletionSnapshot(bytes, forceCreate);
+    };
+
+    const refreshDeletionDraft = (doc: Y.Doc): void => {
+      if (deletionSnapshotBytes === null) return;
+      const bytes = Y.encodeStateAsUpdate(doc);
+      if (snapshotsEqual(bytes, deletionSnapshotBytes)) return;
+      deletionSnapshotBytes = bytes;
+      enqueueDeletionSnapshot(bytes, true);
     };
 
     const onSaveState = (event: EngineYDocSaveStateEvent): void => {
@@ -329,8 +388,8 @@ export function useEngineDoc(input: {
           writesRefused.current = true;
           return;
         }
-        if (deletionSnapshot) {
-          refreshDeletionDraft(doc, true);
+        if (deletionSnapshotBytes !== null) {
+          refreshDeletionDraft(doc);
           return;
         }
         captureDeletion(doc);
@@ -376,6 +435,12 @@ export function useEngineDoc(input: {
           return;
         }
         binding = bound;
+        // Preload, don't block: by the time any real deletion can arrive,
+        // the module is very likely already resolved, so a draft's markdown
+        // lands within the same microtask as its snapshot. The snapshot in
+        // captureDeletion/refreshDeletionDraft keeps a genuinely cold start
+        // (import still in flight) correct regardless.
+        void loadProjectionModule();
         if (!bound.available || !bound.doc) {
           // Resolved: NOT engine-backed. The caller may offer the plain local
           // editor again — that is what `opening` was holding back. EXCEPT
@@ -405,7 +470,7 @@ export function useEngineDoc(input: {
         const onUpdate = () => {
           if (cancelled) return;
           if (writesRefused.current) {
-            refreshDeletionDraft(doc, true);
+            refreshDeletionDraft(doc);
             return;
           }
           reportSaveState("saving");
@@ -421,7 +486,13 @@ export function useEngineDoc(input: {
       });
 
     return () => {
-      if (binding?.doc) refreshDeletionDraft(binding.doc, false);
+      // Belt-and-suspenders, not the sole catcher: `onUpdate` below already
+      // snapshots synchronously for any doc mutation once `writesRefused` is
+      // true, local or remote, ahead of this cleanup in the same tick. This
+      // guards a mutation landing between `cancelled = true` and
+      // `detachSaveObserver()` — narrower than reachable through the public
+      // API today, kept for what a future change to that ordering could open.
+      if (binding?.doc) refreshDeletionDraft(binding.doc);
       cancelled = true;
       unsubscribeSaveState?.();
       detachSaveObserver?.();

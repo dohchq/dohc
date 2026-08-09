@@ -23,6 +23,9 @@ type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 
 function harnessBridge() {
   const saveStateListeners = new Set<SaveStateListener>();
+  const remoteUpdateListeners = new Set<
+    (event: { sessionId: string; update: Uint8Array }) => void
+  >();
   const applied: Array<{ sessionId: string; seq: number }> = [];
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
@@ -50,7 +53,12 @@ function harnessBridge() {
     async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
     },
-    onEngineYDocRemoteUpdate: () => () => undefined,
+    onEngineYDocRemoteUpdate: (
+      listener: (event: { sessionId: string; update: Uint8Array }) => void,
+    ) => {
+      remoteUpdateListeners.add(listener);
+      return () => remoteUpdateListeners.delete(listener);
+    },
     onEngineYDocSaveState: (listener: SaveStateListener) => {
       saveStateListeners.add(listener);
       return () => saveStateListeners.delete(listener);
@@ -59,6 +67,23 @@ function harnessBridge() {
       return undefined;
     },
   };
+
+  // Mutates the SOURCE doc and delivers the resulting incremental update as
+  // a forwarded remote delta — a co-editor's edit, arriving on the same
+  // channel a local one settles through. Not gated by `writesRefused`: a
+  // remote update still applies to a deleted-while-editing doc (only LOCAL
+  // writes are refused), so a deletion's captured text must be frozen
+  // against exactly this.
+  function emitRemoteEdit(suffix: string): void {
+    if (openedSessionId === null) throw new Error("session not open yet");
+    const before = Y.encodeStateVector(doc);
+    doc.getText("plainText").insert(doc.getText("plainText").length, suffix);
+    const update = Y.encodeStateAsUpdate(doc, before);
+    const event = { sessionId: openedSessionId, update };
+    act(() => {
+      for (const listener of [...remoteUpdateListeners]) listener(event);
+    });
+  }
 
   function emit(
     state: "settling" | "saved" | "error" | "file-locked" | "deleted",
@@ -87,6 +112,7 @@ function harnessBridge() {
     api,
     emit,
     emitNow,
+    emitRemoteEdit,
     applied,
     sessionId: () => openedSessionId,
     setRemovalInProgress(value: typeof removalInProgress) {
@@ -235,6 +261,59 @@ it("replaces the same deletion's draft when a keystroke lands before read-only c
     expect(screen.getByTestId("draft").textContent).toBe("seed!!"),
   );
   expect(harness.applied).toHaveLength(appliedAtDelete);
+});
+
+it("freezes the deleted doc's bytes at the event, immune to a remote edit that lands before serialization resolves", async () => {
+  // #697 P1-A: the boundary capture snapshots the doc SYNCHRONOUSLY at the
+  // deletion event and defers only the markdown PROJECTION (the part that
+  // needs the lazy Tiptap module). Nothing before this pin distinguished
+  // that from deferring the snapshot too — both pass every earlier test,
+  // because unmount alone does not corrupt a Y.Doc's encodable state.
+  //
+  // A remote update is the real discriminator: it is NOT gated by
+  // `writesRefused` (only LOCAL writes are refused after deletion), so it
+  // can still land on the SAME doc while the projection is in flight. A
+  // synchronous snapshot is immune to it; a deferred one would pick it up.
+  await mountBound();
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  harness.emitNow("deleted", harness.applied.at(-1)!.seq);
+
+  // Lands after the event, before the queued serialize job has resolved.
+  harness.emitRemoteEdit("+remote");
+
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!"));
+});
+
+it("still holds the final text after teardown, with no further save-state event to answer it", async () => {
+  const view = render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!"));
+
+  // A further edit, then straight to teardown — no separate save-state
+  // report from main ever answers this edit. Correctness pin, not a
+  // discriminator: `onUpdate` already snapshots this edit synchronously
+  // before teardown runs, so removing the teardown-time call alone does not
+  // fail this specific test (verified). It is exercised here anyway,
+  // because it is the one path that would lose an edit if that ordering
+  // ever changed.
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  act(() => {
+    view.rerender(
+      <Harness workspaceId="ws-1" path="notes/big.md" enabled={false} />,
+    );
+  });
+
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!!"));
 });
 
 it("does not carry a deleted verdict into a fresh bind of the same path", async () => {
