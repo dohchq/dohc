@@ -216,7 +216,10 @@ it("journals a live editor update through the Rust Y.Doc provider and suppresses
   typeIntoBody(editor, "Typed with no collaboration server.");
   await session.settleNow();
 
-  expect(ydoc.recordedUpdates).toHaveLength(1);
+  // 2, not 1: the head-present open's own seed (`INITIAL_MARKDOWN`) now
+  // journals through a real recordUpdate ahead of this typed edit's
+  // (#721/#728, `ydoc_open_state_on_store`'s `seedMarkdown`).
+  expect(ydoc.recordedUpdates).toHaveLength(2);
   expect(await readFile(join(root, PATH), "utf8")).toContain(
     "Typed with no collaboration server.",
   );
@@ -774,7 +777,7 @@ it("opens a crash-orphaned draft the daemon resurrects, head absent and all", as
     workspace: WORKSPACE_ID,
     versionId: "main",
     path: ORPHANED,
-    markdown: "Typed before the crash.",
+    markdown: "",
     contentKind: "richdoc",
     head: "absent",
   });
@@ -787,6 +790,16 @@ it("opens a crash-orphaned draft the daemon resurrects, head absent and all", as
     onRemoteUpdate: () => undefined,
     scheduleSettle: () => () => undefined,
   });
+  // A head-absent open seeds nothing (there is no captured snapshot to seed
+  // from — #721/#728), so the crash's own typed content has to arrive as a
+  // real local edit, exactly as it would from a live editor.
+  const crashEditor = new Y.Doc();
+  Y.applyUpdate(crashEditor, crashed.initialUpdate);
+  const beforeTyping = Y.encodeStateVector(crashEditor);
+  typeIntoBody(crashEditor, "Typed before the crash.");
+  await crashed.applyLocalUpdate(
+    Y.encodeStateAsUpdate(crashEditor, beforeTyping),
+  );
   const crashMarker = new Y.Doc();
   crashMarker.getMap("meta").set("crash-orphaned", true);
   await crashed.applyLocalUpdate(Y.encodeStateAsUpdate(crashMarker));
