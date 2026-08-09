@@ -18,6 +18,8 @@ import {
   classifyDmRequests,
   isShareAcceptedInWorkspace,
   liveSharedChannelHoldersByShareId,
+  liveSharedChannelHoldersByWireId,
+  otherLiveSharedChannelHolderByWireId,
   reserveAndPullSharedChannel,
 } from "./dmRequests";
 import type { JoinedSharedChannel } from "./registryStore";
@@ -554,6 +556,7 @@ describe("DM request decisions", () => {
       kindCache,
       peekKind,
       holdersByShareId,
+      holdersByWireId: () => new Map<string, ReadonlySet<string>>(),
       declinedShareIds: new Set(["share-declined"]),
     };
 
@@ -589,6 +592,7 @@ describe("DM request decisions", () => {
       kindCache,
       peekKind,
       holdersByShareId: () => new Map<string, ReadonlySet<string>>(),
+      holdersByWireId: () => new Map<string, ReadonlySet<string>>(),
     };
 
     await expect(
@@ -608,6 +612,34 @@ describe("DM request decisions", () => {
       declined: [
         { shareId: "share-declined", granterEmail: "declined@example.com" },
       ],
+    });
+  });
+
+  it("withholds a re-grant while its wire id is live in another workspace", async () => {
+    const input = {
+      received: [
+        {
+          shareId: "share-new",
+          granterEmail: "owner@example.com",
+          selector: { kind: "chat-channel", channelWireId: "wire-x" },
+        },
+      ],
+      kindCache: new Map<string, "dm" | "not-dm">(),
+      peekKind: async () => "dm" as const,
+      holdersByShareId: () =>
+        new Map<string, ReadonlySet<string>>([
+          ["share-old", new Set(["workspace-a"])],
+        ]),
+      holdersByWireId: () =>
+        new Map<string, ReadonlySet<string>>([
+          ["wire-x", new Set(["workspace-a"])],
+        ]),
+      declinedShareIds: new Set<string>(),
+    };
+
+    await expect(classifyDmRequests(input)).resolves.toEqual({
+      pending: [],
+      declined: [],
     });
   });
 
@@ -720,6 +752,147 @@ describe("DM request decisions", () => {
     expect(holders).toHaveLength(1);
   });
 
+  it("refuses a direct re-grant reservation when its resolved wire id is held elsewhere", async () => {
+    const registry = new Map<string, JoinedSharedChannel[]>([
+      [
+        "workspace-a",
+        [joined({ shareId: "share-old", channelWireId: "wire-x" })],
+      ],
+      ["workspace-b", []],
+    ]);
+    const writeSharedChannels = vi.fn(
+      (workspaceId: string, channels: JoinedSharedChannel[]) => {
+        registry.set(workspaceId, channels);
+      },
+    );
+    const preWrite = (info: { channelWireId: string }) => {
+      const holder = otherLiveSharedChannelHolderByWireId({
+        workspaces: [...registry].map(([workspaceId, sharedChannels]) => ({
+          workspaceId,
+          rootPath: `/workspaces/${workspaceId}`,
+          sharedChannels,
+        })),
+        workspaceId: "workspace-b",
+        channelWireId: info.channelWireId,
+      });
+      if (holder) {
+        const workspaceName = holder.rootPath.split("/").at(-1);
+        throw new Error(
+          `This conversation already lives in ${workspaceName}. Open that workspace to continue.`,
+        );
+      }
+    };
+
+    await expect(
+      reserveAndPullSharedChannel({
+        relay: { baseUrl: "http://relay.test", token: "token" },
+        shareId: "share-new",
+        workspaceId: "workspace-b",
+        rootPath: "/workspaces/workspace-b",
+        recipientUserId: "user-b",
+        relayUrl: "http://relay.test",
+        readSharedChannels: (workspaceId) => registry.get(workspaceId) ?? [],
+        writeSharedChannels,
+        fetchInfo: async () => ({
+          shareId: "share-new",
+          granterUserId: "granter",
+          granterEmail: "owner@example.com",
+          channelWireId: "wire-x",
+          access: "read-write",
+          createdAtMs: 1,
+        }),
+        pull: async () => ({ applied: 0 }),
+        serialize: async (_workspaceId, run) => await run(),
+        preWrite,
+      }),
+    ).rejects.toThrow(
+      "This conversation already lives in workspace-a. Open that workspace to continue.",
+    );
+    expect(writeSharedChannels).not.toHaveBeenCalled();
+  });
+
+  it("releases a wire id after its old workspace row ends", async () => {
+    const ended = joined({
+      shareId: "share-old",
+      channelWireId: "wire-x",
+      ended: true,
+    });
+    const workspaces = [
+      {
+        workspaceId: "workspace-a",
+        rootPath: "/workspaces/workspace-a",
+        sharedChannels: [ended],
+      },
+      {
+        workspaceId: "workspace-b",
+        rootPath: "/workspaces/workspace-b",
+        sharedChannels: [] as JoinedSharedChannel[],
+      },
+    ];
+    const classified = await classifyDmRequests({
+      received: [
+        {
+          shareId: "share-new",
+          granterEmail: "owner@example.com",
+          selector: { kind: "chat-channel", channelWireId: "wire-x" },
+        },
+      ],
+      kindCache: new Map(),
+      peekKind: async () => "dm",
+      holdersByShareId: () => liveSharedChannelHoldersByShareId(workspaces),
+      holdersByWireId: () => liveSharedChannelHoldersByWireId(workspaces),
+      declinedShareIds: new Set(),
+    });
+    expect(classified.pending).toEqual([
+      { shareId: "share-new", granterEmail: "owner@example.com" },
+    ]);
+
+    const writeSharedChannels = vi.fn(
+      (workspaceId: string, channels: JoinedSharedChannel[]) => {
+        const workspace = workspaces.find(
+          (candidate) => candidate.workspaceId === workspaceId,
+        );
+        if (workspace) workspace.sharedChannels = channels;
+      },
+    );
+    await expect(
+      reserveAndPullSharedChannel({
+        relay: { baseUrl: "http://relay.test", token: "token" },
+        shareId: "share-new",
+        workspaceId: "workspace-b",
+        rootPath: "/workspaces/workspace-b",
+        recipientUserId: "user-b",
+        relayUrl: "http://relay.test",
+        readSharedChannels: (workspaceId) =>
+          workspaces.find((workspace) => workspace.workspaceId === workspaceId)
+            ?.sharedChannels ?? [],
+        writeSharedChannels,
+        fetchInfo: async () => ({
+          shareId: "share-new",
+          granterUserId: "granter",
+          granterEmail: "owner@example.com",
+          channelWireId: "wire-x",
+          access: "read-write",
+          createdAtMs: 1,
+        }),
+        pull: async () => ({ applied: 0 }),
+        serialize: async (_workspaceId, run) => await run(),
+        preWrite: (info) => {
+          const holder = otherLiveSharedChannelHolderByWireId({
+            workspaces,
+            workspaceId: "workspace-b",
+            channelWireId: info.channelWireId,
+          });
+          if (holder) throw new Error("wire held elsewhere");
+        },
+      }),
+    ).resolves.toMatchObject({
+      shareId: "share-new",
+      channelWireId: "wire-x",
+    });
+    expect(writeSharedChannels).toHaveBeenCalledOnce();
+  });
+
   it("treats an ended row as re-requestable and re-accepts it", async () => {
     const ended = joined({
       shareId: "share-x",
@@ -737,6 +910,7 @@ describe("DM request decisions", () => {
       kindCache: new Map(),
       peekKind: async () => "dm",
       holdersByShareId: () => liveSharedChannelHoldersByShareId(workspaces),
+      holdersByWireId: () => liveSharedChannelHoldersByWireId(workspaces),
       declinedShareIds: new Set(),
     });
     expect(classified.pending.map((row) => row.shareId)).toEqual(["share-x"]);
@@ -959,6 +1133,11 @@ describe("listDmRecords", () => {
       peekKind: async () => "dm",
       holdersByShareId: () =>
         liveSharedChannelHoldersByShareId([
+          { workspaceId: WS, rootPath: "/accepted", sharedChannels: registry },
+          { workspaceId: "workspace-b", rootPath: "/other", sharedChannels: [] },
+        ]),
+      holdersByWireId: () =>
+        liveSharedChannelHoldersByWireId([
           { workspaceId: WS, rootPath: "/accepted", sharedChannels: registry },
           { workspaceId: "workspace-b", rootPath: "/other", sharedChannels: [] },
         ]),

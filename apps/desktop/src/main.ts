@@ -365,7 +365,9 @@ import {
   classifyDmRequests,
   isShareAcceptedInWorkspace,
   liveSharedChannelHoldersByShareId,
+  liveSharedChannelHoldersByWireId,
   otherLiveSharedChannelHolder,
+  otherLiveSharedChannelHolderByWireId,
   reserveAndPullSharedChannel,
   type DmRequestRow,
 } from "./workspaces/dmRequests";
@@ -4628,11 +4630,27 @@ function registerIpcHandlers(
     });
   }
 
+  function otherWorkspaceHoldingWireId(
+    channelWireId: string,
+    workspaceId: string,
+  ): { workspaceId: string; rootPath: string } | null {
+    return otherLiveSharedChannelHolderByWireId({
+      workspaces: listWorkspaces(),
+      channelWireId,
+      workspaceId,
+    });
+  }
+
   function assertShareNotHeldElsewhere(
     shareId: string,
     workspaceId: string,
+    channelWireId?: string,
   ): void {
-    const holder = otherWorkspaceHoldingShare(shareId, workspaceId);
+    const holder =
+      otherWorkspaceHoldingShare(shareId, workspaceId) ??
+      (channelWireId
+        ? otherWorkspaceHoldingWireId(channelWireId, workspaceId)
+        : null);
     if (!holder) return;
     const workspaceName =
       holder.rootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "workspace";
@@ -4648,7 +4666,7 @@ function registerIpcHandlers(
     rootPath: string;
     recipientUserId: string;
     relayUrl: string;
-    preWrite?: () => void;
+    preWrite?: (info: { channelWireId: string }) => void;
   }): Promise<JoinedSharedChannel> {
     return reserveAndPullSharedChannel({
       ...input,
@@ -7166,6 +7184,8 @@ function registerIpcHandlers(
           peekKind: (shareId) => peekReceivedGrantKindForShare(relay, shareId),
           holdersByShareId: () =>
             liveSharedChannelHoldersByShareId(listWorkspaces()),
+          holdersByWireId: () =>
+            liveSharedChannelHoldersByWireId(listWorkspaces()),
           declinedShareIds: readDeclinedDms(dmRequestFile()),
         }));
         // Push the member's local ops, pull everyone else's, for the joined
@@ -7246,8 +7266,12 @@ function registerIpcHandlers(
           rootPath: workspace.rootPath,
           recipientUserId: acceptCredentials.userId,
           relayUrl: acceptedRelayUrl,
-          preWrite: () =>
-            assertShareNotHeldElsewhere(input.shareId, input.workspaceId),
+          preWrite: (info) =>
+            assertShareNotHeldElsewhere(
+              input.shareId,
+              input.workspaceId,
+              info.channelWireId,
+            ),
         });
       } catch (error) {
         if (error instanceof ShareUnavailableError) {

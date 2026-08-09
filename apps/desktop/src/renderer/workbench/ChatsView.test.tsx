@@ -5765,6 +5765,63 @@ describe("ChatsView direct messages", () => {
     expect(await screen.findByText("new-account@example.com")).toBeTruthy();
   });
 
+  it("refuses an old account's open-DM response after the session changes", async () => {
+    const user = userEvent.setup();
+    const oldDm = dm({
+      peerLabel: "old-peer@example.com",
+      threadId: null,
+    });
+    const oldRequest = {
+      shareId: "share-old-open-dm",
+      granterEmail: "old-open-dm@example.com",
+    };
+    type SyncResult = {
+      available: boolean;
+      dms: DmRecord[];
+      pending: (typeof oldRequest)[];
+      declined: (typeof oldRequest)[];
+    };
+    let resolveStaleSync!: (result: SyncResult) => void;
+    const staleSync = new Promise<SyncResult>((resolve) => {
+      resolveStaleSync = resolve;
+    });
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({
+        available: true,
+        dms: [oldDm],
+        pending: [],
+        declined: [],
+      })
+      .mockImplementationOnce(() => staleSync)
+      .mockImplementation(() => new Promise<never>(() => undefined));
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    await screen.findByTestId("chats-dm-view");
+    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.syncDms.mock.calls[1]?.[0]).toEqual({
+      workspaceId: "workspace-a",
+      openChannelId: oldDm.channelId,
+    });
+
+    act(() => emitCloudSessionChanged("session-b"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-dm-view")).toBeNull();
+    });
+    await act(async () => {
+      resolveStaleSync({
+        available: true,
+        dms: [oldDm],
+        pending: [oldRequest],
+        declined: [],
+      });
+      await staleSync;
+    });
+
+    expect(screen.queryByText("old-open-dm@example.com")).toBeNull();
+    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
+  });
+
   it("accepts a message request in the current workspace and opens it", async () => {
     const user = userEvent.setup();
     const request = {

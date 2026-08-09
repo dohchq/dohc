@@ -369,7 +369,7 @@ describe("main-process chat authorization", () => {
     expect(reserveAt).toBeGreaterThan(credentialsAt);
     expect(handler).toContain("workspaceId: workspace.workspaceId");
     expect(handler).toContain(
-      "preWrite: () =>\n            assertShareNotHeldElsewhere(input.shareId, input.workspaceId)",
+      "preWrite: (info) =>\n            assertShareNotHeldElsewhere(\n              input.shareId,\n              input.workspaceId,\n              info.channelWireId,\n            )",
     );
     expect(handler).not.toContain("activity.queueCloudSync");
   });

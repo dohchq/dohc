@@ -39,14 +39,31 @@ export function liveSharedChannelHoldersByShareId(
   return holders;
 }
 
-export function otherLiveSharedChannelHolder(input: {
+// A re-grant mints a new shareId for the same channelWireId. This map keeps
+// that channel in one workspace until its old row ends. Ended rows remain
+// reversible and do not hold the wire id.
+export function liveSharedChannelHoldersByWireId(
+  workspaces: readonly WorkspaceSharedChannelRegistry[],
+): Map<string, Set<string>> {
+  const holders = new Map<string, Set<string>>();
+  for (const workspace of workspaces) {
+    for (const channel of workspace.sharedChannels ?? []) {
+      if (channel.ended === true) continue;
+      const wireHolders =
+        holders.get(channel.channelWireId) ?? new Set<string>();
+      wireHolders.add(workspace.workspaceId);
+      holders.set(channel.channelWireId, wireHolders);
+    }
+  }
+  return holders;
+}
+
+function otherLiveSharedChannelHolderFromMap(input: {
   workspaces: readonly WorkspaceSharedChannelRegistry[];
-  shareId: string;
   workspaceId: string;
+  holderIds: ReadonlySet<string> | undefined;
 }): WorkspaceSharedChannelRegistry | null {
-  const holderIds = liveSharedChannelHoldersByShareId(input.workspaces).get(
-    input.shareId,
-  );
+  const holderIds = input.holderIds;
   if (!holderIds) return null;
   return (
     input.workspaces.find(
@@ -55,6 +72,34 @@ export function otherLiveSharedChannelHolder(input: {
         holderIds.has(workspace.workspaceId),
     ) ?? null
   );
+}
+
+export function otherLiveSharedChannelHolder(input: {
+  workspaces: readonly WorkspaceSharedChannelRegistry[];
+  shareId: string;
+  workspaceId: string;
+}): WorkspaceSharedChannelRegistry | null {
+  return otherLiveSharedChannelHolderFromMap({
+    workspaces: input.workspaces,
+    workspaceId: input.workspaceId,
+    holderIds: liveSharedChannelHoldersByShareId(input.workspaces).get(
+      input.shareId,
+    ),
+  });
+}
+
+export function otherLiveSharedChannelHolderByWireId(input: {
+  workspaces: readonly WorkspaceSharedChannelRegistry[];
+  channelWireId: string;
+  workspaceId: string;
+}): WorkspaceSharedChannelRegistry | null {
+  return otherLiveSharedChannelHolderFromMap({
+    workspaces: input.workspaces,
+    workspaceId: input.workspaceId,
+    holderIds: liveSharedChannelHoldersByWireId(input.workspaces).get(
+      input.channelWireId,
+    ),
+  });
 }
 
 export function isShareAcceptedInWorkspace(
@@ -73,9 +118,10 @@ export async function classifyDmRequests(input: {
   kindCache: Map<string, "dm" | "not-dm">;
   peekKind: (shareId: string) => Promise<DmPeekResult>;
   holdersByShareId: () => ReadonlyMap<string, ReadonlySet<string>>;
+  holdersByWireId: () => ReadonlyMap<string, ReadonlySet<string>>;
   declinedShareIds: ReadonlySet<string> | null;
 }): Promise<{ pending: DmRequestRow[]; declined: DmRequestRow[] }> {
-  const received: DmRequestRow[] = [];
+  const received: Array<DmRequestRow & { channelWireId: string }> = [];
   for (const row of input.received) {
     const shareId = typeof row.shareId === "string" ? row.shareId : null;
     if (
@@ -88,24 +134,35 @@ export async function classifyDmRequests(input: {
     }
     received.push({
       shareId,
+      channelWireId: row.selector.channelWireId,
       granterEmail:
         typeof row.granterEmail === "string" ? row.granterEmail : null,
     });
   }
 
   const holdersBeforePeek = input.holdersByShareId();
+  const wireHoldersBeforePeek = input.holdersByWireId();
   await resolveDmKinds({
     shareIds: received
-      .filter((row) => !holdersBeforePeek.has(row.shareId))
+      .filter(
+        (row) =>
+          !holdersBeforePeek.has(row.shareId) &&
+          !wireHoldersBeforePeek.has(row.channelWireId),
+      )
       .map((row) => row.shareId),
     cache: input.kindCache,
     peekKind: input.peekKind,
   });
   const holders = input.holdersByShareId();
-  const requests = received.filter(
-    (row) =>
-      input.kindCache.get(row.shareId) === "dm" && !holders.has(row.shareId),
-  );
+  const wireHolders = input.holdersByWireId();
+  const requests: DmRequestRow[] = received
+    .filter(
+      (row) =>
+        input.kindCache.get(row.shareId) === "dm" &&
+        !holders.has(row.shareId) &&
+        !wireHolders.has(row.channelWireId),
+    )
+    .map(({ shareId, granterEmail }) => ({ shareId, granterEmail }));
   const declinedShareIds = input.declinedShareIds;
   if (declinedShareIds === null) return { pending: [], declined: [] };
   return {
@@ -144,7 +201,7 @@ export async function reserveAndPullSharedChannel(input: {
     run: () => Promise<void>,
   ) => Promise<void>;
   afterPull?: (workspaceId: string) => Promise<void>;
-  preWrite?: () => void;
+  preWrite?: (info: { channelWireId: string }) => void;
 }): Promise<JoinedSharedChannel> {
   const info = await input.fetchInfo({
     relay: input.relay,
@@ -161,7 +218,7 @@ export async function reserveAndPullSharedChannel(input: {
 
   // Record the row BEFORE the pull. The row is the write gate, and a pull is
   // durable: pulling first can import channel data without its access gate.
-  input.preWrite?.();
+  input.preWrite?.(info);
   input.writeSharedChannels(
     input.workspaceId,
     mergeJoinedChannel(input.readSharedChannels(input.workspaceId), joined),

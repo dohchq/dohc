@@ -2371,11 +2371,16 @@ export function ChatsView(props: {
   const loadDmConversation = useCallback(
     async (dm: DmRecord, token: number, request = ++dmRefreshSeq.current) => {
       if (!dm.threadId) return;
+      const session = sessionGeneration.current;
       const [result, reactionResult] = await Promise.all([
         bridge().listChatMessages({ workspaceId, threadId: dm.threadId }),
         bridge().listChatReactions({ workspaceId, threadId: dm.threadId }),
       ]);
-      if (token !== liveToken.current || request !== dmRefreshSeq.current) {
+      if (
+        token !== liveToken.current ||
+        request !== dmRefreshSeq.current ||
+        session !== sessionGeneration.current
+      ) {
         return;
       }
       setMessages(result.messages);
@@ -2398,6 +2403,7 @@ export function ChatsView(props: {
 
   const refreshOpenDm = useCallback(
     async (dm: DmRecord, token: number) => {
+      const session = sessionGeneration.current;
       const request = ++dmRefreshSeq.current;
       try {
         // Name the open DM: the main-side shared-channel pass is bounded, so an
@@ -2406,7 +2412,11 @@ export function ChatsView(props: {
           workspaceId,
           openChannelId: dm.channelId,
         });
-        if (token !== liveToken.current || request !== dmRefreshSeq.current) {
+        if (
+          token !== liveToken.current ||
+          request !== dmRefreshSeq.current ||
+          session !== sessionGeneration.current
+        ) {
           return;
         }
         setDmAvailable(result.available);
@@ -3613,6 +3623,14 @@ export function ChatsView(props: {
         setPendingDmRequests([]);
         setDeclinedDmRequests([]);
         setDmAcceptedElsewhere(null);
+        setNav((state) =>
+          state.level === "dm" ? { level: "channels" } : state,
+        );
+        setMessages([]);
+        setMessagesLoading(false);
+        setReactions([]);
+        setViewerAuthorId("");
+        setComposer("");
         void refreshDms();
         void refreshShares();
         return;
