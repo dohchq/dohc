@@ -12,10 +12,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
-import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { NodeSelection } from "@tiptap/pm/state";
-import { dohcMarkdownExtensions } from "./extensions";
+import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
 import {
   activeTurnIntoId,
   BlockMenu,
@@ -41,7 +41,7 @@ function makeEditor(markdown: string): Editor {
       StarterKit.configure({ trailingNode: false }),
       ...dohcMarkdownExtensions,
       TaskList,
-      TaskItem,
+      DohcTaskItem,
       Markdown.configure({ indentation: { style: "space", size: 2 } }),
     ],
     content: markdown,
@@ -67,7 +67,7 @@ function makeEditorWithControls(content: Record<string, unknown>): Editor {
       StarterKit.configure({ trailingNode: false }),
       ...dohcMarkdownExtensions,
       TaskList,
-      TaskItem,
+      DohcTaskItem,
       TableKit,
       controls,
     ],
