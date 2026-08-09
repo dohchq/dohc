@@ -4648,6 +4648,7 @@ function registerIpcHandlers(
     rootPath: string;
     recipientUserId: string;
     relayUrl: string;
+    preWrite?: () => void;
   }): Promise<JoinedSharedChannel> {
     return reserveAndPullSharedChannel({
       ...input,
@@ -7245,6 +7246,8 @@ function registerIpcHandlers(
           rootPath: workspace.rootPath,
           recipientUserId: acceptCredentials.userId,
           relayUrl: acceptedRelayUrl,
+          preWrite: () =>
+            assertShareNotHeldElsewhere(input.shareId, input.workspaceId),
         });
       } catch (error) {
         if (error instanceof ShareUnavailableError) {

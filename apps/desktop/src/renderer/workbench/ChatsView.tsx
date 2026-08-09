@@ -1189,7 +1189,7 @@ function AcceptDmDialog(props: {
             {title}
           </h2>
           <p className="m-0 text-xs text-muted">
-            The conversation lives in the workspace you pick.
+            The conversation lives in the workspace you pick, and stays there.
           </p>
         </div>
         <fieldset className="m-0 grid gap-1 border-0 p-0" disabled={busy}>
@@ -2058,9 +2058,11 @@ export function ChatsView(props: {
         mine.pending = false;
         mine.token = liveToken.current;
         const token = mine.token;
+        const session = sessionGeneration.current;
         try {
           const result = await bridge().syncDms({ workspaceId });
           if (token !== liveToken.current) return;
+          if (session !== sessionGeneration.current) continue;
           setDmAvailable(result.available);
           setDms(result.dms);
           setPendingDmRequests(result.pending);
@@ -3606,6 +3608,12 @@ export function ChatsView(props: {
         // new account for as long as its own listing takes to arrive — or for
         // good, if that listing stalls. It goes with the rows it explains.
         setShareReadFailure(null);
+        setDms([]);
+        setDmAvailable(false);
+        setPendingDmRequests([]);
+        setDeclinedDmRequests([]);
+        setDmAcceptedElsewhere(null);
+        void refreshDms();
         void refreshShares();
         return;
       }
@@ -3618,7 +3626,7 @@ export function ChatsView(props: {
       // land.
       if (phase === "ready") void refreshShares();
     });
-  }, [refreshShares]);
+  }, [refreshDms, refreshShares]);
 
   const submitShare = useCallback(async () => {
     // The disabled control is honesty; this is the gate. A submit that slips

@@ -49,9 +49,9 @@ function writeSet(file: string, declined: ReadonlySet<string>): boolean {
   }
 }
 
-export function readDeclinedDms(file: string): ReadonlySet<string> {
+export function readDeclinedDms(file: string): ReadonlySet<string> | null {
   const result = readSet(file);
-  return result.ok ? result.declined : new Set();
+  return result.ok ? result.declined : null;
 }
 
 export function declineDm(file: string, shareId: string): boolean {

@@ -5606,6 +5606,9 @@ describe("ChatsView direct messages", () => {
     await user.click(screen.getByTestId("chats-dm-request-accept"));
 
     expect(await screen.findByTestId("chats-accept-dm-dialog")).toBeTruthy();
+    expect(screen.getByText(
+      "The conversation lives in the workspace you pick, and stays there.",
+    )).toBeTruthy();
     const options = screen.getAllByTestId("chats-accept-dm-workspace-option");
     const currentOption = options.find(
       (option) => option.getAttribute("data-workspace-id") === "workspace-a",
@@ -5693,6 +5696,73 @@ describe("ChatsView direct messages", () => {
       expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2),
     );
     expect(screen.getByTestId("chats-dm-accepted-elsewhere")).toBeTruthy();
+  });
+
+  it("refuses an old account's DM response after the session changes", async () => {
+    const oldRequest = {
+      shareId: "share-old-account",
+      granterEmail: "old-account@example.com",
+    };
+    const newRequest = {
+      shareId: "share-new-account",
+      granterEmail: "new-account@example.com",
+    };
+    type SyncResult = {
+      available: boolean;
+      dms: DmRecord[];
+      pending: (typeof oldRequest)[];
+      declined: (typeof oldRequest)[];
+    };
+    let resolveStaleSync!: (result: SyncResult) => void;
+    let resolveNewSync!: (result: SyncResult) => void;
+    const staleSync = new Promise<SyncResult>((resolve) => {
+      resolveStaleSync = resolve;
+    });
+    const newSync = new Promise<SyncResult>((resolve) => {
+      resolveNewSync = resolve;
+    });
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({
+        available: true,
+        dms: [],
+        pending: [oldRequest],
+        declined: [],
+      })
+      .mockImplementationOnce(() => staleSync)
+      .mockImplementationOnce(() => newSync)
+      .mockImplementation(() => new Promise<never>(() => undefined));
+
+    renderView();
+    expect(await screen.findByText("old-account@example.com")).toBeTruthy();
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalledTimes(2));
+    act(() => emitCloudSessionChanged("session-b"));
+    await waitFor(() => {
+      expect(screen.queryByText("old-account@example.com")).toBeNull();
+    });
+
+    await act(async () => {
+      resolveStaleSync({
+        available: true,
+        dms: [],
+        pending: [oldRequest],
+        declined: [],
+      });
+      await staleSync;
+    });
+    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalledTimes(3));
+    expect(screen.queryByText("old-account@example.com")).toBeNull();
+
+    await act(async () => {
+      resolveNewSync({
+        available: true,
+        dms: [],
+        pending: [newRequest],
+        declined: [],
+      });
+      await newSync;
+    });
+    expect(await screen.findByText("new-account@example.com")).toBeTruthy();
   });
 
   it("accepts a message request in the current workspace and opens it", async () => {

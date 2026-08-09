@@ -162,6 +162,8 @@ export interface ShareLogPage {
 //               become visible before the owner's bootstrap ops reach relay.
 export type DmPeekResult = "dm" | "not-dm" | "unknown";
 
+const DM_KIND_PEEK_BATCH_SIZE = 5;
+
 // Resolve immutable grant kinds in the shared cache, peeking uncached shares.
 // Unknown and failed peeks stay uncached so the next call retries. A caller
 // that must keep DMs out of an ordinary invite lane withholds every share that
@@ -171,14 +173,20 @@ export async function resolveDmKinds(input: {
   cache: Map<string, "dm" | "not-dm">;
   peekKind: (shareId: string) => Promise<DmPeekResult>;
 }): Promise<void> {
-  for (const shareId of input.shareIds) {
-    if (input.cache.has(shareId)) continue;
-    try {
-      const kind = await input.peekKind(shareId);
-      if (kind !== "unknown") input.cache.set(shareId, kind);
-    } catch {
-      // A failed peek proves no immutable kind. Retry it on the next call.
-    }
+  for (
+    let start = 0;
+    start < input.shareIds.length;
+    start += DM_KIND_PEEK_BATCH_SIZE
+  ) {
+    const batch = input.shareIds.slice(start, start + DM_KIND_PEEK_BATCH_SIZE);
+    // A failed peek proves no immutable kind. It stays uncached for the next call.
+    await Promise.allSettled(
+      batch.map(async (shareId) => {
+        if (input.cache.has(shareId)) return;
+        const kind = await input.peekKind(shareId);
+        if (kind !== "unknown") input.cache.set(shareId, kind);
+      }),
+    );
   }
 }
 

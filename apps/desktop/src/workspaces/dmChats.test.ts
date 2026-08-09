@@ -505,6 +505,27 @@ describe("resolveDmKinds", () => {
     expect(cache.get("share-late")).toBe("not-dm");
     expect(peekKind).toHaveBeenCalledTimes(2);
   });
+
+  it("peeks uncached grants with bounded parallelism", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const peekKind = vi.fn(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      return "not-dm" as const;
+    });
+
+    await resolveDmKinds({
+      shareIds: Array.from({ length: 7 }, (_, index) => `share-${index}`),
+      cache: new Map(),
+      peekKind,
+    });
+
+    expect(maxInFlight).toBeGreaterThan(1);
+    expect(maxInFlight).toBeLessThanOrEqual(5);
+  });
 });
 
 describe("DM request decisions", () => {
@@ -548,6 +569,48 @@ describe("DM request decisions", () => {
     expect(kindCache.has("share-unknown")).toBe(false);
   });
 
+  it("withholds requests when the declined store cannot be read", async () => {
+    const received = [
+      {
+        shareId: "share-pending",
+        granterEmail: "pending@example.com",
+        selector: { kind: "chat-channel", channelWireId: "wire-pending" },
+      },
+      {
+        shareId: "share-declined",
+        granterEmail: "declined@example.com",
+        selector: { kind: "chat-channel", channelWireId: "wire-declined" },
+      },
+    ];
+    const kindCache = new Map<string, "dm" | "not-dm">();
+    const peekKind = vi.fn(async () => "dm" as const);
+    const common = {
+      received,
+      kindCache,
+      peekKind,
+      holdersByShareId: () => new Map<string, ReadonlySet<string>>(),
+    };
+
+    await expect(
+      classifyDmRequests({ ...common, declinedShareIds: null }),
+    ).resolves.toEqual({ pending: [], declined: [] });
+    expect(peekKind).toHaveBeenCalledTimes(2);
+
+    await expect(
+      classifyDmRequests({
+        ...common,
+        declinedShareIds: new Set(["share-declined"]),
+      }),
+    ).resolves.toEqual({
+      pending: [
+        { shareId: "share-pending", granterEmail: "pending@example.com" },
+      ],
+      declined: [
+        { shareId: "share-declined", granterEmail: "declined@example.com" },
+      ],
+    });
+  });
+
   it("reserves and pulls in the explicitly chosen workspace", async () => {
     const registry = new Map<string, JoinedSharedChannel[]>([
       ["workspace-a", []],
@@ -587,6 +650,74 @@ describe("DM request decisions", () => {
     expect(registry.get("workspace-a")).toEqual([]);
     expect(registry.get("workspace-b")).toEqual([]);
     expect(registry.get("workspace-c")?.[0]?.shareId).toBe("share-c");
+  });
+
+  it("lets only one concurrent workspace reserve the same DM share", async () => {
+    const registry = new Map<string, JoinedSharedChannel[]>([
+      ["workspace-a", []],
+      ["workspace-b", []],
+    ]);
+    const info = {
+      shareId: "share-race",
+      granterUserId: "granter",
+      granterEmail: "granter@example.com",
+      channelWireId: "wire-race",
+      access: "read-write" as const,
+      createdAtMs: 1,
+    };
+    const fetchResolvers: Array<(value: typeof info) => void> = [];
+    const fetchInfo = vi.fn(
+      () =>
+        new Promise<typeof info>((resolve) => {
+          fetchResolvers.push(resolve);
+        }),
+    );
+    const writeSharedChannels = (
+      workspaceId: string,
+      channels: JoinedSharedChannel[],
+    ) => {
+      registry.set(workspaceId, channels);
+    };
+    const reserve = (workspaceId: string) =>
+      reserveAndPullSharedChannel({
+        relay: { baseUrl: "http://relay.test", token: "token" },
+        shareId: info.shareId,
+        workspaceId,
+        rootPath: `/workspaces/${workspaceId}`,
+        recipientUserId: "user-1",
+        relayUrl: "http://relay.test",
+        readSharedChannels: (candidateId) => registry.get(candidateId) ?? [],
+        writeSharedChannels,
+        fetchInfo,
+        pull: async () => ({ applied: 0 }),
+        serialize: async (_candidateId, run) => await run(),
+        preWrite: () => {
+          const heldElsewhere = [...registry.entries()].some(
+            ([candidateId, channels]) =>
+              candidateId !== workspaceId &&
+              channels.some(
+                (channel) =>
+                  channel.shareId === info.shareId && channel.ended !== true,
+              ),
+          );
+          if (heldElsewhere) throw new Error("share already held elsewhere");
+        },
+      });
+
+    const first = reserve("workspace-a");
+    const second = reserve("workspace-b");
+    expect(fetchResolvers).toHaveLength(2);
+    fetchResolvers[0]!(info);
+    await expect(first).resolves.toMatchObject({ shareId: info.shareId });
+    fetchResolvers[1]!(info);
+    await expect(second).rejects.toThrow("share already held elsewhere");
+
+    const holders = [...registry.values()].filter((channels) =>
+      channels.some(
+        (channel) => channel.shareId === info.shareId && channel.ended !== true,
+      ),
+    );
+    expect(holders).toHaveLength(1);
   });
 
   it("treats an ended row as re-requestable and re-accepts it", async () => {

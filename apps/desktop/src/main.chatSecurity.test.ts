@@ -348,7 +348,7 @@ describe("main-process chat authorization", () => {
     expect(exclusivityAt).toBeLessThan(credentialsAt);
     expect(
       handler.match(/assertShareNotHeldElsewhere\(/gu),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     const assertionStart = mainSource.indexOf(
       "function assertShareNotHeldElsewhere(",
     );
@@ -368,7 +368,24 @@ describe("main-process chat authorization", () => {
     expect(handler).toContain("if (!acceptedHere)");
     expect(reserveAt).toBeGreaterThan(credentialsAt);
     expect(handler).toContain("workspaceId: workspace.workspaceId");
+    expect(handler).toContain(
+      "preWrite: () =>\n            assertShareNotHeldElsewhere(input.shareId, input.workspaceId)",
+    );
     expect(handler).not.toContain("activity.queueCloudSync");
+  });
+
+  it("keeps accepted DMs in syncDms when the declined-request store is unreadable", () => {
+    const handler = handlerSource("syncDms");
+    const classifyAt = handler.indexOf("await classifyDmRequests({");
+    const listAcceptedAt = handler.indexOf("const dms = await listDmRecords({");
+    const resultAt = handler.indexOf("return SyncDmsResult.parse({");
+    expect(handler).toContain(
+      "declinedShareIds: readDeclinedDms(dmRequestFile())",
+    );
+    expect(classifyAt).toBeGreaterThan(-1);
+    expect(listAcceptedAt).toBeGreaterThan(classifyAt);
+    expect(resultAt).toBeGreaterThan(listAcceptedAt);
+    expect(handler.slice(resultAt)).toContain("dms: dms.map(dmRecordForIpc)");
   });
 
   it("checks renderer trust on every DM request mutation", () => {

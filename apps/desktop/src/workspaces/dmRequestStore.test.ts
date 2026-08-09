@@ -41,7 +41,7 @@ describe("dmRequestStore", () => {
 
   it("fails closed on a present but malformed file", () => {
     writeFileSync(file(), "not json");
-    expect(readDeclinedDms(file())).toEqual(new Set());
+    expect(readDeclinedDms(file())).toBeNull();
     expect(declineDm(file(), "share-A")).toBe(false);
     expect(clearDeclinedDm(file(), "share-A")).toBe(false);
     expect(readFileSync(file(), "utf8")).toBe("not json");
@@ -62,6 +62,7 @@ describe("dmRequestStore", () => {
       return;
     }
 
+    expect(readDeclinedDms(target)).toBeNull();
     expect(declineDm(target, "share-B")).toBe(false);
     expect(clearDeclinedDm(target, "share-A")).toBe(false);
     chmodSync(target, 0o600);

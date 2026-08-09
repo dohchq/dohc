@@ -73,7 +73,7 @@ export async function classifyDmRequests(input: {
   kindCache: Map<string, "dm" | "not-dm">;
   peekKind: (shareId: string) => Promise<DmPeekResult>;
   holdersByShareId: () => ReadonlyMap<string, ReadonlySet<string>>;
-  declinedShareIds: ReadonlySet<string>;
+  declinedShareIds: ReadonlySet<string> | null;
 }): Promise<{ pending: DmRequestRow[]; declined: DmRequestRow[] }> {
   const received: DmRequestRow[] = [];
   for (const row of input.received) {
@@ -106,13 +106,11 @@ export async function classifyDmRequests(input: {
     (row) =>
       input.kindCache.get(row.shareId) === "dm" && !holders.has(row.shareId),
   );
+  const declinedShareIds = input.declinedShareIds;
+  if (declinedShareIds === null) return { pending: [], declined: [] };
   return {
-    pending: requests.filter(
-      (row) => !input.declinedShareIds.has(row.shareId),
-    ),
-    declined: requests.filter((row) =>
-      input.declinedShareIds.has(row.shareId),
-    ),
+    pending: requests.filter((row) => !declinedShareIds.has(row.shareId)),
+    declined: requests.filter((row) => declinedShareIds.has(row.shareId)),
   };
 }
 
@@ -146,6 +144,7 @@ export async function reserveAndPullSharedChannel(input: {
     run: () => Promise<void>,
   ) => Promise<void>;
   afterPull?: (workspaceId: string) => Promise<void>;
+  preWrite?: () => void;
 }): Promise<JoinedSharedChannel> {
   const info = await input.fetchInfo({
     relay: input.relay,
@@ -162,6 +161,7 @@ export async function reserveAndPullSharedChannel(input: {
 
   // Record the row BEFORE the pull. The row is the write gate, and a pull is
   // durable: pulling first can import channel data without its access gate.
+  input.preWrite?.();
   input.writeSharedChannels(
     input.workspaceId,
     mergeJoinedChannel(input.readSharedChannels(input.workspaceId), joined),
