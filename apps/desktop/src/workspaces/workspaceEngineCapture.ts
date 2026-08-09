@@ -2514,6 +2514,23 @@ export function createWorkspaceEngineCapture(
     ydocOwnedPaths: () => Promise<Set<string>>,
     author?: MomentAuthor,
   ): Promise<void> {
+    // A detached-debt marker's cleanup on removal must not depend on
+    // whether policy tracks the path, or on any other gate below: a debt
+    // can exist for a path policy later excludes (or one that was tracked
+    // when the session opened it and is not now), and running this AFTER
+    // the tracking gate left an external delete of an excluded path unable
+    // to ever clear the marker it left behind (#681 round 3, codex P2).
+    // `consumeExpectedEvent` is consumed here, once, so the "delete"
+    // handling below reads the same verdict instead of re-asking it.
+    const isExternalDelete =
+      event.operation === "delete" &&
+      !consumeExpectedEvent("delete", event.path);
+    if (isExternalDelete) {
+      cancelSuspendedDebts(
+        suspendDetachedDebts((path) => path === event.path),
+        `an external delete of ${event.path}`,
+      );
+    }
     // The secret floor outranks policy: secret paths route to the encrypted
     // driver and never reach the plaintext text store (which would refuse
     // them anyway — the store has its own gate).
@@ -2558,17 +2575,9 @@ export function createWorkspaceEngineCapture(
     // CURRENT disk state so rapid successive writes coalesce to the final
     // content instead of replaying stale event snapshots.
     if (event.operation === "delete") {
-      if (consumeExpectedEvent("delete", event.path)) return;
-      // An EXTERNAL delete — never ran through the delete/move seams, so no
-      // debt for this path was ever suspended. Left alone, a stood-down
-      // debt's marker would answer every rename onto this now-free path
-      // with an instruction that cannot be followed, and a still-pending
-      // debt would reopen and recreate the file the watcher just confirmed
-      // gone (#681).
-      cancelSuspendedDebts(
-        suspendDetachedDebts((path) => path === event.path),
-        `an external delete of ${event.path}`,
-      );
+      // The debt cleanup above already consumed this verdict; an EXPECTED
+      // delete (our own) reads false here and stops, same as before.
+      if (!isExternalDelete) return;
       await deleteIfTracked(engine, versionId, event.path, metadata, author);
       return;
     }
@@ -3284,9 +3293,19 @@ export function createWorkspaceEngineCapture(
           // vacate runs, so a mid-session rename over a recovered path is
           // covered too. An open alone is not this proof: it shows no
           // conflicting lease, not that anything reached disk.
+          //
+          // Clear the ABANDONMENT, not the debt (CodeRabbit): this entry may
+          // belong to an OLDER generation whose own release is still being
+          // refused (L). That entry is L's only owner — deleting it here
+          // strands the lease at ydoc-session-busy until the daemon
+          // restarts, exactly what the surrounding comments guard against.
+          // Clearing the flag lets that generation's own release ladder
+          // retire the entry once the lease actually lands (the
+          // `writeCancelled` branch above already does that for a
+          // non-stood-down debt).
           const clearedStandDown = detachedLockedDebts.get(input.path);
           if (clearedStandDown?.stoodDown) {
-            detachedLockedDebts.delete(input.path);
+            clearedStandDown.stoodDown = false;
           }
           // #338. The ENGINE owns the artifact: a settle it reports as
           // materialized either wrote the file or found those bytes already
@@ -3521,8 +3540,8 @@ export function createWorkspaceEngineCapture(
         const standDownFromWrite = (message: string): void => {
           writeCancelled = true;
           onError(`ydoc close retry of ${input.path}`, new Error(message));
-          const entry = detachedLockedDebts.get(input.path);
-          if (entry) entry.stoodDown = true;
+          const debt = detachedLockedDebts.get(input.path);
+          if (debt) debt.stoodDown = true;
           if (pendingRelease === null) return;
           armDetachedLockedRetry();
         };
@@ -3626,8 +3645,8 @@ export function createWorkspaceEngineCapture(
               // marker) had only its lease left to finish: drop the entry
               // now, or it sits forever and a later rename onto this freed
               // path would read it as still locked.
-              const entry = detachedLockedDebts.get(input.path);
-              if (entry && !entry.stoodDown) {
+              const debt = detachedLockedDebts.get(input.path);
+              if (debt && !debt.stoodDown) {
                 detachedLockedDebts.delete(input.path);
               }
               return;
@@ -5543,11 +5562,17 @@ export function createWorkspaceEngineCapture(
         //
         // Read it in that direction ONLY. Absence still means paid — a
         // stood-down debt on the SOURCE refuses the rename instead (#681),
-        // below. One on the DESTINATION is a different object's abandoned
-        // write, not this move's: the incoming content was always going to
-        // replace whatever was there, so it is cancelled instead — nothing
-        // durable is lost, the same "stays in the object's own history"
-        // guarantee every stand-down already gives.
+        // below. One on the DESTINATION is left ALONE: `movePath` never
+        // overwrites an existing destination (workspaceFiles.ts, `destExists`)
+        // — a move onto a path that is still there fails on its own with the
+        // standard, followable "Destination already exists" refusal, before
+        // this debt is ever relevant. Cancelling it here at PREPARE time
+        // (before the disk move even runs) destroyed the marker for a move
+        // that could then FAIL, leaving the abandoned write undefended
+        // (#681 round 3, codex P1) — the two scenarios that actually need
+        // covering are handled elsewhere: an externally removed destination
+        // clears through the watcher's own delete-cancel, and an existing
+        // one is `movePath`'s refusal, not this one's.
         // DESCENDANTS too: this method also serves directory
         // moves, so a debt for `dir/note.md` rides a move of `dir`. Left
         // behind, its delayed payment reopens the moved-from path and
@@ -5567,13 +5592,8 @@ export function createWorkspaceEngineCapture(
           const after = detachedLockedDebts.get(endpoint);
           if (!after) continue;
           if (after.stoodDown) {
-            if (!isSourceSide(endpoint)) {
-              cancelSuspendedDebts(
-                suspendDetachedDebts((path) => path === endpoint),
-                `a rename onto ${endpoint}`,
-              );
-              continue;
-            }
+            // Destination-side: leave it. See the comment above.
+            if (!isSourceSide(endpoint)) continue;
             // Explorer renders this verbatim (docs/brand/copy.md): what
             // happened, why, then one instruction per sentence.
             throw new Error(

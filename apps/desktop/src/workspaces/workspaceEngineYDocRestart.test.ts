@@ -4459,6 +4459,12 @@ it("a materialized settle after reopening a stood-down path clears the marker an
   mirror.getText("plainText").insert(0, "recovered edit");
   await reopened.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
   await reopened.settleNow();
+  // Anti-vacuity: THIS settle is what cleared it, not some unrelated path.
+  // (The doc carries the journaled "never written" text too — the recovery
+  // session's seed, per the fake's own replay of durable state.)
+  expect(
+    state.settledMarkdowns.some((text) => text.includes("recovered edit")),
+  ).toBe(true);
 
   // The marker is gone: the rename now proceeds like any ordinary one.
   const finish = await capture.beginFileRename("note.md", "renamed.md");
@@ -4512,6 +4518,10 @@ it("a rename's own vacate settle clears a stood-down marker for a session still 
   // refuse before its own vacate ever ran.
   const finish = await capture.beginFileRename("note.md", "renamed.md");
   await finish(true);
+  // Anti-vacuity: the vacate's OWN settle is what cleared it.
+  expect(
+    state.settledMarkdowns.some((text) => text.includes("recovered mid-rename")),
+  ).toBe(true);
   await capture.stop();
 }, 25_000);
 
@@ -4616,20 +4626,25 @@ it("a watcher-captured external delete cancels a stood-down debt instead of leav
   await capture.stop();
 }, 20_000);
 
-it("a stood-down debt on the rename's destination is cancelled instead of refusing", async () => {
-  // #681 round 2, P2 (codex, verified): endpointMatch checks the
-  // destination too, so a stood-down debt for the path something is being
-  // renamed ONTO used to refuse that unrelated rename forever, naming a
-  // recovery ("open target.md to write it again") that makes no sense once
-  // this rename is about to replace target.md anyway. The incoming content
-  // was always going to overwrite whatever was there, so the abandoned
-  // write is cancelled instead — nothing durable is lost, the object's
-  // edits stay in its own history exactly as every stand-down already
-  // promises.
+it("a stood-down debt on the rename's destination survives a move that fails because the destination exists", async () => {
+  // #681 round 3, P1 (codex, real — the round-2 destination cancel rested
+  // on a false premise). `movePath` REFUSES an existing destination
+  // (workspaceFiles.ts, `destExists`) — moves never overwrite. Cancelling
+  // the destination's stood-down debt at PREPARE time, before the disk
+  // move even runs, destroyed the marker for a move that could then FAIL —
+  // leaving the abandoned write undefended even though nothing about it
+  // had actually changed.
+  //
+  // The fix leaves the destination's debt alone: an existing destination
+  // makes `movePath` fail on its own with the standard, followable
+  // "Destination already exists" refusal; an externally removed one is
+  // already cleared by the watcher's own delete-cancel. Neither scenario
+  // needs this seam to touch the marker at all.
   const { capture, state, rootPath } = await lockedRebindCapture(
-    "dohc-ydoc-dest-standdown-",
+    "dohc-ydoc-dest-move-fails-",
   );
   await writeFile(join(rootPath, "source.md"), "moving in\n", "utf8");
+  await writeFile(join(rootPath, "target.md"), "still there\n", "utf8");
   const { session } = await openWithOneEdit(capture, "never written", "target.md");
 
   state.locked = true;
@@ -4647,12 +4662,124 @@ it("a stood-down debt on the rename's destination is cancelled instead of refusi
     )
     .not.toHaveLength(0);
 
-  // RED before the fix: rejected "dohc gave up on writing target.md
-  // earlier... Open target.md to write it again" instead of proceeding.
+  // Prepare does not refuse and does not touch the destination's marker —
+  // the disk-level check is what decides, once the move is attempted.
   const finish = await capture.beginFileRename("source.md", "target.md");
-  await finish(true);
+  // The disk move fails: target.md is still there. main.ts reports that
+  // outcome to the finisher.
+  await finish(false);
+
+  // RED before the fix: the marker was already cancelled at prepare time
+  // (before the failed move even ran), so this resolved instead of
+  // refusing.
+  await expect(
+    capture.beginFileRename("target.md", "elsewhere.md"),
+  ).rejects.toThrow(
+    "dohc could not rename target.md. dohc gave up on writing target.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open target.md to write them again. Then rename target.md again.",
+  );
   await capture.stop();
 }, 25_000);
+
+it("a write-classified event over an already-absent stood-down path also cancels its debt", async () => {
+  // #681 round 3 (cert N4b): the "absent" branch — a write-classified
+  // watcher event that, once read, turns out to have no file — is a
+  // SEPARATE door from the explicit "delete" operation branch above it.
+  // Both call cancelSuspendedDebts with the same trace, but only the
+  // "delete" branch had a pin: severing this one's call left every
+  // existing restart test green.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-absent-branch-delete-",
+  );
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // The symlink stand-down never materialized note.md, so no file exists
+  // at rootPath/note.md — an "update"-classified event resolves to
+  // disk.kind === "absent" once captureOnePath reads it: the write-
+  // classified door, not the explicit "delete" operation one.
+  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  await capture.flush();
+
+  // RED under a sever of just this branch's cancel call: nothing traces
+  // the removal, so this assertion is what catches it.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+  await capture.stop();
+}, 20_000);
+
+it("a watcher-captured external delete of a policy-excluded path still cancels its stood-down debt", async () => {
+  // #681 round 3, P2 (codex, real): the cleanup ran AFTER
+  // `captureOnePath`'s policy-tracking gate, so an excluded path's
+  // external delete could never reach it — the same immortal-marker gap
+  // as the tracked case (round 2), through a different door. A debt can
+  // exist for an excluded path regardless: opening a live session is never
+  // gated by policy, only capture is (policyTracksPath has no call site in
+  // `openYDocSessionTask`).
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-excluded-external-delete-",
+  );
+  const { session } = await openWithOneEdit(
+    capture,
+    "never written",
+    "node_modules/pkg/index.js",
+  );
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // An external program deletes the excluded path directly.
+  capture.captureBatch([
+    { path: "node_modules/pkg/index.js", operation: "delete" },
+  ]);
+  await capture.flush();
+
+  // Anti-vacuity: the cleanup ran, not just "nothing refused by accident".
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes(
+        "an external delete of node_modules/pkg/index.js removed the path",
+      ),
+    ),
+  ).toBe(true);
+
+  // RED before the fix: policyTracksPath("node_modules/...") is false, so
+  // the cleanup never ran and this rejected instead of resolving.
+  const finish = await capture.beginFileRename(
+    "node_modules/pkg/index.js",
+    "node_modules/pkg/renamed.js",
+  );
+  expect(typeof finish).toBe("function");
+  await capture.stop();
+}, 20_000);
 
 it("a settle refused because peers outran it keeps the write ladder alive", async () => {
   // #650. `ydoc-remote-updates-pending` reports a RACE — remote edits drained
