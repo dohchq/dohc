@@ -38,7 +38,7 @@ impl SecretDataKey {
         let mut bytes = [0u8; SECRET_KEY_BYTES];
         // A CSPRNG failure is unrecoverable for key generation; surface it as an
         // invalid-key error rather than panicking.
-        getrandom::getrandom(&mut bytes).map_err(|_| CryptoError::InvalidKeyLength)?;
+        getrandom::fill(&mut bytes).map_err(|_| CryptoError::InvalidKeyLength)?;
         Ok(SecretDataKey(bytes))
     }
 

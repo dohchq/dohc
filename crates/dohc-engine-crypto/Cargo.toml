@@ -23,12 +23,12 @@ test-util = []
 # separate from the ciphertext, and (c) it shares the RustCrypto stack already
 # vendored via `sha2`. Parameters (256-bit key, 96-bit nonce, 128-bit tag) are
 # identical to Node's `aes-256-gcm`, which the cross-engine fixtures prove.
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 # scrypt KDF for the passphrase-wrapped data-key envelope (N=2^17, r=8, p=1),
 # byte-matching Node's `crypto.scrypt` in `secretKeyEnvelope.ts`.
-scrypt = { version = "0.11", default-features = false }
+scrypt = { version = "0.12", default-features = false }
 # CSPRNG for random IVs and fresh data keys (safe wrapper; keeps forbid-unsafe).
-getrandom = "0.2"
+getrandom = "0.4"
 # Best-effort in-memory scrubbing of plaintext/key material on drop.
 zeroize = { version = "1", features = ["zeroize_derive"] }
 # Envelope JSON (parsed/emitted in the exact TS field order for parity).

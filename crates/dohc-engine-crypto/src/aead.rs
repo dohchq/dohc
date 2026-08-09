@@ -18,7 +18,7 @@ use crate::base64;
 use crate::error::CryptoError;
 use crate::key::SecretDataKey;
 use crate::secret::SecretPlaintext;
-use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::aead::{AeadInOut, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
 
 /// The AAD format prefix. Never change: it is part of the on-disk/cross-engine
@@ -161,8 +161,9 @@ fn seal_core(
     let cipher = cipher_for(key)?;
     let aad = secret_aad(workspace_id, path);
     let mut buffer = plaintext.to_vec();
+    let nonce = Nonce::from(iv);
     let tag_ga = cipher
-        .encrypt_in_place_detached(Nonce::from_slice(&iv), &aad, &mut buffer)
+        .encrypt_inout_detached(&nonce, &aad, buffer.as_mut_slice().into())
         // An in-place GCM encrypt only fails on absurd (>64 GiB) inputs, which
         // the size cap above already excludes; treat as a decrypt-class failure.
         .map_err(|_| CryptoError::DecryptFailed)?;
@@ -204,7 +205,7 @@ pub fn seal(
     plaintext: &[u8],
 ) -> Result<SealedSecret, CryptoError> {
     let mut iv = [0u8; SECRET_IV_BYTES];
-    getrandom::getrandom(&mut iv).map_err(|_| CryptoError::InvalidIvLength)?;
+    getrandom::fill(&mut iv).map_err(|_| CryptoError::InvalidIvLength)?;
     seal_core(key, workspace_id, path, plaintext, iv)
 }
 
@@ -221,9 +222,10 @@ pub fn open(
     let cipher = cipher_for(key)?;
     let aad = secret_aad(workspace_id, path);
     let mut buffer = sealed.ciphertext.clone();
-    let tag = Tag::from_slice(&sealed.tag);
+    let nonce = Nonce::from(sealed.iv);
+    let tag = Tag::from(sealed.tag);
     cipher
-        .decrypt_in_place_detached(Nonce::from_slice(&sealed.iv), &aad, &mut buffer, tag)
+        .decrypt_inout_detached(&nonce, &aad, buffer.as_mut_slice().into(), &tag)
         .map_err(|_| CryptoError::DecryptFailed)?;
     Ok(SecretPlaintext::new(buffer))
 }
