@@ -3635,6 +3635,116 @@ describe("the ydoc.open deadline (#616)", () => {
     adapter.dispose();
   });
 
+  // Codex round on #728 head ed57b683, finding 1 (the certifier's own
+  // recorded residual). `resolve_capture_object`'s FIRST step,
+  // `alias_object_id`, reuses a path's own current alias before
+  // derivation or disambiguation ever run — a routine re-capture of the
+  // SAME path (content changed, no rename) must keep the object identity
+  // its current row already holds, including an explicit id, or the
+  // evicted lineage behind it becomes unreachable.
+  it("re-seeding a path with no explicit id reuses its own current entry's id, not a fresh derivation", async () => {
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      markdown: "original content",
+      contentKind: "plaintext",
+      objectId: "object-explicit-id",
+    });
+    const adapter = new YdocLiveAdapter(engine);
+    const first = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(first.objectId).toBe("object-explicit-id");
+    await first.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "typed, never settled: ",
+    });
+    await first.evict();
+
+    // A routine re-capture of the SAME path (content changed, no rename),
+    // with no explicit object id.
+    // MUTATION: re-derive a fresh id instead of reusing the path's own
+    // current entry -> this reopen gets a DIFFERENT object id, and the
+    // evicted lineage (still keyed by "object-explicit-id") becomes
+    // unreachable.
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      markdown: "updated content",
+      contentKind: "plaintext",
+    });
+
+    const reopened = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(reopened.objectId).toBe("object-explicit-id");
+    expect(reopened.lineage).toBe("existing");
+    expect(reopened.doc.getText("plainText").toString()).toBe(
+      "typed, never settled: original content",
+    );
+    await reopened.close({ settle: true });
+    adapter.dispose();
+  });
+
+  // Codex round on #728 head ed57b683, finding 2 (the certifier's own
+  // recorded residual). `objectHasLiveAliasElsewhere` scanned every
+  // workspace. The daemon's `object_has_live_alias` filters by
+  // `workspace_id` — object ids are only unique within a workspace, so a
+  // fixture in a DIFFERENT workspace that happens to reuse this exact
+  // string must never collide.
+  it("object-alias-collision is scoped to the target workspace, not global", async () => {
+    const OTHER_WORKSPACE = "workspace-handle-other";
+    const engine = new YdocLoopbackEngine();
+    const adapter = new YdocLiveAdapter(engine);
+
+    // Learn the id THIS workspace's path would derive, side-effect-free
+    // (no edit, so evicting leaves no lineage behind).
+    const probe = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const derivedId = probe.objectId;
+    await probe.evict();
+
+    // A DIFFERENT workspace's fixture happens to reuse that exact id
+    // string.
+    // MUTATION: scan `objectHasLiveAliasElsewhere` across every workspace
+    // instead of scoping to the target one -> this open refuses
+    // object-alias-collision even though nothing in THIS workspace holds
+    // the id.
+    engine.seedFile({
+      workspace: OTHER_WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      markdown: "unrelated workspace's file",
+      contentKind: "plaintext",
+      objectId: derivedId,
+    });
+
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(session.objectId).toBe(derivedId);
+    expect(session.lineage).toBe("absent");
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
   it("evicts without settling, closing, or handing the text over again", async () => {
     // #665. Evict does not SETTLE or CLOSE. When nothing is owed,
     // `resendMissingState` is a no-op, so the provider hands over no text again

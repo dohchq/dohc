@@ -272,7 +272,17 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   seedFile(input: SeedLoopbackFileInput): void {
     const key = fileKey(input.workspace, input.versionId, input.path);
-    const objectId = input.objectId ?? this.resolveDefaultObjectId(key);
+    // Mirrors `resolve_capture_object`'s FIRST step, `alias_object_id`: a
+    // path that already has a known alias reuses it, before derivation or
+    // disambiguation ever run. An ordinary re-capture of the same path
+    // (content changed, no rename) must keep the object identity its
+    // current row already holds — including an explicit or previously
+    // disambiguated id — or the evicted lineage behind it becomes
+    // unreachable.
+    const objectId =
+      input.objectId ??
+      this.files.get(key)?.objectId ??
+      this.resolveDefaultObjectId(input.workspace, key);
     // The daemon keeps ONE snapshot row per object: a capture that lands
     // the SAME object at a new path replaces its row rather than adding a
     // second one, or a scan over `files` (capturedFileFor) would find the
@@ -300,26 +310,36 @@ export class YdocLoopbackEngine implements EngineTransport {
   // Mirrors `resolve_capture_object`'s disambiguation branch
   // (crates/dohc-engine-domain/src/store.rs): a path's default id must not
   // collide with an object that renamed away and is still live elsewhere.
-  private resolveDefaultObjectId(key: string): string {
+  private resolveDefaultObjectId(workspace: string, key: string): string {
     const derived = deriveObjectId(key);
-    return this.objectHasLiveAliasElsewhere(key, derived)
+    return this.objectHasLiveAliasElsewhere(workspace, key, derived)
       ? `${derived}#recaptured-${this.nextRecaptureOrder++}`
       : derived;
   }
 
   // Mirrors `object_has_live_alias` (crates/dohc-engine-domain/src/store.rs):
-  // true when some path OTHER than `excludingKey` currently holds this
-  // exact object id — the sign an object renamed away and is still
-  // referenced elsewhere. Shared by capture's id resolution (above) and
-  // open's collision refusal (`open()`, actor.rs
-  // ydoc_open_state_on_store) — the SAME rule, at the two sites that mint
-  // an id from a bare path.
+  // true when some path OTHER than `excludingKey`, WITHIN `workspace`,
+  // currently holds this exact object id — the sign an object renamed
+  // away and is still referenced elsewhere. Scoped to the workspace like
+  // the daemon's query (`WHERE workspace_id = ?1 AND object_id = ?2`):
+  // object ids are unique only within a workspace, so a fixture in a
+  // DIFFERENT workspace reusing this exact string must never collide.
+  // Shared by capture's id resolution (above) and open's collision
+  // refusal (`open()`, actor.rs ydoc_open_state_on_store) — the SAME
+  // rule, at the two sites that mint an id from a bare path.
   private objectHasLiveAliasElsewhere(
+    workspace: string,
     excludingKey: string,
     objectId: string,
   ): boolean {
     for (const [otherKey, file] of this.files) {
-      if (otherKey !== excludingKey && file.objectId === objectId) return true;
+      if (
+        file.workspace === workspace &&
+        otherKey !== excludingKey &&
+        file.objectId === objectId
+      ) {
+        return true;
+      }
     }
     return false;
   }
@@ -457,7 +477,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       // disambiguated id for that (resolve_capture_object); an open cannot
       // reserve one pre-commit, so it refuses instead of grafting onto the
       // renamed file's lineage (actor.rs ydoc_open_state_on_store).
-      if (this.objectHasLiveAliasElsewhere(fileLookupKey, derived)) {
+      if (this.objectHasLiveAliasElsewhere(request.workspace, fileLookupKey, derived)) {
         throw objectAliasCollisionRefusal();
       }
       objectId = derived;
