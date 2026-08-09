@@ -2,6 +2,10 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const dmRequestsSource = readFileSync(
+  new URL("./workspaces/dmRequests.ts", import.meta.url),
+  "utf8",
+);
 
 function handlerSource(channel: string): string {
   const marker = `CHANNELS.${channel},`;
@@ -113,7 +117,12 @@ describe("main-process chat authorization", () => {
     expect(handlerSource("joinSharedChannel")).toContain(
       "recipientUserId: joinedRecipientUserId",
     );
-    expect(mainSource).toContain("const recipientUserId = joinCredentials.userId;");
+    expect(mainSource).toContain(
+      "const joinedRecipientUserId = joinCredentials.userId;",
+    );
+    expect(handlerSource("acceptDm")).toContain(
+      "recipientUserId: acceptCredentials.userId",
+    );
     expect(mainSource).toContain(
       "joinedChannelMatchesCredentials(channel, syncCredentials)",
     );
@@ -231,9 +240,8 @@ describe("main-process chat authorization", () => {
     ).toContain("engineOffRefusal(");
   });
 
-  // #617 codex P1. Both join paths pull the share's log into this workspace's
-  // chat store, and autoJoinReceivedDms claims the DM home first — both
-  // durable. A joined-lane refusal raised AFTER either one leaves the pulled
+  // Both explicit join paths pull the share's log into the chosen workspace.
+  // A joined-lane refusal raised AFTER either one leaves the pulled
   // messages with no registry row, and no row is what
   // joinedSharedChannelForTarget answers null for: assertSharedChannelWritable
   // and channelIsLocked then read a READ-ONLY shared channel as a local one
@@ -245,33 +253,36 @@ describe("main-process chat authorization", () => {
   // the cached registry — is what has to precede the pull. The loser then
   // refuses having pulled nothing.
   it("reserves the joined-lane slot before either join path pulls anything", () => {
-    const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");
-    const autoJoinEnd = mainSource.indexOf("ipcMain.handle(", autoJoinStart);
-    expect(autoJoinStart).toBeGreaterThan(-1);
-    expect(autoJoinEnd).toBeGreaterThan(autoJoinStart);
-
+    const helperStart = mainSource.indexOf(
+      "function reserveAndPullSharedChannelForWorkspace(",
+    );
+    const helperEnd = mainSource.indexOf(
+      "ipcMain.handle(CHANNELS.listChatChannelShares",
+      helperStart,
+    );
+    expect(helperStart).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    const helper = mainSource.slice(helperStart, helperEnd);
+    expect(helper).toContain("return reserveAndPullSharedChannel({");
+    expect(helper).toContain(
+      "writeSharedChannels: setWorkspaceSharedChannels",
+    );
+    expect(helper).toContain("serialize: serializeSharedChannelSync");
     for (const [label, source] of [
       ["joinSharedChannel", handlerSource("joinSharedChannel")],
-      ["autoJoinReceivedDms", mainSource.slice(autoJoinStart, autoJoinEnd)],
+      ["acceptDm", handlerSource("acceptDm")],
     ] as const) {
-      const reserveAt = source.indexOf("mergeJoinedChannel(");
-      const pullAt = source.indexOf("pullSharedChannel({");
-      expect(reserveAt, label).toBeGreaterThan(-1);
-      expect(pullAt, label).toBeGreaterThan(-1);
-      expect(reserveAt, label).toBeLessThan(pullAt);
-      // And NOTHING removes the row when the pull fails. A pull is multi-page
-      // and durable, so a failure proves nothing about what landed; a row
-      // removed under landed data is a channel that reads as locally owned
-      // and writable — the reservation's own defect, through the cleanup
-      // path. The row is the write gate: it may never be absent while channel
-      // data exists locally. Rotating syncJoinedSharedChannels passes finish
-      // or end the row later, so the held slot is temporary.
-      const afterPull = source.slice(pullAt);
-      expect(afterPull, label).not.toContain("releaseJoinedSharedChannel(");
-      expect(afterPull, label).not.toContain("sharedChannels.filter(");
+      expect(source, label).toContain(
+        "reserveAndPullSharedChannelForWorkspace({",
+      );
     }
-    // The helper itself is gone, so no caller can reintroduce it by name.
-    expect(mainSource).not.toContain("releaseJoinedSharedChannel");
+    const reserveAt = dmRequestsSource.indexOf("input.writeSharedChannels(");
+    const pullAt = dmRequestsSource.indexOf("await input.pull({");
+    expect(reserveAt).toBeGreaterThan(-1);
+    expect(pullAt).toBeGreaterThan(reserveAt);
+    expect(dmRequestsSource.slice(pullAt)).not.toContain(
+      "writeSharedChannels(input.workspaceId, []",
+    );
   });
 
   // An ENDED row claims nothing across workspaces. The tombstone stays as its
@@ -279,22 +290,22 @@ describe("main-process chat authorization", () => {
   // silently was not: the invitation stayed filtered out of every other
   // workspace, and the only offered action in the holder was to rejoin.
   it("lets an ended row stop claiming a share for every other workspace", () => {
-    const claimStart = mainSource.indexOf(
-      "function shareIdsClaimedByOtherWorkspaces(",
+    const claimStart = dmRequestsSource.indexOf(
+      "export function liveSharedChannelHoldersByShareId(",
     );
-    const claimEnd = mainSource.indexOf(
-      "ipcMain.handle(CHANNELS.listChatChannelShares",
+    const claimEnd = dmRequestsSource.indexOf(
+      "export function otherLiveSharedChannelHolder(",
       claimStart,
     );
     expect(claimStart).toBeGreaterThan(-1);
     expect(claimEnd).toBeGreaterThan(claimStart);
-    const claim = mainSource.slice(claimStart, claimEnd);
+    const claim = dmRequestsSource.slice(claimStart, claimEnd);
     const skipAt = claim.indexOf("if (channel.ended === true) continue;");
-    const addAt = claim.indexOf("claimed.add(channel.shareId);");
+    const addAt = claim.indexOf("shareHolders.add(workspace.workspaceId);");
     expect(skipAt).toBeGreaterThan(-1);
     expect(addAt).toBeGreaterThan(-1);
-    // The skip guards the add, rather than sitting anywhere in the function.
     expect(skipAt).toBeLessThan(addAt);
+    expect(dmRequestsSource.match(/Ended rows are provenance/gu)).toHaveLength(1);
   });
 
   // Reserving the row before the pull makes it VISIBLE to any sync pass that
@@ -307,18 +318,120 @@ describe("main-process chat authorization", () => {
       "return serializeSharedChannelSync(workspaceId, () =>\n    runSharedChannelSyncPass(workspaceId, priorityChannelWireId),",
     );
 
-    const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");
-    const autoJoinEnd = mainSource.indexOf("ipcMain.handle(", autoJoinStart);
-    for (const [label, source] of [
-      ["joinSharedChannel", handlerSource("joinSharedChannel")],
-      ["autoJoinReceivedDms", mainSource.slice(autoJoinStart, autoJoinEnd)],
-    ] as const) {
-      const serializeAt = source.indexOf("serializeSharedChannelSync(");
-      const pullAt = source.indexOf("pullSharedChannel({");
-      expect(serializeAt, label).toBeGreaterThan(-1);
-      // The pull happens INSIDE the serialized run, not beside it.
-      expect(serializeAt, label).toBeLessThan(pullAt);
+    const serializeAt = dmRequestsSource.indexOf("await input.serialize(");
+    const pullAt = dmRequestsSource.indexOf("await input.pull({");
+    expect(serializeAt).toBeGreaterThan(-1);
+    expect(pullAt).toBeGreaterThan(serializeAt);
+  });
+
+  it("keeps received DMs as requests until acceptDm chooses a workspace", () => {
+    const sync = handlerSource("syncDms");
+    expect(sync).toContain("await classifyDmRequests({");
+    expect(sync).toContain("pending,");
+    expect(sync).toContain("declined,");
+    expect(sync).not.toContain("mergeJoinedChannel(");
+    expect(sync).not.toContain("setWorkspaceSharedChannels(");
+    expect(sync).not.toContain("pullSharedChannel({");
+    expect(sync).not.toContain("reserveAndPullSharedChannel({");
+    expect(mainSource).not.toContain("autoJoinReceivedDms");
+    expect(mainSource).not.toContain("dohc-dm-homes.json");
+  });
+
+  it("accepts only once and keys every write and pull to the chosen workspace", () => {
+    const handler = handlerSource("acceptDm");
+    const exclusivityAt = handler.indexOf("assertShareNotHeldElsewhere(");
+    const credentialsAt = handler.indexOf("await warmCredentialCache()");
+    const reserveAt = handler.indexOf(
+      "reserveAndPullSharedChannelForWorkspace({",
+    );
+    expect(exclusivityAt).toBeGreaterThan(-1);
+    expect(exclusivityAt).toBeLessThan(credentialsAt);
+    expect(
+      handler.match(/assertShareNotHeldElsewhere\(/gu),
+    ).toHaveLength(3);
+    const assertionStart = mainSource.indexOf(
+      "function assertShareNotHeldElsewhere(",
+    );
+    const assertionEnd = mainSource.indexOf(
+      "function reserveAndPullSharedChannelForWorkspace(",
+      assertionStart,
+    );
+    expect(assertionStart).toBeGreaterThan(-1);
+    expect(assertionEnd).toBeGreaterThan(assertionStart);
+    const assertion = mainSource.slice(assertionStart, assertionEnd);
+    expect(assertion).toContain(
+      "otherWorkspaceHoldingShare(shareId, workspaceId)",
+    );
+    expect(assertion).toContain(
+      "This conversation already lives in ${workspaceName}. Open that workspace to continue.",
+    );
+    expect(handler).toContain("if (!acceptedHere)");
+    expect(reserveAt).toBeGreaterThan(credentialsAt);
+    expect(handler).toContain("workspaceId: workspace.workspaceId");
+    expect(handler).toContain(
+      "preWrite: (info) =>\n            assertShareNotHeldElsewhere(\n              input.shareId,\n              input.workspaceId,\n              info.channelWireId,\n            )",
+    );
+    expect(handler).not.toContain("activity.queueCloudSync");
+  });
+
+  it("keeps the reservation row's placement true after a non-share-unavailable pull failure", () => {
+    const handler = handlerSource("acceptDm");
+    const catchAt = handler.indexOf("} catch (error) {");
+    const catchEnd = handler.indexOf(
+      "\n    }\n\n    // Acceptance succeeded",
+      catchAt,
+    );
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(catchEnd).toBeGreaterThan(catchAt);
+    const catchBlock = handler.slice(catchAt, catchEnd);
+    const shareUnavailableAt = catchBlock.indexOf(
+      "if (error instanceof ShareUnavailableError)",
+    );
+    const placementCheckAt = catchBlock.indexOf(
+      "!isShareAcceptedInWorkspace(",
+    );
+    const rethrowAt = catchBlock.indexOf("throw error;");
+
+    expect(shareUnavailableAt).toBeGreaterThan(-1);
+    expect(placementCheckAt).toBeGreaterThan(shareUnavailableAt);
+    expect(rethrowAt).toBeGreaterThan(placementCheckAt);
+    expect(catchBlock).toContain(
+      "findWorkspace(input.workspaceId)?.sharedChannels ?? [],\n            input.shareId,",
+    );
+    expect(catchBlock).toContain(
+      "input.shareId,\n          )\n        ) {\n          throw error;\n        }",
+    );
+  });
+
+  it("keeps accepted DMs in syncDms when the declined-request store is unreadable", () => {
+    const handler = handlerSource("syncDms");
+    const classifyAt = handler.indexOf("await classifyDmRequests({");
+    const listAcceptedAt = handler.indexOf("const dms = await listDmRecords({");
+    const resultAt = handler.indexOf("return SyncDmsResult.parse({");
+    expect(handler).toContain(
+      "declinedShareIds: readDeclinedDms(dmRequestFile())",
+    );
+    expect(classifyAt).toBeGreaterThan(-1);
+    expect(listAcceptedAt).toBeGreaterThan(classifyAt);
+    expect(resultAt).toBeGreaterThan(listAcceptedAt);
+    expect(handler.slice(resultAt)).toContain("dms: dms.map(dmRecordForIpc)");
+  });
+
+  it("checks renderer trust on every DM request mutation", () => {
+    for (const channel of ["acceptDm", "declineDm", "requestDmAgain"]) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain("assertTrustedSender(event);");
+      expect(handler.indexOf("assertTrustedSender(event);"), channel).toBeLessThan(
+        handler.indexOf(".parse(payload)"),
+      );
     }
+  });
+
+  it("filters confirmed DMs from the ordinary received-channel lane", () => {
+    const handler = handlerSource("listChatChannelShares");
+    expect(handler).toContain("await resolveDmKinds({");
+    expect(handler).toContain("shareIdsToWithholdFromOrdinaryInvites({");
+    expect(handler).toContain("shareIdsClaimedElsewhere,");
   });
 
   // #640: the joined lane crosses IPC scoped to the channels the caller

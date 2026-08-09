@@ -153,7 +153,7 @@ export interface ShareLogPage {
 }
 
 // The outcome of peeking a received grant's channel kind:
-//   "dm"      — a DM grant; auto-join it.
+//   "dm"      — a pending DM request.
 //   "not-dm"  — a DEFINITIVE ordinary-channel answer: an authoritative
 //               channel.create was observed with kind "channel". Safe to
 //               CACHE because a grant's channel kind is immutable.
@@ -162,9 +162,46 @@ export interface ShareLogPage {
 //               become visible before the owner's bootstrap ops reach relay.
 export type DmPeekResult = "dm" | "not-dm" | "unknown";
 
-// Peek a received chat-channel grant's KIND without mutating the local store,
-// to decide whether it should AUTO-JOIN (only `kind:"dm"` grants do; a regular
-// shared-channel grant stays manual-join). The share filter serves the
+const DM_KIND_PEEK_BATCH_SIZE = 5;
+
+// Resolve immutable grant kinds in the shared cache, peeking uncached shares.
+// Unknown and failed peeks stay uncached so the next call retries. A caller
+// that must keep DMs out of an ordinary invite lane withholds every share that
+// is not confirmed "not-dm" after this attempt.
+export async function resolveDmKinds(input: {
+  shareIds: readonly string[];
+  cache: Map<string, "dm" | "not-dm">;
+  peekKind: (shareId: string) => Promise<DmPeekResult>;
+}): Promise<void> {
+  for (
+    let start = 0;
+    start < input.shareIds.length;
+    start += DM_KIND_PEEK_BATCH_SIZE
+  ) {
+    const batch = input.shareIds.slice(start, start + DM_KIND_PEEK_BATCH_SIZE);
+    // A failed peek proves no immutable kind. It stays uncached for the next call.
+    await Promise.allSettled(
+      batch.map(async (shareId) => {
+        if (input.cache.has(shareId)) return;
+        const kind = await input.peekKind(shareId);
+        if (kind !== "unknown") input.cache.set(shareId, kind);
+      }),
+    );
+  }
+}
+
+export function shareIdsToWithholdFromOrdinaryInvites(input: {
+  shareIds: readonly string[];
+  cache: ReadonlyMap<string, "dm" | "not-dm">;
+}): Set<string> {
+  return new Set(
+    input.shareIds.filter((shareId) => input.cache.get(shareId) !== "not-dm"),
+  );
+}
+
+// Peek a received chat-channel grant's KIND without mutating the local store
+// to classify it as a pending DM request or an ordinary shared-channel invite.
+// The share filter serves the
 // channel.create as the join bootstrap, so the EARLIEST SERVED op carries the
 // channel kind. But the log GET paginates raw rows before filtering — a normal
 // owner log has `workspace.init` before `chat.channel.create`, so the first

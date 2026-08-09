@@ -1455,6 +1455,9 @@ export const SetChatReactionResult = z.object({
 });
 export type SetChatReactionResult = z.infer<typeof SetChatReactionResult>;
 
+const EMAIL_STRING = z.email().max(320);
+const SHARE_ID = z.string().min(1).max(200);
+
 // Direct messages (WS-MU-C3). A DM is a `kind:"dm"` channel plus one MU-C4
 // chat-channel grant per participant, riding the shared-channel lane. The
 // whole surface is gated on collaboration (signed in + relay): a solo user
@@ -1484,6 +1487,12 @@ export const DmRecord = z.object({
 });
 export type DmRecord = z.infer<typeof DmRecord>;
 
+export const DmRequestRow = z.object({
+  shareId: SHARE_ID,
+  granterEmail: EMAIL_STRING.nullable(),
+});
+export type DmRequestRow = z.infer<typeof DmRequestRow>;
+
 export const SyncDmsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   // The DM the caller is reading, when it is reading one. The shared-channel
@@ -1498,8 +1507,25 @@ export const SyncDmsResult = z.object({
   // surface (solo zero-bloat).
   available: z.boolean(),
   dms: z.array(DmRecord),
+  pending: z.array(DmRequestRow),
+  declined: z.array(DmRequestRow),
 });
 export type SyncDmsResult = z.infer<typeof SyncDmsResult>;
+
+export const AcceptDmPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  shareId: SHARE_ID,
+});
+export type AcceptDmPayload = z.infer<typeof AcceptDmPayload>;
+
+export const AcceptDmResult = z.object({ dm: DmRecord });
+export type AcceptDmResult = z.infer<typeof AcceptDmResult>;
+
+export const DeclineDmPayload = z.object({ shareId: SHARE_ID });
+export type DeclineDmPayload = z.infer<typeof DeclineDmPayload>;
+
+export const RequestDmAgainPayload = z.object({ shareId: SHARE_ID });
+export type RequestDmAgainPayload = z.infer<typeof RequestDmAgainPayload>;
 
 export const StartDmPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -2361,9 +2387,6 @@ export const CloudJoinWorkspaceResult = z.object({
   warning: z.string().min(1).max(500).optional(),
 });
 export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
-
-const EMAIL_STRING = z.email().max(320);
-const SHARE_ID = z.string().min(1).max(200);
 
 // ---- Relay shares (PR 18, the engine-native cloud) ----
 // A share grant lives on the SYNC RELAY: an explicit path list and/or a
@@ -3413,6 +3436,9 @@ export interface DohcDesktopBridge {
   // Direct messages (WS-MU-C3): reconcile DM state with the relay and list the
   // workspace's DMs; start (or continue) a DM with a recipient set.
   syncDms(payload: SyncDmsPayload): Promise<SyncDmsResult>;
+  acceptDm(payload: AcceptDmPayload): Promise<AcceptDmResult>;
+  declineDm(payload: DeclineDmPayload): Promise<void>;
+  requestDmAgain(payload: RequestDmAgainPayload): Promise<void>;
   startDm(payload: StartDmPayload): Promise<StartDmResult>;
   // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token stays in
   // main. publish (or leave) a presence state and long-poll for peer changes;

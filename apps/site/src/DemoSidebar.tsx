@@ -188,6 +188,7 @@ export function DemoSidebar(props: {
       ) : props.activePanel === "chats" ? (
         <ChatsView
           workspaceId="marketing-demo"
+          workspaces={[{ workspaceId: "marketing-demo", label: "Marketing" }]}
           onOpenFileChat={(thread) => thread.path && open(thread.path)}
           onOpenPath={open}
           onError={() => undefined}

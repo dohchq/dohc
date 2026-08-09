@@ -583,6 +583,9 @@ export const CHANNELS = {
   listChatReactions: "desktop:list-chat-reactions",
   setChatReaction: "desktop:set-chat-reaction",
   syncDms: "desktop:sync-dms",
+  acceptDm: "desktop:accept-dm",
+  declineDm: "desktop:decline-dm",
+  requestDmAgain: "desktop:request-dm-again",
   startDm: "desktop:start-dm",
   // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token never
   // reaches the renderer — main holds the token and makes the relay presence

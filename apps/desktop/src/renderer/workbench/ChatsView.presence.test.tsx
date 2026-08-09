@@ -3,7 +3,10 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatChannelRecord, ChannelThreadRecord, DmRecord } from "../../ipc/bridgeContract";
-import { ChatsView, type ChatPresenceCollaboration } from "./ChatsView";
+import {
+  ChatsView as ProductionChatsView,
+  type ChatPresenceCollaboration,
+} from "./ChatsView";
 import type {
   PresencePeer,
   PresenceScope,
@@ -13,6 +16,22 @@ import type {
 
 // MU-C1 — presence in the Chats surface: gated by collaboration, calm, and
 // dormant for solo.
+
+type TestChatsViewProps = Omit<
+  Parameters<typeof ProductionChatsView>[0],
+  "workspaces"
+> & {
+  workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
+};
+
+function ChatsView(props: TestChatsViewProps) {
+  return (
+    <ProductionChatsView
+      workspaces={[{ workspaceId: props.workspaceId, label: "Work" }]}
+      {...props}
+    />
+  );
+}
 
 const NOW = 1_700_000_000_000;
 
@@ -81,6 +100,9 @@ const bridgeMock = {
   setChatReaction: vi.fn(),
   // DM presence (MU-C3 x MU-C1): the DM surface loads through syncDms.
   syncDms: vi.fn(),
+  acceptDm: vi.fn(),
+  declineDm: vi.fn(),
+  requestDmAgain: vi.fn(),
   writeClipboardText: vi.fn(),
   onWorkspaceActivity: vi.fn(),
 };
@@ -181,8 +203,20 @@ beforeEach(() => {
     relay: { state: "answered" as const, granted: [], received: [] },
   });
   // Solo default: no DMs, DM surface unavailable.
-  bridgeMock.syncDms.mockResolvedValue({ available: false, dms: [] });
-  vi.stubGlobal("dohcDesktop", bridgeMock);
+  bridgeMock.syncDms.mockResolvedValue({
+    available: false,
+    dms: [],
+    pending: [],
+    declined: [],
+  });
+  vi.stubGlobal("dohcDesktop", {
+    ...bridgeMock,
+    syncDms: async (payload: { workspaceId: string; openChannelId?: string }) => ({
+      pending: [],
+      declined: [],
+      ...(await bridgeMock.syncDms(payload)),
+    }),
+  });
 });
 
 afterEach(() => {
@@ -202,6 +236,7 @@ function renderView(collaboration: ChatPresenceCollaboration | null) {
   render(
     <ChatsView
       workspaceId="workspace-a"
+      workspaces={[{ workspaceId: "workspace-a", label: "Work" }]}
       onOpenFileChat={vi.fn()}
       onError={vi.fn()}
       collaboration={collaboration}
