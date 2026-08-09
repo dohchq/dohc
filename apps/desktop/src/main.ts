@@ -7279,7 +7279,19 @@ function registerIpcHandlers(
             "That conversation isn't available anymore. Ask the sender to message you again.",
           );
         }
-        throw error;
+        // The reservation row is the write gate (reserveAndPullSharedChannel writes it
+        // before the pull, and keeps it if the pull fails). Once it exists, a pull
+        // failure is not an accept failure — fall through to the listDmRecords check
+        // below, which reports success if the pull's data landed anyway, or the
+        // existing "could not open it" message if it hasn't yet.
+        if (
+          !isShareAcceptedInWorkspace(
+            findWorkspace(input.workspaceId)?.sharedChannels ?? [],
+            input.shareId,
+          )
+        ) {
+          throw error;
+        }
       }
     }
 

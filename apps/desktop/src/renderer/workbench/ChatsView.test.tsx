@@ -5822,6 +5822,30 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
   });
 
+  it("closes the open accept-DM dialog when the cloud session changes", async () => {
+    const user = userEvent.setup();
+    const request = {
+      shareId: "share-old-account-dialog",
+      granterEmail: "old-account@example.com",
+    };
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [],
+      pending: [request],
+      declined: [],
+    });
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-request-accept"));
+    expect(await screen.findByTestId("chats-accept-dm-dialog")).toBeTruthy();
+
+    act(() => emitCloudSessionChanged("session-b"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("chats-accept-dm-dialog")).toBeNull();
+    });
+  });
+
   it("accepts a message request in the current workspace and opens it", async () => {
     const user = userEvent.setup();
     const request = {
@@ -5854,6 +5878,36 @@ describe("ChatsView direct messages", () => {
     );
     expect(onNavCommand).toHaveBeenCalledWith({ level: "dm", dm: accepted });
     expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+  });
+
+  it("routes a panel-variant accept through the editor tab seam", async () => {
+    const user = userEvent.setup();
+    const request = {
+      shareId: "share-dm-panel-accept",
+      granterEmail: "bob@example.com",
+    };
+    const accepted = dm({
+      role: "participant",
+      shareId: request.shareId,
+      peerLabel: "bob@example.com",
+    });
+    const onOpenInTab = vi.fn();
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [],
+      pending: [request],
+      declined: [],
+    });
+    bridgeMock.acceptDm.mockResolvedValue({ dm: accepted });
+
+    renderView(vi.fn(), vi.fn(), { onOpenInTab });
+    await user.click(await screen.findByTestId("chats-dm-request-accept"));
+    await user.click(screen.getByTestId("chats-accept-dm-confirm"));
+
+    await waitFor(() =>
+      expect(onOpenInTab).toHaveBeenCalledWith({ level: "dm", dm: accepted }),
+    );
+    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
   });
 
   it("clears the cross-workspace confirmation after the next successful DM refresh", async () => {

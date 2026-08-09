@@ -3361,8 +3361,7 @@ export function ChatsView(props: {
         if (token !== liveToken.current) return;
         setAcceptingDmRequest(null);
         if (chosenWorkspaceId === workspaceId) {
-          props.onNavCommand?.({ level: "dm", dm: result.dm });
-          void openDm(result.dm);
+          openConversation({ level: "dm", dm: result.dm });
           void refreshDms();
         } else {
           const label =
@@ -3386,7 +3385,7 @@ export function ChatsView(props: {
         );
       }
     },
-    [openDm, props, refreshDms, workspaceId],
+    [openConversation, props, refreshDms, workspaceId],
   );
 
   const setDmRequestDeclined = useCallback(
@@ -3622,6 +3621,8 @@ export function ChatsView(props: {
         setDmAvailable(false);
         setPendingDmRequests([]);
         setDeclinedDmRequests([]);
+        setAcceptingDmRequest(null);
+        setDmRequestBusy(null);
         setDmAcceptedElsewhere(null);
         setNav((state) =>
           state.level === "dm" ? { level: "channels" } : state,

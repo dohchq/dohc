@@ -374,6 +374,35 @@ describe("main-process chat authorization", () => {
     expect(handler).not.toContain("activity.queueCloudSync");
   });
 
+  it("keeps the reservation row's placement true after a non-share-unavailable pull failure", () => {
+    const handler = handlerSource("acceptDm");
+    const catchAt = handler.indexOf("} catch (error) {");
+    const catchEnd = handler.indexOf(
+      "\n    }\n\n    // Acceptance succeeded",
+      catchAt,
+    );
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(catchEnd).toBeGreaterThan(catchAt);
+    const catchBlock = handler.slice(catchAt, catchEnd);
+    const shareUnavailableAt = catchBlock.indexOf(
+      "if (error instanceof ShareUnavailableError)",
+    );
+    const placementCheckAt = catchBlock.indexOf(
+      "!isShareAcceptedInWorkspace(",
+    );
+    const rethrowAt = catchBlock.indexOf("throw error;");
+
+    expect(shareUnavailableAt).toBeGreaterThan(-1);
+    expect(placementCheckAt).toBeGreaterThan(shareUnavailableAt);
+    expect(rethrowAt).toBeGreaterThan(placementCheckAt);
+    expect(catchBlock).toContain(
+      "findWorkspace(input.workspaceId)?.sharedChannels ?? [],\n            input.shareId,",
+    );
+    expect(catchBlock).toContain(
+      "input.shareId,\n          )\n        ) {\n          throw error;\n        }",
+    );
+  });
+
   it("keeps accepted DMs in syncDms when the declined-request store is unreadable", () => {
     const handler = handlerSource("syncDms");
     const classifyAt = handler.indexOf("await classifyDmRequests({");
