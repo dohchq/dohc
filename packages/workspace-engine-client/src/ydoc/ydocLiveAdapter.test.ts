@@ -10,6 +10,7 @@ import {
 } from "../live/daemonLiveAdapter";
 import type { Request } from "./generated/Request";
 import {
+  ENGINE_DELIVERED_ORIGIN,
   IllFormedUtf16EditError,
   RemoteYdocApplyError,
   YDOC_OPEN_DEADLINE_MS,
@@ -229,8 +230,9 @@ describe("YdocLiveAdapter", () => {
     // Reviewer repro: a single raw transaction deletes two pre-existing U+FFFD
     // while a mid-surrogate split adds two, netting to zero. Aggregate counting
     // misses it; deleted-U+FFFD accounting rejects it. Divergence vs the real
-    // R11a engine: yrs="😀x" vs editor="�x�" (crates/dohc-engine-collab).
-    const engine = seedPlaintextEngine("��😀");
+    // R11a engine: yrs="😀x" vs editor="�x�"
+    // (crates/dohc-engine-collab).
+    const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);
     const session = await adapter.openSession({
       workspace: WORKSPACE,
@@ -238,6 +240,15 @@ describe("YdocLiveAdapter", () => {
       path: PATH,
       contentKind: "plaintext",
     });
+    // The pre-existing U+FFFD arrives the way a REMOTE update would
+    // (ENGINE_DELIVERED_ORIGIN bypasses the local-edit validator below) — a
+    // captured file whose OWN bytes hold raw U+FFFD can no longer open as a
+    // live session at all: the seed is now a real LOCAL_EDITOR_ORIGIN
+    // recordUpdate (#721), and this SAME validator would refuse it before
+    // the session ever existed.
+    session.doc.transact(() => {
+      session.doc.getText("plainText").insert(0, "��😀");
+    }, ENGINE_DELIVERED_ORIGIN);
 
     expect(() =>
       session.applyLocalEdit((doc) => {
@@ -256,7 +267,7 @@ describe("YdocLiveAdapter", () => {
   });
 
   it("allows a clean delete of pre-existing U+FFFD with a clean insert", async () => {
-    const engine = seedPlaintextEngine("�abc");
+    const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);
     const session = await adapter.openSession({
       workspace: WORKSPACE,
@@ -264,6 +275,10 @@ describe("YdocLiveAdapter", () => {
       path: PATH,
       contentKind: "plaintext",
     });
+    // Pre-existing U+FFFD via a remote-origin update — see BYPASS-1 above.
+    session.doc.transact(() => {
+      session.doc.getText("plainText").insert(0, "�abc");
+    }, ENGINE_DELIVERED_ORIGIN);
 
     const result = await session.applyLocalEdit((doc) => {
       const text = doc.getText("plainText");
@@ -2445,6 +2460,11 @@ describe("YdocLiveAdapter", () => {
 
     expect(engine.requests.map((request) => request.method)).toEqual([
       YDOC_METHOD.open,
+      // The captured seed ("seed") now journals through a real recordUpdate
+      // (#721/#728: `ydoc_open_state_on_store` returns `seedMarkdown` for a
+      // head-present open with no lineage yet, and the adapter records it),
+      // ahead of the manual local edit's own recordUpdate.
+      YDOC_METHOD.recordUpdate,
       YDOC_METHOD.recordUpdate,
       YDOC_METHOD.settle,
       YDOC_METHOD.applyExternalMarkdownEdit,
@@ -2467,19 +2487,26 @@ describe("YdocLiveAdapter", () => {
         updateBase64: expect.stringMatching(/^[A-Za-z0-9+/]+={0,2}$/),
       },
     });
-    expect(engine.requests[2]?.params).toEqual({
-      sessionId: "session-1",
-      summary: "manual settle",
+    expect(engine.requests[2]).toMatchObject({
+      idempotencyKey: "session-1:2",
+      params: {
+        sessionId: "session-1",
+        updateBase64: expect.stringMatching(/^[A-Za-z0-9+/]+={0,2}$/),
+      },
     });
     expect(engine.requests[3]?.params).toEqual({
       sessionId: "session-1",
-      markdown: "external edit",
+      summary: "manual settle",
     });
     expect(engine.requests[4]?.params).toEqual({
       sessionId: "session-1",
-      summary: "session close",
+      markdown: "external edit",
     });
     expect(engine.requests[5]?.params).toEqual({
+      sessionId: "session-1",
+      summary: "session close",
+    });
+    expect(engine.requests[6]?.params).toEqual({
       sessionId: "session-1",
       settle: false,
     });
@@ -3632,6 +3659,52 @@ describe("the ydoc.open deadline (#616)", () => {
     // The session is still the daemon's: a non-settling close succeeds
     // cleanly.
     await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  // Codex round on #728 rebased head a5d7b7bb. The NoMarker guard's blind
+  // spot: a head-present open with NO existing lineage used to embed its
+  // markdown directly into `initialUpdateBase64`, leaving
+  // `firstUpdatePending` true forever — so a direct settle over a freshly
+  // opened captured file, with no local edits at all, wrongly hit the
+  // guard above. `ydoc_open_state_on_store` (actor.rs) never embeds a seed
+  // in `initial_update`: `seed_markdown` carries it separately, and the
+  // CLIENT applies-and-records it through a REAL `ydoc.recordUpdate`
+  // (`YdocLiveAdapter.openSession`), which is what clears
+  // `firstUpdatePending` honestly — the guard itself needed no change.
+  it("a head-present open with no lineage yet journals its seed through recordUpdate, so an untouched settle succeeds", async () => {
+    const materialized: Array<{ path: string; markdown: string }> = [];
+    const engine = new YdocLoopbackEngine({
+      materialize: (input) => materialized.push(input),
+    });
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      markdown: "captured content",
+      contentKind: "plaintext",
+    });
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(session.lineage).toBe("absent");
+    expect(session.doc.getText("plainText").toString()).toBe(
+      "captured content",
+    );
+
+    // MUTATION: embed the seed directly in `initialUpdateBase64` instead of
+    // returning `seedMarkdown` for the adapter to record -> this close
+    // wrongly refuses (NoMarker), even though the artifact already holds
+    // this exact content and nothing was ever "untouched" from the
+    // daemon's point of view.
+    await expect(session.close({ settle: true })).resolves.toBeUndefined();
+    expect(materialized).toEqual([
+      { path: PATH, markdown: "captured content" },
+    ]);
     adapter.dispose();
   });
 

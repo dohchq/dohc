@@ -200,18 +200,6 @@ function resurrectedDoc(lineage: Y.Doc): Y.Doc {
   return doc;
 }
 
-function createSeededDoc(markdown: string, contentKind: YdocContentKind): Y.Doc {
-  const doc = declaredDoc();
-  if (contentKind === "plaintext") {
-    doc.getText("plainText").insert(0, markdown);
-  } else if (markdown.length > 0) {
-    const paragraph = new Y.XmlElement("paragraph");
-    paragraph.insert(0, [new Y.XmlText(markdown)]);
-    doc.getXmlFragment("body").insert(0, [paragraph]);
-  }
-  return doc;
-}
-
 function project(session: LoopbackSession): string {
   if (session.contentKind === "plaintext") {
     return session.doc.getText("plainText").toString();
@@ -504,12 +492,22 @@ export class YdocLoopbackEngine implements EngineTransport {
     const contentKind = lineage
       ? lineage.contentKind
       : (requestedKind ?? file?.contentKind ?? "richdoc");
-    const doc = lineage
-      ? resurrectedDoc(lineage.doc)
-      : file
-        ? createSeededDoc(file.markdown, contentKind)
-        : new Y.Doc();
+    const doc = lineage ? resurrectedDoc(lineage.doc) : declaredDoc();
     const lineageAbsentAtOpen = lineage === undefined;
+    // A captured file with no durable lineage yet ships its markdown as
+    // `seedMarkdown`, not embedded in `initialUpdateBase64` — the CLIENT
+    // applies it as a real local update and records it through
+    // `ydoc.recordUpdate` (`YdocLiveAdapter.openSession`), exactly as
+    // `ydoc_open_state_on_store` does (actor.rs): `initial_update` stays
+    // the EMPTY doc's state, and `seed_markdown` carries the head's text
+    // separately, `(!lineage_existing).then(|| head...).flatten()`. That
+    // recordUpdate is what clears `firstUpdatePending` — embedding the
+    // seed directly into the initial doc here (as an earlier version of
+    // this loopback did) leaves an ordinary settle over a freshly-opened
+    // captured file looking untouched forever, and the NoMarker guard
+    // refuses it.
+    const seedMarkdown =
+      !lineage && file?.head === "present" ? file.markdown : undefined;
     this.sessions.set(sessionId, {
       sessionId,
       workspace: request.workspace,
@@ -531,6 +529,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(doc)),
       lineage: lineage ? "existing" : "absent",
       head: file ? file.head : "absent",
+      ...(seedMarkdown !== undefined ? { seedMarkdown } : {}),
     };
   }
 
