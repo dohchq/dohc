@@ -1495,12 +1495,20 @@ async function syncSharedChannelsForChatTarget(
   const entry = findWorkspace(workspaceId);
   if (!entry) return 0;
   if (!target) return await syncWorkspaceSharedChannels(workspaceId);
-  const joinedChannel = await joinedSharedChannelForTarget({
-    workspaceId,
-    sharedChannels: entry.sharedChannels,
-    store: linkedChatStoreFor(entry),
-    target,
-  }).catch(() => null);
+  let joinedChannel: JoinedSharedChannel | null;
+  try {
+    joinedChannel = await joinedSharedChannelForTarget({
+      workspaceId,
+      sharedChannels: entry.sharedChannels,
+      store: linkedChatStoreFor(entry),
+      target,
+    });
+  } catch {
+    // The LOOKUP failed (the engine is restarting, say). That says nothing
+    // about the target, so fall back to an ordinary pass rather than reading
+    // the failure as "this channel is local" and syncing nothing.
+    return await syncWorkspaceSharedChannels(workspaceId);
+  }
   // A target holding no live grant has nothing to sync. A local channel's
   // threads never came from the relay, and running a pass for it would put a
   // whole window of relay round trips in front of a purely local read.
@@ -1526,6 +1534,9 @@ async function runSharedChannelSyncPass(
   workspaceId: string,
   priorityChannelWireId?: string,
 ): Promise<number> {
+  // Live rows this pass is responsible for. A pass that dies before finishing
+  // refreshed none of them, and must say so rather than report a clean sweep.
+  let liveRows = 0;
   try {
     const entry = findWorkspace(workspaceId);
     // The registry, unfiltered: the pass needs a row's PLACE even after the row
@@ -1549,6 +1560,7 @@ async function runSharedChannelSyncPass(
       reportSharedChannelPassCoveredEverything(workspaceId);
       return 0;
     }
+    liveRows = matching.length;
     const relay = {
       baseUrl: normalizeServerUrl(relayUrl),
       token: syncCredentials.token,
@@ -1584,10 +1596,13 @@ async function runSharedChannelSyncPass(
     } else {
       sharedChannelSyncCursors.set(workspaceId, result.resumeAfterChannelWireId);
     }
+    // Rows this pass did not leave fresh: the ones the rotation never reached,
+    // plus the ones it reached and could not sync.
+    const unrefreshed = result.uncovered + result.failedRows;
     reportSharedChannelPassCoverage({
       workspaceId,
       live: matching.length,
-      uncovered: result.uncovered,
+      uncovered: unrefreshed,
       passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,
     });
     if (result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
@@ -1610,10 +1625,10 @@ async function runSharedChannelSyncPass(
       notifyRenderer();
     }
     if (result.changed) await projectPendingChatBookmarksAfterPull(workspaceId);
-    return result.uncovered;
+    return unrefreshed;
   } catch (error) {
     console.error(`[desktop] shared channel sync failed for ${workspaceId}:`, error);
-    return 0;
+    return liveRows;
   }
 }
 
@@ -6811,10 +6826,6 @@ function registerIpcHandlers(
           })
         ).authorUserId,
     });
-    // MU-C4: refresh before reading, the way listChatChannels does. A channel
-    // view has no poll of its own, and the pass is bounded, so an untargeted
-    // sync could leave the channel the user just opened waiting for the
-    // rotation. Naming it puts it in THIS pass (#718).
     // MU-C4: refresh before reading, the way listChatChannels does. A channel
     // view has no poll of its own, and the pass is bounded, so an untargeted
     // sync could leave the channel the user just opened waiting for the

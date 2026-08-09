@@ -105,6 +105,37 @@ describe("the shared-channel sync pass is bounded in production", () => {
     ).toBeLessThan(helper.indexOf("return await syncWorkspaceSharedChannels(workspaceId,"));
   });
 
+  // A lookup that FAILS (the engine restarting) is not evidence the target is
+  // local. Reading it that way skips the sync entirely and the workspace goes
+  // unsynced for that trigger.
+  it("falls back to a plain pass when the target lookup itself fails", () => {
+    const helper = sourceBetween(
+      "async function syncSharedChannelsForChatTarget(",
+      "\n}\n",
+    );
+    expect(helper).toContain("} catch {");
+    expect(helper).toContain("return await syncWorkspaceSharedChannels(workspaceId);");
+    // The failure path must not be the local-target path.
+    expect(helper).not.toContain(".catch(() => null)");
+    expect(
+      helper.indexOf("return await syncWorkspaceSharedChannels(workspaceId);"),
+    ).toBeLessThan(
+      helper.indexOf("if (!joinedChannel || joinedChannel.ended === true) return 0;"),
+    );
+  });
+
+  // A pass that reached its rows and refreshed none of them (offline) reported
+  // a clean sweep, and every snapshot built on it read as fully fresh.
+  it("reports rows a pass failed to refresh, and everything when a pass dies", () => {
+    expect(passSource).toContain(
+      "const unrefreshed = result.uncovered + result.failedRows;",
+    );
+    expect(passSource).toContain("return unrefreshed;");
+    // The outer catch owns the same claim.
+    expect(passSource).toContain("return liveRows;");
+    expect(passSource).toContain("liveRows = matching.length;");
+  });
+
   // The pass waits in a per-workspace queue. Resolving the priority to a SHARE
   // before queueing means a revoke plus re-grant while it waits leaves the
   // queued pass hunting a share id that no longer exists — the same failure the
@@ -149,7 +180,7 @@ describe("the shared-channel sync pass is bounded in production", () => {
 
   it("reports the rows the pass left, so a partial pass never reads as fresh", () => {
     expect(passSource).toContain("reportSharedChannelPassCoverage({");
-    expect(passSource).toContain("uncovered: result.uncovered,");
+    expect(passSource).toContain("uncovered: unrefreshed,");
     expect(mainSource).toContain("createPassCoverageReporter((message) =>");
   });
 

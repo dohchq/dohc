@@ -420,6 +420,35 @@ describe("syncJoinedSharedChannels", () => {
     expect(result.resumeAfterChannelWireId).toBe("wire-2");
   });
 
+  // Offline, with fewer rows than the window: the rotation reached every row and
+  // refreshed none. Counting those as covered makes the pass report a clean
+  // sweep, and the snapshot built on it reads as fully fresh.
+  it("reports every row a failed pass could not refresh, even when it reached them all", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pull = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+    const rows = Array.from({ length: 4 }, (_, index) =>
+      joined({ shareId: `share-${index + 1}`, access: "read-only" }),
+    );
+    const result = await syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      ...passOver(rows),
+      passRows: 16,
+      pull,
+      push: vi.fn(async () => ({ pushed: 0 })),
+    });
+    // The rotation still covered the window, and still advanced: a failure must
+    // not stall it.
+    expect(result.uncovered).toBe(0);
+    expect(result.resumeAfterChannelWireId).toBe("wire-4");
+    // But nothing was refreshed, and the result says so.
+    expect(result.failedRows).toBe(4);
+    errorSpy.mockRestore();
+  });
+
   it("counts a transient failure as covered relay work", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const pull = vi.fn(async (_input: { shareId: string }) => {
@@ -471,6 +500,7 @@ describe("syncJoinedSharedChannels", () => {
       readOnlyShareIds: [],
       changed: true,
       uncovered: 0,
+      failedRows: 0,
       resumeAfterChannelWireId: "wire-ro",
     });
   });
@@ -539,6 +569,8 @@ describe("syncJoinedSharedChannels", () => {
       readOnlyShareIds: [],
       changed: false,
       uncovered: 0,
+      // The flaky row was reached and not refreshed: in the rotation, not fresh.
+      failedRows: 1,
       resumeAfterChannelWireId: "wire-ok",
     });
     // Only the healthy share pulled; the flaky one logged and moved on.

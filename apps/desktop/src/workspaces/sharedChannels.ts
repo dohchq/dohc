@@ -263,8 +263,12 @@ export interface SyncJoinedSharedChannelsResult {
   readOnlyShareIds: string[];
   // True when any pull applied new ops — the caller should refresh the UI.
   changed: boolean;
-  // Live rows that this bounded pass did not reach.
+  // Live rows the rotation did not reach this pass.
   uncovered: number;
+  // Rows the pass DID reach and could not refresh (offline, relay hiccup).
+  // They stay in the rotation — a failure must not stall the window — but they
+  // are not fresh, so a caller reporting freshness must count them too.
+  failedRows: number;
   // The channel the rotation stopped on, or null when the pass covered no live
   // row. A CHANNEL, not a grant: a share id dies with its grant, and a revoked
   // and re-granted channel would lose the rotation's place with it.
@@ -309,6 +313,7 @@ export async function syncJoinedSharedChannels(input: {
   const endedShareIds: string[] = [];
   const readOnlyShareIds: string[] = [];
   let changed = false;
+  let failedRows = 0;
   // The window rotates: this pass resumes after the row the last one stopped on
   // and wraps, so freshness decays evenly instead of the pass growing with the
   // registry. Above the window, every row is reached within
@@ -386,7 +391,9 @@ export async function syncJoinedSharedChannels(input: {
         continue;
       }
       // Transient failures (offline, relay hiccup) are logged and retried on
-      // the next pass; they must not fail the workspace's own sync.
+      // the next pass; they must not fail the workspace's own sync. The row
+      // keeps its place in the rotation and is reported as unrefreshed.
+      failedRows += 1;
       console.error(
         `[desktop] shared channel sync failed (share ${channel.shareId}):`,
         error,
@@ -398,6 +405,7 @@ export async function syncJoinedSharedChannels(input: {
     readOnlyShareIds,
     changed,
     uncovered,
+    failedRows,
     resumeAfterChannelWireId,
   };
 }

@@ -952,10 +952,11 @@ export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
 
 export const ListChatFileMentionsResult = z.object({
   // #718: these responses are built from the local store after ONE bounded
-  // shared-channel sync pass. When that pass could not reach every joined row,
-  // this is how many rows it left — the response is fresh for what it covered
-  // and no fresher for the rest. Absent when the pass covered everything, so a
-  // reader that never sees it is reading a fully refreshed answer.
+  // shared-channel sync pass. This is how many joined rows that pass did not
+  // leave fresh — the ones its window never reached, plus the ones it reached
+  // and could not sync (offline, relay hiccup). A pass that died outright
+  // reports every live row. Absent means the pass that ran left no row behind,
+  // which is the only claim of full freshness this field ever makes.
   sharedChannelRowsUncovered: z.number().int().positive().optional(),
   mentions: z.array(ChatFileMentionRecord).max(2000),
 });
