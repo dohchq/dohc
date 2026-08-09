@@ -345,19 +345,21 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
   }
   const resolveKnownSpecifiers = (node: t.Expression): readonly string[] =>
     resolveSpecifiers(node, (name) => stringConsts.get(name) ?? []);
+  const isCreateRequireCall = (node: t.Node): boolean => {
+    if (!t.isCallExpression(node) && !t.isOptionalCallExpression(node)) return false;
+    const callee = node.callee;
+    return (
+      (t.isIdentifier(callee) && createRequireNames.has(callee.name)) ||
+      ((t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) &&
+        !callee.computed &&
+        t.isIdentifier(callee.property) &&
+        createRequireNames.has(callee.property.name))
+    );
+  };
   const collectAliases = (node: t.Node): void => {
     if (t.isVariableDeclarator(node) && t.isIdentifier(node.id)) {
       const init = node.init;
-      if (init !== null && t.isCallExpression(init)) {
-        const callee = init.callee;
-        const isCreateRequire =
-          (t.isIdentifier(callee) && createRequireNames.has(callee.name)) ||
-          (t.isMemberExpression(callee) &&
-            !callee.computed &&
-            t.isIdentifier(callee.property) &&
-            createRequireNames.has(callee.property.name));
-        if (isCreateRequire) requireAliases.add(node.id.name);
-      }
+      if (init != null && isCreateRequireCall(init)) requireAliases.add(node.id.name);
     }
   };
   t.traverseFast(sourceFile, collectAliases);
@@ -452,14 +454,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
         // `createRequire(import.meta.url)("pkg")` — invoked immediately rather
         // than stored, so the callee is another CALL, not an identifier. Real
         // shape in this repo: workspaceDatabase.test.ts:115.
-        const calleeIsCreateRequireCall =
-          t.isCallExpression(node.callee) &&
-          ((t.isIdentifier(node.callee.callee) &&
-            createRequireNames.has(node.callee.callee.name)) ||
-            (t.isMemberExpression(node.callee.callee) &&
-              !node.callee.callee.computed &&
-              t.isIdentifier(node.callee.callee.property) &&
-              createRequireNames.has(node.callee.callee.property.name)));
+        const calleeIsCreateRequireCall = isCreateRequireCall(node.callee);
         if (isBareRequire || isModuleRequire || calleeIsCreateRequireCall) {
           found = true;
           return;
@@ -717,6 +712,13 @@ const m = await import(name);`),
       `export const m = makeRequire(import.meta.url)("${L}");`,
     ].join("\n");
     expect(hasRuntimeLegacyImport(aliasedDirect)).toBe(true);
+
+    const optionalAlias = [
+      `import { createRequire } from "node:module";`,
+      `const load = createRequire?.(import.meta.url);`,
+      `export const m = load?.("${L}");`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(optionalAlias)).toBe(true);
 
     // A const whose initializer is itself a concatenation.
     const concatConst = [
