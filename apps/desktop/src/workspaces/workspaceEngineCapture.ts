@@ -1502,23 +1502,32 @@ export function createWorkspaceEngineCapture(
   // the delete (the stale one) still cancels, and a session that opened
   // after it (the recreation's own) arms normally — see
   // `consumeRecentExternalDeleteWithNoDebt`.
-  let recentExternalDeletesWithNoDebt = new Map<
+  const recentExternalDeletesWithNoDebt = new Map<
     string,
     { deletedAtMs: number; expiresAtMs: number; expected: boolean }
   >();
-  // Pruned on every insert (#681 round 8, codex P2), not only on the rare
-  // consume: a long-lived workspace that deletes many files without ever
-  // registering a late debt for them would otherwise retain one entry per
-  // delete forever. Pruning here keeps the map small by construction —
-  // bounded by unique deletes within one TTL window, not by the
-  // workspace's whole lifetime.
+  // Swept in place, at most once per PRUNE window (#681 round 9, codex
+  // P2 — round 8's version rebuilt the whole map, via a spread + filter +
+  // new Map, on EVERY insert. A bulk deletion of a large tree calls
+  // `noteExternalDeleteWithNoDebt` once per path, and every one of those
+  // paths is fresh — nothing has crossed its own 10s TTL yet within the
+  // same burst — so that rebuild was quadratic busywork that found nothing
+  // to prune. Throttling to once per window turns a burst of N inserts
+  // into one O(map size) sweep instead of N of them; a sweep this throws
+  // away is still safe because `consumeRecentExternalDeleteWithNoDebt`
+  // checks its own entry's expiry directly, so a throttled sweep can never
+  // let an expired tombstone match.
+  const RECENT_EXTERNAL_DELETE_PRUNE_INTERVAL_MS = 1_000;
+  let recentExternalDeletesPrunedAtMs = -Infinity;
   function pruneRecentExternalDeletesWithNoDebt(): void {
     const nowMs = now();
-    recentExternalDeletesWithNoDebt = new Map(
-      [...recentExternalDeletesWithNoDebt].filter(
-        ([, entry]) => entry.expiresAtMs > nowMs,
-      ),
-    );
+    if (nowMs - recentExternalDeletesPrunedAtMs < RECENT_EXTERNAL_DELETE_PRUNE_INTERVAL_MS) {
+      return;
+    }
+    recentExternalDeletesPrunedAtMs = nowMs;
+    for (const [path, entry] of recentExternalDeletesWithNoDebt) {
+      if (entry.expiresAtMs <= nowMs) recentExternalDeletesWithNoDebt.delete(path);
+    }
   }
   function noteExternalDeleteWithNoDebt(path: string, expected: boolean): void {
     pruneRecentExternalDeletesWithNoDebt();
@@ -1538,13 +1547,22 @@ export function createWorkspaceEngineCapture(
   // version switch's materialization; or external), so the cancellation
   // trace can name which — the recorder is the only place that verdict is
   // still known once the debt itself would otherwise treat it as generic.
+  // Checks the entry's OWN expiry here too, not only via the throttled
+  // sweep above: this is the door correctness actually depends on, so it
+  // must never trust a sweep that may have been skipped this window.
   function consumeRecentExternalDeleteWithNoDebt(
     path: string,
     sessionOpenedAtMs: number,
   ): { expected: boolean } | null {
     pruneRecentExternalDeletesWithNoDebt();
     const entry = recentExternalDeletesWithNoDebt.get(path);
-    if (entry === undefined || sessionOpenedAtMs >= entry.deletedAtMs) return null;
+    if (
+      entry === undefined ||
+      entry.expiresAtMs <= now() ||
+      sessionOpenedAtMs >= entry.deletedAtMs
+    ) {
+      return null;
+    }
     recentExternalDeletesWithNoDebt.delete(path);
     return { expected: entry.expected };
   }
@@ -3464,6 +3482,16 @@ export function createWorkspaceEngineCapture(
           // vacate runs, so a mid-session rename over a recovered path is
           // covered too. An open alone is not this proof: it shows no
           // conflicting lease, not that anything reached disk.
+          //
+          // The same proof also retires this path's no-debt tombstone (#681
+          // round 9, codex P1): a session is classified once, at open,
+          // against a delete it predates, and stays classified that way
+          // forever otherwise — even after landing THIS settle proves the
+          // deletion's premise (the path is gone) no longer holds. Without
+          // this, a still-later transient close failure for the SAME
+          // session, over edits made AFTER this recovery, would read as
+          // belonging to the deleted incarnation and get wrongly cancelled.
+          recentExternalDeletesWithNoDebt.delete(input.path);
           //
           // Clear the ABANDONMENT, not the debt (CodeRabbit): this entry may
           // belong to an OLDER generation whose own release is still being

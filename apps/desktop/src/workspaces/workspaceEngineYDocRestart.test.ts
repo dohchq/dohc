@@ -3316,6 +3316,64 @@ it("a late-registering debt's cancellation trace names dohc's own removal, not a
   await capture.stop();
 }, 15_000);
 
+it("a materialized settle retires a session's deletion fence, so post-recovery edits arm normally", async () => {
+  // #681 round 9, codex P1 (real): a session is classified once, at open,
+  // against a delete it predates — but round 8's discriminator never
+  // revisits that classification. A session opened before a delete can
+  // still recover mid-session: one of its OWN settles can rematerialize
+  // the path, proving the deletion's premise is gone. Without retiring
+  // the tombstone there, a LATER transient close failure over edits made
+  // AFTER that recovery still reads as belonging to the deleted
+  // incarnation and gets wrongly cancelled — the post-recovery edits get
+  // no retry and the artifact stays stale.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-tombstone-rematerialize-",
+  );
+
+  // The session opens, then the path is deleted externally — this
+  // session predates the delete, so the discriminator alone would
+  // classify it "old" for the rest of its life.
+  const { session, mirror } = await openWithOneEdit(capture, "first edit");
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // The SAME session settles for real — no lock, no failure — and its
+  // materialized write proves note.md exists again.
+  await expect(session.settleNow()).resolves.toMatchObject({
+    markdown: "first edit",
+  });
+
+  // More edits land on this session, made AFTER the recovery above.
+  const before = Y.encodeStateVector(mirror);
+  mirror
+    .getText("plainText")
+    .insert(mirror.getText("plainText").length, " second edit");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
+
+  // This close hits a genuine transient lock.
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // RED before the fix: the tombstone from before the recovery, still
+  // classifying this session as "old," was consumed here and cancelled
+  // these genuinely pending post-recovery edits instead of arming them.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("removed the path while a pending write waited"),
+    ),
+  ).toBe(false);
+
+  // The lock releases, and the ladder — armed normally — lands the write.
+  state.locked = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["first edit", "first edit second edit"]);
+  await capture.stop();
+}, 20_000);
+
 it("a delete refuses the open that could register a debt while disk work is in flight", async () => {
   // #696 rescanned for debts registered after its suspension snapshot. #697
   // makes that late registration unreachable: a new live open cannot enter
