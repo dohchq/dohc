@@ -438,6 +438,59 @@ describe("main-process chat authorization", () => {
     );
   });
 
+  // #742 P1 (round 3): without this, a failed /sync/shares or
+  // classifyDmRequests call resets pending/declined to [] — the withhold set
+  // (previous pin) then sees no claimed shareIds, and a DM Leave just
+  // withheld from the list bounces right back in as a stale ended row. The
+  // fix is stale-until-next-success: seed from the last successful classify
+  // BEFORE the network attempt, and only overwrite the cache on success — the
+  // catch block must never reset pending/declined itself.
+  it("falls back to the last successfully classified request lanes on a relay/classify failure", () => {
+    const handler = handlerSource("syncDms");
+    const lastKnownAt = handler.indexOf(
+      "const lastKnownLanes = lastKnownDmRequestLanes.get(workspace.workspaceId);",
+    );
+    const pendingSeedAt = handler.indexOf(
+      "let pending: DmRequestRow[] = lastKnownLanes?.pending ?? [];",
+    );
+    const declinedSeedAt = handler.indexOf(
+      "let declined: DmRequestRow[] = lastKnownLanes?.declined ?? [];",
+    );
+    const relayIfAt = handler.indexOf("if (relay) {");
+    const classifyAt = handler.indexOf("await classifyDmRequests({");
+    const cacheSetAt = handler.indexOf(
+      "lastKnownDmRequestLanes.set(workspace.workspaceId, { pending, declined });",
+    );
+    const catchAt = handler.indexOf("} catch (error) {");
+    const catchEnd = handler.indexOf("\n    }\n    const dms = await listDmRecords({");
+    expect(lastKnownAt).toBeGreaterThan(-1);
+    expect(pendingSeedAt).toBeGreaterThan(lastKnownAt);
+    expect(declinedSeedAt).toBeGreaterThan(pendingSeedAt);
+    expect(relayIfAt).toBeGreaterThan(declinedSeedAt);
+    expect(classifyAt).toBeGreaterThan(relayIfAt);
+    // The cache updates only on the SUCCESS path, right after classify.
+    expect(cacheSetAt).toBeGreaterThan(classifyAt);
+    expect(catchAt).toBeGreaterThan(cacheSetAt);
+    expect(catchEnd).toBeGreaterThan(catchAt);
+    // The catch block itself never reassigns pending/declined — the seeded
+    // (or newly classified, if classify succeeded before a later step threw)
+    // values simply stand.
+    const catchBlock = handler.slice(catchAt, catchEnd);
+    expect(catchBlock).not.toContain("pending =");
+    expect(catchBlock).not.toContain("declined =");
+    expect(catchBlock).not.toContain("lastKnownDmRequestLanes.set(");
+
+    // The cache itself is workspace-keyed, matching listWorkspaces/
+    // findWorkspace's own per-workspace scoping everywhere else in this file.
+    const cacheDeclAt = mainSource.indexOf(
+      "const lastKnownDmRequestLanes = new Map<",
+    );
+    expect(cacheDeclAt).toBeGreaterThan(-1);
+    expect(mainSource.slice(cacheDeclAt, cacheDeclAt + 400)).toContain(
+      "{ pending: DmRequestRow[]; declined: DmRequestRow[] }",
+    );
+  });
+
   it("checks renderer trust on every DM request mutation", () => {
     for (const channel of ["acceptDm", "declineDm", "requestDmAgain", "leaveDm"]) {
       const handler = handlerSource(channel);

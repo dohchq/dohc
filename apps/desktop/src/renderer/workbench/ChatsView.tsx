@@ -3970,10 +3970,17 @@ export function ChatsView(props: {
         goBack();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "dohc could not leave that conversation."));
+        // Re-arm presence (#742 P2, round 3): if leaveDm rejected, the row
+        // never ended and this conversation stays open, but presence.leave()
+        // already stopped the channel — without this the client goes
+        // invisible to peers until it navigates away and back.
+        presence.restart();
+        props.onError(
+          ipcErrorMessage(error, "dohc could not leave that conversation. Try again."),
+        );
       }
     },
-    [goBack, presence.leave, props, workspaceId],
+    [goBack, presence.leave, presence.restart, props, workspaceId],
   );
 
   const reactionsByMessage = useMemo(() => {

@@ -54,6 +54,12 @@ export interface PresenceResult {
   // relay's TTL). Await this BEFORE that action. A no-op if presence was
   // never active (channelRef is null) or already stopped.
   leave: () => Promise<void>;
+  // Re-arms presence with a fresh channel (#742 P2, round 3): call this if
+  // the action `leave()` was preparing for did NOT go through — leave()
+  // already stopped the old channel, so without this the client stays
+  // invisible to peers until it navigates elsewhere and back. A no-op if the
+  // scope is not currently active (nothing to re-arm).
+  restart: () => void;
 }
 
 function peerState(peer: PresencePeer): Partial<PresenceLocalState> {
@@ -66,6 +72,10 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
   const { enabled, transport, topic, clientId, displayName } = input;
   const typingIdleMs = input.typingIdleMs ?? 5_000;
   const [peers, setPeers] = useState<PresencePeer[]>(EMPTY_PEERS);
+  // Bumped by restart() to force the channel effect below to tear down (a
+  // no-op — it is already stopped) and stand up a FRESH channel (#742 P2,
+  // round 3), without needing any of the scope inputs to actually change.
+  const [restartGeneration, setRestartGeneration] = useState(0);
   // Monotonic per-channel token; only the newest channel may repaint.
   const tokenRef = useRef(0);
   const channelRef = useRef<PresenceChannel | null>(null);
@@ -105,7 +115,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
       if (channelRef.current === channel) channelRef.current = null;
       setPeers(EMPTY_PEERS);
     };
-  }, [active, transport, topic, clientId, displayName]);
+  }, [active, transport, topic, clientId, displayName, restartGeneration]);
 
   const others = useMemo(
     () => peers.filter((peer) => peer.clientId !== clientId),
@@ -150,5 +160,10 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
     [],
   );
 
-  return { others, typingNames, setTyping, leave };
+  const restart = useMemo(
+    () => () => setRestartGeneration((generation) => generation + 1),
+    [],
+  );
+
+  return { others, typingNames, setTyping, leave, restart };
 }

@@ -129,7 +129,12 @@ export interface PresenceChannel {
   // Stop heartbeating + polling, abort any in-flight poll, and best-effort
   // leave. Idempotent. After this, onPeers never fires again. Resolves once
   // the internal poll loop has fully exited (including a pending retry
-  // sleep), so teardown is deterministic and nothing dangles.
+  // sleep) AND the leave call has settled (#742 P2, round 3: a caller about
+  // to do something that will make this scope reject further presence calls
+  // — e.g. ending the DM's share — must be able to await the leave actually
+  // reaching the transport, not just being launched) — so teardown is
+  // deterministic and nothing dangles. The leave itself stays best-effort: a
+  // rejecting transport.leave never throws out of stop().
   stop(): Promise<void>;
 }
 
@@ -216,7 +221,7 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
       state = next;
       void publishNow();
     },
-    stop() {
+    async stop() {
       if (!stopped) {
         stopped = true;
         if (heartbeatTimer) clearTimeout(heartbeatTimer);
@@ -226,17 +231,22 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
         retryResolve?.();
         pollController?.abort();
         // Best-effort explicit leave so peers see the departure before the
-        // TTL. Guarded: this channel accepts any transport, and a rejecting
-        // leave must never surface as an unhandled rejection.
+        // TTL — AWAITED (#742 P2, round 3), not fire-and-forget: a caller can
+        // rely on this having actually reached the transport once stop()'s
+        // own promise settles. Guarded: this channel accepts any transport,
+        // and a rejecting leave must never surface as an unhandled rejection
+        // or throw out of stop().
         try {
-          void Promise.resolve(
-            options.transport.leave({ topic: options.topic, clientId: options.clientId }),
-          ).catch(() => undefined);
+          await options.transport.leave({
+            topic: options.topic,
+            clientId: options.clientId,
+          });
         } catch {
-          // Sync-throwing transports get the same best-effort treatment.
+          // Sync-throwing or rejecting transports get the same best-effort
+          // treatment.
         }
       }
-      return loopDone ?? Promise.resolve();
+      await (loopDone ?? Promise.resolve());
     },
   };
 }
