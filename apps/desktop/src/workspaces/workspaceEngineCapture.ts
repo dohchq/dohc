@@ -2525,6 +2525,71 @@ export function createWorkspaceEngineCapture(
     });
   }
 
+  // A detached-debt marker's cleanup on removal must not depend on whether
+  // policy tracks the path, or on any other capture-side gate: a debt can
+  // exist for a path policy later excludes (or one that was tracked when
+  // the session opened it and is not now), and running this after such a
+  // gate left an external delete of an excluded path unable to ever clear
+  // the marker it left behind (#681 round 3, codex P2). Cleanup runs
+  // whether the delete is EXTERNAL or EXPECTED (#681 round 4, codex P2):
+  // an engine-materialized removal — a version switch whose target omits
+  // the file, a relay fast-forward delete — is registered as an expected
+  // event so it never re-journals as a new moment, but it is exactly as
+  // terminal for an abandoned write as an external delete. The path is
+  // gone either way; only the REASON differs, and only the trace needs to
+  // say which.
+  //
+  // A SEPARATE function from `captureOnePath`, called for every batched
+  // event regardless of `daemonOwnsCapture` (#681 round 6, codex P2-B):
+  // registry maintenance is not capture. Production sets
+  // `daemonOwnsCapture: true` (engineCaptureGate.ts), under which
+  // `captureBatch` never calls `captureOnePath` at all — the daemon
+  // performs the disk-to-engine write itself — but a detached debt is
+  // purely JS-side bookkeeping about a Y.Doc session's own close failure,
+  // unrelated to which side captures disk content, and the watcher
+  // reports the same events either way. Living inside `captureOnePath`
+  // left this entire mechanism (rounds 3-5) dead in the shipped
+  // configuration; every prior test exercised the JS-capture harness.
+  //
+  // GATED ON A DEBT EXISTING (#681 round 5, CodeRabbit Major + security).
+  // Only a path with a registered debt needs this early answer at all —
+  // every OTHER path, secrets included, must see the capture-side gates
+  // (secret floor, then live-session, then policy) completely untouched.
+  // Consuming the expected-event token here for a path with no debt stole
+  // it from whichever gate owns that path's own verdict — a secret path's
+  // removal read as external and recorded a spurious protected "Deleted"
+  // moment, because `captureSecretPath` never got the chance to consume
+  // its own token. Reading disk here unconditionally also meant reading
+  // secret plaintext through the plaintext reader before the secret
+  // floor, and charging a disk read to every excluded/deferred path on
+  // every event. PEEK decides the trace and whether to cancel; the single
+  // real consumption stays at `captureOnePath`'s own original site (or
+  // inside `captureSecretPath`, for the — believed unreachable — case of
+  // a secret path somehow carrying a debt: peeking rather than consuming
+  // leaves that path's own verdict intact either way).
+  async function cleanupDetachedDebtForEvent(event: WatcherEvent): Promise<void> {
+    if (!detachedLockedDebts.has(event.path)) return;
+    if (event.operation === "delete") {
+      const isExternalDelete = !peekExpectedEvent("delete", event.path);
+      cancelSuspendedDebts(
+        suspendDetachedDebts((path) => path === event.path),
+        isExternalDelete
+          ? `an external delete of ${event.path}`
+          : `dohc's own removal of ${event.path}`,
+      );
+      return;
+    }
+    const peeked = await readDiskTextState(rootPath, event.path);
+    if (peeked.kind !== "absent") return;
+    const isExternalAbsence = !peekExpectedEvent("delete", event.path);
+    cancelSuspendedDebts(
+      suspendDetachedDebts((path) => path === event.path),
+      isExternalAbsence
+        ? `an external delete of ${event.path}`
+        : `dohc's own removal of ${event.path}`,
+    );
+  }
+
   async function captureOnePath(
     engine: VersionedTextStore,
     versionId: string,
@@ -2534,58 +2599,6 @@ export function createWorkspaceEngineCapture(
     ydocOwnedPaths: () => Promise<Set<string>>,
     author?: MomentAuthor,
   ): Promise<void> {
-    // A detached-debt marker's cleanup on removal must not depend on
-    // whether policy tracks the path, or on any other gate below: a debt
-    // can exist for a path policy later excludes (or one that was tracked
-    // when the session opened it and is not now), and running this AFTER
-    // the tracking gate left an external delete of an excluded path unable
-    // to ever clear the marker it left behind (#681 round 3, codex P2).
-    // Cleanup runs whether the delete is EXTERNAL or EXPECTED (#681 round 4,
-    // codex P2): an engine-materialized removal — a version switch whose
-    // target omits the file, a relay fast-forward delete — is registered as
-    // an expected event so it never re-journals as a new moment, but it is
-    // exactly as terminal for an abandoned write as an external delete. The
-    // path is gone either way; only the REASON differs, and only the trace
-    // needs to say which.
-    //
-    // GATED ON A DEBT EXISTING (#681 round 5, CodeRabbit Major + security).
-    // Only a path with a registered debt needs this early answer at all —
-    // every OTHER path, secrets included, must see the ORIGINAL gate order
-    // (secret floor, then live-session, then policy) completely untouched.
-    // Consuming the expected-event token here for a path with no debt stole
-    // it from whichever gate below owns that path's own verdict — a secret
-    // path's removal read as external and recorded a spurious protected
-    // "Deleted" moment, because `captureSecretPath` never got the chance to
-    // consume its own token. Reading disk here unconditionally also meant
-    // reading secret plaintext through the plaintext reader before the
-    // secret floor, and charging a disk read to every excluded/deferred
-    // path on every event. PEEK decides the trace and whether to cancel;
-    // the single real consumption stays at each branch's original site
-    // below (or inside `captureSecretPath`, for the — believed unreachable —
-    // case of a secret path somehow carrying a debt: peeking rather than
-    // consuming leaves that path's own verdict intact either way).
-    if (detachedLockedDebts.has(event.path)) {
-      if (event.operation === "delete") {
-        const isExternalDelete = !peekExpectedEvent("delete", event.path);
-        cancelSuspendedDebts(
-          suspendDetachedDebts((path) => path === event.path),
-          isExternalDelete
-            ? `an external delete of ${event.path}`
-            : `dohc's own removal of ${event.path}`,
-        );
-      } else {
-        const peeked = await readDiskTextState(rootPath, event.path);
-        if (peeked.kind === "absent") {
-          const isExternalAbsence = !peekExpectedEvent("delete", event.path);
-          cancelSuspendedDebts(
-            suspendDetachedDebts((path) => path === event.path),
-            isExternalAbsence
-              ? `an external delete of ${event.path}`
-              : `dohc's own removal of ${event.path}`,
-          );
-        }
-      }
-    }
     // The secret floor outranks policy: secret paths route to the encrypted
     // driver and never reach the plaintext text store (which would refuse
     // them anyway — the store has its own gate).
@@ -3108,8 +3121,22 @@ export function createWorkspaceEngineCapture(
 
     captureBatch(events) {
       if (events.length === 0) return;
-      if (options.daemonOwnsCapture) return;
       const batch = events.map((event) => ({ ...event }));
+      // Registry maintenance, not capture (#681 round 6, codex P2-B): runs
+      // for every batch regardless of `daemonOwnsCapture`, ahead of the
+      // early return below. See `cleanupDetachedDebtForEvent`'s own
+      // comment for why a debt's cleanup cannot be skipped just because
+      // the daemon owns the disk-to-engine write.
+      enqueue("detached-debt cleanup", async () => {
+        for (const event of batch) {
+          try {
+            await cleanupDetachedDebtForEvent(event);
+          } catch (error) {
+            onError(`detached-debt cleanup of ${event.path}`, error);
+          }
+        }
+      });
+      if (options.daemonOwnsCapture) return;
       // Attribution is decided HERE, at settle (captureBatch runs on the
       // watcher's settle path), not when the chain task executes — the legacy
       // recorder's rule, kept: a dohc-tracked run owns every batch that
@@ -3348,13 +3375,27 @@ export function createWorkspaceEngineCapture(
           // refused (L). That entry is L's only owner — deleting it here
           // strands the lease at ydoc-session-busy until the daemon
           // restarts, exactly what the surrounding comments guard against.
-          // Clearing the flag lets that generation's own release ladder
-          // retire the entry once the lease actually lands (the
-          // `writeCancelled` branch above already does that for a
-          // non-stood-down debt).
           const clearedStandDown = detachedLockedDebts.get(input.path);
           if (clearedStandDown?.stoodDown) {
             clearedStandDown.stoodDown = false;
+            // The flag alone does not say whether L is still owed — only
+            // that OLDER generation's own closure knows that (#681 round 6,
+            // codex P2-A). Ask it, on the chain (this settle's completion
+            // runs off it): with nothing owed, paying now just retires the
+            // entry — the `writeCancelled` branch below already does that
+            // for a non-stood-down debt, and skipping this left a fully
+            // discharged debt lingering forever (a later delete then traced
+            // a cancellation for a write that was never pending, and the
+            // closure graph stayed retained past workspace stop). With a
+            // release still refused, the same call re-arms that retry
+            // exactly as it would have on its own schedule — the O3 case
+            // this settle must never strand. Fire-and-forget: a stalled
+            // release here must never fail THIS settle's own success.
+            enqueue(`ydoc close retry of ${input.path}`, () =>
+              clearedStandDown.pay().catch((error: unknown) => {
+                onError(`ydoc close retry of ${input.path}`, error);
+              }),
+            );
           }
           // #338. The ENGINE owns the artifact: a settle it reports as
           // materialized either wrote the file or found those bytes already

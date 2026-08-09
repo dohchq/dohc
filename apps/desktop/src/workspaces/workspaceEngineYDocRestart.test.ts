@@ -1,6 +1,6 @@
 import * as Y from "yjs";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import {
@@ -2292,7 +2292,10 @@ it("announces a recovered edit exactly once when both arm points run", async () 
 // adoption's replay is EMPTY, which is exactly the gap #595 names: nothing
 // arms a settle on the replacement, and the pending locked write would sit
 // stale until an unrelated edit.
-async function lockedRebindCapture(prefix: string) {
+async function lockedRebindCapture(
+  prefix: string,
+  options?: { daemonOwnsCapture?: boolean },
+) {
   // #630's scratch, like every other harness in this file: the run root is
   // swept even when a test fails, and an unremovable tree fails the suite
   // instead of being left behind under a green run.
@@ -2541,6 +2544,7 @@ async function lockedRebindCapture(prefix: string) {
         error instanceof Error ? error.message : String(error),
       );
     },
+    ...(options?.daemonOwnsCapture ? { daemonOwnsCapture: true } : {}),
   });
   return { capture, state, loopback, workspaceId, rootPath };
 }
@@ -4527,6 +4531,68 @@ it("onSettled clearing a stood-down flag does not strand a debt still awaiting i
   await capture.stop();
 }, 45_000);
 
+it("a recovered debt with no retained release does not linger for a later delete to falsely cancel", async () => {
+  // #681 round 6, codex P2-A (real, small): `onSettled`'s recovery only
+  // flipped `stoodDown`. When the retry session's release had ALREADY
+  // completed — the symlink-block door never holds one open at all, per
+  // its own `pendingRelease` reasoning — no lease obligation remained,
+  // yet the entry lingered forever anyway. A later delete of the
+  // recovered path then found it and traced a cancellation for a write
+  // that had already landed, and the closure graph stayed retained past
+  // workspace stop.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-recovered-no-lease-",
+  );
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // The user replaces the symlink, reopens, and settles for real — this
+  // door never holds a lease open, so recovery leaves nothing owed.
+  state.unmaterialized = false;
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const mirror = new Y.Doc();
+  Y.applyUpdate(mirror, reopened.initialUpdate);
+  const before = Y.encodeStateVector(mirror);
+  mirror.getText("plainText").insert(0, "recovered, nothing owed");
+  await reopened.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
+  await reopened.settleNow();
+  await reopened.close({ settle: false });
+  // Drain the chain so recovery's own enqueued pay() retires the entry
+  // before the delete below.
+  await capture.flush();
+
+  // An external program deletes the recovered path.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // RED before the fix: the entry lingered after recovery, so this
+  // delete found it and traced a cancellation for a write that had
+  // already landed.
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("removed the path while a pending write waited"),
+    ),
+  ).toBe(false);
+  await capture.stop();
+}, 25_000);
+
 it("a materialized settle after reopening a stood-down path clears the marker and re-enables the rename", async () => {
   // #681 round 2's honest lifecycle end: only PROOF clears the marker — a
   // settle the engine reports as materialized, which is the moment "its
@@ -4761,6 +4827,15 @@ it("an engine-materialized delete of a stood-down path also cancels its debt", a
   const { capture, state, rootPath } = await lockedRebindCapture(
     "dohc-ydoc-materialized-delete-",
   );
+
+  // note.md must be TRACKED before the debt exists: a stray journal from
+  // the Q1b mutant (the hoisted cleanup's peek reverted to a consume) is
+  // observable only if there is something for `deleteIfTracked` to
+  // record — an untracked path's delete is a silent no-op either way.
+  await writeFile(join(rootPath, "note.md"), "already tracked\n", "utf8");
+  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  await capture.flush();
+
   const { session } = await openWithOneEdit(capture, "never written");
 
   state.locked = true;
@@ -4784,6 +4859,7 @@ it("an engine-materialized delete of a stood-down path also cancels its debt", a
   capture.registerExpectedEngineEvents([
     { path: "note.md", operation: "delete" },
   ]);
+  await rm(join(rootPath, "note.md"));
   capture.captureBatch([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
@@ -4795,12 +4871,89 @@ it("an engine-materialized delete of a stood-down path also cancels its debt", a
     ),
   ).toBe(true);
 
+  // Q1b (certifier, required): a peek-to-consume regression on the
+  // hoisted cleanup keeps the trace above correct — peek and consume
+  // return the identical verdict — but steals the token before
+  // `captureOnePath`'s own real consumption. That leaves the engine's
+  // own removal reading as external THERE, and `deleteIfTracked` records
+  // a spurious new "delete" moment for a path the engine already knows
+  // is gone. Assert the journal, not just the trace.
+  const page = await capture.listMoments();
+  const strayDeletes = page.moments.filter(
+    (moment) => moment.path === "note.md" && moment.operation === "delete",
+  );
+  expect(strayDeletes).toHaveLength(0);
+
   // The path is recreated (the version now active has a file there, or
   // the user made a new one) and a rename now proceeds — no stale refusal.
   await writeFile(join(rootPath, "note.md"), "fresh content\n", "utf8");
   const finish = await capture.beginFileRename("note.md", "renamed.md");
   expect(typeof finish).toBe("function");
   await capture.stop();
+}, 20_000);
+
+it("in the daemon-owned production configuration, an external delete still cancels a stood-down debt", async () => {
+  // #681 round 6, codex P2-B (real — the same class as #736's dead fence):
+  // production constructs capture with `daemonOwnsCapture: true`
+  // (engineCaptureGate.ts:65), under which `captureBatch` used to return
+  // before ever calling `captureOnePath` — the function that carried
+  // rounds 3-5's entire debt-cleanup fix. Every prior external-removal
+  // pin drove this file's JS-capture harness (`daemonOwnsCapture`
+  // unset), so none of them proved the SHIPPED configuration behaved the
+  // same way. Detached debts arise independently of which side captures
+  // disk content — they come from a Y.Doc session's own close failure,
+  // which `daemonOwnsCapture` never gates — so the cleanup has to run
+  // for them regardless.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-daemon-owned-cleanup-",
+    { daemonOwnsCapture: true },
+  );
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // An external program deletes the path. The watcher still reports the
+  // same event in daemon-owned mode — only the disk-to-engine CAPTURE is
+  // the daemon's job, not this registry's own cleanup. `flush()` is not
+  // usable here: in daemon-owned mode it also flushes the DAEMON's own
+  // capture over the wire, which this loopback harness does not model —
+  // poll the observable trace instead.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+
+  // RED before the fix: `captureBatch` returned before `captureOnePath`
+  // ever ran, so this trace never appeared and the marker never cleared.
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.some((message) =>
+          message.includes("an external delete of note.md removed the path"),
+        ),
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+
+  // The path is recreated and a rename now proceeds cleanly — no stale
+  // refusal, in the same configuration the app actually ships.
+  await writeFile(join(rootPath, "note.md"), "fresh content\n", "utf8");
+  const finish = await capture.beginFileRename("note.md", "elsewhere.md");
+  expect(typeof finish).toBe("function");
+  // No `capture.stop()`/`flush()` here: in daemon-owned mode both also
+  // flush the DAEMON's own capture over the wire (a real RPC this
+  // loopback harness does not model), and this test never calls
+  // `capture.start()` — nothing here arms a timer that would outlive it.
 }, 20_000);
 
 it("a stood-down debt on the rename's destination survives a move that fails because the destination exists", async () => {
