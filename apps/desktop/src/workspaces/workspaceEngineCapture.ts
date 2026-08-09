@@ -931,6 +931,24 @@ export function isYDocSessionUnreleasedError(
   return error instanceof YDocSessionUnreleasedError;
 }
 
+export class YDocRemovalInProgressError extends Error {
+  readonly code = "removal-in-progress" as const;
+  constructor(
+    readonly workspacePath: string,
+    readonly inProgress: string,
+    readonly operation: "open" | "settle",
+  ) {
+    super(`dohc could not ${operation} ${workspacePath}. ${inProgress}`);
+    this.name = "YDocRemovalInProgressError";
+  }
+}
+
+export function isYDocRemovalInProgressError(
+  error: unknown,
+): error is YDocRemovalInProgressError {
+  return error instanceof YDocRemovalInProgressError;
+}
+
 // A detached locked-write payment that was cancelled after it started. The
 // payment runs on the capture chain; the edges that cancel it do not, so a
 // delete or move finisher can land while the payment sits in an awaited RPC.
@@ -3071,6 +3089,14 @@ export function createWorkspaceEngineCapture(
       );
 
       async function openYDocSessionTask(): Promise<WorkspaceEngineYDocProviderSession> {
+        const removal = removalWindowFor(input.path);
+        if (removal) {
+          throw new YDocRemovalInProgressError(
+            input.path,
+            removal.inProgress,
+            "open",
+          );
+        }
         // An ORPHANED session — one a refused open could not release — still
         // belongs to the daemon, which answers ydoc-session-busy for as long
         // as it stands, so the user's "Try again" would refuse forever.
@@ -4101,7 +4127,20 @@ export function createWorkspaceEngineCapture(
             noteUpdate();
             return session.applyLocalUpdate(update, onArmed);
           },
-          settleNow: (opts) => session.settleNow(opts),
+          settleNow: async (opts) => {
+            // Fence the public provider once. The only direct caller of the
+            // inner restart-safe session is detached-debt payment, which has
+            // its own removal-window check before it can open or settle.
+            const removal = removalWindowFor(input.path);
+            if (removal) {
+              throw new YDocRemovalInProgressError(
+                input.path,
+                removal.inProgress,
+                "settle",
+              );
+            }
+            return await session.settleNow(opts);
+          },
           applyExternalMarkdownEdit: (markdown) => {
             noteUpdate();
             return session.applyExternalMarkdownEdit(markdown);

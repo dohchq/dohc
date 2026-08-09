@@ -534,11 +534,27 @@ function CopySourceButton(props: {
 // its row (#579 review, P2). Self-contained on the module store, so every
 // surface where the keyed document view dies — the editor branches AND the
 // not-in-version refusal — can show the same recovery.
-function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
+const DELETED_WHILE_EDITING_NOTICE =
+  "This file was deleted while you were editing it. Your unsaved changes are kept as a recoverable draft.";
+
+function OrphanedDraftNotices(props: {
+  workspaceId: string;
+  path: string;
+  message?: string;
+  showWhenEmpty?: boolean;
+}) {
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
-  if (drafts.length === 0) return null;
+  if (drafts.length === 0 && !props.showWhenEmpty) return null;
   return (
     <div>
+      {drafts.length === 0 ? (
+        <div
+          data-testid="orphaned-draft-notice"
+          className="border-b border-line bg-panel px-4 py-1 text-[11px] text-danger"
+        >
+          {props.message}
+        </div>
+      ) : null}
       {drafts.map((draft) => (
         <div
           key={draft.id}
@@ -546,8 +562,12 @@ function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
           className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
         >
           <span className="text-danger">
-            This document reopened before your last edit saved. Copy your text
-            to keep it.
+            {props.message ?? (
+              <>
+                This document reopened before your last edit saved. Copy your
+                text to keep it.
+              </>
+            )}
           </span>
           <div className="flex items-center gap-2">
             <CopySourceButton
@@ -820,6 +840,10 @@ const ENGINE_CHIP: Record<
     label: "Changed on disk",
     title:
       "This file changed outside dohc while it was open. Open History to restore your text.",
+  },
+  deleted: {
+    label: "Deleted",
+    title: DELETED_WHILE_EDITING_NOTICE,
   },
   recovery: {
     label: "Edit set aside",
@@ -1116,6 +1140,24 @@ function MarkdownView(props: {
     return applyFrontmatter(body, orderFrontmatter(liveMeta));
   };
 
+  // Main reports deletion only after disk removal succeeds. Preserve the
+  // canonical live Y.Doc once, before the read-only render can discard any
+  // part of it. This uses the same durable module store as every #600 path.
+  const deletedDraftCaptured = useRef(false);
+  if (!engine.deletedWhileEditing) deletedDraftCaptured.current = false;
+  if (
+    engine.deletedWhileEditing &&
+    engine.available &&
+    engine.hasUnsettledChanges &&
+    !deletedDraftCaptured.current
+  ) {
+    const draft = serializeEngineDraft();
+    if (draft !== null) {
+      captureOrphanedDraft(props.workspaceId, props.path, draft);
+      deletedDraftCaptured.current = true;
+    }
+  }
+
   useEffect(() => {
     if (surfaceMode === "read") void loadMarkdownEditor();
   }, [surfaceMode, props.path]);
@@ -1188,6 +1230,7 @@ function MarkdownView(props: {
   const readOnly =
     !!props.forceReadOnly ||
     engine.notInVersion ||
+    engine.deletedWhileEditing ||
     // #564: the engine open hit its retry deadline. The plain editor stays
     // read-only — its autosave would race the session the engine may still
     // bind — and the notice below states the reason and offers the retry.
@@ -1523,7 +1566,8 @@ function MarkdownView(props: {
     onSaveStateChange?.(
       engine.saveState === "read-only" ||
         engine.saveState === "file-locked" ||
-        engine.saveState === "changed-on-disk"
+        engine.saveState === "changed-on-disk" ||
+        engine.saveState === "deleted"
         ? "error"
         : engine.saveState,
     );
@@ -1803,7 +1847,14 @@ function MarkdownView(props: {
   // user takes it or dismisses it. Rendered in both branches below — the
   // reopen can resolve into either editor.
   const orphanedDraftNotice = (
-    <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+    <OrphanedDraftNotices
+      workspaceId={props.workspaceId}
+      path={props.path}
+      message={
+        engine.deletedWhileEditing ? DELETED_WHILE_EDITING_NOTICE : undefined
+      }
+      showWhenEmpty={engine.deletedWhileEditing}
+    />
   );
 
   // Linked mentions live at the BOTTOM of the document, inside the reading
@@ -1929,11 +1980,14 @@ function MarkdownView(props: {
             <PageIdentity
               ydoc={engine.doc}
               filenameStem={filenameStem(props.path)}
+              readOnly={engine.deletedWhileEditing}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
-            <Suspense fallback={<PropertiesFallback />}>
-              <LazyPropertiesPanel ydoc={engine.doc} />
-            </Suspense>
+            {engine.deletedWhileEditing ? null : (
+              <Suspense fallback={<PropertiesFallback />}>
+                <LazyPropertiesPanel ydoc={engine.doc} />
+              </Suspense>
+            )}
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -1958,6 +2012,7 @@ function MarkdownView(props: {
                 onBlockTargetConsumed={retireJump}
                 pendingUndo={editorPendingUndo}
                 onPendingUndoConsumed={props.onPendingUndoConsumed}
+                readOnly={engine.deletedWhileEditing}
                 collab={{
                   ydoc: engine.doc,
                   // Solo engine editing shows the settle indicator, not presence
@@ -2158,6 +2213,7 @@ function MarkdownView(props: {
                 headingTarget={props.headingTarget}
                 pendingUndo={editorPendingUndo}
                 onPendingUndoConsumed={props.onPendingUndoConsumed}
+                readOnly={readOnly}
                 collab={null}
               />
             </Suspense>
@@ -2991,7 +3047,8 @@ export function FileInspector(props: {
     notInVersion ||
     engine.opening ||
     engine.engineMayHoldDocument ||
-    switchUnresyncedRef.current;
+    switchUnresyncedRef.current ||
+    engine.deletedWhileEditing;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText
@@ -3037,7 +3094,14 @@ export function FileInspector(props: {
   // view, and Copy/Dismiss must exist wherever the marker shows. The markdown
   // branch renders its own copy inside its header layout.
   const recoveryNotices = (
-    <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+    <OrphanedDraftNotices
+      workspaceId={props.workspaceId}
+      path={props.path}
+      message={
+        engine.deletedWhileEditing ? DELETED_WHILE_EDITING_NOTICE : undefined
+      }
+      showWhenEmpty={engine.deletedWhileEditing}
+    />
   );
 
   if (notInVersion) {

@@ -42,7 +42,7 @@ function harnessBridge() {
   };
 
   function emit(
-    state: "settling" | "saved" | "error" | "file-locked",
+    state: "settling" | "saved" | "error" | "file-locked" | "deleted",
     seq: number,
     sessionId?: string,
   ): void {
@@ -67,6 +67,8 @@ function Harness(props: { workspaceId: string; path: string }) {
     <div>
       <span data-testid="state">{engine.saveState}</span>
       <span data-testid="available">{String(engine.available)}</span>
+      <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
+      <span data-testid="unsettled">{String(engine.hasUnsettledChanges)}</span>
       <button
         type="button"
         data-testid="type"
@@ -133,6 +135,31 @@ it("shows the failure when a settle fails, instead of reading Saved", async () =
     await vi.advanceTimersByTimeAsync(10_000);
   });
   expect(screen.getByTestId("state").textContent).toBe("error");
+});
+
+it("refuses transport writes synchronously after main reports deletion", async () => {
+  await mountBound();
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  const appliedAtDelete = harness.applied.length;
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+
+  expect(screen.getByTestId("state").textContent).toBe("deleted");
+  expect(screen.getByTestId("deleted").textContent).toBe("true");
+  expect(screen.getByTestId("unsettled").textContent).toBe("true");
+
+  // A Y.Doc update can fire before the read-only React render commits. The
+  // transport ref closes that gap, so no later update reaches main.
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  expect(harness.applied).toHaveLength(appliedAtDelete);
+  expect(screen.getByTestId("state").textContent).toBe("deleted");
+
+  harness.emit("error", harness.applied.at(-1)!.seq);
+  expect(screen.getByTestId("state").textContent).toBe("deleted");
 });
 
 it("passes a file-locked report through, and a real settle clears it", async () => {

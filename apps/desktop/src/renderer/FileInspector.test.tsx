@@ -1103,7 +1103,7 @@ describe("engine markdown source view", () => {
     const saveStateListeners = new Set<
       (event: {
         sessionId: string;
-        state: "settling" | "saved" | "error";
+        state: "settling" | "saved" | "error" | "deleted";
         seq: number;
       }) => void
     >();
@@ -1140,7 +1140,7 @@ describe("engine markdown source view", () => {
         (
           listener: (event: {
             sessionId: string;
-            state: "settling" | "saved" | "error";
+            state: "settling" | "saved" | "error" | "deleted";
             seq: number;
           }) => void,
         ) => {
@@ -1157,7 +1157,10 @@ describe("engine markdown source view", () => {
       const update = Y.encodeStateAsUpdate(serverDoc, before);
       for (const listener of remoteListeners) listener({ sessionId, update });
     };
-    return { bridgeMock, pushRemoteMarkdown };
+    const pushSaveState = (state: "settling" | "saved" | "error" | "deleted", seq: number) => {
+      for (const listener of saveStateListeners) listener({ sessionId, state, seq });
+    };
+    return { bridgeMock, pushRemoteMarkdown, pushSaveState };
   }
 
   beforeEach(() => {
@@ -1224,6 +1227,72 @@ describe("engine markdown source view", () => {
     await user.click(screen.getByTestId("markdown-source-toggle"));
     expect(screen.getByTestId("view-markdown").hidden).toBe(false);
     expect(screen.queryByTestId("markdown-source-view")).toBeNull();
+  });
+
+  it("keeps a deleted live document read-only and preserves its unsettled text in recovery", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    await user.type(screen.getByTestId("page-title"), " Retitled");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => pushSaveState("deleted", 1));
+
+    expect(
+      await screen.findByText(
+        "This file was deleted while you were editing it. Your unsaved changes are kept as a recoverable draft.",
+      ),
+    ).toBeTruthy();
+    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(true);
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("markdown-editor").getAttribute("contenteditable"),
+      ).toBe("false"),
+    );
+
+    // Reuse #600's existing Copy recovery action and prove it returns the
+    // current Y.Doc text, including the edit that never settled.
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toContain("title: Plan Retitled"),
+    );
+  });
+
+  it("renders the same recovery surface when the live open loses to deletion", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    const refusedBridge = {
+      ...bridgeMock,
+      openEngineYDocSession: vi.fn(async () => ({
+        available: false,
+        deletedWhileEditing: true,
+      })),
+    };
+    captureOrphanedDraft(
+      "ws-1",
+      "a.md",
+      "---\ntitle: Draft from the refused open\n---\n\nUnsettled body\n",
+    );
+    vi.stubGlobal("dohcDesktop", refusedBridge);
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    expect(
+      await screen.findByText(
+        "This file was deleted while you were editing it. Your unsaved changes are kept as a recoverable draft.",
+      ),
+    ).toBeTruthy();
+    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(
+      true,
+    );
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toContain(
+        "Draft from the refused open",
+      ),
+    );
   });
 
   it("re-projects the source live when a remote CRDT delta lands", async () => {

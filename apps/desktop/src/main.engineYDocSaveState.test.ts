@@ -21,6 +21,18 @@ function handlerSource(channel: string): string {
 }
 
 describe("engine Y.Doc save-state reporting in main", () => {
+  it("notifies live renderer sessions only after the disk delete succeeds", () => {
+    const handler = handlerSource("deleteWorkspacePath");
+    const deleteAt = handler.indexOf("await deletePath(");
+    const notifyAt = handler.indexOf("notifyEngineYDocSessionsDeleted(");
+    const successAt = handler.indexOf("finishDebts?.(true)");
+    const failureAt = handler.indexOf("finishDebts?.(false)");
+    expect(deleteAt).toBeGreaterThan(-1);
+    expect(notifyAt).toBeGreaterThan(deleteAt);
+    expect(notifyAt).toBeLessThan(successAt);
+    expect(failureAt).toBeGreaterThan(successAt);
+  });
+
   it("tells the renderer when a shared-view re-check DISCARDS a local edit", () => {
     // The renderer has already counted this edit, so a silent return strands
     // the document on "Saving…" forever: every later report carries a seq
@@ -57,6 +69,24 @@ describe("engine Y.Doc save-state reporting in main", () => {
     expect(handler).toMatch(
       /entry\.session\.applyLocalUpdate\(\s*input\.update,\s*\(\)\s*=>\s*noteLocalEdit\(/,
     );
+  });
+
+  it("makes updates inert after a successful delete and repeats the deleted state", () => {
+    const handler = handlerSource("engineYDocApplyUpdate");
+    const deletedAt = handler.indexOf("if (entry.deleted)");
+    const applyAt = handler.indexOf("entry.session.applyLocalUpdate(");
+    expect(deletedAt).toBeGreaterThan(-1);
+    expect(deletedAt).toBeLessThan(applyAt);
+    expect(handler.slice(deletedAt, applyAt)).toContain('"deleted"');
+    expect(handler.indexOf("return;", deletedAt)).toBeLessThan(applyAt);
+  });
+
+  it("maps a removal-window open refusal to the renderer deletion contract", () => {
+    const handler = handlerSource("engineYDocOpen");
+    const catchAt = handler.indexOf("} catch (error) {");
+    const answer = handler.slice(catchAt, handler.indexOf("const entry:"));
+    expect(answer).toContain("isYDocRemovalInProgressError(error)");
+    expect(answer).toContain("deletedWhileEditing: true");
   });
 
   it("reports each settle against the seq state of ITS OWN open", () => {

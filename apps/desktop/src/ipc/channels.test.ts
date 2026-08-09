@@ -19,6 +19,7 @@ import {
   ENGINE_YDOC_UPDATE_MAX_BYTES,
   MENU_COMMANDS,
   parseEngineYDocRemoteUpdateEvent,
+  parseEngineYDocSaveStateEvent,
   parseSearchResultsEvent,
   parseUpdateStateEvent,
   parseWorkspaceActivatedEvent,
@@ -508,5 +509,17 @@ describe("parseEngineYDocRemoteUpdateEvent (preload boundary)", () => {
         update: new Uint8Array(ENGINE_YDOC_UPDATE_MAX_BYTES + 1),
       }),
     ).toBeNull();
+  });
+});
+
+describe("parseEngineYDocSaveStateEvent (preload boundary)", () => {
+  it("accepts the deleted state that turns a live editor read-only", () => {
+    expect(
+      parseEngineYDocSaveStateEvent({
+        sessionId: "session-1",
+        state: "deleted",
+        seq: 4,
+      }),
+    ).toEqual({ sessionId: "session-1", state: "deleted", seq: 4 });
   });
 });

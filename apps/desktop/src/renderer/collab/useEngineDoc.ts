@@ -43,7 +43,8 @@ export type EngineDocSaveState =
   | "error"
   | "file-locked"
   | "read-only"
-  | "changed-on-disk";
+  | "changed-on-disk"
+  | "deleted";
 
 export type UseEngineDoc = {
   // True once the engine session is open and the mirror doc is bound. false =>
@@ -79,6 +80,12 @@ export type UseEngineDoc = {
   // stays read-only, states the reason, and offers a retry (bump retryKey),
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: boolean;
+  // The file was removed while this request was opening or while its live
+  // session was bound. The current document is retained for recovery only.
+  deletedWhileEditing: boolean;
+  // True when this mirror contains a local update that no successful settle
+  // has covered. Deletion recovery captures only when this is true.
+  hasUnsettledChanges: boolean;
 };
 
 // What ONE open answers: a workspace, a path, the gate, and the active-version
@@ -109,7 +116,8 @@ type EngineDocOpenOutcome =
   // opposite (#534, #564). Collapsing them would put the branches back
   // behind one flag.
   | { key: string; kind: "not-in-version" }
-  | { key: string; kind: "engine-may-hold-document" };
+  | { key: string; kind: "engine-may-hold-document" }
+  | { key: string; kind: "deleted-while-editing" };
 
 let engineDocSessionCounter = 0;
 function nextSessionId(): string {
@@ -126,6 +134,7 @@ function makeTransport(
   // echoes back the seq each settle STARTED at, and only a settle that covers
   // the newest edit may be reported as "Saved".
   localSeq: { current: number },
+  writesRefused: { current: boolean },
 ): EngineYDocTransport {
   return {
     async open() {
@@ -139,9 +148,11 @@ function makeTransport(
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
+        ...(result.deletedWhileEditing ? { deletedWhileEditing: true } : {}),
       };
     },
     applyLocalUpdate(update) {
+      if (writesRefused.current) return;
       // Fire-and-forget: main journals + settles. A transient IPC error never
       // tears the editor down; the mirror doc keeps the edit and the next update
       // (or close) re-converges. The seq is NOT rolled back on that failure —
@@ -189,6 +200,8 @@ export function useEngineDoc(input: {
   const requestKey = engineDocRequestKey(input);
   const [outcome, setOutcome] = useState<EngineDocOpenOutcome | null>(null);
   const [saveState, setSaveState] = useState<EngineDocSaveState>("saved");
+  const [deletedRequestKey, setDeletedRequestKey] = useState<string | null>(null);
+  const [unsettledRequestKey, setUnsettledRequestKey] = useState<string | null>(null);
   // Monotonic per-open token: only the newest open may set state (the async-
   // state invariant — a stale workspace/path response never repaints).
   const openTokenRef = useRef(0);
@@ -210,6 +223,17 @@ export function useEngineDoc(input: {
   // repaints the document they just entered.
   const notInVersion = settled?.kind === "not-in-version";
   const engineMayHoldDocument = settled?.kind === "engine-may-hold-document";
+  const deletedWhileEditing =
+    settled?.kind === "deleted-while-editing" ||
+    (settled?.kind === "bound" && deletedRequestKey === requestKey);
+  const hasUnsettledChanges = unsettledRequestKey === requestKey;
+  const writesRefused = useRef(false);
+  const writesRefusedKey = useRef(requestKey);
+  if (writesRefusedKey.current !== requestKey) {
+    writesRefusedKey.current = requestKey;
+    writesRefused.current = false;
+  }
+  if (deletedWhileEditing) writesRefused.current = true;
 
   useEffect(() => {
     setSaveState("saved");
@@ -227,7 +251,13 @@ export function useEngineDoc(input: {
 
     const sessionId = nextSessionId();
     const localSeq = { current: 0 };
-    const transport = makeTransport(workspaceId, path, sessionId, localSeq);
+    const transport = makeTransport(
+      workspaceId,
+      path,
+      sessionId,
+      localSeq,
+      writesRefused,
+    );
 
     void bindEngineYDoc(transport)
       .then((bound) => {
@@ -251,7 +281,9 @@ export function useEngineDoc(input: {
               ? "not-in-version"
               : bound.engineMayHoldDocument
                 ? "engine-may-hold-document"
-                : "unavailable",
+                : bound.deletedWhileEditing
+                  ? "deleted-while-editing"
+                  : "unavailable",
           });
           return;
         }
@@ -260,6 +292,8 @@ export function useEngineDoc(input: {
         // before this observer attached, so it never shows a spurious "saving".
         const onUpdate = () => {
           if (cancelled) return;
+          if (writesRefused.current) return;
+          setUnsettledRequestKey(key);
           setSaveState("saving");
         };
         bound.doc.on("update", onUpdate);
@@ -275,6 +309,19 @@ export function useEngineDoc(input: {
         unsubscribeSaveState = bridge().onEngineYDocSaveState((event) => {
           if (cancelled || token !== openTokenRef.current) return;
           if (event.sessionId !== sessionId) return;
+          // Deletion is terminal for this session. A settle/update already in
+          // flight can report after main's deletion notice, but it no longer
+          // describes a path that exists and must not repaint this state.
+          if (writesRefused.current && event.state !== "deleted") return;
+          if (event.state === "deleted") {
+            // Refuse transport writes synchronously. React can take a render
+            // to make Tiptap read-only, but no keystroke in that gap may reach
+            // main and recreate the path.
+            writesRefused.current = true;
+            setDeletedRequestKey(key);
+            setSaveState("deleted");
+            return;
+          }
           // `file-locked` is the one refusal that makes a DURABILITY claim:
           // its copy tells the user dohc has their edits and is retrying. So
           // it may only stand for a settle that carries the newest edit. A
@@ -302,7 +349,10 @@ export function useEngineDoc(input: {
           }
           // "saved" vouches only for edits journaled before that settle began.
           // Anything typed since is still unsaved — keep showing "Saving…".
-          if (event.seq >= localSeq.current) setSaveState("saved");
+          if (event.seq >= localSeq.current) {
+            setUnsettledRequestKey((current) => (current === key ? null : current));
+            setSaveState("saved");
+          }
         });
         setOutcome({ key, kind: "bound", doc: bound.doc });
       })
@@ -335,5 +385,14 @@ export function useEngineDoc(input: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input.workspaceId, input.path, input.enabled, input.reopenKey, input.retryKey]);
 
-  return { available, opening, doc, saveState, notInVersion, engineMayHoldDocument };
+  return {
+    available,
+    opening,
+    doc,
+    saveState,
+    notInVersion,
+    engineMayHoldDocument,
+    deletedWhileEditing,
+    hasUnsettledChanges,
+  };
 }

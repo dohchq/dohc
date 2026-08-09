@@ -169,6 +169,7 @@ export type MarkdownEditorProps = {
   onBlockTargetConsumed?: (nonce: number) => void;
   resolveWorkspaceAssetUrl?: (workspacePath: string) => string | null;
   autoFocus?: boolean;
+  readOnly?: boolean;
   collab?: MarkdownEditorCollab | null;
   pendingUndo?: MarkdownEditorPendingUndo;
   onPendingUndoConsumed?: (token: number) => void;
@@ -364,6 +365,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       onBlockTargetConsumed,
       resolveWorkspaceAssetUrl,
       autoFocus,
+      readOnly,
       collab,
       pendingUndo,
       onPendingUndoConsumed,
@@ -639,6 +641,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         // empty-doc path below, same as non-collab mounts.
         content: collabActive ? collabInitialContent : value,
         contentType: collabActive ? undefined : "markdown",
+        editable: !readOnly,
         // Register the image node view's per-editor context BEFORE the
         // ProseMirror view is built (createView reads the extension's storage),
         // so workspace-relative image srcs resolve on the very first paint.
@@ -670,6 +673,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       },
       [extensions, collabActive],
     );
+
+    useEffect(() => {
+      editor?.setEditable(!readOnly);
+    }, [editor, readOnly]);
 
     useEffect(() => {
       dirtyTrackingReadyRef.current = false;

@@ -232,6 +232,108 @@ it("journals a live editor update through the Rust Y.Doc provider and suppresses
   await session.close({ settle: false });
 });
 
+it("refuses a stale live-session settle while a removal window is open", async () => {
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+  });
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath(PATH);
+  const settlesBeforeRefusal = methodCount(YDOC_METHOD.settle);
+
+  const refusal = await session.settleNow().then(
+    () => null,
+    (error: unknown) => error,
+  );
+
+  expect(refusal).toMatchObject({
+    name: "YDocRemovalInProgressError",
+    code: "removal-in-progress",
+    workspacePath: PATH,
+  });
+  expect((refusal as Error).message).toContain(`dohc is still deleting ${PATH}.`);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(settlesBeforeRefusal);
+  finishDelete(true);
+});
+
+it("refuses a new live session before it can recreate a path inside a removal window", async () => {
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath(PATH);
+  await rm(join(root, PATH));
+  const opensBeforeRace = methodCount(YDOC_METHOD.open);
+  const settlesBeforeRace = methodCount(YDOC_METHOD.settle);
+
+  const raced = await capture
+    .openYDocSession({
+      path: PATH,
+      onRemoteUpdate: () => undefined,
+    })
+    .then(
+      (session) => ({ kind: "opened" as const, session }),
+      (error: unknown) => ({ kind: "refused" as const, error }),
+    );
+  if (raced.kind === "opened") {
+    const editor = mirrorEditor(raced.session);
+    typeIntoBody(editor, "Typed while delete was on disk.");
+    await raced.session.settleNow().catch(() => undefined);
+  }
+
+  await expect(readFile(join(root, PATH), "utf8")).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  expect(raced.kind).toBe("refused");
+  if (raced.kind === "refused") {
+    expect(raced.error).toMatchObject({
+      name: "YDocRemovalInProgressError",
+      code: "removal-in-progress",
+      workspacePath: PATH,
+    });
+  }
+  expect(methodCount(YDOC_METHOD.open)).toBe(opensBeforeRace);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(settlesBeforeRace);
+  finishDelete(true);
+});
+
+it("keeps a completed delete absent after a live-session race and closes its removal window", async () => {
+  const first = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+  });
+  const editor = mirrorEditor(first);
+  typeIntoBody(editor, "Typed before delete.");
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath(PATH);
+  await rm(join(root, PATH));
+  const settlesAfterVacate = methodCount(YDOC_METHOD.settle);
+
+  const raced = await capture
+    .openYDocSession({
+      path: PATH,
+      onRemoteUpdate: () => undefined,
+    })
+    .then(
+      (session) => ({ kind: "opened" as const, session }),
+      (error: unknown) => ({ kind: "refused" as const, error }),
+    );
+  if (raced.kind === "opened") {
+    const racedEditor = mirrorEditor(raced.session);
+    typeIntoBody(racedEditor, "Typed during delete.");
+    await raced.session.settleNow().catch(() => undefined);
+  }
+  finishDelete(true);
+
+  await expect(readFile(join(root, PATH), "utf8")).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  expect(raced.kind).toBe("refused");
+  expect(methodCount(YDOC_METHOD.settle)).toBe(settlesAfterVacate);
+
+  // A successful open after the finisher proves the removal window closed.
+  await writeFile(join(root, PATH), "", "utf8");
+  const reopened = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+  });
+  await reopened.close({ settle: false });
+});
+
 it("captures a different disk edit while the Rust Y.Doc session is live", async () => {
   const session = await capture.openYDocSession({
     path: PATH,
