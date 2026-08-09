@@ -571,6 +571,8 @@ export const ReadWorkspaceGraphPayload = z.object({
 export type ReadWorkspaceGraphPayload = z.infer<typeof ReadWorkspaceGraphPayload>;
 
 export const WorkspaceGraphResult = z.object({
+  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   nodes: z.array(WorkspaceGraphNode).max(2000),
   edges: z.array(WorkspaceGraphEdge).max(10000),
   unresolvedLinks: z.number().int().nonnegative(),
@@ -949,6 +951,12 @@ export const ChatFileMentionRecord = z.object({
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
 
 export const ListChatFileMentionsResult = z.object({
+  // #718: these responses are built from the local store after ONE bounded
+  // shared-channel sync pass. When that pass could not reach every joined row,
+  // this is how many rows it left — the response is fresh for what it covered
+  // and no fresher for the rest. Absent when the pass covered everything, so a
+  // reader that never sees it is reading a fully refreshed answer.
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   mentions: z.array(ChatFileMentionRecord).max(2000),
 });
 export type ListChatFileMentionsResult = z.infer<
@@ -1261,6 +1269,8 @@ export const ListChatChannelsPayload = z.object({
 export type ListChatChannelsPayload = z.infer<typeof ListChatChannelsPayload>;
 
 export const ListChatChannelsResult = z.object({
+  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   channels: z.array(ChatChannelRecord),
   // The "Files" grouping: file-linked Chats listed read-only beside the
   // channels (they live in the file rail; the Chats view cross-links).
@@ -1337,6 +1347,8 @@ export const ListPersonalChatFeedPayload = z.object({
 });
 export type ListPersonalChatFeedPayload = z.infer<typeof ListPersonalChatFeedPayload>;
 export const ListPersonalChatFeedResult = z.object({
+  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   items: z.array(ChatFeedItemRecord).max(50),
   nextCursor: z.string().max(1000).optional(),
   headCursor: z.string().max(1000).optional(),

@@ -263,7 +263,7 @@ describe("syncJoinedSharedChannels", () => {
       passRows: 16,
       // Rotation alone would cover share-5 .. share-20 — never share-1.
       resumeAfterChannelWireId: "wire-4",
-      priorityShareId: "share-1",
+      priorityChannelWireId: "wire-1",
       pull,
       push,
     });
@@ -300,7 +300,7 @@ describe("syncJoinedSharedChannels", () => {
         passRows: 16,
         ...(cursor ? { resumeAfterChannelWireId: cursor } : {}),
         // The same share is written before every pass.
-        priorityShareId: "share-32",
+        priorityChannelWireId: "wire-32",
         pull,
         push: vi.fn(async () => ({ pushed: 0 })),
       });
@@ -326,7 +326,7 @@ describe("syncJoinedSharedChannels", () => {
       // share-3) CONTAINS the priority row — the case where a naive fill would
       // spend two of the three slots on share-2.
       resumeAfterChannelWireId: "wire-5",
-      priorityShareId: "share-2",
+      priorityChannelWireId: "wire-2",
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
     });
@@ -352,7 +352,7 @@ describe("syncJoinedSharedChannels", () => {
         joined({ shareId: "share-gone", ended: true }),
       ]),
       passRows: 1,
-      priorityShareId: "share-gone",
+      priorityChannelWireId: "wire-gone",
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
     });

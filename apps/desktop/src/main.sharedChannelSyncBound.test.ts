@@ -88,6 +88,56 @@ describe("the shared-channel sync pass is bounded in production", () => {
     expect(merge).not.toContain("return [...kept, joined];");
   });
 
+  // The helper resolves a target, and a target with no live grant resolves to
+  // nothing. Running a pass anyway put a whole window of relay round trips in
+  // front of a purely local read — opening a LOCAL channel awaited the rotation.
+  it("never starts a pass for a chat target that holds no live grant", () => {
+    const helper = sourceBetween(
+      "async function syncSharedChannelsForChatTarget(",
+      "\n}\n",
+    );
+    expect(helper).toContain(
+      "if (!joinedChannel || joinedChannel.ended === true) return 0;",
+    );
+    // And the skip must come BEFORE the pass, or it skips nothing.
+    expect(
+      helper.indexOf("if (!joinedChannel || joinedChannel.ended === true) return 0;"),
+    ).toBeLessThan(helper.indexOf("return await syncWorkspaceSharedChannels(workspaceId,"));
+  });
+
+  // The pass waits in a per-workspace queue. Resolving the priority to a SHARE
+  // before queueing means a revoke plus re-grant while it waits leaves the
+  // queued pass hunting a share id that no longer exists — the same failure the
+  // cursor already had, one layer up.
+  it("carries the priority through the queue as a channel, not a grant", () => {
+    const helper = sourceBetween(
+      "async function syncSharedChannelsForChatTarget(",
+      "\n}\n",
+    );
+    expect(helper).toContain(
+      "return await syncWorkspaceSharedChannels(workspaceId, joinedChannel.channelWireId);",
+    );
+    expect(helper).not.toContain("joinedChannel.shareId");
+    expect(syncCallSource).toContain("priorityChannelWireId,");
+  });
+
+  // Aggregate reads answer from the local store after ONE bounded pass. An
+  // agent reading that response through the CLI or MCP cannot see the pass was
+  // partial unless the response says so — the console line reaches nobody.
+  it("tells every aggregate read how many rows its pass left", () => {
+    for (const result of [
+      "ListChatFileMentionsResult",
+      "ListChatChannelsResult",
+      "ListPersonalChatFeedResult",
+      "WorkspaceGraphResult",
+    ]) {
+      const response = sourceBetween(`return ${result}.parse({`, "\n    });");
+      expect(response, result).toContain(
+        "...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),",
+      );
+    }
+  });
+
   it("rotates the window: the cursor is both read and stored per workspace", () => {
     expect(syncCallSource).toContain(
       "resumeAfterChannelWireId: sharedChannelSyncCursors.get(workspaceId),",
@@ -108,10 +158,10 @@ describe("the shared-channel sync pass is bounded in production", () => {
   // rows go away and come back would then have its first partial pass silenced.
   it("clears the remembered remainder on every no-rows return", () => {
     expect(passSource).toContain(
-      "if (!entry || channels.length === 0) {\n      reportSharedChannelPassCoveredEverything(workspaceId);\n      return;\n    }",
+      "if (!entry || channels.length === 0) {\n      reportSharedChannelPassCoveredEverything(workspaceId);\n      return 0;\n    }",
     );
     expect(passSource).toContain(
-      "if (matching.length === 0) {\n      reportSharedChannelPassCoveredEverything(workspaceId);\n      return;\n    }",
+      "if (matching.length === 0) {\n      reportSharedChannelPassCoveredEverything(workspaceId);\n      return 0;\n    }",
     );
   });
 
@@ -119,7 +169,7 @@ describe("the shared-channel sync pass is bounded in production", () => {
   // rows than the window, closing Chats stops the poll, so that pass can be the
   // last one for minutes and the message would sit local.
   it("names the written share so its own pass covers it", () => {
-    expect(syncCallSource).toContain("priorityShareId,");
+    expect(syncCallSource).toContain("priorityChannelWireId,");
     // Each write trigger separately: one handler still naming its share is not
     // proof the others do.
     for (const channel of [

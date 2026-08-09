@@ -304,7 +304,7 @@ describe("main-process chat authorization", () => {
   // Both join paths run outside a pass, so this queues rather than deadlocking.
   it("runs each join's first pull under the same per-workspace serializer as the sync pass", () => {
     expect(mainSource).toContain(
-      "return serializeSharedChannelSync(workspaceId, () =>\n    runSharedChannelSyncPass(workspaceId, priorityShareId),",
+      "return serializeSharedChannelSync(workspaceId, () =>\n    runSharedChannelSyncPass(workspaceId, priorityChannelWireId),",
     );
 
     const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");

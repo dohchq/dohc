@@ -1473,12 +1473,14 @@ async function projectPendingChatBookmarksAfterPull(workspaceId: string): Promis
   });
 }
 
+// Resolves to the live rows this pass did not reach, so an awaited caller can
+// say so in its own response.
 function syncWorkspaceSharedChannels(
   workspaceId: string,
-  priorityShareId?: string,
-): Promise<void> {
+  priorityChannelWireId?: string,
+): Promise<number> {
   return serializeSharedChannelSync(workspaceId, () =>
-    runSharedChannelSyncPass(workspaceId, priorityShareId),
+    runSharedChannelSyncPass(workspaceId, priorityChannelWireId),
   );
 }
 
@@ -1489,19 +1491,23 @@ function syncWorkspaceSharedChannels(
 async function syncSharedChannelsForChatTarget(
   workspaceId: string,
   target?: { channelId: string } | { threadId: string },
-): Promise<void> {
+): Promise<number> {
   const entry = findWorkspace(workspaceId);
-  if (!entry || !target) {
-    await syncWorkspaceSharedChannels(workspaceId);
-    return;
-  }
+  if (!entry) return 0;
+  if (!target) return await syncWorkspaceSharedChannels(workspaceId);
   const joinedChannel = await joinedSharedChannelForTarget({
     workspaceId,
     sharedChannels: entry.sharedChannels,
     store: linkedChatStoreFor(entry),
     target,
   }).catch(() => null);
-  await syncWorkspaceSharedChannels(workspaceId, joinedChannel?.shareId);
+  // A target holding no live grant has nothing to sync. A local channel's
+  // threads never came from the relay, and running a pass for it would put a
+  // whole window of relay round trips in front of a purely local read.
+  if (!joinedChannel || joinedChannel.ended === true) return 0;
+  // The CHANNEL, not its grant: this pass may sit in the per-workspace queue,
+  // and a revoke plus re-grant while it waits replaces the share id.
+  return await syncWorkspaceSharedChannels(workspaceId, joinedChannel.channelWireId);
 }
 
 // A pass with no rows to cover left nothing behind. Clearing the remainder this
@@ -1518,8 +1524,8 @@ function reportSharedChannelPassCoveredEverything(workspaceId: string): void {
 
 async function runSharedChannelSyncPass(
   workspaceId: string,
-  priorityShareId?: string,
-): Promise<void> {
+  priorityChannelWireId?: string,
+): Promise<number> {
   try {
     const entry = findWorkspace(workspaceId);
     // The registry, unfiltered: the pass needs a row's PLACE even after the row
@@ -1529,11 +1535,11 @@ async function runSharedChannelSyncPass(
     const channels = registryOrder.filter((channel) => !channel.ended);
     if (!entry || channels.length === 0) {
       reportSharedChannelPassCoveredEverything(workspaceId);
-      return;
+      return 0;
     }
     await warmCredentialCache();
     const syncCredentials = cachedCredentials;
-    if (!syncCredentials?.relayUrl) return;
+    if (!syncCredentials?.relayUrl) return 0;
     const relayUrl = syncCredentials.relayUrl;
     // A joined channel syncs only for the relay account that joined it.
     const matching = channels.filter((channel) =>
@@ -1541,7 +1547,7 @@ async function runSharedChannelSyncPass(
     );
     if (matching.length === 0) {
       reportSharedChannelPassCoveredEverything(workspaceId);
-      return;
+      return 0;
     }
     const relay = {
       baseUrl: normalizeServerUrl(relayUrl),
@@ -1561,7 +1567,7 @@ async function runSharedChannelSyncPass(
       registryOrder,
       passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,
       resumeAfterChannelWireId: sharedChannelSyncCursors.get(workspaceId),
-      priorityShareId,
+      priorityChannelWireId,
       pull: async (input) =>
         await daemonRelay.pullSharedChannel({
           shareId: input.shareId,
@@ -1604,8 +1610,10 @@ async function runSharedChannelSyncPass(
       notifyRenderer();
     }
     if (result.changed) await projectPendingChatBookmarksAfterPull(workspaceId);
+    return result.uncovered;
   } catch (error) {
     console.error(`[desktop] shared channel sync failed for ${workspaceId}:`, error);
+    return 0;
   }
 }
 
@@ -1751,7 +1759,9 @@ function engineForWorkspace(
     },
     // MU-C4: joined shared channels refresh on the same cadence as the
     // workspace's own sync (best-effort; never fails the pass).
-    syncSharedChannels: () => syncWorkspaceSharedChannels(workspace.workspaceId),
+    syncSharedChannels: async () => {
+      await syncWorkspaceSharedChannels(workspace.workspaceId);
+    },
     // A replicated chat message can mark a live bookmark pending without
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
@@ -3946,7 +3956,9 @@ function registerIpcHandlers(
       input.workspaceId,
       "Chat mentions",
     );
-    await syncWorkspaceSharedChannels(engineWorkspace.workspaceId);
+    const rowsUncovered = await syncWorkspaceSharedChannels(
+      engineWorkspace.workspaceId,
+    );
     const store = linkedChatStoreFor(engineWorkspace);
     const threads = await store.listThreads({ workspaceId: engineWorkspace.workspaceId });
     const graphChannelRows = await store.listChannels({
@@ -4033,6 +4045,7 @@ function registerIpcHandlers(
         .map((node) => [node.id, node.path] as const),
     );
     return WorkspaceGraphResult.parse({
+      ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
       ...overlaid,
       nodes: overlaid.nodes.map((node) =>
         node.kind === "file"
@@ -6097,7 +6110,7 @@ function registerIpcHandlers(
       input.workspaceId,
       "Chats",
     );
-    await syncWorkspaceSharedChannels(workspace.workspaceId);
+    const rowsUncovered = await syncWorkspaceSharedChannels(workspace.workspaceId);
     const objectId = await capture.fileObjectIdForPath(input.path);
     const store = linkedChatStoreFor(workspace);
     const mentions = await store.listFileMentions({
@@ -6118,6 +6131,7 @@ function registerIpcHandlers(
       ),
     );
     return ListChatFileMentionsResult.parse({
+      ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
       mentions: mentions.flatMap((mention) => {
         const currentPath = resolveChatFileMentionPath({
           requestedObjectId: objectId,
@@ -6518,7 +6532,7 @@ function registerIpcHandlers(
     // MU-C4: refresh joined shared channels BEFORE reading, so opening Chats
     // shows other members' latest messages. Never throws; offline it returns
     // fast and the local rows answer.
-    await syncWorkspaceSharedChannels(workspace.workspaceId);
+    const rowsUncovered = await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
     // First chat use auto-creates General.
     await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
@@ -6553,6 +6567,7 @@ function registerIpcHandlers(
       }
     }
     return ListChatChannelsResult.parse({
+      ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
       channels: channels.map((channel) => ({
         ...chatChannelForIpc(channel),
         wireId: wireIds.get(channel.id) ?? null,
@@ -6665,7 +6680,7 @@ function registerIpcHandlers(
       "Chats",
     );
     await warmCredentialCache();
-    await syncWorkspaceSharedChannels(workspace.workspaceId);
+    const rowsUncovered = await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
     const ownerUserId = localUserId();
     await store.ensureDefaultChannelFollows({
@@ -6691,6 +6706,7 @@ function registerIpcHandlers(
       ),
     );
     return ListPersonalChatFeedResult.parse({
+      ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
       items: page.items.map((item) => ({
         message: chatMessageForIpc(item.message),
         thread: chatThreadForIpc(item.thread),

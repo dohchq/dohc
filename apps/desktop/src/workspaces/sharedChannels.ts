@@ -284,9 +284,10 @@ export async function syncJoinedSharedChannels(input: {
   registryOrder: readonly JoinedSharedChannel[];
   passRows: number;
   resumeAfterChannelWireId?: string;
-  // The share whose write triggered this pass. Always covered, and covered in
-  // ADDITION to the rotation's rows.
-  priorityShareId?: string;
+  // The CHANNEL whose write triggered this pass. Always covered, and covered in
+  // ADDITION to the rotation's rows. A channel, not a grant: the pass may wait
+  // in a queue, and a revoke plus re-grant replaces the share id while it does.
+  priorityChannelWireId?: string;
   // Required factory-selected operations prevent a rooted sync pass from
   // silently falling back to the legacy TypeScript relay client.
   pull: (input: {
@@ -340,13 +341,15 @@ export async function syncJoinedSharedChannels(input: {
   // would starve the tail of the registry forever. So a pass costs at most
   // passRows + 1 rows, and ceil(live / passRows) holds whatever the writes do.
   const rotationBudget = Math.min(Math.max(input.passRows, 0), live.length);
-  const priority = input.priorityShareId
-    ? (live.find((channel) => channel.shareId === input.priorityShareId) ?? null)
+  const priority = input.priorityChannelWireId
+    ? (live.find(
+        (channel) => channel.channelWireId === input.priorityChannelWireId,
+      ) ?? null)
     : null;
   const rotation: JoinedSharedChannel[] = [];
   for (let offset = 0; rotation.length < rotationBudget && offset < live.length; offset += 1) {
     const channel = live[(startIndex + offset) % live.length]!;
-    if (channel.shareId === priority?.shareId) continue;
+    if (channel.channelWireId === priority?.channelWireId) continue;
     rotation.push(channel);
   }
   const covered = priority ? [priority, ...rotation] : rotation;
