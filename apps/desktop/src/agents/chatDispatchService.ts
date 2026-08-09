@@ -135,7 +135,9 @@ export interface ChatDispatchServiceOptions {
     threadId: string,
     verifiedUserId: string | undefined,
   ): Promise<boolean>;
-  onMessagePosted(workspaceId: string): void;
+  // The thread names the chat target, so a shared-channel push can cover the
+  // channel this message landed in instead of waiting for the sync rotation.
+  onMessagePosted(workspaceId: string, threadId: string): void;
   onRunUpdated?(workspaceId: string): void;
   setRunAttribution(
     workspaceId: string,
@@ -659,7 +661,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         // The report itself is authoritative; a provenance chip is optional.
       }
     }
-    options.onMessagePosted(workspace.workspaceId);
+    options.onMessagePosted(workspace.workspaceId, threadId);
     return message.id;
   }
 
@@ -1673,7 +1675,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           body: SELF_TEST_SCRATCH_BODY,
         });
         scratchThreadId = scratch.thread.id;
-        options.onMessagePosted(workspaceId);
+        options.onMessagePosted(workspaceId, scratchThreadId);
       }
       const runId = `run_self_test_${createId()}`;
       const marker = `dohc-runner-self-test:${runId}`;

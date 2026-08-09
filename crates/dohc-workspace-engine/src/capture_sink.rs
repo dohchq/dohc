@@ -21,7 +21,6 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-const CAPTURE_METADATA_ORIGIN: &str = "capture";
 /// The encrypted store validates origins against the TS `WRITE_ORIGINS` set,
 /// which has no "capture" entry; the TS capture path writes secrets with
 /// origin "local-file" — mirrored here.
@@ -450,7 +449,7 @@ impl StoreCaptureSink {
                 version_id: self.version_id.clone(),
                 path: path.to_owned(),
                 text,
-                metadata_origin: CAPTURE_METADATA_ORIGIN.to_owned(),
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
                 metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
                 author_json: self.author_json.clone(),
@@ -491,7 +490,7 @@ impl StoreCaptureSink {
                 version_id: self.version_id.clone(),
                 path: path.to_owned(),
                 bytes,
-                metadata_origin: CAPTURE_METADATA_ORIGIN.to_owned(),
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
                 metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
                 author_json: self.author_json.clone(),
@@ -1493,7 +1492,10 @@ mod tests {
         supervisor.close(&db).expect("close actor");
         let captured = snapshot(&db, "notes/a.md").expect("captured snapshot");
         assert_eq!(captured.text, "latest");
-        assert_eq!(captured.metadata_origin, CAPTURE_METADATA_ORIGIN);
+        assert_eq!(
+            captured.metadata_origin,
+            dohc_engine_domain::store::CAPTURE_ORIGIN
+        );
         assert_eq!(moment_count(&db, "notes/a.md"), 2);
     }
 

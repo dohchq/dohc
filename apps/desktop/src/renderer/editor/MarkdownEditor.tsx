@@ -11,6 +11,7 @@ import {
   type SetStateAction,
 } from "react";
 import { Extension, type Editor } from "@tiptap/core";
+import { serializeRichdocBody } from "@dohc/ydoc-projection";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -808,7 +809,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     useEffect(() => {
       if (!editor || collabActive || !pendingUndo) return;
       if (appliedPendingUndoToken.current === pendingUndo.token) return;
-      const current = editor.getMarkdown();
+      const current = serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON()));
       if (current !== pendingUndo.restoredText) {
         onPendingUndoConsumed?.(pendingUndo.token);
         return;
@@ -878,14 +879,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           editor?.commands.focus(position);
         },
         getMarkdown() {
-          // `editor.markdown` is @tiptap/markdown's documented public accessor
-          // for the MarkdownManager (it's the same instance as the internal
-          // `editor.storage.markdown.manager`, just the stable surface).
-          if (!editor?.markdown) return value;
+          if (!editor) return value;
           // Escape literal `==` inside highlight marks before serializing so a
           // WYSIWYG highlight over text containing `==` saves as an unambiguous,
           // losslessly reversible `==a\=\=b==` (matches import-export.ts).
-          return editor.markdown.serialize(escapeHighlightMarkdown(editor.getJSON()));
+          return serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON()));
         },
       }),
       [editor, value],

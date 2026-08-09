@@ -1,4 +1,4 @@
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 
 const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/;
 const FRONTMATTER_PRIORITY_KEYS = ["id", "title", "icon"] as const;
@@ -28,13 +28,10 @@ export function parseFrontmatter(src: string): {
 
   const [, raw, rest] = match;
   let meta: Record<string, unknown> = {};
+  if (isEmptyFrontmatter(raw ?? "")) return { meta, body: rest ?? "" };
   try {
     const parsed = yaml.load(raw ?? "");
-    if (parsed == null) {
-      return isEmptyFrontmatter(raw ?? "")
-        ? { meta, body: rest ?? "" }
-        : { meta: {}, body: src };
-    }
+    if (parsed == null) return { meta: {}, body: src };
     if (!isFrontmatterMap(parsed)) return { meta: {}, body: src };
     meta = parsed;
   } catch {
