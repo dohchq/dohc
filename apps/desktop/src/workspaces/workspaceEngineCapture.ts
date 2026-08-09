@@ -1460,6 +1460,16 @@ export function createWorkspaceEngineCapture(
     // refused release puts the debt back — release-only — rather than
     // letting go of it. Rejects when the lease is still held.
     discard: () => Promise<void>;
+    // Set once by a terminal stand-down, to the message that explains it.
+    // null while the write is still pending. A stood-down debt used to
+    // DELETE this entry, and `beginFileRename` read that absence as proof
+    // the write landed — recording the stale pre-lock artifact as if it had
+    // (#681). Keeping the entry with this marker set is what lets the
+    // rename seam tell "abandoned" from "landed" instead of reading both as
+    // silence. It is not immortal: the next successful open of this path
+    // clears it (see `openYDocSessionTask`), and the delete/move seam never
+    // restores a cancelled debt at all.
+    terminal: string | null;
   }
   const detachedLockedDebts = new Map<string, DetachedLockedDebt>();
 
@@ -3368,6 +3378,18 @@ export function createWorkspaceEngineCapture(
           onSettleStart,
           onSettleError,
         });
+        // This open just succeeded, which proves the daemon holds no
+        // conflicting lease on this path — an unreleased lease from an
+        // earlier stand-down answers every open ydoc-session-busy until it
+        // clears. So any terminal marker left here is stale: this session
+        // now owns the path's write, and a rename mid-session already
+        // vacates it (settleAndCloseLiveYDocSessions, below) before reading
+        // disk. Clear it (#681) — its only other exit is the path's removal,
+        // which the delete/move seam already never restores.
+        const staleStandDown = detachedLockedDebts.get(input.path);
+        if (staleStandDown?.terminal) {
+          detachedLockedDebts.delete(input.path);
+        }
         // Register the live session only after the open succeeds (a secret/
         // already-live/path-not-in-version rejection propagates to the caller
         // and never guards a path that has no session). The close below drops the entry
@@ -3472,13 +3494,18 @@ export function createWorkspaceEngineCapture(
         // Give up on W and say why — the user is the last one who can act on
         // this. L is untouched: the debt survives whenever a lease is still
         // held, so the ladder keeps retrying the release alone.
+        //
+        // The entry stays in the registry, marked terminal, rather than
+        // being deleted: absence used to read as "landed" everywhere,
+        // including at the rename seam, which cannot tell it from a real
+        // payment (#681). Marking it is what lets that seam refuse instead
+        // of recording stale content as a save.
         const standDownFromWrite = (message: string): void => {
           writeCancelled = true;
           onError(`ydoc close retry of ${input.path}`, new Error(message));
-          if (pendingRelease === null) {
-            detachedLockedDebts.delete(input.path);
-            return;
-          }
+          const entry = detachedLockedDebts.get(input.path);
+          if (entry) entry.terminal = message;
+          if (pendingRelease === null) return;
           armDetachedLockedRetry();
         };
 
@@ -3575,7 +3602,9 @@ export function createWorkspaceEngineCapture(
               // debt names is gone, or its write is refused for good, and
               // reopening it would recreate what the user removed.
               await releaseRetainedSession();
-              detachedLockedDebts.delete(input.path);
+              // W's terminal marker survives this — nothing here proves the
+              // write, only that the lease is free. It clears at the next
+              // open of this path, or never, if the path is removed first.
               return;
             }
             const live = liveYDocSessions.get(input.path);
@@ -3790,6 +3819,7 @@ export function createWorkspaceEngineCapture(
             pay: payDetachedLockedDebt,
             arm: armDetachedLockedRetry,
             discard: discardDetachedLockedDebt,
+            terminal: null,
           });
           armDetachedLockedRetry();
         };
@@ -5468,13 +5498,13 @@ export function createWorkspaceEngineCapture(
         // is the proof: still named after the payment means it did not land,
         // so the rename REFUSES and the debt survives for the retry ladder.
         //
-        // Read it in that direction ONLY. A stand-down clears the entry too,
-        // and the rename then does record the stale artifact — deliberately:
-        // no pending write is left to wait for, the newer text stays in the
-        // object's history (writeIfChanged adds a moment and the engine rename
-        // keeps the object id), and the stand-down already told the user.
-        // Refusing there would strand the rename on a condition that no longer
-        // changes.
+        // Read it in that direction ONLY. Absence still means paid — a
+        // stand-down no longer clears the entry (#681): it stays, marked
+        // terminal, so this loop can tell "abandoned" from "landed" instead
+        // of reading both as silence. A terminal debt refuses the rename
+        // too, on its own copy — recording the stale pre-lock artifact under
+        // a new name would be the same silent stale moment the payment
+        // branch above exists to prevent, just reached a different way.
         // DESCENDANTS too: this method also serves directory
         // moves, so a debt for `dir/note.md` rides a move of `dir`. Left
         // behind, its delayed payment reopens the moved-from path and
@@ -5490,21 +5520,28 @@ export function createWorkspaceEngineCapture(
           const debt = detachedLockedDebts.get(endpoint);
           if (!debt) continue;
           await debt.pay();
-          if (detachedLockedDebts.has(endpoint)) {
-            // WHY the payment did not land decides what the user is told. A
-            // removal window over the endpoint holds every payment for it, so
-            // the lock may be long gone and "close that program" would send
-            // the user after nothing.
-            const removal = removalWindowFor(endpoint);
+          const after = detachedLockedDebts.get(endpoint);
+          if (!after) continue;
+          if (after.terminal) {
+            // Explorer renders this verbatim (docs/brand/copy.md): what
+            // happened, why, then one instruction per sentence.
             throw new Error(
-              // Explorer renders this verbatim, so it follows
-              // docs/brand/copy.md: what happened, why, then ONE instruction
-              // per sentence.
-              removal
-                ? `dohc could not rename ${fromPath}. ${removal.inProgress} Wait for that to finish. Then rename again.`
-                : `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
+              `dohc could not rename ${fromPath}. dohc gave up on writing ${endpoint} earlier, so its last edit never reached disk. Open ${endpoint} to write it again. Then rename ${fromPath} again.`,
             );
           }
+          // WHY the payment did not land decides what the user is told. A
+          // removal window over the endpoint holds every payment for it, so
+          // the lock may be long gone and "close that program" would send
+          // the user after nothing.
+          const removal = removalWindowFor(endpoint);
+          throw new Error(
+            // Explorer renders this verbatim, so it follows
+            // docs/brand/copy.md: what happened, why, then ONE instruction
+            // per sentence.
+            removal
+              ? `dohc could not rename ${fromPath}. ${removal.inProgress} Wait for that to finish. Then rename again.`
+              : `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
+          );
         }
         // WS-G2-C-2 (gate fix 3): a live Y.Doc session over either endpoint must
         // be flushed + released before the file moves, or a later settle would

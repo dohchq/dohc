@@ -2948,6 +2948,68 @@ it("the version fence drops a detached locked retry after a switch", async () =>
   await capture.stop();
 }, 20_000);
 
+it("a rename after a version-switch stand-down refuses instead of saving stale content", async () => {
+  // #681, active-version-branch door: `standDownFromWrite` used to delete
+  // the debt entry the same way the other two doors did, so `beginFileRename`
+  // read the fence's stand-down as a landed write and would have recorded
+  // the STALE pre-lock disk artifact under the new name.
+  const { capture, state, loopback, workspaceId, rootPath } =
+    await lockedRebindCapture("dohc-ydoc-fence-rename-");
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "old version edit");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  const ensured = await loopback.sendRequest({
+    id: 9_101,
+    method: "versions.ensureMain",
+    workspace: workspaceId,
+    params: { workspaceId },
+  });
+  const main = ensured.result as { id?: string };
+  const created = await loopback.sendRequest({
+    id: 9_102,
+    method: "versions.createNamed",
+    workspace: workspaceId,
+    params: {
+      workspaceId,
+      name: "fence-rename-target",
+      fromVersionId: main.id ?? "main",
+    },
+    idempotencyKey: "fence-rename-create-1",
+  } as Parameters<typeof loopback.sendRequest>[0]);
+  const createdVersion = created.result as { id?: string };
+  await loopback.sendRequest({
+    id: 9_103,
+    method: "versions.setActive",
+    workspace: workspaceId,
+    params: { workspaceId, versionId: createdVersion.id! },
+  });
+  state.locked = false;
+
+  await expect
+    .poll(
+      () => state.errors.filter((context) => context.includes("close retry")),
+      { timeout: 15_000 },
+    )
+    .toHaveLength(1);
+
+  // RED against current main: absence read as landed, so this resolved and
+  // recorded renamed.md from the stale pre-lock text instead of refusing.
+  await expect(
+    capture.beginFileRename("note.md", "renamed.md"),
+  ).rejects.toThrow(
+    "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edit never reached disk. Open note.md to write it again. Then rename note.md again.",
+  );
+  await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 25_000);
+
 it("a reopen before the timer fires receives the locked debt, not silence", async () => {
   // #595 round 5 P2: opening a document settles nothing by itself, so a
   // stand-down that merely SEES the live session would strand the pending
@@ -4152,6 +4214,50 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
   await capture.stop();
 }, 40_000);
 
+it("a rename after a terminal settle refusal refuses instead of saving stale content", async () => {
+  // #681, terminal-settle door (conflict-stale-target branch):
+  // `standDownFromWrite` used to delete the debt entry here too, so a rename
+  // right after this stand-down would have read the STALE pre-lock disk
+  // artifact as proof the write landed and recorded it under the new name.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-terminal-rename-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "conflicting edit");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.settleFailure = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+    new Error("daemon response"),
+  );
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.filter((message) =>
+          message.includes("changed outside dohc"),
+        ),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // RED against current main: absence read as landed, so this resolved and
+  // recorded renamed.md from the stale pre-lock text instead of refusing.
+  await expect(
+    capture.beginFileRename("note.md", "renamed.md"),
+  ).rejects.toThrow(
+    "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edit never reached disk. Open note.md to write it again. Then rename note.md again.",
+  );
+  await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
+  expect(state.settledMarkdowns).toEqual([]);
+  await capture.stop();
+}, 25_000);
+
 it("a settle that committed but wrote nothing stops the ladder and names the symlink", async () => {
   // #651. A settle RESOLVING is the adjacent operation, not the write: the
   // engine commits the lineage and answers materialized: false for a target it
@@ -4213,6 +4319,93 @@ it("a settle that committed but wrote nothing stops the ladder and names the sym
   expect(state.generation).toBe(generationAtStandDown);
   await capture.stop();
 }, 40_000);
+
+it("a rename after a symlink stand-down refuses instead of saving stale content", async () => {
+  // #681, blocked-target door: `standDownFromBlockedTarget` reaches the same
+  // `standDownFromWrite` as the other two doors, which used to delete the
+  // debt entry. `beginFileRename` read that absence as proof the write
+  // landed, read the moved-from disk (the STALE pre-lock text a symlinked
+  // target never received), and would have recorded it as a new moment
+  // before renaming — the exact silent stale moment #681 names.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-symlink-rename-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // RED against current main: absence read as landed, so this resolved and
+  // recorded renamed.md from the stale pre-lock text instead of refusing.
+  await expect(
+    capture.beginFileRename("note.md", "renamed.md"),
+  ).rejects.toThrow(
+    "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edit never reached disk. Open note.md to write it again. Then rename note.md again.",
+  );
+  await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
+  expect(state.settledMarkdowns).toHaveLength(0);
+  await capture.stop();
+}, 25_000);
+
+it("reopening a stood-down path clears the marker and re-enables the rename", async () => {
+  // #681's lifecycle end: the marker is not immortal. Every stand-down
+  // message tells the user to open the path again, and the next open
+  // proves the daemon holds no conflicting lease for it (an unreleased one
+  // answers ydoc-session-busy) — so it clears the marker instead of
+  // refusing renames over this path forever.
+  const { capture, state, rootPath } = await lockedRebindCapture(
+    "dohc-ydoc-standdown-clear-",
+  );
+  await writeFile(join(rootPath, "note.md"), "stale pre-lock artifact\n", "utf8");
+  const { session } = await openWithOneEdit(capture, "never written");
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  state.locked = false;
+  state.unmaterialized = true;
+  await expect
+    .poll(
+      () => state.errorMessages.filter((message) => message.includes("symlink")),
+      { timeout: 15_000 },
+    )
+    .not.toHaveLength(0);
+
+  // The refusal is live before recovery.
+  await expect(
+    capture.beginFileRename("note.md", "renamed.md"),
+  ).rejects.toThrow(/dohc gave up on writing note\.md earlier/);
+
+  // The user replaces the symlink and reopens the path, exactly as the
+  // stand-down message instructed.
+  state.unmaterialized = false;
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await reopened.close({ settle: false });
+
+  // The marker is gone: the rename now proceeds like any ordinary one.
+  const finish = await capture.beginFileRename("note.md", "renamed.md");
+  await finish(true);
+  await capture.stop();
+}, 25_000);
 
 it("a settle refused because peers outran it keeps the write ladder alive", async () => {
   // #650. `ydoc-remote-updates-pending` reports a RACE — remote edits drained
