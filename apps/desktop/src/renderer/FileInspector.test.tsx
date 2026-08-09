@@ -1157,10 +1157,17 @@ describe("engine markdown source view", () => {
       const update = Y.encodeStateAsUpdate(serverDoc, before);
       for (const listener of remoteListeners) listener({ sessionId, update });
     };
-    const pushSaveState = (state: "settling" | "saved" | "error" | "deleted", seq: number) => {
+    const pushSaveState = (
+      state: "settling" | "saved" | "error" | "deleted",
+      seq: number,
+    ) => {
       for (const listener of saveStateListeners) listener({ sessionId, state, seq });
     };
-    return { bridgeMock, pushRemoteMarkdown, pushSaveState };
+    return {
+      bridgeMock,
+      pushRemoteMarkdown,
+      pushSaveState,
+    };
   }
 
   beforeEach(() => {
@@ -1307,6 +1314,33 @@ describe("engine markdown source view", () => {
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toContain("title: Plan Retitled"),
     );
+  });
+
+  it("updates the same set-aside draft for a keystroke before read-only commits", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    const title = screen.getByTestId("page-title");
+    await user.type(title, " Retitled");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+
+    // One React batch: the deletion event captures first, then the still-live
+    // title editor accepts one final keystroke before read-only commits.
+    act(() => {
+      pushSaveState("deleted", 1);
+      fireEvent.change(title, { target: { value: "Plan Retitled!" } });
+    });
+
+    await user.click(await screen.findByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toContain(
+        "title: Plan Retitled!",
+      ),
+    );
+    expect(screen.getAllByTestId("orphaned-draft-notice")).toHaveLength(1);
   });
 
   it.each([

@@ -4,6 +4,10 @@ import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
+import {
+  resetOrphanedDrafts,
+  useOrphanedDrafts,
+} from "../orphanedDrafts";
 import { useEngineDoc } from "./useEngineDoc";
 
 // AUDIT-SILENTSAVE. The engine editor's save indicator used to be a 1s timer
@@ -22,15 +26,22 @@ function harnessBridge() {
   const applied: Array<{ sessionId: string; seq: number }> = [];
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
+  doc.getMap("meta").set("contentKind", "plain-text");
   doc.getText("plainText").insert(0, "seed");
   let removalInProgress: {
     operation: "delete" | "move";
     message: string;
   } | null = null;
+  let emitDeletedDuringOpen = false;
 
   const api = {
     async openEngineYDocSession(payload: { sessionId: string }) {
       openedSessionId = payload.sessionId;
+      if (emitDeletedDuringOpen) {
+        for (const listener of [...saveStateListeners]) {
+          listener({ sessionId: payload.sessionId, state: "deleted", seq: 0 });
+        }
+      }
       if (removalInProgress) {
         return { available: false, removalInProgress };
       }
@@ -62,30 +73,46 @@ function harnessBridge() {
     });
   }
 
+  function emitNow(
+    state: "settling" | "saved" | "error" | "file-locked" | "deleted",
+    seq: number,
+  ): void {
+    if (openedSessionId === null) throw new Error("session not open yet");
+    for (const listener of [...saveStateListeners]) {
+      listener({ sessionId: openedSessionId, state, seq });
+    }
+  }
+
   return {
     api,
     emit,
+    emitNow,
     applied,
     sessionId: () => openedSessionId,
     setRemovalInProgress(value: typeof removalInProgress) {
       removalInProgress = value;
     },
+    setEmitDeletedDuringOpen(value: boolean) {
+      emitDeletedDuringOpen = value;
+    },
   };
 }
 
-function Harness(props: { workspaceId: string; path: string }) {
+function Harness(props: { workspaceId: string; path: string; enabled?: boolean }) {
   const [retryKey, setRetryKey] = useState(0);
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
-    enabled: true,
+    enabled: props.enabled ?? true,
     retryKey,
   });
+  const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   return (
     <div>
       <span data-testid="state">{engine.saveState}</span>
       <span data-testid="available">{String(engine.available)}</span>
       <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
+      <span data-testid="draft">{drafts.at(-1)?.text ?? "none"}</span>
       <span data-testid="removal-operation">
         {engine.removalInProgress?.operation ?? "none"}
       </span>
@@ -115,11 +142,13 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   harness = harnessBridge();
   vi.stubGlobal("dohcDesktop", harness.api);
+  resetOrphanedDrafts();
 });
 
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  resetOrphanedDrafts();
 });
 
 async function mountBound() {
@@ -185,6 +214,64 @@ it("refuses transport writes synchronously after main reports deletion", async (
 
   harness.emit("error", harness.applied.at(-1)!.seq);
   expect(screen.getByTestId("state").textContent).toBe("deleted");
+});
+
+it("replaces the same deletion's draft when a keystroke lands before read-only commits", async () => {
+  await mountBound();
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  const appliedAtDelete = harness.applied.length;
+
+  // One React batch: main reports deletion, then Tiptap emits one last local
+  // update before the read-only render can commit.
+  act(() => {
+    harness.emitNow("deleted", harness.applied.at(-1)!.seq);
+    screen.getByTestId("type").click();
+  });
+
+  await waitFor(() =>
+    expect(screen.getByTestId("draft").textContent).toBe("seed!!"),
+  );
+  expect(harness.applied).toHaveLength(appliedAtDelete);
+});
+
+it("does not carry a deleted verdict into a fresh bind of the same path", async () => {
+  const view = render(
+    <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
+  );
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+  expect(screen.getByTestId("deleted").textContent).toBe("true");
+
+  view.rerender(
+    <Harness workspaceId="ws-1" path="notes/big.md" enabled={false} />,
+  );
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("false"));
+  view.rerender(
+    <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
+  );
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+
+  expect(screen.getByTestId("deleted").textContent).toBe("false");
+  const appliedBeforeFreshEdit = harness.applied.length;
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  expect(harness.applied).toHaveLength(appliedBeforeFreshEdit + 1);
+});
+
+it("observes deletion while the open answer is still in flight", async () => {
+  harness.setEmitDeletedDuringOpen(true);
+  render(<Harness workspaceId="ws-1" path="notes/big.md" />);
+
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+  expect(screen.getByTestId("state").textContent).toBe("deleted");
+  expect(screen.getByTestId("deleted").textContent).toBe("true");
 });
 
 it("keeps a failed delete interval retryable without storing a deleted verdict", async () => {

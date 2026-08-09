@@ -229,6 +229,17 @@ export function storeDraft(draft: StoredOrphanedDraft): boolean {
   return writeRows([...readRows().rows, draft]);
 }
 
+export function replaceStoredDraft(draft: StoredOrphanedDraft): boolean {
+  if (!isPersistableDraftPath(draft.path)) return false;
+  const rows = readRows().rows;
+  const found = rows.some((row) => row.id === draft.id);
+  return writeRows(
+    found
+      ? rows.map((row) => (row.id === draft.id ? draft : row))
+      : [...rows, draft],
+  );
+}
+
 export function forgetStoredDraft(id: number): void {
   const rows = readRows().rows;
   const kept = rows.filter((row) => row.id !== id);

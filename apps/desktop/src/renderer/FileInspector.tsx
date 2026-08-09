@@ -323,10 +323,8 @@ const LazySourceCodeEditor = lazy(() =>
   })),
 );
 
-// yDocToMarkdown lives in editor/import-export, which statically pulls the
-// Tiptap schema/KaTeX stack the lazy MarkdownEditor split keeps out of this
-// eager chunk — load it on demand (first source-view toggle), documentExport
-// precedent. Cached: every later toggle reuses the loaded module.
+// The source view needs editor/import-export only on demand. Cache the module
+// after the first toggle so later toggles reuse it.
 let importExportPromise: Promise<typeof import("./editor/import-export")> | null = null;
 function loadImportExport(): Promise<typeof import("./editor/import-export")> {
   importExportPromise ??= import("./editor/import-export");
@@ -629,6 +627,7 @@ const MARKDOWN_COMPONENTS = {
 };
 
 type SaveState = "saved" | "saving" | "error";
+export type FileSaveState = SaveState | "deleted";
 
 // The plain-text autosave, used by every NON-markdown editable view (CSV,
 // JSON, text). It carries the same three write seams as MarkdownView — an
@@ -864,7 +863,7 @@ function MarkdownView(props: {
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
   chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
-  onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
+  onSaveStateChange?: (state: FileSaveState) => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
   pendingUndo?: PendingTextUndo;
@@ -1116,18 +1115,14 @@ function MarkdownView(props: {
   // PropertiesPanel, which write straight into the engine Y.Doc's frontmatter
   // MAP — NOT into latestDraft.current, which stays at this mount's initial
   // markdown. Reading latestDraft.current for the frontmatter therefore exports
-  // a stale title. Serialize the LIVE map instead. Reading it directly (rather
-  // than yDocToMarkdown) keeps import-export's heavy schema/KaTeX stack out of
-  // this eager chunk — the mounted WYSIWYG editor already owns the body.
+  // a stale title. Serialize the LIVE map instead and combine it with the body
+  // the mounted WYSIWYG editor already owns.
   const serializeEngineDraft = (): string | null => {
-    // The mounted editor is the ONLY serializer of the canonical Y.Doc, so
-    // without it there is no honest body to emit for an engine-backed
-    // document: `props.body` is the markdown CACHE beside that doc. It lags
-    // every edit the Y.Doc has taken since the read, and on the recovery path
-    // (a failed read whose retry bound the document, #564) it is empty. Both
-    // export a file that is not the user's document while reporting success,
-    // and emptiness was never the thing that made it wrong — the Y.Doc being
-    // canonical is. Refuse; the menu says the document is not ready.
+    // This export path needs the mounted editor's live body. `props.body` is
+    // the markdown cache beside the canonical Y.Doc, so it lags every edit the
+    // document has taken since the read. On the recovery path (a failed read
+    // whose retry bound the document, #564), it is empty. Refuse instead of
+    // exporting stale text; the menu says the document is not ready.
     const editorBody = wysiwygRef.current?.getMarkdown();
     if (editorBody === undefined && engine.doc !== null) return null;
     const body = editorBody ?? markdownEditorBody(props.body);
@@ -1139,26 +1134,9 @@ function MarkdownView(props: {
     return applyFrontmatter(body, orderFrontmatter(liveMeta));
   };
 
-  // Main reports deletion only after disk removal succeeds. Preserve a racing
-  // edit once, before the read-only render can discard any part of it. A save
-  // report that landed first means the deletion has no set-aside edit.
-  const saveStateBeforeRender = useRef(engine.saveState);
-  const deletionWasActive = useRef(false);
-  const deletedDraftCaptured = useRef(false);
-  if (!engine.deletedWhileEditing) {
-    deletionWasActive.current = false;
-    deletedDraftCaptured.current = false;
-  } else if (!deletionWasActive.current) {
-    deletionWasActive.current = true;
-    if (engine.available && saveStateBeforeRender.current !== "saved") {
-      const draft = serializeEngineDraft();
-      if (draft !== null) {
-        captureOrphanedDraft(props.workspaceId, props.path, draft);
-        deletedDraftCaptured.current = true;
-      }
-    }
-  }
-  saveStateBeforeRender.current = engine.saveState;
+  const hasSetAsideEdit =
+    engine.deletedDraftId !== null &&
+    orphanedDrafts.some((draft) => draft.id === engine.deletedDraftId);
 
   useEffect(() => {
     if (surfaceMode === "read") void loadMarkdownEditor();
@@ -1563,11 +1541,12 @@ function MarkdownView(props: {
       onSaveStateChange?.(saveState);
       return;
     }
-    // The shell's dot has three states; a read-only, file-locked, or
-    // changed-on-disk refusal is an unsaved document as far as the tab is
-    // concerned.
+    // Deletion is terminal: recovery owns any text worth keeping, and the
+    // shell must not promise a flush to a path that no longer exists.
     onSaveStateChange?.(
-      engine.saveState === "saved" || engine.saveState === "saving"
+      engine.saveState === "saved" ||
+        engine.saveState === "saving" ||
+        engine.saveState === "deleted"
         ? engine.saveState
         : "error",
     );
@@ -1849,9 +1828,7 @@ function MarkdownView(props: {
   const documentNotices = (
     <>
       {engine.deletedWhileEditing ? (
-        <DeletedWhileEditingNotice
-          hasSetAsideEdit={deletedDraftCaptured.current}
-        />
+        <DeletedWhileEditingNotice hasSetAsideEdit={hasSetAsideEdit} />
       ) : null}
       <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
     </>
@@ -1893,7 +1870,7 @@ function MarkdownView(props: {
                 data-testid="markdown-save-state"
                 data-state={engineChipState}
                 title={
-                  engineChipState === "deleted" && deletedDraftCaptured.current
+                  engineChipState === "deleted" && hasSetAsideEdit
                     ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
                     : ENGINE_CHIP[engineChipState].title
                 }
@@ -2975,7 +2952,7 @@ export function FileInspector(props: {
   onScrollConsumed?: () => void;
   // Editor save-state seam for the tab strip's dirty indicator. Editable
   // source/table/document views all report through the same small contract.
-  onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
+  onSaveStateChange?: (state: FileSaveState) => void;
   // Registers the active editor's draft flush with the shell: explorer ops
   // await it before re-pathing files.
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;

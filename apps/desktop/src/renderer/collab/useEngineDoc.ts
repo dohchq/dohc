@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type * as Y from "yjs";
+import { yDocToMarkdown } from "@dohc/ydoc-projection";
+import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { bridge } from "../bridge";
+import {
+  captureOrphanedDraft,
+  replaceOrphanedDraft,
+} from "../orphanedDrafts";
 import {
   bindEngineYDoc,
   type EngineYDocBinding,
@@ -88,6 +94,8 @@ export type UseEngineDoc = {
   // Main confirmed that it removed this file while the live session was
   // bound. The current document is retained for recovery only.
   deletedWhileEditing: boolean;
+  // The recovery row created for this deletion, if it still exists.
+  deletedDraftId: number | null;
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
@@ -114,7 +122,7 @@ function engineDocRequestKey(input: {
 
 // The settled result of one open, stamped with the request it answers.
 type EngineDocOpenOutcome =
-  | { key: string; kind: "bound"; doc: Y.Doc }
+  | { key: string; token: number; kind: "bound"; doc: Y.Doc }
   | { key: string; kind: "unavailable" }
   // Their OWN kinds, not flags on "unavailable": every other unavailable
   // answer means "fall back to the plain editor", and these two mean the
@@ -207,7 +215,11 @@ export function useEngineDoc(input: {
   const requestKey = engineDocRequestKey(input);
   const [outcome, setOutcome] = useState<EngineDocOpenOutcome | null>(null);
   const [saveState, setSaveState] = useState<EngineDocSaveState>("saved");
-  const [deletedRequestKey, setDeletedRequestKey] = useState<string | null>(null);
+  const [deletion, setDeletion] = useState<{
+    token: number;
+    draftId: number | null;
+  } | null>(null);
+  const saveStateRef = useRef<EngineDocSaveState>("saved");
   // Monotonic per-open token: only the newest open may set state (the async-
   // state invariant — a stale workspace/path response never repaints).
   const openTokenRef = useRef(0);
@@ -232,7 +244,8 @@ export function useEngineDoc(input: {
   const removalInProgress =
     settled?.kind === "removal-in-progress" ? settled.removal : null;
   const deletedWhileEditing =
-    settled?.kind === "bound" && deletedRequestKey === requestKey;
+    settled?.kind === "bound" && deletion?.token === settled.token;
+  const deletedDraftId = deletedWhileEditing ? deletion.draftId : null;
   const writesRefused = useRef(false);
   const writesRefusedKey = useRef(requestKey);
   if (writesRefusedKey.current !== requestKey) {
@@ -244,6 +257,7 @@ export function useEngineDoc(input: {
   }
 
   useEffect(() => {
+    saveStateRef.current = "saved";
     setSaveState("saved");
     if (!input.enabled) return;
     const { workspaceId, path } = input;
@@ -252,10 +266,13 @@ export function useEngineDoc(input: {
     // it holds is still the one it asked for.
     const key = requestKey;
     const token = ++openTokenRef.current;
+    setDeletion(null);
     let cancelled = false;
     let binding: EngineYDocBinding | null = null;
     let detachSaveObserver: (() => void) | null = null;
     let unsubscribeSaveState: (() => void) | null = null;
+    let deletionSnapshot: { id: number | null; text: string } | null = null;
+    let deletionPending = false;
 
     const sessionId = nextSessionId();
     const localSeq = { current: 0 };
@@ -267,7 +284,90 @@ export function useEngineDoc(input: {
       writesRefused,
     );
 
-    void bindEngineYDoc(transport)
+    const reportSaveState = (state: EngineDocSaveState): void => {
+      saveStateRef.current = state;
+      setSaveState(state);
+    };
+
+    const captureDeletion = (doc: Y.Doc): void => {
+      const text = yDocToMarkdown(doc);
+      const id =
+        saveStateRef.current === "saved"
+          ? null
+          : captureOrphanedDraft(workspaceId, path, text);
+      deletionSnapshot = { id, text };
+      writesRefused.current = true;
+      setDeletion({ token, draftId: id });
+      reportSaveState("deleted");
+    };
+
+    const refreshDeletionDraft = (doc: Y.Doc, reportDraft: boolean): void => {
+      if (!deletionSnapshot) return;
+      const text = yDocToMarkdown(doc);
+      if (text === deletionSnapshot.text) return;
+      if (deletionSnapshot.id === null) {
+        deletionSnapshot = {
+          id: captureOrphanedDraft(workspaceId, path, text),
+          text,
+        };
+      } else {
+        replaceOrphanedDraft(workspaceId, path, deletionSnapshot.id, text);
+        deletionSnapshot = { id: deletionSnapshot.id, text };
+      }
+      if (reportDraft) {
+        setDeletion({ token, draftId: deletionSnapshot.id });
+      }
+    };
+
+    const onSaveState = (event: EngineYDocSaveStateEvent): void => {
+      if (cancelled || token !== openTokenRef.current) return;
+      if (event.sessionId !== sessionId) return;
+      if (event.state === "deleted") {
+        const doc = binding?.doc;
+        if (!doc) {
+          deletionPending = true;
+          writesRefused.current = true;
+          return;
+        }
+        if (deletionSnapshot) {
+          refreshDeletionDraft(doc, true);
+          return;
+        }
+        captureDeletion(doc);
+        return;
+      }
+      // Deletion is terminal for this session. A settle/update already in
+      // flight can report after main's deletion notice, but it no longer
+      // describes a path that exists and must not repaint this state.
+      if (writesRefused.current) return;
+      if (event.state === "file-locked") {
+        if (event.seq >= localSeq.current) reportSaveState(event.state);
+        return;
+      }
+      if (
+        event.state === "error" ||
+        event.state === "read-only" ||
+        event.state === "changed-on-disk"
+      ) {
+        reportSaveState(event.state);
+        return;
+      }
+      if (event.state === "settling") {
+        reportSaveState("saving");
+        return;
+      }
+      if (event.seq >= localSeq.current) reportSaveState("saved");
+    };
+
+    const openAttempt = (async (): Promise<EngineYDocBinding> => {
+      // Subscribe before open: main registers the live entry before the IPC
+      // answer returns, so deletion can otherwise notify an empty listener set
+      // in that hand-over window. The async boundary catches an older preload
+      // that does not expose this channel without delaying the open itself.
+      unsubscribeSaveState = bridge().onEngineYDocSaveState(onSaveState);
+      return bindEngineYDoc(transport);
+    })();
+    void openAttempt
       .then((bound) => {
         // A newer open (workspace/path switch) superseded this one, or the effect
         // already cleaned up: never bind the stale doc — close it and bail.
@@ -301,69 +401,19 @@ export function useEngineDoc(input: {
         // An edit is unsaved the instant it happens. Only main's settle report
         // may clear it — nothing here guesses "saved". The seed apply happened
         // before this observer attached, so it never shows a spurious "saving".
+        const doc = bound.doc;
         const onUpdate = () => {
           if (cancelled) return;
-          if (writesRefused.current) return;
-          setSaveState("saving");
+          if (writesRefused.current) {
+            refreshDeletionDraft(doc, true);
+            return;
+          }
+          reportSaveState("saving");
         };
-        bound.doc.on("update", onUpdate);
-        detachSaveObserver = () => bound.doc?.off("update", onUpdate);
-        // Subscribe only once the session is CONFIRMED live. Nothing can be
-        // missed by waiting: a settle needs an edit, and an edit needs this
-        // bound doc. Doing it here also keeps every bridge call inside the
-        // caught region — a synchronous call in the effect body turned a
-        // bridge without this method (an older preload, a test double) from
-        // graceful "not engine-backed" into a blanked editor.
-        // Guarded by the per-open token AND the per-open sessionId (the
-        // async-state invariant): another document's settle never repaints.
-        unsubscribeSaveState = bridge().onEngineYDocSaveState((event) => {
-          if (cancelled || token !== openTokenRef.current) return;
-          if (event.sessionId !== sessionId) return;
-          // Deletion is terminal for this session. A settle/update already in
-          // flight can report after main's deletion notice, but it no longer
-          // describes a path that exists and must not repaint this state.
-          if (writesRefused.current && event.state !== "deleted") return;
-          if (event.state === "deleted") {
-            // Refuse transport writes synchronously. React can take a render
-            // to make Tiptap read-only, but no keystroke in that gap may reach
-            // main and recreate the path.
-            writesRefused.current = true;
-            setDeletedRequestKey(key);
-            setSaveState("deleted");
-            return;
-          }
-          // `file-locked` is the one refusal that makes a DURABILITY claim:
-          // its copy tells the user dohc has their edits and is retrying. So
-          // it may only stand for a settle that carries the newest edit. A
-          // keystroke still in flight means this refusal is about older text,
-          // and showing it would promise safety for a sequence the settle
-          // never covered. Same guard "saved" uses, for the same reason —
-          // keep "Saving…" until an event covers the newest edit.
-          if (event.state === "file-locked") {
-            if (event.seq >= localSeq.current) setSaveState(event.state);
-            return;
-          }
-          // These claim nothing about what is held — "error" says the opposite
-          // — so they stand as soon as they arrive, whatever is in flight.
-          if (
-            event.state === "error" ||
-            event.state === "read-only" ||
-            event.state === "changed-on-disk"
-          ) {
-            setSaveState(event.state);
-            return;
-          }
-          if (event.state === "settling") {
-            setSaveState("saving");
-            return;
-          }
-          // "saved" vouches only for edits journaled before that settle began.
-          // Anything typed since is still unsaved — keep showing "Saving…".
-          if (event.seq >= localSeq.current) {
-            setSaveState("saved");
-          }
-        });
-        setOutcome({ key, kind: "bound", doc: bound.doc });
+        doc.on("update", onUpdate);
+        detachSaveObserver = () => doc.off("update", onUpdate);
+        if (deletionPending) captureDeletion(doc);
+        setOutcome({ key, token, kind: "bound", doc });
       })
       .catch(() => {
         if (cancelled || token !== openTokenRef.current) return;
@@ -371,6 +421,7 @@ export function useEngineDoc(input: {
       });
 
     return () => {
+      if (binding?.doc) refreshDeletionDraft(binding.doc, false);
       cancelled = true;
       unsubscribeSaveState?.();
       detachSaveObserver?.();
@@ -402,6 +453,7 @@ export function useEngineDoc(input: {
     notInVersion,
     engineMayHoldDocument,
     deletedWhileEditing,
+    deletedDraftId,
     removalInProgress,
   };
 }

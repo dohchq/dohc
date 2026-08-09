@@ -58,6 +58,7 @@ import {
   classifyForView,
   FileInspector,
   preloadMarkdownEditor,
+  type FileSaveState,
   type HeadingTarget,
   type ScrollTarget,
 } from "./FileInspector";
@@ -1263,7 +1264,8 @@ export function DesktopWorkspaceShell(props: {
   // reports its markdown save state) — never persisted.
   const [activeTabDirty, setActiveTabDirty] = useState(false);
   const onSaveStateChange = useCallback(
-    (state: "saved" | "saving" | "error") => setActiveTabDirty(state !== "saved"),
+    (state: FileSaveState) =>
+      setActiveTabDirty(state !== "saved" && state !== "deleted"),
     [],
   );
   useEffect(() => {

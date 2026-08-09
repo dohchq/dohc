@@ -6,6 +6,7 @@ import {
   captureOrphanedDraft,
   dismissOrphanedDraft,
   remapOrphanedDraftPaths,
+  replaceOrphanedDraft,
   resetOrphanedDrafts,
   useOrphanedDrafts,
   type OrphanedDraft,
@@ -122,6 +123,23 @@ describe("orphanedDrafts persistence (#600)", () => {
     ).toEqual(["# Plan\n\nTyped, unsaved.", "# Plan\n\nTyped again."]);
     // A restored draft is durable, so nothing stays behind the close warning.
     expect(next.atRiskOrphanedDraftIds()).toEqual([]);
+  });
+
+  it("replaces a later snapshot of the same deletion without appending", async () => {
+    const id = captureOrphanedDraft("ws-1", "notes/plan.md", "Before");
+    replaceOrphanedDraft("ws-1", "notes/plan.md", id, "After");
+
+    expect(
+      draftsFor(useOrphanedDrafts, "ws-1", "notes/plan.md").map(
+        (draft) => draft.text,
+      ),
+    ).toEqual(["After"]);
+    const next = await relaunch();
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "notes/plan.md").map(
+        (draft) => draft.text,
+      ),
+    ).toEqual(["After"]);
   });
 
   it("never writes a secret-classified path to plaintext storage", async () => {

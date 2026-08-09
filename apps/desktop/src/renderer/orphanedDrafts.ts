@@ -4,6 +4,7 @@ import {
   forgetStoredDraft,
   loadStoredDrafts,
   remapStoredDraftPaths,
+  replaceStoredDraft,
   storeDraft,
 } from "./orphanedDraftStorage";
 
@@ -75,11 +76,8 @@ function keyFor(workspaceId: string, path: string): string {
   return JSON.stringify([workspaceId, path]);
 }
 
-// Deferred, because the capture runs during the document view's render (the
-// render-phase transition in FileInspector) and notifying subscribers there
-// would schedule re-renders mid-render. The capturing render does not need
-// the notification: it reads the map through the same hook one microtask
-// later.
+// Deferred because some captures still run during document-view render. A
+// synchronous notification there would schedule subscriber renders mid-render.
 function scheduleNotify(): void {
   // Every caller just mutated the map; the bump invalidates snapshot caches.
   storeVersion += 1;
@@ -97,7 +95,7 @@ function scheduleNotify(): void {
 // get one id and one Dismiss deletes both texts. The lowest free id is bounded
 // by how many drafts this run has seen, so it never reaches that end.
 //
-// Synchronous, because a capture runs during a render and cannot await.
+// Synchronous because event-boundary and render-boundary captures cannot await.
 //
 // Ids are never reused, which is why dismissing does not give one back. The
 // close guard remembers the ids the user approved losing (#579 review, r13),
@@ -114,7 +112,7 @@ export function captureOrphanedDraft(
   workspaceId: string,
   path: string,
   text: string,
-): void {
+): number {
   const key = keyFor(workspaceId, path);
   const id = allocateDraftId();
   // One reading for both halves, or the copy that outlives the run would sort
@@ -129,6 +127,40 @@ export function captureOrphanedDraft(
   // Append, never overwrite: a second reopen with the first notice still up
   // must not destroy the first draft (#579 review, P2).
   drafts.set(key, [...(drafts.get(key) ?? EMPTY), { id, text, capturedAtMs }]);
+  scheduleNotify();
+  return id;
+}
+
+// A second snapshot from the SAME deletion updates its existing recovery.
+// Separate deletions still use captureOrphanedDraft and append separate rows.
+export function replaceOrphanedDraft(
+  workspaceId: string,
+  path: string,
+  id: number,
+  text: string,
+): void {
+  const key = keyFor(workspaceId, path);
+  const current = drafts.get(key) ?? EMPTY;
+  const captured = current.find((draft) => draft.id === id);
+  if (!captured || captured.text === text) return;
+  const replacement = { ...captured, text };
+  drafts.set(
+    key,
+    current.map((draft) => (draft.id === id ? replacement : draft)),
+  );
+  if (
+    replaceStoredDraft({
+      id,
+      workspaceId,
+      path,
+      text,
+      capturedAtMs: captured.capturedAtMs,
+    })
+  ) {
+    storedIds.add(id);
+  } else {
+    storedIds.delete(id);
+  }
   scheduleNotify();
 }
 
