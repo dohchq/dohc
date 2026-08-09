@@ -439,20 +439,12 @@ async fn an_open_base_conflict_freezes_the_open_too() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_oversized_resolution_fold_reports_its_measurements() {
-    // Codex #596 round 4: the catch-all wrapped the fold's BlobTooLarge as
-    // state-corrupt, discarding the numbers. The refusal now carries the
-    // constraint, the limit, and the observed usage end to end.
-    //
-    // #656: it names MAX_TEXT_BYTES, not the fold's cap. This test has never
-    // passed — a resolution large enough to reach the fold's 20 MiB update cap
-    // is over the store's 10 MiB text cap first, and every plaintext write
-    // runs `validate_text` (`normalized_write_input`), so the fold branch is
-    // unreachable from `conflict_resolve` by construction. Asserting the fold's
-    // cap here asserted a refusal this path cannot produce. The invariant the
-    // test owns is unchanged: the refusal names its constraint, limit and
-    // observed usage. It just names the one actually enforced — telling a
-    // caller refused at 10 MiB that the limit is 20 MiB would be false.
+async fn an_oversized_resolution_hits_the_text_limit_before_the_fold() {
+    // #656: every plaintext write runs `validate_text` first, so an oversized
+    // resolution trips the store's 10 MiB text cap before it can ever reach
+    // the fold's 20 MiB update cap — the refusal names MAX_TEXT_BYTES, the
+    // constraint actually enforced (Codex #596 round 4: it must carry the
+    // constraint, limit, and observed usage, not collapse to state-corrupt).
     //
     // MUTATION: return the old bare `InvalidText { reason: "text exceeds the
     // size cap" }` from `validate_text` - the PayloadTooLarge match fails.

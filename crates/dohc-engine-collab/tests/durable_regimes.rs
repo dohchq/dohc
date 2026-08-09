@@ -10,15 +10,34 @@ use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::{
     apply_remote_update, claim_base, close_session, ensure_marker, load_persisted, read_marker,
     record_local_update, settle, ClaimOutcome, CloseOutcome, CollabError, DocKey, LeaseRegistry,
-    Regime, RemoteUpdate, ReplicationApplyOutcome, Ydoc,
+    Regime, RemoteUpdate, ReplicationApplyOutcome, SettleOutcome, Ydoc,
 };
-use dohc_engine_storage::{NoFaults, TxnOutcome};
+use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 
 fn committed<T>(o: TxnOutcome<T>) -> T {
     match o {
         TxnOutcome::Committed(v) => v,
         TxnOutcome::Crashed { .. } => panic!("expected committed, got crashed"),
     }
+}
+
+/// Mark a `settle()` call's OWN materialization job complete. Every test
+/// below that seeds an ADDITIONAL pending job to prove the close guard
+/// blocks on THAT job must call this first — the settle's own job (still
+/// pending, same target path) would otherwise block the close by itself,
+/// and the seeded job would prove nothing: deleting it would flip no
+/// assertion.
+fn land_settle_job(store: &mut EngineStore, outcome: &SettleOutcome) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE materialization_jobs SET status = 'complete' WHERE job_id = ?1",
+                [&outcome.job_id],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("land the settle's own job");
 }
 
 /// A small plaintext lineage: (base full-state bytes, a follow-up remote delta).
@@ -70,7 +89,14 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "mine");
     committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_000).expect("rec"));
-    committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    let settle_outcome =
+        committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    // The settle's OWN job must land before this test's cross-workspace
+    // collision means anything — a still-pending job for THIS object's own
+    // path is correctly blocking (#715: the guard now reads any pending job
+    // aimed at the path, not just certain job-id spellings), and asserting
+    // through it would test that instead of the workspace-scoping bug below.
+    land_settle_job(&mut ts.store, &settle_outcome);
 
     // The guard joins `moments`, so this lineage needs the settle moment a
     // domain-layer settle would have written — without it the join matches
@@ -151,7 +177,11 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     let doc2 = Ydoc::wire();
     let delta2 = doc2.plaintext_insert(0, "mine");
     committed(record_local_update(&mut ts2.store, &key2, &delta2, &NoFaults, 1_000).expect("rec"));
-    committed(settle(&mut ts2.store, &key2, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    let settle_outcome2 =
+        committed(settle(&mut ts2.store, &key2, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    // Land THIS settle's own job too — the seeded job below must be the
+    // ONLY thing this half blocks on, or it proves nothing either.
+    land_settle_job(&mut ts2.store, &settle_outcome2);
     ts2.store
         .write_with(&NoFaults, |tx| {
             let text_sha = dohc_engine_storage::hex_sha256(b"mine");
@@ -206,6 +236,121 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
         ),
         "this workspace's own pending job must still hold the prune"
     );
+}
+
+/// #715. The local-only prune guard's pending-materialization check matched
+/// only the `ydoc-mat_` / `resolve-mat_` job-id prefixes. `enqueue_write`
+/// also mints `merge-mat_`, `sync-resolve-mat_`, and `secret-mat_` — a
+/// pending job under any of those three still targets this object's disk
+/// artifact, but went unmatched and let the close prune the CRDT cache while
+/// the materialization that would rewrite the file was still queued (a
+/// stale-disk window, not data loss: `blobs`/`snapshots` still hold the
+/// content).
+///
+/// One test per prefix, settle-then-seed a same-path pending job of exactly
+/// that kind, and require the close to refuse. `job_id_prefix` also names
+/// the scratch store — every prefix is a distinct valid identifier already.
+///
+/// The settle's OWN job is landed (marked complete) before the seeded job:
+/// otherwise that still-pending job — same target path — would block the
+/// close by itself, and the seeded job would prove nothing (deleting it
+/// would flip no assertion).
+///
+/// MUTATION: restore the `ydoc-mat_` / `resolve-mat_` job-id prefix match in
+/// `close_session`'s pending-job query — each of these three still-pending
+/// jobs stops blocking and the assert fails.
+fn assert_pending_job_of_kind_blocks_close(job_id_prefix: &str) {
+    let mut ts = fresh_store(job_id_prefix);
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    let delta = doc.plaintext_insert(0, "mine");
+    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_000).expect("rec"));
+    let settle_outcome =
+        committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    land_settle_job(&mut ts.store, &settle_outcome);
+
+    let moment_id = "settle-moment-id";
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            let text_sha = dohc_engine_storage::hex_sha256(b"mine");
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) \
+                 VALUES (?1, 4, 'mine')",
+                [&text_sha],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO versions \
+                 (workspace_id, version_id, kind, name, created_at_ms) \
+                 VALUES (?1, ?2, 'main', 'main', 1)",
+                rusqlite::params![key.workspace_id, key.version_id],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO moments \
+                 (workspace_id, moment_order, moment_id, version_id, object_id, path, \
+                  recorded_at_ms, operation, after_blob_sha256, before_present, \
+                  metadata_origin) \
+                 VALUES (?1, 0, ?2, ?3, ?4, 'notes/doc.md', 1, 'write', ?5, 0, 'ydoc')",
+                rusqlite::params![
+                    key.workspace_id,
+                    moment_id,
+                    key.version_id,
+                    key.object_id,
+                    text_sha
+                ],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            // The still-pending job this object's own materialization would
+            // land under `job_id_prefix` — the exact same shape as
+            // `ydoc-mat_`/`resolve-mat_`, just a different spelling.
+            let sha = dohc_engine_storage::put_binary_blob(tx, b"pending bytes")?;
+            tx.execute(
+                "INSERT INTO materialization_jobs \
+                 (job_id, workspace_id, target_path, content_sha256, preimage_present, \
+                  target_generation, status, created_at_ms, operation) \
+                 VALUES (?1, ?2, 'notes/doc.md', ?3, 0, 1, 'pending', 1, 'write')",
+                rusqlite::params![format!("{job_id_prefix}{moment_id}"), key.workspace_id, sha],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("seed the pending job");
+
+    assert!(
+        matches!(
+            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            Err(CollabError::UnsettledClose)
+        ),
+        "a pending '{job_id_prefix}' job must hold the prune"
+    );
+}
+
+#[test]
+fn a_pending_merge_mat_job_blocks_the_local_close() {
+    assert_pending_job_of_kind_blocks_close("merge-mat_");
+}
+
+#[test]
+fn a_pending_sync_resolve_mat_job_blocks_the_local_close() {
+    assert_pending_job_of_kind_blocks_close("sync-resolve-mat_");
+}
+
+#[test]
+fn a_pending_secret_mat_job_blocks_the_local_close() {
+    assert_pending_job_of_kind_blocks_close("secret-mat_");
 }
 
 #[test]
@@ -266,17 +411,25 @@ fn local_only_close_prunes_the_cache() {
 /// Seed a head for the object: the version row, the text blob, and the
 /// `snapshots` row that points at it.
 ///
-/// `engine_write_status` is what separates the two directions. `None` is the
-/// disk -> engine direction — a capture read the file, so no materialization
-/// job exists and the bytes are the disk's. `Some(status)` is the engine ->
-/// disk direction: a job was minted to put these bytes on the file, and only
-/// that job's outcome says whether the disk ever received them.
+/// `engine_write_status` is what separates the two directions, and now also
+/// picks the realistic `metadata_origin` for each (#723: `captured_head_sha`
+/// reads that column directly). `None` is the disk -> engine direction — a
+/// capture read the file, so no materialization job exists, the head's
+/// origin is `"capture"`, and the bytes are the disk's. `Some(status)` is the
+/// engine -> disk direction: a job was minted to put these bytes on the file
+/// (origin `"ydoc"`, the real settle write's own origin), and only that
+/// job's outcome says whether the disk ever received them.
 fn seed_head(
     store: &mut dohc_engine_storage::EngineStore,
     key: &DocKey,
     text: &str,
     engine_write_status: Option<&str>,
 ) {
+    let metadata_origin = if engine_write_status.is_some() {
+        "ydoc"
+    } else {
+        "capture"
+    };
     store
         .write_with(&NoFaults, |tx| {
             let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
@@ -296,8 +449,14 @@ fn seed_head(
                 "INSERT OR REPLACE INTO snapshots \
                  (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
                   latest_moment_id, metadata_origin) \
-                 VALUES (?1, ?2, ?3, 'notes/doc.md', ?4, 1, 'head-moment', 'capture')",
-                rusqlite::params![key.workspace_id, key.version_id, key.object_id, sha],
+                 VALUES (?1, ?2, ?3, 'notes/doc.md', ?4, 1, 'head-moment', ?5)",
+                rusqlite::params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    sha,
+                    metadata_origin
+                ],
             )
             .map_err(dohc_engine_storage::StorageError::persist_public)?;
             if let Some(status) = engine_write_status {
@@ -410,13 +569,14 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
     // content. Everything typed into the session would be gone.
     //
     // The direction is what the fallback reads, not the bytes. A capture is
-    // disk -> engine and mints no job, so its head IS the file. A head the
-    // engine wrote has a job, and only that job says whether the file ever
-    // received it — `last_settled_sha` is the proof for that direction, and
-    // this state is exactly the one where it was withdrawn.
+    // disk -> engine and mints no job, so its head's origin is "capture". A
+    // head the engine wrote has origin "ydoc", and only `last_settled_sha`
+    // says whether the file ever received it — this state is exactly the one
+    // where the settle withdrew that proof.
     //
-    // MUTATION: drop the `NOT EXISTS (materialization_jobs …)` clause from
-    // `captured_head_sha` — this close prunes and the assert below fails.
+    // MUTATION: drop the `metadata_origin = CAPTURE_ORIGIN` predicate from
+    // `captured_head_sha` (answer "captured" for every head) — this close
+    // prunes and the assert below fails.
     let mut ts = fresh_store("engine-head-never-landed");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -483,6 +643,57 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
             Err(CollabError::UnsettledClose)
         ),
         "an engine-written head answers through the settle marker, not this fallback"
+    );
+}
+
+#[test]
+fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
+    // #723. `captured_head_sha` used to answer "captured" with
+    // `NOT EXISTS (materialization_jobs WHERE content+path match)`. An
+    // EARLIER, unrelated engine settle for this exact content and path
+    // leaves its job row behind after it completes — the table is a ledger,
+    // not a lease — so a LATER, genuine capture that reverts the disk to
+    // those same bytes still finds that leftover row and reads as "not
+    // captured", refusing a discharge the direction plainly allows.
+    //
+    // `claim_foreign_head`'s dedupe (store.rs) is the real capture path: it
+    // flips `snapshots.metadata_origin` to "capture" and mints no job row at
+    // all, so the fixed predicate sees the capture directly.
+    //
+    // MUTATION: restore the `NOT EXISTS (materialization_jobs …)` predicate
+    // in `captured_head_sha` — this close returns UnsettledClose and the
+    // expect below fails.
+    let mut ts = fresh_store("captured-reversion-leftover-job");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    let delta = doc.plaintext_insert(0, "what the user typed");
+    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+
+    // The earlier engine settle: a completed job for this exact content and
+    // path — the leftover row the old heuristic tripped on.
+    seed_head(&mut ts.store, &key, "what the user typed", Some("complete"));
+    // The later capture: disk reverted to the same bytes. `claim_foreign_head`
+    // rewrites the snapshot's origin in place and mints no new job — `None`
+    // reproduces exactly that, leaving the completed job row untouched.
+    seed_head(&mut ts.store, &key, "what the user typed", None);
+
+    let out =
+        committed(close_session(&mut ts.store, &key, false, &NoFaults, 1_400).expect("close"));
+    assert!(
+        matches!(out, CloseOutcome::Pruned { .. }),
+        "a genuine capture discharges despite a leftover completed job row: {out:?}"
     );
 }
 
