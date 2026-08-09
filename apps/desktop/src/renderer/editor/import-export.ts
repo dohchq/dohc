@@ -1,6 +1,6 @@
 import type { AnyExtension, JSONContent } from '@tiptap/core'
 import { getHTMLFromFragment, getSchema } from '@tiptap/core'
-import { backtickFence } from '@dohc/ydoc-projection'
+import { backtickFence, serializeRichdocBody } from '@dohc/ydoc-projection'
 import { CodeBlock } from '@tiptap/extension-code-block'
 import { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { MarkdownManager } from '@tiptap/markdown'
@@ -161,7 +161,7 @@ export function markdownBodyToHtml(body: string): string {
 function yDocBodyToMarkdown(doc: Y.Doc): string {
   const plainText = getDohcYDocPlainText(doc)
   if (plainText) return plainText.toString()
-  return markdownManager.serialize(escapeHighlightMarkdown(yDocBodyToJSON(doc)))
+  return serializeRichdocBody(escapeHighlightMarkdown(yDocBodyToJSON(doc)))
 }
 
 function yDocBodyToJSON(doc: Y.Doc): JSONContent {

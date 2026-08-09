@@ -525,19 +525,19 @@ describe("blockControls copy as markdown", () => {
   it("serializes a heading block to markdown", () => {
     const editor = track(makeEditor("## Section"));
     const node = editor.state.doc.child(0);
-    expect(serializeBlockToMarkdown(editor, node)).toBe("## Section");
+    expect(serializeBlockToMarkdown(node)).toBe("## Section");
   });
 
   it("serializes a paragraph block to markdown", () => {
     const editor = track(makeEditor("Just text"));
     const node = editor.state.doc.child(0);
-    expect(serializeBlockToMarkdown(editor, node)).toBe("Just text");
+    expect(serializeBlockToMarkdown(node)).toBe("Just text");
   });
 
   it("serializes a bulleted list block to markdown", () => {
     const editor = track(makeEditor("- alpha\n- beta"));
     const node = editor.state.doc.child(0);
-    const md = serializeBlockToMarkdown(editor, node);
+    const md = serializeBlockToMarkdown(node);
     expect(md).toMatch(/^[-*]\s+alpha$/m);
     expect(md).toMatch(/^[-*]\s+beta$/m);
   });

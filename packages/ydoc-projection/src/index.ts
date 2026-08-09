@@ -13,6 +13,7 @@ export {
   getDohcYDocPlainText,
   markdownToYDoc,
   plainTextToYDoc,
+  serializeRichdocBody,
   yDocToMarkdown,
 } from "./import-export.js";
 export { dohcMarkdownExtensions } from "./dohc-markdown-extensions.js";
