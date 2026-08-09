@@ -192,17 +192,17 @@ function unwrapExpression(node: t.Expression): t.Expression {
 // for a guard whose realistic input is an ordinary import.
 function resolveSpecifiers(
   node: t.Expression,
-  stringConsts: ReadonlyMap<string, readonly string[]>,
+  resolveConst: (name: string) => readonly string[],
 ): readonly string[] {
   if (t.isStringLiteral(node)) return [node.value];
-  if (t.isIdentifier(node)) return stringConsts.get(node.name) ?? [];
+  if (t.isIdentifier(node)) return resolveConst(node.name);
   // A template whose every substitution resolves statically — `${SCOPE}/pkg` is
   // the same value as the concatenation, so it must not read differently.
   if (t.isTemplateLiteral(node)) {
     let parts: string[] = [node.quasis[0]?.value.cooked ?? node.quasis[0]?.value.raw ?? ""];
     for (const [index, expression] of node.expressions.entries()) {
       if (!t.isExpression(expression)) return [];
-      const values = resolveSpecifiers(expression, stringConsts);
+      const values = resolveSpecifiers(expression, resolveConst);
       if (values.length === 0) return [];
       const suffix = node.quasis[index + 1]?.value.cooked ?? node.quasis[index + 1]?.value.raw ?? "";
       parts = parts.flatMap((prefix) => values.map((value) => prefix + value + suffix));
@@ -211,12 +211,12 @@ function resolveSpecifiers(
   }
   if (t.isBinaryExpression(node, { operator: "+" })) {
     if (!t.isExpression(node.left)) return [];
-    const left = resolveSpecifiers(node.left, stringConsts);
-    const right = resolveSpecifiers(node.right, stringConsts);
+    const left = resolveSpecifiers(node.left, resolveConst);
+    const right = resolveSpecifiers(node.right, resolveConst);
     return left.flatMap((l) => right.map((r) => l + r));
   }
   const unwrapped = unwrapExpression(node);
-  if (unwrapped !== node) return resolveSpecifiers(unwrapped, stringConsts);
+  if (unwrapped !== node) return resolveSpecifiers(unwrapped, resolveConst);
   return [];
 }
 
@@ -323,21 +323,25 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
     }
   };
   t.traverseFast(sourceFile, collectNames);
-  let resolvedAnotherValue: boolean;
-  do {
-    resolvedAnotherValue = false;
-    for (const [name, expressions] of stringConstExpressions) {
-      const values = new Set(stringConsts.get(name) ?? []);
-      const previousSize = values.size;
-      for (const expression of expressions) {
-        for (const value of resolveSpecifiers(expression, stringConsts)) values.add(value);
-      }
-      if (values.size > previousSize) {
-        stringConsts.set(name, [...values]);
-        resolvedAnotherValue = true;
+  const resolveConst = (name: string, resolving: ReadonlySet<string>): readonly string[] => {
+    if (resolving.has(name)) return [];
+    const nextResolving = new Set(resolving).add(name);
+    const values = new Set<string>();
+    for (const expression of stringConstExpressions.get(name) ?? []) {
+      for (const value of resolveSpecifiers(
+        expression,
+        (dependency) => resolveConst(dependency, nextResolving),
+      )) {
+        values.add(value);
       }
     }
-  } while (resolvedAnotherValue);
+    return [...values];
+  };
+  for (const name of stringConstExpressions.keys()) {
+    stringConsts.set(name, resolveConst(name, new Set()));
+  }
+  const resolveKnownSpecifiers = (node: t.Expression): readonly string[] =>
+    resolveSpecifiers(node, (name) => stringConsts.get(name) ?? []);
   const collectAliases = (node: t.Node): void => {
     if (t.isVariableDeclarator(node) && t.isIdentifier(node.id)) {
       const init = node.init;
@@ -399,14 +403,14 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       }
     } else if (t.isImportExpression(node)) {
       if (
-        resolveSpecifiers(node.source, stringConsts).some((candidate) =>
+        resolveKnownSpecifiers(node.source).some((candidate) =>
           isLegacySpecifier(candidate, fileName),
         )
       ) {
         found = true;
         return;
       }
-    } else if (t.isCallExpression(node) || t.isNewExpression(node)) {
+    } else if (t.isCallExpression(node) || t.isOptionalCallExpression(node) || t.isNewExpression(node)) {
       const arg = node.arguments?.[0];
       // `new Worker(SOURCE, { eval: true })` runs SOURCE as a real module, so a
       // load inside it ships. cliServer.ts already defines such a body as a
@@ -417,7 +421,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
         if (workerRunsEval(node, optionObjects)) {
           const body = node.arguments?.[0];
           const sources = body !== undefined && t.isExpression(body)
-            ? resolveSpecifiers(body, stringConsts)
+            ? resolveKnownSpecifiers(body)
             : [];
           if (sources.some((source) => hasRuntimeLegacyImport(source, fileName))) {
             found = true;
@@ -427,7 +431,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       }
       const isStringArg =
         arg !== undefined && t.isExpression(arg) &&
-        resolveSpecifiers(arg, stringConsts).some((candidate) =>
+        resolveKnownSpecifiers(arg).some((candidate) =>
           isLegacySpecifier(candidate, fileName),
         );
       if (isStringArg) {
@@ -438,7 +442,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
         // Node's CommonJS `module.require(...)`, which really does load — unlike
         // an arbitrary `loader.require(...)` method, which does not.
         const isModuleRequire =
-          t.isMemberExpression(node.callee) &&
+          (t.isMemberExpression(node.callee) || t.isOptionalMemberExpression(node.callee)) &&
           !node.callee.computed &&
           t.isIdentifier(node.callee.object, { name: "module" }) &&
           t.isIdentifier(node.callee.property, { name: "require" });
@@ -678,6 +682,19 @@ const m = await import(\`\${SCOPE}/workspace-engine\`);`;
       hasRuntimeLegacyImport(`const name = "${L}-client";
 const m = await import(name);`),
     ).toBe(false);
+
+    // Same-name declarations across scopes can create a cycle in the
+    // conservative file-wide map. The resolver must stop the cycle while
+    // keeping the statically reachable legacy candidate.
+    const cyclic = [
+      `const name = "@dohc";`,
+      `function outer() {`,
+      `  const specifier = name + "/workspace-engine";`,
+      `  function inner() { const name = specifier; return name; }`,
+      `  return require(specifier);`,
+      `}`,
+    ].join("\n");
+    expect(hasRuntimeLegacyImport(cyclic)).toBe(true);
   });
 
   it("handles the loader and specifier spellings that need name tracking", () => {
@@ -727,6 +744,11 @@ const m = await import(name);`),
       `function a() { const name = "${L}"; return require(name); }`,
     ].join("\n");
     expect(hasRuntimeLegacyImport(shadowedReversed)).toBe(true);
+
+    // Optional calls still load the package whenever the loader exists.
+    expect(hasRuntimeLegacyImport(`const m = require?.("${L}");`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`const m = module.require?.("${L}");`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`const m = loader.require?.("${L}");`)).toBe(false);
   });
 
   it("sees through erased expression wrappers on a specifier", () => {
