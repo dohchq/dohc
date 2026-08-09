@@ -1084,10 +1084,12 @@ pub fn close_session(
         // the replay (retry-settle or open-time) lands the job.
         //
         // Matched on the object's TARGET PATH rather than a job-id prefix.
-        // `enqueue_write` mints several spellings for this same intent
-        // (`ydoc-mat_`, `resolve-mat_`, `merge-mat_`, `sync-resolve-mat_`,
-        // `secret-mat_`, …) and a prefix list drifts out of sync with them
-        // (#715: three of five went unmatched, each a stale-disk window).
+        // Disk-writing jobs carry many id spellings (`ydoc-mat_`,
+        // `resolve-mat_`, `merge-mat_`, `sync-resolve-mat_` from
+        // `enqueue_write`; `secret-mat_` from the secrets store's own
+        // enqueue; binary, version-switch, and unprefixed hash-id jobs
+        // besides) and a prefix list drifts out of sync with them (#715:
+        // three went unmatched, each a stale-disk window).
         // Every kind sets `target_path` to the disk path it intends to
         // write, so asking "is any pending job aimed at this object's disk
         // artifact" via that path is the fact itself, not a proxy for it —
@@ -1309,6 +1311,12 @@ fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, C
 /// bytes then refuses a valid discharge. `claim_foreign_head`'s dedupe writes
 /// `metadata_origin` directly and mints no job row either way, so it is the
 /// fact this function needs, not a proxy for it.
+///
+/// A fact about LOCAL heads. Replication (#356, unbuilt) replays remote
+/// moments with their origins verbatim, so a peer's capture moment would
+/// satisfy this without the local disk holding the bytes — when sync lands,
+/// either rewrite origins at the replication boundary or add the locality
+/// test here.
 fn captured_head_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
     conn.query_row(
         "SELECT s.blob_sha256 FROM snapshots s \
