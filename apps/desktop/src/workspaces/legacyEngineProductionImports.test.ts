@@ -1,7 +1,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, posix, relative, resolve, sep } from "node:path";
+import { parse, type ParserPlugin } from "@babel/parser";
+import * as t from "@babel/types";
 import { describe, expect, it } from "vitest";
-import ts from "typescript";
 
 // R16 ratchet. The legacy TypeScript engine package was deleted in favour of
 // the Rust daemon. No production source may restore a dependency on it.
@@ -77,11 +78,26 @@ function isProductionSource(posixPath: string): boolean {
   return SCANNED_SOURCE.test(posixPath);
 }
 
-function scriptKindFor(posixPath: string): ts.ScriptKind {
-  if (posixPath.endsWith(".tsx")) return ts.ScriptKind.TSX;
-  if (posixPath.endsWith(".jsx")) return ts.ScriptKind.JSX;
-  if (/\.[cm]?js$/.test(posixPath)) return ts.ScriptKind.JS;
-  return ts.ScriptKind.TS;
+type SourceSyntax = "tsx" | "jsx" | "js" | "ts";
+
+function scriptKindFor(posixPath: string): SourceSyntax {
+  if (posixPath.endsWith(".tsx")) return "tsx";
+  if (posixPath.endsWith(".jsx")) return "jsx";
+  if (/\.[cm]?js$/.test(posixPath)) return "js";
+  return "ts";
+}
+
+function parserPluginsFor(posixPath: string): ParserPlugin[] {
+  switch (scriptKindFor(posixPath)) {
+    case "tsx":
+      return ["typescript", "jsx"];
+    case "jsx":
+      return ["jsx"];
+    case "ts":
+      return ["typescript"];
+    case "js":
+      return [];
+  }
 }
 
 const SKIP_DIRS = new Set([
@@ -121,8 +137,8 @@ function walk(dir: string, out: string[]): void {
 // clause beginning with `type` and a genuine runtime import was waved through.
 // Patching the pattern fixed that instance; the class remains — comments between
 // `import` and its parenthesis, the specifier appearing inside a string or a
-// comment, `loader.require(…)` masquerading as `require(…)`. The compiler
-// already knows the difference, so ask it.
+// comment, `loader.require(…)` masquerading as `require(…)`. The parser already
+// knows the difference, so ask it.
 const LEGACY_SOURCE_DIR = `packages/${LEGACY_PACKAGE_NAME}/`;
 
 // The package name, OR a relative path that lands inside the package. Reaching
@@ -139,26 +155,23 @@ function isLegacySpecifier(specifier: string, fromFile: string): boolean {
 // True when the whole declaration is erased at build time: `import type { X }`,
 // or named bindings that are ALL individually `type`. One value binding among
 // them makes the declaration runtime.
-function isErasedImport(node: ts.ImportDeclaration): boolean {
-  const clause = node.importClause;
-  if (clause === undefined) return false; // bare `import "pkg"` — side effect
-  if (clause.isTypeOnly) return true;
-  const bindings = clause.namedBindings;
-  if (clause.name === undefined && bindings !== undefined && ts.isNamedImports(bindings)) {
-    return bindings.elements.length > 0 && bindings.elements.every((e) => e.isTypeOnly);
-  }
-  return false;
+function isErasedImport(node: t.ImportDeclaration): boolean {
+  if (node.specifiers.length === 0) return false; // bare `import "pkg"` — side effect
+  if (node.importKind === "type" || node.importKind === "typeof") return true;
+  return node.specifiers.every(
+    (specifier) => t.isImportSpecifier(specifier) && specifier.importKind === "type",
+  );
 }
 
 // Strips the wrappers TypeScript erases: (x), x as T, <T>x, x satisfies T, x!.
 // None changes the runtime value, so none may change what this guard sees.
-function unwrapExpression(node: ts.Expression): ts.Expression {
+function unwrapExpression(node: t.Expression): t.Expression {
   if (
-    ts.isParenthesizedExpression(node) ||
-    ts.isAsExpression(node) ||
-    ts.isTypeAssertionExpression(node) ||
-    ts.isSatisfiesExpression(node) ||
-    ts.isNonNullExpression(node)
+    t.isParenthesizedExpression(node) ||
+    t.isTSAsExpression(node) ||
+    t.isTSTypeAssertion(node) ||
+    t.isTSSatisfiesExpression(node) ||
+    t.isTSNonNullExpression(node)
   ) {
     return unwrapExpression(node.expression);
   }
@@ -179,23 +192,26 @@ function unwrapExpression(node: ts.Expression): ts.Expression {
 // dependency through. A symbol table would be more precise and is not worth it
 // for a guard whose realistic input is an ordinary import.
 function resolveSpecifiers(
-  node: ts.Expression,
+  node: t.Expression,
   stringConsts: ReadonlyMap<string, readonly string[]>,
 ): readonly string[] {
-  if (ts.isStringLiteralLike(node)) return [node.text];
-  if (ts.isIdentifier(node)) return stringConsts.get(node.text) ?? [];
+  if (t.isStringLiteral(node)) return [node.value];
+  if (t.isIdentifier(node)) return stringConsts.get(node.name) ?? [];
   // A template whose every substitution resolves statically — `${SCOPE}/pkg` is
   // the same value as the concatenation, so it must not read differently.
-  if (ts.isTemplateExpression(node)) {
-    let parts: string[] = [node.head.text];
-    for (const span of node.templateSpans) {
-      const values = resolveSpecifiers(span.expression, stringConsts);
+  if (t.isTemplateLiteral(node)) {
+    let parts: string[] = [node.quasis[0]?.value.cooked ?? node.quasis[0]?.value.raw ?? ""];
+    for (const [index, expression] of node.expressions.entries()) {
+      if (!t.isExpression(expression)) return [];
+      const values = resolveSpecifiers(expression, stringConsts);
       if (values.length === 0) return [];
-      parts = parts.flatMap((prefix) => values.map((v) => prefix + v + span.literal.text));
+      const suffix = node.quasis[index + 1]?.value.cooked ?? node.quasis[index + 1]?.value.raw ?? "";
+      parts = parts.flatMap((prefix) => values.map((value) => prefix + value + suffix));
     }
     return parts;
   }
-  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+  if (t.isBinaryExpression(node, { operator: "+" })) {
+    if (!t.isExpression(node.left)) return [];
     const left = resolveSpecifiers(node.left, stringConsts);
     const right = resolveSpecifiers(node.right, stringConsts);
     return left.flatMap((l) => right.map((r) => l + r));
@@ -208,49 +224,70 @@ function resolveSpecifiers(
 // The Worker constructor, by local binding rather than by spelling: a bare
 // identifier bound to node:worker_threads' Worker, or a member access such as
 // `workerThreads.Worker`.
-function isWorkerConstructor(expression: ts.Expression, workerNames: ReadonlySet<string>): boolean {
-  if (ts.isIdentifier(expression)) return workerNames.has(expression.text);
-  if (ts.isPropertyAccessExpression(expression)) return expression.name.text === "Worker";
+function isWorkerConstructor(expression: t.Node, workerNames: ReadonlySet<string>): boolean {
+  if (t.isIdentifier(expression)) return workerNames.has(expression.name);
+  if (t.isMemberExpression(expression) && !expression.computed && t.isIdentifier(expression.property)) {
+    return expression.property.name === "Worker";
+  }
   return false;
 }
 
 // `{ eval: true }` in a Worker's options object literal.
 function workerRunsEval(
-  node: ts.NewExpression,
-  optionObjects: ReadonlyMap<string, readonly ts.ObjectLiteralExpression[]>,
+  node: t.NewExpression,
+  optionObjects: ReadonlyMap<string, readonly t.ObjectExpression[]>,
 ): boolean {
   const rawArgument = node.arguments?.[1];
-  if (rawArgument === undefined) return false;
+  if (rawArgument === undefined || !t.isExpression(rawArgument)) return false;
   const argument = unwrapExpression(rawArgument);
   // Either inline, or a const holding the options object — `const opts = { eval:
   // true }; new Worker(SRC, opts)` runs source just the same. EVERY candidate for
   // that name is considered, for the same reason specifiers keep every candidate:
   // a later `const opts = { eval: false }` must not hide an earlier evaluated
   // body.
-  const candidates = ts.isObjectLiteralExpression(argument)
+  const candidates = t.isObjectExpression(argument)
     ? [argument]
-    : ts.isIdentifier(argument)
-      ? (optionObjects.get(argument.text) ?? [])
+    : t.isIdentifier(argument)
+      ? (optionObjects.get(argument.name) ?? [])
       : [];
   return candidates.some((options) =>
     options.properties.some(
       (property) =>
-        ts.isPropertyAssignment(property) &&
-        (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) &&
-        property.name.text === "eval" &&
-        property.initializer.kind === ts.SyntaxKind.TrueKeyword,
+        t.isObjectProperty(property) &&
+        (t.isIdentifier(property.key) || t.isStringLiteral(property.key)) &&
+        (t.isIdentifier(property.key) ? property.key.name : property.key.value) === "eval" &&
+        t.isBooleanLiteral(property.value, { value: true }),
     ),
   );
 }
 
+function isAstNode(value: unknown): value is t.Node {
+  return typeof value === "object" && value !== null && "type" in value;
+}
+
+function walkAst(node: t.Node, visitor: (node: t.Node) => void): void {
+  visitor(node);
+  const fields = node as unknown as Record<string, unknown>;
+  for (const key of t.VISITOR_KEYS[node.type] ?? []) {
+    const value = fields[key];
+    if (Array.isArray(value)) {
+      for (const child of value) {
+        if (isAstNode(child)) walkAst(child, visitor);
+      }
+    } else if (isAstNode(value)) {
+      walkAst(value, visitor);
+    }
+  }
+}
+
 function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean {
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
-    scriptKindFor(fileName),
-  );
+  const sourceFile = parse(source, {
+    createImportExpressions: true,
+    createParenthesizedExpressions: true,
+    plugins: parserPluginsFor(fileName),
+    sourceFilename: fileName,
+    sourceType: "unambiguous",
+  });
   // `createRequire` bindings are runtime loaders under another name, and this
   // repo uses them DELIBERATELY: workspaceDatabase.ts:18 explains that bundlers
   // emitting a CommonJS shim inject their own top-level `const require`, so a
@@ -273,102 +310,121 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
   const stringConsts = new Map<string, readonly string[]>();
   // Object literals bound to a name, so a Worker's options can be reached
   // through a const rather than only inline.
-  const optionObjects = new Map<string, ts.ObjectLiteralExpression[]>();
+  const optionObjects = new Map<string, t.ObjectExpression[]>();
   const addConst = (name: string, values: readonly string[]): void => {
     if (values.length === 0) return;
     stringConsts.set(name, [...(stringConsts.get(name) ?? []), ...values]);
   };
   // Two passes: import aliases and string consts first, so a const declared
   // after its use — or a createRequire alias imported below it — still resolves.
-  const collectNames = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
-      const bindings = node.importClause?.namedBindings;
-      if (bindings !== undefined && ts.isNamedImports(bindings)) {
-        for (const element of bindings.elements) {
-          const imported = (element.propertyName ?? element.name).text;
-          if (imported === "createRequire") createRequireNames.add(element.name.text);
-          if (imported === "Worker") workerNames.add(element.name.text);
+  const collectNames = (node: t.Node): void => {
+    if (t.isImportDeclaration(node)) {
+      for (const specifier of node.specifiers) {
+        if (t.isImportSpecifier(specifier)) {
+          const imported = t.isIdentifier(specifier.imported)
+            ? specifier.imported.name
+            : specifier.imported.value;
+          if (imported === "createRequire") createRequireNames.add(specifier.local.name);
+          if (imported === "Worker") workerNames.add(specifier.local.name);
         }
       }
     }
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
-      const init = node.initializer;
-      if (init !== undefined) addConst(node.name.text, resolveSpecifiers(init, stringConsts));
-      const unwrapped = init === undefined ? undefined : unwrapExpression(init);
-      if (unwrapped !== undefined && ts.isObjectLiteralExpression(unwrapped)) {
-        optionObjects.set(node.name.text, [
-          ...(optionObjects.get(node.name.text) ?? []),
+    if (t.isVariableDeclarator(node) && t.isIdentifier(node.id)) {
+      const init = node.init;
+      if (init !== null && t.isExpression(init)) {
+        addConst(node.id.name, resolveSpecifiers(init, stringConsts));
+      }
+      const unwrapped = init !== null && t.isExpression(init) ? unwrapExpression(init) : undefined;
+      if (unwrapped !== undefined && t.isObjectExpression(unwrapped)) {
+        optionObjects.set(node.id.name, [
+          ...(optionObjects.get(node.id.name) ?? []),
           unwrapped,
         ]);
       }
     }
-    ts.forEachChild(node, collectNames);
   };
-  collectNames(sourceFile);
-  const collectAliases = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
-      const init = node.initializer;
-      if (init !== undefined && ts.isCallExpression(init)) {
-        const callee = init.expression;
+  walkAst(sourceFile, collectNames);
+  const collectAliases = (node: t.Node): void => {
+    if (t.isVariableDeclarator(node) && t.isIdentifier(node.id)) {
+      const init = node.init;
+      if (init !== null && t.isCallExpression(init)) {
+        const callee = init.callee;
         const isCreateRequire =
-          (ts.isIdentifier(callee) && createRequireNames.has(callee.text)) ||
-          (ts.isPropertyAccessExpression(callee) &&
-            createRequireNames.has(callee.name.text));
-        if (isCreateRequire) requireAliases.add(node.name.text);
+          (t.isIdentifier(callee) && createRequireNames.has(callee.name)) ||
+          (t.isMemberExpression(callee) &&
+            !callee.computed &&
+            t.isIdentifier(callee.property) &&
+            createRequireNames.has(callee.property.name));
+        if (isCreateRequire) requireAliases.add(node.id.name);
       }
     }
-    ts.forEachChild(node, collectAliases);
   };
-  collectAliases(sourceFile);
+  walkAst(sourceFile, collectAliases);
   let found = false;
-  const visit = (node: ts.Node): void => {
+  const visit = (node: t.Node): void => {
     if (found) return;
-    if (ts.isImportDeclaration(node)) {
-      const spec = node.moduleSpecifier;
-      if (ts.isStringLiteralLike(spec) && isLegacySpecifier(spec.text, fileName) && !isErasedImport(node)) {
+    if (t.isImportDeclaration(node)) {
+      if (isLegacySpecifier(node.source.value, fileName) && !isErasedImport(node)) {
         found = true;
         return;
       }
-    } else if (ts.isExportDeclaration(node)) {
+    } else if (t.isExportNamedDeclaration(node)) {
       // `export { x } from "pkg"` re-exports a value; `export type { X }` does
       // not — and neither does `export { type X }`, whose specifiers are each
       // type-only while the declaration itself is not.
-      const spec = node.moduleSpecifier;
-      if (spec !== undefined && ts.isStringLiteralLike(spec) && isLegacySpecifier(spec.text, fileName)) {
-        const clause = node.exportClause;
+      const spec = node.source;
+      if (spec != null && isLegacySpecifier(spec.value, fileName)) {
         const allSpecifiersErased =
-          clause !== undefined &&
-          ts.isNamedExports(clause) &&
-          clause.elements.length > 0 &&
-          clause.elements.every((e) => e.isTypeOnly);
-        if (!node.isTypeOnly && !allSpecifiersErased) {
+          node.specifiers.length > 0 &&
+          node.specifiers.every(
+            (specifier) => t.isExportSpecifier(specifier) && specifier.exportKind === "type",
+          );
+        if (node.exportKind !== "type" && !allSpecifiersErased) {
           found = true;
           return;
         }
       }
-    } else if (ts.isImportEqualsDeclaration(node)) {
-      // `import Engine = require("pkg")`.
-      const ref = node.moduleReference;
+    } else if (t.isExportAllDeclaration(node)) {
       if (
-        ts.isExternalModuleReference(ref) &&
-        ts.isStringLiteralLike(ref.expression) &&
-        isLegacySpecifier(ref.expression.text, fileName) &&
-        !node.isTypeOnly
+        isLegacySpecifier(node.source.value, fileName) &&
+        node.exportKind !== "type"
       ) {
         found = true;
         return;
       }
-    } else if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+    } else if (t.isTSImportEqualsDeclaration(node)) {
+      // `import Engine = require("pkg")`.
+      const ref = node.moduleReference;
+      if (
+        t.isTSExternalModuleReference(ref) &&
+        isLegacySpecifier(ref.expression.value, fileName) &&
+        node.importKind !== "type"
+      ) {
+        found = true;
+        return;
+      }
+    } else if (t.isImportExpression(node)) {
+      if (
+        resolveSpecifiers(node.source, stringConsts).some((candidate) =>
+          isLegacySpecifier(candidate, fileName),
+        )
+      ) {
+        found = true;
+        return;
+      }
+    } else if (t.isCallExpression(node) || t.isNewExpression(node)) {
       const arg = node.arguments?.[0];
       // `new Worker(SOURCE, { eval: true })` runs SOURCE as a real module, so a
       // load inside it ships. cliServer.ts already defines such a body as a
       // template literal (REGEX_WORKER_SOURCE) and evals it, which makes this a
       // live shape rather than a hypothetical one. Recurse into the body when it
       // is statically knowable.
-      if (ts.isNewExpression(node) && isWorkerConstructor(node.expression, workerNames)) {
+      if (t.isNewExpression(node) && isWorkerConstructor(node.callee, workerNames)) {
         if (workerRunsEval(node, optionObjects)) {
           const body = node.arguments?.[0];
-          const sources = body === undefined ? [] : resolveSpecifiers(body, stringConsts);
+          const sources = body !== undefined && t.isExpression(body)
+            ? resolveSpecifiers(body, stringConsts)
+            : [];
           if (sources.some((source) => hasRuntimeLegacyImport(source, fileName))) {
             found = true;
             return;
@@ -376,41 +432,41 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
         }
       }
       const isStringArg =
-        arg !== undefined &&
+        arg !== undefined && t.isExpression(arg) &&
         resolveSpecifiers(arg, stringConsts).some((candidate) =>
           isLegacySpecifier(candidate, fileName),
         );
       if (isStringArg) {
         // `import("pkg")`, and a BARE `require("pkg")` — but not a method call
         // such as `loader.require("pkg")`, which is not Node's require.
-        const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
         const isBareRequire =
-          ts.isIdentifier(node.expression) && requireAliases.has(node.expression.text);
+          t.isIdentifier(node.callee) && requireAliases.has(node.callee.name);
         // Node's CommonJS `module.require(...)`, which really does load — unlike
         // an arbitrary `loader.require(...)` method, which does not.
         const isModuleRequire =
-          ts.isPropertyAccessExpression(node.expression) &&
-          ts.isIdentifier(node.expression.expression) &&
-          node.expression.expression.text === "module" &&
-          node.expression.name.text === "require";
+          t.isMemberExpression(node.callee) &&
+          !node.callee.computed &&
+          t.isIdentifier(node.callee.object, { name: "module" }) &&
+          t.isIdentifier(node.callee.property, { name: "require" });
         // `createRequire(import.meta.url)("pkg")` — invoked immediately rather
         // than stored, so the callee is another CALL, not an identifier. Real
         // shape in this repo: workspaceDatabase.test.ts:115.
         const calleeIsCreateRequireCall =
-          ts.isCallExpression(node.expression) &&
-          ((ts.isIdentifier(node.expression.expression) &&
-            createRequireNames.has(node.expression.expression.text)) ||
-            (ts.isPropertyAccessExpression(node.expression.expression) &&
-              createRequireNames.has(node.expression.expression.name.text)));
-        if (isDynamicImport || isBareRequire || isModuleRequire || calleeIsCreateRequireCall) {
+          t.isCallExpression(node.callee) &&
+          ((t.isIdentifier(node.callee.callee) &&
+            createRequireNames.has(node.callee.callee.name)) ||
+            (t.isMemberExpression(node.callee.callee) &&
+              !node.callee.callee.computed &&
+              t.isIdentifier(node.callee.callee.property) &&
+              createRequireNames.has(node.callee.callee.property.name)));
+        if (isBareRequire || isModuleRequire || calleeIsCreateRequireCall) {
           found = true;
           return;
         }
       }
     }
-    ts.forEachChild(node, visit);
   };
-  visit(sourceFile);
+  walkAst(sourceFile, visit);
   return found;
 }
 
@@ -527,6 +583,8 @@ describe("legacy engine production imports (R16 ratchet)", () => {
     expect(hasRuntimeLegacyImport(`export { thing } from "${L}";`)).toBe(true);
     expect(hasRuntimeLegacyImport(`export type { Thing } from "${L}";`)).toBe(false);
     expect(hasRuntimeLegacyImport(`export { type Thing } from "${L}";`)).toBe(false);
+    expect(hasRuntimeLegacyImport(`export * from "${L}";`)).toBe(true);
+    expect(hasRuntimeLegacyImport(`export type * from "${L}";`)).toBe(false);
 
     // Default and namespace imports are runtime; their type-only forms are not.
     expect(hasRuntimeLegacyImport(`import thing from "${L}";`)).toBe(true);
@@ -578,10 +636,10 @@ describe("legacy engine production imports (R16 ratchet)", () => {
       `}`,
     ].join("\n");
     expect(hasRuntimeLegacyImport(tsx, "some/View.tsx")).toBe(true);
-    expect(scriptKindFor("a/b.tsx")).toBe(ts.ScriptKind.TSX);
-    expect(scriptKindFor("a/b.jsx")).toBe(ts.ScriptKind.JSX);
-    expect(scriptKindFor("a/b.mjs")).toBe(ts.ScriptKind.JS);
-    expect(scriptKindFor("a/b.ts")).toBe(ts.ScriptKind.TS);
+    expect(scriptKindFor("a/b.tsx")).toBe("tsx");
+    expect(scriptKindFor("a/b.jsx")).toBe("jsx");
+    expect(scriptKindFor("a/b.mjs")).toBe("js");
+    expect(scriptKindFor("a/b.ts")).toBe("ts");
   });
 
   it("resolves a specifier factored into a constant", () => {
