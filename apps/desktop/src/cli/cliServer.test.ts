@@ -1340,6 +1340,15 @@ describe("CLI socket server", () => {
           regex: false,
         },
       ],
+      [
+        "export",
+        {
+          cwd: workspaceRoot,
+          actor: "agent",
+          scope: { kind: "all" },
+          outDir: "export-coverage",
+        },
+      ],
     ];
     for (const [verb, args] of chatReads) {
       calls.reads = 0;
