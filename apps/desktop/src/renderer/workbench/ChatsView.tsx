@@ -1276,7 +1276,6 @@ function LeaveDmDialog(props: {
         <div className="flex flex-col gap-1">
           <h2
             id="chats-leave-dm-title"
-            data-testid="chats-leave-dm-title"
             className="m-0 text-sm font-semibold text-ink"
           >
             {`Leave your conversation with ${props.dm.peerLabel}?`}
@@ -1508,9 +1507,6 @@ export function ChatsView(props: {
     workspaceLabel: string;
   } | null>(null);
   const [dmRequestBusy, setDmRequestBusy] = useState<string | null>(null);
-  // The DM placement reverse path (#742): a participant confirms before
-  // ending their accepted row (reversible but disruptive — the conversation
-  // leaves this workspace's list until re-accepted).
   const [leavingDm, setLeavingDm] = useState<DmRecord | null>(null);
   const [dmRecipients, setDmRecipients] = useState("");
   const [dmDraft, setDmDraft] = useState("");
@@ -4406,9 +4402,6 @@ export function ChatsView(props: {
 
   if (nav.level === "dm") {
     const dm = nav.dm;
-    const currentWorkspaceLabel =
-      props.workspaces.find((candidate) => candidate.workspaceId === workspaceId)
-        ?.label ?? workspaceId;
     return (
       <div
         data-testid="chats-dm-view"
@@ -4428,7 +4421,6 @@ export function ChatsView(props: {
               <button
                 type="button"
                 data-testid="chats-dm-leave"
-                title="Leave conversation"
                 onClick={() => setLeavingDm(dm)}
                 className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
               >
@@ -4502,7 +4494,10 @@ export function ChatsView(props: {
           <LeaveDmDialog
             key={leavingDm.channelId}
             dm={leavingDm}
-            workspaceLabel={currentWorkspaceLabel}
+            workspaceLabel={
+              props.workspaces.find((candidate) => candidate.workspaceId === workspaceId)
+                ?.label ?? workspaceId
+            }
             onConfirm={() => leaveDmConversation(leavingDm)}
             onClose={() => setLeavingDm(null)}
           />

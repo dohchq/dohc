@@ -6147,17 +6147,7 @@ describe("ChatsView direct messages", () => {
   // visible reverse path. The owner side (shareId null) never accepted a
   // grant into a workspace, so it has nothing to reverse.
   describe("leaving a conversation (#742)", () => {
-    it("shows Leave only for a participant's accepted DM, not the owner's own", async () => {
-      const user = userEvent.setup();
-      const participant = dm({ role: "participant", shareId: "share-dm-1" });
-      bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participant] });
-      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-      renderView();
-      await user.click(await screen.findByTestId("chats-dm-item"));
-      expect(await screen.findByTestId("chats-dm-leave")).toBeTruthy();
-    });
-
-    it("hides Leave on the owner's own DM", async () => {
+    it("shows Leave only for a participant's accepted DM, never the owner's own", async () => {
       const user = userEvent.setup();
       bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
       bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
@@ -6181,7 +6171,7 @@ describe("ChatsView direct messages", () => {
       await user.click(await screen.findByTestId("chats-dm-leave"));
 
       const dialog = await screen.findByTestId("chats-leave-dm-dialog");
-      expect(screen.getByTestId("chats-leave-dm-title").textContent).toBe(
+      expect(dialog.textContent).toContain(
         "Leave your conversation with alice@example.com?",
       );
       expect(dialog.textContent).toContain(

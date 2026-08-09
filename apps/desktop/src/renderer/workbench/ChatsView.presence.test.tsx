@@ -103,8 +103,6 @@ const bridgeMock = {
   acceptDm: vi.fn(),
   declineDm: vi.fn(),
   requestDmAgain: vi.fn(),
-  startDm: vi.fn(),
-  leaveDm: vi.fn(),
   writeClipboardText: vi.fn(),
   onWorkspaceActivity: vi.fn(),
 };

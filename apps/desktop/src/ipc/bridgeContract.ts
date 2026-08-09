@@ -3458,8 +3458,6 @@ export interface DohcDesktopBridge {
   declineDm(payload: DeclineDmPayload): Promise<void>;
   requestDmAgain(payload: RequestDmAgainPayload): Promise<void>;
   startDm(payload: StartDmPayload): Promise<StartDmResult>;
-  // The DM surface's reverse path for placement (#742): ends the accepted
-  // DM's registry row through the same mechanism as leaveSharedChannel.
   leaveDm(payload: LeaveDmPayload): Promise<void>;
   // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token stays in
   // main. publish (or leave) a presence state and long-poll for peer changes;

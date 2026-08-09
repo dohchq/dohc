@@ -955,22 +955,28 @@ describe("DM request decisions", () => {
       { workspaceId: "workspace-b", rootPath: "/b", sharedChannels: [] },
     ];
 
+    // One shared kindCache across both calls, like the real syncDms poll
+    // (peekedReceivedGrantKinds persists across polls): the second call needs
+    // no fixture kind, it reuses what the first call already resolved.
+    const kindCache = new Map<string, "dm" | "not-dm">();
+    const classify = () =>
+      classifyDmRequests({
+        received: [
+          {
+            shareId: "share-live",
+            granterEmail: "x@example.com",
+            selector: { kind: "chat-channel", channelWireId: "wire-live" },
+          },
+        ],
+        kindCache,
+        peekKind: async () => "dm",
+        holdersByShareId: () => liveSharedChannelHoldersByShareId(workspaces),
+        holdersByWireId: () => liveSharedChannelHoldersByWireId(workspaces),
+        declinedShareIds: new Set(),
+      });
+
     // Before leaving: workspace-a holds it, so it is not a pending request.
-    const beforeLeave = await classifyDmRequests({
-      received: [
-        {
-          shareId: "share-live",
-          granterEmail: "x@example.com",
-          selector: { kind: "chat-channel", channelWireId: "wire-live" },
-        },
-      ],
-      kindCache: new Map(),
-      peekKind: async () => "dm",
-      holdersByShareId: () => liveSharedChannelHoldersByShareId(workspaces),
-      holdersByWireId: () => liveSharedChannelHoldersByWireId(workspaces),
-      declinedShareIds: new Set(),
-    });
-    expect(beforeLeave.pending).toEqual([]);
+    expect((await classify()).pending).toEqual([]);
 
     // Leave: the same endJoinedChannel call leaveDm's IPC handler makes.
     workspaces[0]!.sharedChannels = endJoinedChannel(
@@ -982,20 +988,7 @@ describe("DM request decisions", () => {
     );
 
     // After leaving: no workspace holds it, so it reappears as a request.
-    const afterLeave = await classifyDmRequests({
-      received: [
-        {
-          shareId: "share-live",
-          granterEmail: "x@example.com",
-          selector: { kind: "chat-channel", channelWireId: "wire-live" },
-        },
-      ],
-      kindCache: new Map([["share-live", "dm" as const]]),
-      peekKind: async () => "dm",
-      holdersByShareId: () => liveSharedChannelHoldersByShareId(workspaces),
-      holdersByWireId: () => liveSharedChannelHoldersByWireId(workspaces),
-      declinedShareIds: new Set(),
-    });
+    const afterLeave = await classify();
     expect(afterLeave.pending.map((row) => row.shareId)).toEqual(["share-live"]);
 
     // Accepting elsewhere (workspace-b) succeeds.
