@@ -3583,8 +3583,15 @@ pub fn delete_text_in_tx(
     )
     .map_err(DomainError::sql_persist)?;
     // #739: must run in this SAME transaction as the path_aliases removal
-    // above — see `cancel_pending_jobs_for_path` for why.
-    cancel_pending_jobs_for_path(tx, ws, &input.path, input.now_ms)?;
+    // above — see `cancel_pending_jobs_for_path` for why. Materialization
+    // jobs carry no version identity — they mirror the ACTIVE version's
+    // working tree only, the same gate `enqueue_binary_delete` applies to
+    // its own job — so an INACTIVE version's delete must not touch them: a
+    // named version deleting its own `note.md` must never cancel a pending
+    // job that belongs to `main`'s `note.md` of the same name.
+    if version_is_active(tx, ws, &input.version_id)? {
+        cancel_pending_jobs_for_path(tx, ws, &input.path, input.now_ms)?;
+    }
 
     let result = DeleteResult {
         object,
