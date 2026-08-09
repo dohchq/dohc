@@ -3582,12 +3582,8 @@ pub fn delete_text_in_tx(
         params![ws, input.version_id, before.object_id],
     )
     .map_err(DomainError::sql_persist)?;
-    // #739: a materialization job left PENDING by this path's OWN prior
-    // write (a locked target, a busy store — #595/#663) survives this
-    // delete unless cancelled HERE, in the same transaction. Left pending,
-    // startup/fence replay (`materialize_replay_pending`) would later find
-    // its preimage still matching untouched disk bytes and materialize it —
-    // resurrecting a path the registry no longer tracks.
+    // #739: must run in this SAME transaction as the path_aliases removal
+    // above — see `cancel_pending_jobs_for_path` for why.
     cancel_pending_jobs_for_path(tx, ws, &input.path, input.now_ms)?;
 
     let result = DeleteResult {

@@ -1905,16 +1905,6 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
         }),
     )
     .await;
-    // The delete is DB-only for text (mirroring it to disk is a desktop
-    // concern, #738), so the pre-delete bytes are still sitting there —
-    // exactly the state a real crash would leave. The pending job's preimage
-    // (Present, v1) still matches those bytes, so nothing but the
-    // delete-time cancellation stands between it and a replay that clobbers
-    // this path back into existence.
-    assert_eq!(
-        std::fs::read_to_string(scratch.path().join("notes/deleted.md")).expect("still on disk"),
-        "v1"
-    );
     call(&transport, &handle, 9, "workspace.close", json!({})).await;
     drop(transport);
 

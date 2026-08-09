@@ -3664,7 +3664,7 @@ it("a folder move settles and closes a live child session before opening its win
   // GREEN proof 2: the session is already gone, so closing it again is a
   // harmless no-op instead of a fresh settle racing the window.
   const settlesAtClose = state.settleCalls.length;
-  await expect(session.close()).resolves.not.toThrow();
+  await session.close();
   expect(state.settleCalls).toHaveLength(settlesAtClose);
 
   // Refusal side: the window still covers the child by prefix, so a reopen
