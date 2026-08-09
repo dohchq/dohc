@@ -184,8 +184,7 @@ function yDocBodyToJSON(doc: Y.Doc): JSONContent {
 export function serializeRichdocBody(root: JSONContent): string {
   const source = JSON.stringify(root)
   const sourceCharacters = new Set(source)
-  const inlineCodeEntitySentinels = new Map<string, string>()
-  const markdownSyntaxSentinels = new Map<string, string>()
+  const characterSentinels = new Map<string, string>()
   const codeBlocks = new Map<string, string>()
   const reservedTokens = new Set(
     source.match(/\uE000DOHC_[A-Z_]+_\d+\uE001/gu) ?? [],
@@ -228,12 +227,12 @@ export function serializeRichdocBody(root: JSONContent): string {
     if (content?.length) {
       content = renderInlineCodeRuns(
         content,
-        inlineCodeEntitySentinels,
+        characterSentinels,
         sourceCharacters,
       )
       content = protectMarkdownSyntax(
         content,
-        markdownSyntaxSentinels,
+        characterSentinels,
         sourceCharacters,
       )
     }
@@ -263,14 +262,7 @@ export function serializeRichdocBody(root: JSONContent): string {
   markdown = restoreCharacterSentinels(
     markdown,
     new Map(Array.from(
-      markdownSyntaxSentinels,
-      ([character, sentinel]) => [sentinel, character] as const,
-    )),
-  )
-  markdown = restoreCharacterSentinels(
-    markdown,
-    new Map(Array.from(
-      inlineCodeEntitySentinels,
+      characterSentinels,
       ([character, sentinel]) => [sentinel, character] as const,
     )),
   )
@@ -291,7 +283,6 @@ function protectMarkdownSyntax(
         sentinels,
         sourceCharacters,
         /[\\`*_[\]~]/g,
-        true,
       ),
     }
   })
@@ -341,17 +332,12 @@ function replaceCharacters(
   replacements: Map<string, string>,
   sourceCharacters: ReadonlySet<string>,
   pattern = /[&<>]/g,
-  reverseSentinelRange = false,
 ): string {
   return value.replace(pattern, character => {
     const existing = replacements.get(character)
     if (existing) return existing
 
-    const sentinel = reserveCharacterSentinel(
-      sourceCharacters,
-      replacements,
-      reverseSentinelRange,
-    )
+    const sentinel = reserveCharacterSentinel(sourceCharacters, replacements)
     replacements.set(character, sentinel)
     return sentinel
   })
@@ -445,13 +431,8 @@ function continuationPrefixForListMarker(prefix: string): string | null {
 function reserveCharacterSentinel(
   sourceCharacters: ReadonlySet<string>,
   reserved: Map<string, string>,
-  reverse = false,
 ): string {
-  for (
-    let codePoint = reverse ? 0xF8FF : 0xE002;
-    reverse ? codePoint >= 0xE002 : codePoint <= 0xF8FF;
-    codePoint += reverse ? -1 : 1
-  ) {
+  for (let codePoint = 0xE002; codePoint <= 0xF8FF; codePoint += 1) {
     const candidate = String.fromCodePoint(codePoint)
     if (
       !sourceCharacters.has(candidate)
@@ -460,7 +441,7 @@ function reserveCharacterSentinel(
       return candidate
     }
   }
-  throw new Error('could not reserve an inline-code serialization sentinel')
+  throw new Error('could not reserve a Markdown serialization sentinel')
 }
 
 function restoreCharacterSentinels(

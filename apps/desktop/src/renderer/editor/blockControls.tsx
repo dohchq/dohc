@@ -552,15 +552,8 @@ export function activeTurnIntoId(editor: Editor | null): BlockMenuTurnIntoId {
   return "paragraph";
 }
 
-/**
- * Serialize one block through the shared projection contract.
- * The storage guard keeps the plain-text fallback for editors without Markdown.
- */
-export function serializeBlockToMarkdown(
-  editor: Editor,
-  node: ProseMirrorNode,
-): string {
-  if (!editor.storage.markdown?.manager) return node.textContent;
+/** Serialize one block through the shared projection contract. */
+export function serializeBlockToMarkdown(node: ProseMirrorNode): string {
   return serializeRichdocBody(
     escapeHighlightMarkdown({ type: "doc", content: [node.toJSON()] }),
   );
@@ -583,7 +576,7 @@ export async function copyBlockAsMarkdown(
   if (!editor) return;
   const node = editor.view.state.doc.nodeAt(pos);
   if (!node) return;
-  await writeClipboardText(serializeBlockToMarkdown(editor, node));
+  await writeClipboardText(serializeBlockToMarkdown(node));
 }
 
 export function BlockMenu({

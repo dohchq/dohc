@@ -141,17 +141,6 @@ function sanitizeImageSrc(src: string): string {
   return trimmed
 }
 
-function escapedPunctuationValue(token: {
-  content?: unknown
-  text?: unknown
-  markup?: unknown
-  raw?: unknown
-}): string {
-  const content = token.content ?? token.text
-  if (content != null) return String(content)
-  return String(token.markup ?? token.raw ?? '').replace(/^\\/, '')
-}
-
 function imageAltText(token: {
   content?: unknown
   text?: unknown
@@ -277,7 +266,7 @@ const DohcEscapedPunctuation = Node.create({
 
   parseMarkdown: (token, helpers) =>
     helpers.createNode('escapedPunctuation', {
-      value: token.value ?? escapedPunctuationValue(token),
+      value: token.value,
     }),
 
   renderMarkdown: (node) =>
@@ -451,7 +440,7 @@ function findClosingHighlight(src: string): number {
 // verbatim (only its opening/closing `==` delimiters come from renderMarkdown),
 // so this escaping has to be applied to the highlight-marked text nodes before
 // serialization — see escapeHighlightMarkdown below. Each `\=` round-trips back
-// through the base `escape` token (an escapedPunctuation node whose
+// through the `dohcEscape` token (an escapedPunctuation node whose
 // renderMarkdown re-emits `\=`), so once escaped the text carries no bare `=`.
 function escapeHighlightBody(body: string): string {
   return body.replace(/=/g, '\\=')
@@ -794,7 +783,7 @@ const DohcHighlight = Mark.create({
 //   - the closing `$` must be preceded by a non-space character,
 //   - the closing `$` must NOT be immediately followed by a digit.
 // So `$5 and $6` and `a $ b` never fire, while `$x$` does. A backslash-escaped
-// `\$` is left to the base `escape` token (an escapedPunctuation node), so it
+// `\$` is left to the `dohcEscape` token (an escapedPunctuation node), so it
 // stays a literal dollar and never opens or closes math — findClosingInlineMath
 // skips `\`-escaped characters for the same reason.
 function findClosingInlineMath(src: string): number {
