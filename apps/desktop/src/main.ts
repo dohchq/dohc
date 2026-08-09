@@ -353,7 +353,6 @@ import {
   resolveDmKinds,
   runningThread,
   shareIdsToWithholdFromOrdinaryInvites,
-  withholdDmsInRequestLanes,
   type DmPeekResult,
   type DmRecordInfo,
   type ShareLogPage,
@@ -366,13 +365,15 @@ import {
 } from "./workspaces/dmRequestStore";
 import {
   classifyDmRequests,
+  classifyDmRequestsWithFallback,
+  createLastKnownDmRequestLanesCache,
   isShareAcceptedInWorkspace,
   liveSharedChannelHoldersByShareId,
   liveSharedChannelHoldersByWireId,
   otherLiveSharedChannelHolder,
   otherLiveSharedChannelHolderByWireId,
   reserveAndPullSharedChannel,
-  type DmRequestRow,
+  withholdDmsInRequestLanes,
 } from "./workspaces/dmRequests";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import {
@@ -4230,7 +4231,15 @@ function registerIpcHandlers(
       // credential snapshot instead of letting an existing engine keep the
       // previous token.
       await adoptCompletedCloudLoginSession({
-        clearCachedCredentials: () => clearCachedCredentials(),
+        // #742 P1 SECURITY (round 4): clear the DM request-lanes cache at the
+        // same session transition the credential cache clears at — otherwise
+        // a NEW account's first failed /sync/shares poll (no relay yet, or a
+        // transient failure) would be served the PREVIOUS account's cached
+        // request rows, sender emails included.
+        clearCachedCredentials: () => {
+          clearCachedCredentials();
+          lastKnownDmRequestLanes.clear();
+        },
         stopEngines: async () => await activity.stopEngines(),
         closeRelayTransportWorkspaces: async () =>
           await closeAllRelayTransportWorkspaces(),
@@ -4286,7 +4295,12 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.cloudLogout, async (event) => {
     assertTrustedSender(event);
     await runCloudLogoutTransition({
-      clearCachedCredentials: () => clearCachedCredentials(),
+      // #742 P1 SECURITY (round 4): see the login-adoption site's comment —
+      // same reasoning, same fix.
+      clearCachedCredentials: () => {
+        clearCachedCredentials();
+        lastKnownDmRequestLanes.clear();
+      },
       logout: () => cloudLogin().logout(),
       stopEngines: () => activity.stopEngines(),
       closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces(),
@@ -7182,18 +7196,12 @@ function registerIpcHandlers(
   // retryable because a grant can arrive before its channel bootstrap ops.
   const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
 
-  // #742 P1 (round 3): the last successfully classified request lanes per
-  // workspace. Staleness contract: last-known-until-next-success. When
-  // /sync/shares or classifyDmRequests fails, syncDms falls back to this
-  // instead of empty lanes — an offline poll must not un-hide a DM Leave
-  // (#742 P1-A) just withheld from the list by silently returning empty
-  // lanes, which would make it look like it stayed live. A request accepted,
-  // declined, or re-requested while offline keeps showing its PRE-OFFLINE
-  // state here until the next successful classify overwrites it.
-  const lastKnownDmRequestLanes = new Map<
-    string,
-    { pending: DmRequestRow[]; declined: DmRequestRow[] }
-  >();
+  // #742 P1 (rounds 3–4): the last successfully classified request lanes,
+  // per workspace — see createLastKnownDmRequestLanesCache's own comment for
+  // the staleness contract. Cleared at the same two sites that clear the
+  // credential cache (login adoption, logout): a new account's first failed
+  // poll must never be served the previous account's cached request rows.
+  const lastKnownDmRequestLanes = createLastKnownDmRequestLanesCache();
 
   // Peek a received chat-channel grant's kind without mutating the local store.
   // The share-log GET paginates raw rows before the
@@ -7231,13 +7239,11 @@ function registerIpcHandlers(
     await warmCredentialCache();
     const relay = dmRelayConnection();
     const store = linkedChatStoreFor(workspace);
-    // #742 P1 (round 3): seed from the last successful classify, not [] — see
-    // lastKnownDmRequestLanes' own comment for the staleness contract.
-    const lastKnownLanes = lastKnownDmRequestLanes.get(workspace.workspaceId);
-    let pending: DmRequestRow[] = lastKnownLanes?.pending ?? [];
-    let declined: DmRequestRow[] = lastKnownLanes?.declined ?? [];
-    if (relay) {
-      try {
+    const { pending, declined } = await classifyDmRequestsWithFallback({
+      workspaceId: workspace.workspaceId,
+      cache: lastKnownDmRequestLanes,
+      classify: async () => {
+        if (!relay) throw new Error("DM sync is unavailable: not signed in.");
         const listing = await relayShareJson<{
           received?: Array<{
             shareId?: unknown;
@@ -7245,7 +7251,11 @@ function registerIpcHandlers(
             selector?: { kind?: unknown; channelWireId?: unknown };
           }>;
         }>("/sync/shares");
-        ({ pending, declined } = await classifyDmRequests({
+        // Re-derived on EVERY call, not a snapshot taken once: classifyDmRequests
+        // calls this twice, before and after its own async peek, specifically to
+        // catch a grant accepted elsewhere mid-poll (PR #737 round 6) — freezing
+        // it here would silently reopen that race.
+        return classifyDmRequests({
           received: listing.received ?? [],
           kindCache: peekedReceivedGrantKinds,
           peekKind: (shareId) => peekReceivedGrantKindForShare(relay, shareId),
@@ -7254,8 +7264,11 @@ function registerIpcHandlers(
           holdersByWireId: () =>
             liveSharedChannelHoldersByWireId(listWorkspaces()),
           declinedShareIds: readDeclinedDms(dmRequestFile()),
-        }));
-        lastKnownDmRequestLanes.set(workspace.workspaceId, { pending, declined });
+        });
+      },
+    });
+    if (relay) {
+      try {
         // Push the member's local ops, pull everyone else's, for the joined
         // DMs (and other shared channels) this bounded pass reaches. The DM the
         // caller has OPEN is named, so the 4 s poll behind an open conversation
@@ -7271,8 +7284,9 @@ function registerIpcHandlers(
         activity.queueCloudSync(workspace.workspaceId);
       } catch (error) {
         // Offline degradation: never a crash, never a blocked Chats view — the
-        // local DM list still serves and the next pass retries. pending/
-        // declined already hold the last-known lanes seeded above.
+        // local DM list still serves and the next pass retries. Unrelated to
+        // pending/declined above, which classifyDmRequestsWithFallback already
+        // resolved (freshly, or from the last-known cache).
         console.error(`[desktop] DM sync failed for ${workspace.rootPath}:`, error);
       }
     }
@@ -7284,9 +7298,17 @@ function registerIpcHandlers(
     const requestShareIds = new Set(
       [...pending, ...declined].map((row) => row.shareId),
     );
+    // Fresh, AFTER classify resolves — not reused from before it, which could
+    // be stale by the time the withhold decision actually needs it.
+    const holdersByShareId = liveSharedChannelHoldersByShareId(listWorkspaces());
     return SyncDmsResult.parse({
       available: relay !== null,
-      dms: withholdDmsInRequestLanes(dms, requestShareIds).map(dmRecordForIpc),
+      dms: withholdDmsInRequestLanes({
+        dms,
+        requestShareIds,
+        holdersByShareId,
+        workspaceId: workspace.workspaceId,
+      }).map(dmRecordForIpc),
       pending,
       declined,
     });

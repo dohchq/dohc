@@ -113,6 +113,58 @@ export function isShareAcceptedInWorkspace(
   );
 }
 
+function hasOtherLiveHolder(
+  holdersByShareId: ReadonlyMap<string, ReadonlySet<string>>,
+  shareId: string,
+  workspaceId: string,
+): boolean {
+  const holders = holdersByShareId.get(shareId);
+  if (!holders) return false;
+  for (const holder of holders) {
+    if (holder !== workspaceId) return true;
+  }
+  return false;
+}
+
+// One identity, one place: an ended participant row is withheld from the DM
+// list while its share is EITHER a pending/declined request OR held LIVE by
+// another workspace (#742 P1-A / round 4). Without the request-lane half,
+// Leave would end the row but the same conversation stays visible here too —
+// listDmRecords keeps an ended participant row readable (connected:false) on
+// purpose, so an owner-revoked grant's history survives after the owner ends
+// it, and Leave doesn't revoke anything, so the grant stays "received" and
+// classifyDmRequests re-lists it. Without the live-elsewhere half: leave in
+// workspace A, accept the SAME request into workspace B, and the share
+// leaves the request lanes the moment B holds it live — A's request-lane
+// check alone would stop withholding and the ended row would reappear in A's
+// list. holdersByShareId is built the same way classifyDmRequests's own
+// holdersByShareId callback builds it (liveSharedChannelHoldersByShareId) —
+// but derive it FRESH, after classify resolves, not reused from before:
+// classify itself re-derives its own copy mid-call specifically to catch a
+// grant accepted elsewhere while it awaits (PR #737 round 6), so a snapshot
+// taken any earlier can already be stale by the time this runs. An
+// owner-revoked row is unaffected by either check: no request (its grant
+// left the relay's received listing) and no other live holder (nobody
+// accepted anything).
+export function withholdDmsInRequestLanes<T extends { shareId: string | null }>(
+  input: {
+    dms: readonly T[];
+    requestShareIds: ReadonlySet<string>;
+    holdersByShareId: ReadonlyMap<string, ReadonlySet<string>>;
+    workspaceId: string;
+  },
+): T[] {
+  return input.dms.filter((dm) => {
+    if (dm.shareId === null) return true;
+    if (input.requestShareIds.has(dm.shareId)) return false;
+    return !hasOtherLiveHolder(
+      input.holdersByShareId,
+      dm.shareId,
+      input.workspaceId,
+    );
+  });
+}
+
 export async function classifyDmRequests(input: {
   received: readonly ReceivedDmGrantRow[];
   kindCache: Map<string, "dm" | "not-dm">;
@@ -169,6 +221,57 @@ export async function classifyDmRequests(input: {
     pending: requests.filter((row) => !declinedShareIds.has(row.shareId)),
     declined: requests.filter((row) => declinedShareIds.has(row.shareId)),
   };
+}
+
+export interface DmRequestLanes {
+  pending: DmRequestRow[];
+  declined: DmRequestRow[];
+}
+
+// #742 P1 (rounds 3–4): the last successfully classified request lanes, per
+// workspace. Staleness contract: last-known-until-next-success OR
+// session-transition. set() is called only after a SUCCESSFUL classify —
+// never on failure, which is what makes "last known" mean something. clear()
+// must run at every credential-cache-clearing session transition (logout,
+// login adoption) — main.ts wires this in beside its own credential cache
+// clear, so a new account's first failed poll is never served the previous
+// account's cached request rows (a real cross-account leak: sender emails
+// included).
+export function createLastKnownDmRequestLanesCache() {
+  const lanes = new Map<string, DmRequestLanes>();
+  return {
+    get(workspaceId: string): DmRequestLanes | undefined {
+      return lanes.get(workspaceId);
+    },
+    set(workspaceId: string, next: DmRequestLanes): void {
+      lanes.set(workspaceId, next);
+    },
+    // Account-wide: a session transition is never scoped to one workspace.
+    clear(): void {
+      lanes.clear();
+    },
+  };
+}
+export type LastKnownDmRequestLanesCache = ReturnType<
+  typeof createLastKnownDmRequestLanesCache
+>;
+
+// Resolve a workspace's request lanes, falling back to the cache on failure
+// and recording a fresh cache entry on success. classify() carries every
+// side effect (the relay fetch, logging) — this stays pure so it is testable
+// without a relay, a workspace, or main.ts's Electron-only closures.
+export async function classifyDmRequestsWithFallback(input: {
+  workspaceId: string;
+  cache: LastKnownDmRequestLanesCache;
+  classify: () => Promise<DmRequestLanes>;
+}): Promise<DmRequestLanes> {
+  try {
+    const result = await input.classify();
+    input.cache.set(input.workspaceId, result);
+    return result;
+  } catch {
+    return input.cache.get(input.workspaceId) ?? { pending: [], declined: [] };
+  }
 }
 
 export async function reserveAndPullSharedChannel(input: {

@@ -12,16 +12,18 @@ import {
   requireShareableChatChannel,
   resolveDmKinds,
   shareIdsToWithholdFromOrdinaryInvites,
-  withholdDmsInRequestLanes,
   type ShareLogPage,
 } from "./dmChats";
 import {
   classifyDmRequests,
+  classifyDmRequestsWithFallback,
+  createLastKnownDmRequestLanesCache,
   isShareAcceptedInWorkspace,
   liveSharedChannelHoldersByShareId,
   liveSharedChannelHoldersByWireId,
   otherLiveSharedChannelHolderByWireId,
   reserveAndPullSharedChannel,
+  withholdDmsInRequestLanes,
 } from "./dmRequests";
 import type { JoinedSharedChannel } from "./registryStore";
 import { endJoinedChannel } from "./sharedChannels";
@@ -1305,19 +1307,179 @@ describe("withholdDmsInRequestLanes", () => {
     const endedDeclined = { shareId: "share-declined", connected: false };
     const liveOther = { shareId: "share-other", connected: true };
     const owned = { shareId: null, connected: true };
-    const result = withholdDmsInRequestLanes(
-      [endedLeft, endedDeclined, liveOther, owned],
-      new Set(["share-left", "share-declined"]),
-    );
+    const result = withholdDmsInRequestLanes({
+      dms: [endedLeft, endedDeclined, liveOther, owned],
+      requestShareIds: new Set(["share-left", "share-declined"]),
+      holdersByShareId: new Map(),
+      workspaceId: "workspace-a",
+    });
     expect(result).toEqual([liveOther, owned]);
   });
 
-  it("leaves an owner-revoked ended row alone: its shareId never reaches the request lanes", () => {
+  it("leaves the owner-revoked tombstone case alone: no request AND no other live holder", () => {
     // The owner-revoked case: the grant is gone from the relay's received
-    // listing, so classifyDmRequests never re-lists it — requestShareIds
-    // simply does not contain it, and the filter is a no-op here.
+    // listing (no request), and nobody accepted it anywhere (no live
+    // holder) — both checks pass it through.
     const revoked = { shareId: "share-revoked", connected: false };
-    const result = withholdDmsInRequestLanes([revoked], new Set());
+    const result = withholdDmsInRequestLanes({
+      dms: [revoked],
+      requestShareIds: new Set(),
+      holdersByShareId: new Map(),
+      workspaceId: "workspace-a",
+    });
     expect(result).toEqual([revoked]);
+  });
+
+  // #742 P1 (round 4): leave in workspace A, accept the SAME request into
+  // workspace B — the share leaves the request lanes the moment B holds it
+  // live, and the request-lane check ALONE would stop withholding it, so A's
+  // ended row would reappear. Built through the REAL holder-map function
+  // (liveSharedChannelHoldersByShareId), not a hand-typed Map, so this proves
+  // the actual integration, not just the filter's own arithmetic.
+  it("withholds an ended row whose share is held live by another workspace, even once it leaves the request lanes", () => {
+    const endedInA = joined({
+      shareId: "share-x",
+      channelWireId: "wire-x",
+      ended: true,
+    });
+    const liveInB = joined({
+      shareId: "share-x",
+      channelWireId: "wire-x",
+    });
+    const workspaces = [
+      { workspaceId: "workspace-a", rootPath: "/a", sharedChannels: [endedInA] },
+      { workspaceId: "workspace-b", rootPath: "/b", sharedChannels: [liveInB] },
+    ];
+    const holdersByShareId = liveSharedChannelHoldersByShareId(workspaces);
+    expect(holdersByShareId.get("share-x")).toEqual(new Set(["workspace-b"]));
+
+    const result = withholdDmsInRequestLanes({
+      dms: [{ shareId: "share-x", connected: false }],
+      // Accepted elsewhere: the share is no longer a request anywhere.
+      requestShareIds: new Set(),
+      holdersByShareId,
+      workspaceId: "workspace-a",
+    });
+    expect(result).toEqual([]);
+  });
+
+  it("does not withhold a live holder held by the SAME workspace (not 'other')", () => {
+    const liveHere = joined({ shareId: "share-y", channelWireId: "wire-y" });
+    const workspaces = [
+      { workspaceId: "workspace-a", rootPath: "/a", sharedChannels: [liveHere] },
+    ];
+    const holdersByShareId = liveSharedChannelHoldersByShareId(workspaces);
+    const result = withholdDmsInRequestLanes({
+      dms: [{ shareId: "share-y", connected: true }],
+      requestShareIds: new Set(),
+      holdersByShareId,
+      workspaceId: "workspace-a",
+    });
+    expect(result).toEqual([{ shareId: "share-y", connected: true }]);
+  });
+});
+
+// #742 P1 (rounds 3–4): the syncDms fallback + session-transition machinery,
+// extracted pure and dependency-injected so it gets real executing coverage
+// (the #737 precedent for anything that would otherwise be a main.ts-only
+// closure).
+describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", () => {
+  const laneA = { pending: [{ shareId: "share-a", granterEmail: "a@x.com" }], declined: [] };
+  const laneB = { pending: [{ shareId: "share-b", granterEmail: "b@x.com" }], declined: [] };
+
+  it("seeds from the cache on a classify failure (offline / relay error)", async () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    cache.set("workspace-a", laneA);
+    const result = await classifyDmRequestsWithFallback({
+      workspaceId: "workspace-a",
+      cache,
+      classify: async () => {
+        throw new Error("relay unreachable");
+      },
+    });
+    expect(result).toEqual(laneA);
+  });
+
+  it("returns empty lanes on failure when nothing was ever cached for this workspace", async () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    const result = await classifyDmRequestsWithFallback({
+      workspaceId: "workspace-a",
+      cache,
+      classify: async () => {
+        throw new Error("relay unreachable");
+      },
+    });
+    expect(result).toEqual({ pending: [], declined: [] });
+  });
+
+  it("overwrites the cache on a successful classify, so the NEXT failure falls back to the NEW value", async () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    cache.set("workspace-a", laneA);
+    const succeeded = await classifyDmRequestsWithFallback({
+      workspaceId: "workspace-a",
+      cache,
+      classify: async () => laneB,
+    });
+    expect(succeeded).toEqual(laneB);
+
+    const fellBack = await classifyDmRequestsWithFallback({
+      workspaceId: "workspace-a",
+      cache,
+      classify: async () => {
+        throw new Error("relay unreachable");
+      },
+    });
+    expect(fellBack).toEqual(laneB);
+  });
+
+  it("never records a failed classify's result", async () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    await classifyDmRequestsWithFallback({
+      workspaceId: "workspace-a",
+      cache,
+      classify: async () => {
+        throw new Error("relay unreachable");
+      },
+    });
+    expect(cache.get("workspace-a")).toBeUndefined();
+  });
+
+  // #742 P1 SECURITY (round 4): the cross-account leak this whole cache
+  // exists to close. Without clear() at a session transition, a signed-in
+  // account's cached rows (sender emails included) would answer for whoever
+  // signs in next, the moment their own first poll fails.
+  it("clear() removes every workspace's cached lanes, so a session transition can never leak the previous account's rows", async () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    cache.set("workspace-a", laneA);
+    cache.set("workspace-b", laneB);
+
+    cache.clear();
+
+    expect(
+      await classifyDmRequestsWithFallback({
+        workspaceId: "workspace-a",
+        cache,
+        classify: async () => {
+          throw new Error("no relay yet for the new account");
+        },
+      }),
+    ).toEqual({ pending: [], declined: [] });
+    expect(
+      await classifyDmRequestsWithFallback({
+        workspaceId: "workspace-b",
+        cache,
+        classify: async () => {
+          throw new Error("no relay yet for the new account");
+        },
+      }),
+    ).toEqual({ pending: [], declined: [] });
+  });
+
+  it("keeps each workspace's cache independent", () => {
+    const cache = createLastKnownDmRequestLanesCache();
+    cache.set("workspace-a", laneA);
+    cache.set("workspace-b", laneB);
+    expect(cache.get("workspace-a")).toEqual(laneA);
+    expect(cache.get("workspace-b")).toEqual(laneB);
   });
 });

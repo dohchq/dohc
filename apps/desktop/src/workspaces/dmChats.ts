@@ -142,24 +142,6 @@ export async function listDmRecords(input: {
   );
 }
 
-// One identity, one place: a DM whose share currently appears in the request
-// lanes (pending or declined) is withheld from the DM list, and the
-// request-lane representation wins. Without this, Leave (#742) would end the
-// row but the conversation would stay visible here too — listDmRecords keeps
-// an ended participant row readable (connected:false) on purpose, so an
-// owner-revoked grant's history survives after the owner ends it. Leaving
-// yourself doesn't revoke anything, so the grant is still "received" and
-// classifyDmRequests re-lists it — this filter is what makes that re-listing
-// also remove the old placement instead of duplicating it. An owner-revoked
-// row is unaffected: its grant is gone from the relay's received listing, so
-// it never reaches the request lanes and this filter leaves it in the list.
-export function withholdDmsInRequestLanes<T extends { shareId: string | null }>(
-  dms: readonly T[],
-  requestShareIds: ReadonlySet<string>,
-): T[] {
-  return dms.filter((dm) => dm.shareId === null || !requestShareIds.has(dm.shareId));
-}
-
 // One page of a relay share-log GET (`/sync/shares/:id/log`): the relay
 // paginates RAW log rows and applies the share filter AFTER, so `ops` can be
 // empty while `hasMore` is true and the cursor still advances over the dropped

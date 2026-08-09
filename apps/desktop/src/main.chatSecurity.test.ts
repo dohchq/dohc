@@ -326,7 +326,7 @@ describe("main-process chat authorization", () => {
 
   it("keeps received DMs as requests until acceptDm chooses a workspace", () => {
     const sync = handlerSource("syncDms");
-    expect(sync).toContain("await classifyDmRequests({");
+    expect(sync).toContain("return classifyDmRequests({");
     expect(sync).toContain("pending,");
     expect(sync).toContain("declined,");
     expect(sync).not.toContain("mergeJoinedChannel(");
@@ -405,7 +405,7 @@ describe("main-process chat authorization", () => {
 
   it("keeps accepted DMs in syncDms when the declined-request store is unreadable", () => {
     const handler = handlerSource("syncDms");
-    const classifyAt = handler.indexOf("await classifyDmRequests({");
+    const classifyAt = handler.indexOf("classify: async () => {");
     const listAcceptedAt = handler.indexOf("const dms = await listDmRecords({");
     const resultAt = handler.indexOf("return SyncDmsResult.parse({");
     expect(handler).toContain(
@@ -414,80 +414,81 @@ describe("main-process chat authorization", () => {
     expect(classifyAt).toBeGreaterThan(-1);
     expect(listAcceptedAt).toBeGreaterThan(classifyAt);
     expect(resultAt).toBeGreaterThan(listAcceptedAt);
-    expect(handler.slice(resultAt)).toContain(
-      "dms: withholdDmsInRequestLanes(dms, requestShareIds).map(dmRecordForIpc)",
-    );
+    expect(handler.slice(resultAt)).toContain("dms: withholdDmsInRequestLanes({");
+    expect(handler.slice(resultAt)).toContain("}).map(dmRecordForIpc)");
   });
 
-  // #742 P1-A: without this, a DM whose row Leave just ended stays visible in
-  // BOTH `dms` (listDmRecords' readable-tombstone row, connected:false) and
-  // `pending` (classifyDmRequests re-listing it) — the same conversation
-  // shown twice. The withhold set must be keyed off pending AND declined
-  // (declining a re-request must not un-hide the old list entry either), and
-  // computed AFTER classifyDmRequests, from what it actually returned.
-  it("withholds a DM from the list once its shareId reaches either request lane", () => {
+  // #742 P1-A / round 4: without this, a DM whose row Leave just ended stays
+  // visible in BOTH `dms` (listDmRecords' readable-tombstone row,
+  // connected:false) and a request lane (classifyDmRequests re-listing it)
+  // OR held live by another workspace (accepted elsewhere) — the same
+  // conversation shown twice either way. requestShareIds is keyed off
+  // pending AND declined; holdersByShareId is derived AFTER classify
+  // resolves (dmRequests.ts's own executing tests cover the filter's actual
+  // arithmetic and the stale-snapshot risk in detail — this pin only checks
+  // main.ts wires the pieces in the right order).
+  it("wires the withhold call with request lanes AND a post-classify holders snapshot", () => {
     const handler = handlerSource("syncDms");
-    const classifyAt = handler.indexOf("await classifyDmRequests({");
+    const classifyAt = handler.indexOf("classify: async () => {");
     const requestShareIdsAt = handler.indexOf("const requestShareIds = new Set(");
-    const resultAt = handler.indexOf("return SyncDmsResult.parse({");
+    const holdersAt = handler.indexOf(
+      "const holdersByShareId = liveSharedChannelHoldersByShareId(listWorkspaces());",
+    );
+    const withholdAt = handler.indexOf("dms: withholdDmsInRequestLanes({");
     expect(classifyAt).toBeGreaterThan(-1);
     expect(requestShareIdsAt).toBeGreaterThan(classifyAt);
-    expect(resultAt).toBeGreaterThan(requestShareIdsAt);
-    expect(handler.slice(requestShareIdsAt, resultAt)).toContain(
+    expect(holdersAt).toBeGreaterThan(requestShareIdsAt);
+    expect(withholdAt).toBeGreaterThan(holdersAt);
+    expect(handler.slice(requestShareIdsAt, withholdAt)).toContain(
       "[...pending, ...declined].map((row) => row.shareId)",
+    );
+    expect(handler.slice(withholdAt)).toContain("requestShareIds,");
+    expect(handler.slice(withholdAt)).toContain("holdersByShareId,");
+    expect(handler.slice(withholdAt)).toContain(
+      "workspaceId: workspace.workspaceId,",
     );
   });
 
-  // #742 P1 (round 3): without this, a failed /sync/shares or
-  // classifyDmRequests call resets pending/declined to [] — the withhold set
-  // (previous pin) then sees no claimed shareIds, and a DM Leave just
-  // withheld from the list bounces right back in as a stale ended row. The
-  // fix is stale-until-next-success: seed from the last successful classify
-  // BEFORE the network attempt, and only overwrite the cache on success — the
-  // catch block must never reset pending/declined itself.
-  it("falls back to the last successfully classified request lanes on a relay/classify failure", () => {
+  // #742 P1 (rounds 3–4): the fallback/staleness ARITHMETIC now has real
+  // executing coverage (classifyDmRequestsWithFallback /
+  // createLastKnownDmRequestLanesCache in dmChats.test.ts, per the #737
+  // precedent for anything main.ts cannot be imported to exercise directly).
+  // This pin only checks main.ts's WIRING: syncDms routes classify through
+  // the shared fallback cache, keyed per workspace.
+  it("routes syncDms's classify through classifyDmRequestsWithFallback with the shared cache", () => {
     const handler = handlerSource("syncDms");
-    const lastKnownAt = handler.indexOf(
-      "const lastKnownLanes = lastKnownDmRequestLanes.get(workspace.workspaceId);",
+    expect(handler).toContain("await classifyDmRequestsWithFallback({");
+    expect(handler).toContain("workspaceId: workspace.workspaceId,");
+    expect(handler).toContain("cache: lastKnownDmRequestLanes,");
+    expect(mainSource).toContain(
+      "const lastKnownDmRequestLanes = createLastKnownDmRequestLanesCache();",
     );
-    const pendingSeedAt = handler.indexOf(
-      "let pending: DmRequestRow[] = lastKnownLanes?.pending ?? [];",
-    );
-    const declinedSeedAt = handler.indexOf(
-      "let declined: DmRequestRow[] = lastKnownLanes?.declined ?? [];",
-    );
-    const relayIfAt = handler.indexOf("if (relay) {");
-    const classifyAt = handler.indexOf("await classifyDmRequests({");
-    const cacheSetAt = handler.indexOf(
-      "lastKnownDmRequestLanes.set(workspace.workspaceId, { pending, declined });",
-    );
-    const catchAt = handler.indexOf("} catch (error) {");
-    const catchEnd = handler.indexOf("\n    }\n    const dms = await listDmRecords({");
-    expect(lastKnownAt).toBeGreaterThan(-1);
-    expect(pendingSeedAt).toBeGreaterThan(lastKnownAt);
-    expect(declinedSeedAt).toBeGreaterThan(pendingSeedAt);
-    expect(relayIfAt).toBeGreaterThan(declinedSeedAt);
-    expect(classifyAt).toBeGreaterThan(relayIfAt);
-    // The cache updates only on the SUCCESS path, right after classify.
-    expect(cacheSetAt).toBeGreaterThan(classifyAt);
-    expect(catchAt).toBeGreaterThan(cacheSetAt);
-    expect(catchEnd).toBeGreaterThan(catchAt);
-    // The catch block itself never reassigns pending/declined — the seeded
-    // (or newly classified, if classify succeeded before a later step threw)
-    // values simply stand.
-    const catchBlock = handler.slice(catchAt, catchEnd);
-    expect(catchBlock).not.toContain("pending =");
-    expect(catchBlock).not.toContain("declined =");
-    expect(catchBlock).not.toContain("lastKnownDmRequestLanes.set(");
+  });
 
-    // The cache itself is workspace-keyed, matching listWorkspaces/
-    // findWorkspace's own per-workspace scoping everywhere else in this file.
-    const cacheDeclAt = mainSource.indexOf(
-      "const lastKnownDmRequestLanes = new Map<",
+  // #742 P1 SECURITY (round 4): a NEW account's first failed poll must never
+  // be served the PREVIOUS account's cached request rows, sender emails
+  // included. The cache clears at the exact two sites that clear the
+  // credential cache — login adoption and logout — never at the 401 path
+  // (a token refresh within the SAME account, not an account change).
+  it("clears the DM request-lanes cache at both credential-cache session transitions", () => {
+    const adoptStart = mainSource.indexOf(
+      "await adoptCompletedCloudLoginSession({",
     );
-    expect(cacheDeclAt).toBeGreaterThan(-1);
-    expect(mainSource.slice(cacheDeclAt, cacheDeclAt + 400)).toContain(
-      "{ pending: DmRequestRow[]; declined: DmRequestRow[] }",
+    const adoptEnd = mainSource.indexOf("stopEngines: async () => await activity.stopEngines(),", adoptStart);
+    expect(adoptStart).toBeGreaterThan(-1);
+    expect(adoptEnd).toBeGreaterThan(adoptStart);
+    expect(mainSource.slice(adoptStart, adoptEnd)).toContain(
+      "lastKnownDmRequestLanes.clear();",
+    );
+
+    const logoutStart = mainSource.indexOf(
+      "await runCloudLogoutTransition({",
+    );
+    const logoutEnd = mainSource.indexOf("logout: () => cloudLogin().logout(),", logoutStart);
+    expect(logoutStart).toBeGreaterThan(-1);
+    expect(logoutEnd).toBeGreaterThan(logoutStart);
+    expect(mainSource.slice(logoutStart, logoutEnd)).toContain(
+      "lastKnownDmRequestLanes.clear();",
     );
   });
 

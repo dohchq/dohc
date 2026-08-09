@@ -15,7 +15,7 @@ import {
   reconcileResolvedChatDecision,
   type ChatsNav,
 } from "./ChatsView";
-import { withholdDmsInRequestLanes } from "../../workspaces/dmChats";
+import { withholdDmsInRequestLanes } from "../../workspaces/dmRequests";
 
 type TestChatsViewProps = Omit<
   Parameters<typeof ProductionChatsView>[0],
@@ -6203,7 +6203,12 @@ describe("ChatsView direct messages", () => {
         .mockResolvedValueOnce({ available: true, dms: [participant], pending: [], declined: [] })
         .mockResolvedValue({
           available: true,
-          dms: withholdDmsInRequestLanes([endedRow], new Set(["share-dm-1"])),
+          dms: withholdDmsInRequestLanes({
+            dms: [endedRow],
+            requestShareIds: new Set(["share-dm-1"]),
+            holdersByShareId: new Map(),
+            workspaceId: "workspace-a",
+          }),
           pending: [reappearedRequest],
           declined: [],
         });
