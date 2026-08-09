@@ -3574,8 +3574,13 @@ export function DesktopWorkspaceShell(props: {
 
   // The editor is the one live conversation surface. It owns presence,
   // drafts, and navigation state.
+  const dmWorkspaceOptions = props.workspaces.map((workspace) => ({
+    workspaceId: workspace.workspaceId,
+    label: workspaceName(workspace),
+  }));
   const chatsViewProps = {
     workspaceId,
+    workspaces: dmWorkspaceOptions,
     initialNav: chatsNav.current ?? undefined,
     initialDrafts: chatsDrafts.current ?? undefined,
     onNavChange: onChatsNav,
@@ -3597,6 +3602,7 @@ export function DesktopWorkspaceShell(props: {
   // transport so the navigator cannot create a duplicate presence lease.
   const chatsNavigatorProps = {
     workspaceId,
+    workspaces: dmWorkspaceOptions,
     selectedNav: selectedChatsNav ?? undefined,
     readRevision: chatsReadRevision,
     onOpenInTab: openChatsNavInTab,

@@ -39,7 +39,11 @@ import {
   SendChatMessagePayload,
   SendChatMessageResult,
   SetChatReactionPayload,
+  AcceptDmPayload,
+  DeclineDmPayload,
+  RequestDmAgainPayload,
   StartDmPayload,
+  SyncDmsResult,
   SyncStatusResult,
   ListWorkspaceVersionsResult,
   ResolveWorkspaceVersionConflictPayload,
@@ -66,6 +70,28 @@ import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 
 describe("chat IPC contract", () => {
+  it("validates DM request lanes and their account/workspace mutations", () => {
+    const request = { shareId: "share-1", granterEmail: "sender@example.com" };
+    expect(
+      SyncDmsResult.parse({
+        available: true,
+        dms: [],
+        pending: [request],
+        declined: [{ shareId: "share-2", granterEmail: null }],
+      }),
+    ).toMatchObject({ pending: [request] });
+    expect(
+      AcceptDmPayload.parse({ workspaceId: "workspace-a", shareId: "share-1" }),
+    ).toEqual({ workspaceId: "workspace-a", shareId: "share-1" });
+    expect(DeclineDmPayload.parse({ shareId: "share-1" })).toEqual({
+      shareId: "share-1",
+    });
+    expect(RequestDmAgainPayload.parse({ shareId: "share-1" })).toEqual({
+      shareId: "share-1",
+    });
+    expect(SyncDmsResult.safeParse({ available: true, dms: [] }).success).toBe(false);
+  });
+
   it("accepts an opaque shared attachment without local object metadata", () => {
     expect(
       ChatAttachmentRecord.parse({

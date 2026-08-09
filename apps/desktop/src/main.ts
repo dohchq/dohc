@@ -162,6 +162,10 @@ import {
   ListChatReactionsResult,
   SetChatReactionPayload,
   SetChatReactionResult,
+  AcceptDmPayload,
+  AcceptDmResult,
+  DeclineDmPayload,
+  RequestDmAgainPayload,
   SyncDmsPayload,
   SyncDmsResult,
   StartDmPayload,
@@ -351,7 +355,11 @@ import {
   type ShareLogPage,
 } from "./workspaces/dmChats";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
-import { claimDmHome, readDmHome, readDmHomes } from "./workspaces/dmHomeStore";
+import {
+  declineDm,
+  readDeclinedDms,
+  requestDmAgain,
+} from "./workspaces/dmRequestStore";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import {
   adoptCompletedCloudLoginSession,
@@ -4590,11 +4598,10 @@ function registerIpcHandlers(
     }),
   );
 
-  // Received shares another local workspace already claimed — joined into its
-  // registry, or pinned to it by the account-level DM home map. A received
-  // grant is account-wide, so the relay answers the same lane in every
-  // workspace; scoping it here is what keeps one workspace's sharing surface
-  // independent of another's (#618).
+  // Received shares another local workspace already joined into its registry.
+  // A received grant is account-wide, so the relay answers the same lane in
+  // every workspace. Scoping keeps each workspace's sharing surface separate
+  // (#618).
   function shareIdsClaimedByOtherWorkspaces(workspaceId: string): Set<string> {
     const claimed = new Set<string>();
     for (const entry of listWorkspaces()) {
@@ -4610,9 +4617,6 @@ function registerIpcHandlers(
         if (channel.ended === true) continue;
         claimed.add(channel.shareId);
       }
-    }
-    for (const [shareId, homeWorkspaceId] of Object.entries(readDmHomes(dmHomeFile()))) {
-      if (homeWorkspaceId !== workspaceId) claimed.add(shareId);
     }
     return claimed;
   }
@@ -4631,6 +4635,14 @@ function registerIpcHandlers(
     // or switch landing mid-flight cannot drift them apart.
     await warmCredentialCache();
     const credentials = cachedCredentials;
+    const shareIdsClaimedElsewhere = shareIdsClaimedByOtherWorkspaces(
+      input.workspaceId,
+    );
+    // A syncDms poll fills the kind cache. Before that first peek, a new DM can
+    // appear in both received lanes briefly; the next Chats poll removes it.
+    for (const [shareId, kind] of peekedReceivedGrantKinds) {
+      if (kind === "dm") shareIdsClaimedElsewhere.add(shareId);
+    }
     const relay = await readRelayChatShareLanes({
       fetchListing: async () => {
         if (!credentials) throw new RelaySessionError("Sign in to dohc Cloud first.");
@@ -4640,7 +4652,7 @@ function registerIpcHandlers(
         }>(credentials, "/sync/shares");
       },
       remoteWorkspaceId: entry.remote?.remoteWorkspaceId ?? null,
-      shareIdsClaimedElsewhere: shareIdsClaimedByOtherWorkspaces(input.workspaceId),
+      shareIdsClaimedElsewhere,
     });
     // The caller's channels PLUS the invitations this answer is about to hand
     // it. The sharing surface shows both, and for each invitation it decides
@@ -7049,8 +7061,8 @@ function registerIpcHandlers(
   // A DM is a `kind:"dm"` channel plus one MU-C4 chat-channel grant per
   // participant, riding the shared-channel lane. The whole surface is gated on
   // collaboration: signed out / no relay ⇒ available:false and the renderer
-  // shows nothing. Authorization lives at the relay — everything here is
-  // orchestration (born-shared auto-grant / auto-join) + display.
+  // shows nothing. Authorization lives at the relay. This layer lists
+  // requests, accepts them into a workspace, and displays established DMs.
 
   // The relay connection DMs ride, or null when collaboration is off.
   function dmRelayConnection(): SyncRelayConnection | null {
@@ -7076,21 +7088,18 @@ function registerIpcHandlers(
     };
   }
 
-  // The account-level DM homing map file (spans every workspace) — lives in the
-  // account/user data dir, never a single workspace's engine db.
-  function dmHomeFile(): string {
-    return join(stateDir(), "dohc-dm-homes.json");
+  // The account-level declined-request file spans every workspace. Accepted
+  // DMs live only in the chosen workspace's shared-channel registry.
+  function dmRequestFile(): string {
+    return join(stateDir(), "dohc-dm-requests.json");
   }
 
-  // Received chat-channel shares whose authoritative channel.create was
-  // observed with the ordinary "channel" kind. Cached so a manual-join invite
-  // is probed once, while an empty/unbootstrapped log remains retryable: the relay
-  // can expose the grant before the owner's channel bootstrap ops arrive.
-  const peekedNonDmShareIds = new Set<string>();
+  // Confirmed received-grant kinds. An empty/unbootstrapped log stays
+  // retryable because a grant can arrive before its channel bootstrap ops.
+  const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
 
-  // Peek a received chat-channel grant's kind WITHOUT mutating the local store:
-  // only `kind:"dm"` grants auto-join — a regular shared-channel grant is left
-  // to explicit manual join. The share-log GET paginates RAW rows before the
+  // Peek a received chat-channel grant's kind without mutating the local store.
+  // The share-log GET paginates raw rows before the
   // share filter, so the peek must PAGE through nextCursor until the first
   // served op (the channel.create bootstrap) appears — reading only the first
   // page is a permanent false negative on any log with an earlier filtered op
@@ -7112,25 +7121,42 @@ function registerIpcHandlers(
     });
   }
 
-  // Auto-join every received DM grant not yet joined: pull the share's log into
-  // this workspace's own chat store and register it in the shared-channel
-  // registry (the SAME rows manual joins use), so subsequent passes sync it
-  // bidirectionally through `syncWorkspaceSharedChannels`. Regular shared
-  // channels are skipped — they stay manual-join.
-  async function autoJoinReceivedDms(
-    workspace: { workspaceId: string; rootPath: string },
+  function shareIdsClaimedByAnyWorkspace(): Set<string> {
+    const claimed = new Set<string>();
+    for (const entry of listWorkspaces()) {
+      for (const channel of entry.sharedChannels ?? []) claimed.add(channel.shareId);
+    }
+    return claimed;
+  }
+
+  function dmAcceptedByOtherWorkspace(
+    shareId: string,
+    workspaceId: string,
+  ): boolean {
+    return listWorkspaces().some(
+      (candidate) =>
+        candidate.workspaceId !== workspaceId &&
+        (candidate.sharedChannels ?? []).some(
+          (channel) => channel.shareId === shareId,
+        ),
+    );
+  }
+
+  // Refresh immutable DM/channel kind facts for unaccepted received grants.
+  // This reads relay state only: accepting is the sole path that registers and
+  // pulls a received DM into a workspace.
+  async function refreshDmRequestKinds(
     relay: SyncRelayConnection,
-  ): Promise<void> {
-    const joinCredentials = cachedCredentials;
-    const relayUrl = joinCredentials?.relayUrl;
-    if (!joinCredentials || !relayUrl) return;
-    const recipientUserId = joinCredentials.userId;
+  ): Promise<Array<{ shareId: string; granterEmail: string | null }>> {
     const listing = await relayShareJson<{
       received?: Array<{
         shareId?: unknown;
+        granterEmail?: unknown;
         selector?: { kind?: unknown; channelWireId?: unknown };
       }>;
     }>("/sync/shares");
+    const claimed = shareIdsClaimedByAnyWorkspace();
+    const received: Array<{ shareId: string; granterEmail: string | null }> = [];
     for (const row of listing.received ?? []) {
       const shareId = typeof row.shareId === "string" ? row.shareId : null;
       const selector = row.selector;
@@ -7138,84 +7164,19 @@ function registerIpcHandlers(
       if (typeof selector.channelWireId !== "string" || selector.channelWireId.length === 0) {
         continue;
       }
-      const existing = findWorkspace(workspace.workspaceId)?.sharedChannels ?? [];
-      if (
-        existing.some(
-          (channel) =>
-            channel.shareId === shareId || channel.channelWireId === selector.channelWireId,
-        )
-      ) {
-        continue;
-      }
-      // Probe each received share AT MOST ONCE (CodeRabbit: unbounded relay
-      // round-trips). Skip without a network peek when it is either already
-      // confirmed non-DM, or a DM homed in ANOTHER workspace (cross-workspace
-      // scoping — a received DM is ACCOUNT-wide, so pin it to exactly one local
-      // workspace).
-      if (peekedNonDmShareIds.has(shareId)) continue;
-      const homedIn = readDmHome(dmHomeFile(), shareId);
-      if (homedIn && homedIn !== workspace.workspaceId) continue;
+      received.push({
+        shareId,
+        granterEmail: typeof row.granterEmail === "string" ? row.granterEmail : null,
+      });
+      if (claimed.has(shareId) || peekedReceivedGrantKinds.has(shareId)) continue;
       try {
         const kind = await peekReceivedGrantKindForShare(relay, shareId);
-        if (kind === "not-dm") {
-          // Definitive (a channel kind never changes) — never re-probe.
-          peekedNonDmShareIds.add(shareId);
-          continue;
-        }
-        // Transient failure: leave un-cached and retry on the next pass.
-        if (kind !== "dm") continue;
-        // The DM peek confirmed it — claim it here (or confirm this is home).
-        if (!claimDmHome(dmHomeFile(), shareId, workspace.workspaceId)) continue;
-        const info = await fetchSharedChannelInfo({ relay, shareId });
-        const joined: JoinedSharedChannel = {
-          shareId: info.shareId,
-          channelWireId: info.channelWireId,
-          access: info.access,
-          granterEmail: info.granterEmail,
-          relayUrl,
-          recipientUserId,
-        };
-        // Record the row BEFORE the pull, for the reason joinSharedChannel
-        // states: the row is the write gate, and it must never be absent while
-        // channel data exists locally.
-        // Rows read fresh — every await above could have changed them.
-        setWorkspaceSharedChannels(
-          workspace.workspaceId,
-          mergeJoinedChannel(
-            findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
-            joined,
-          ),
-        );
-        // No rollback on failure, for the reason joinSharedChannel states: a
-        // multi-page pull can land data before it fails, and a row removed
-        // under landed data is a channel that reads as locally owned. The
-        // reservation stays and the next pass finishes or ends it.
-        //
-        // Under the same per-workspace serializer as the sync pass, for the
-        // reason joinSharedChannel states: the reserved row is visible to a
-        // pass that starts during this pull.
-        await serializeSharedChannelSync(workspace.workspaceId, async () => {
-          const daemonRelay = relayClientForWorkspace({
-            workspaceId: workspace.workspaceId,
-            rootPath: workspace.rootPath,
-            relay,
-          });
-          const pulled = await daemonRelay.pullSharedChannel({
-            shareId: info.shareId,
-            channelWireId: info.channelWireId,
-          });
-          if (pulled.applied > 0) {
-            await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
-          }
-        });
-      } catch (error) {
-        // A share revoked between the listing and the fetch surfaces as
-        // unavailable — skip it; the next pass reconciles. Never blocks the
-        // other grants.
-        if (error instanceof ShareUnavailableError) continue;
-        throw error;
+        if (kind !== "unknown") peekedReceivedGrantKinds.set(shareId, kind);
+      } catch {
+        // A failed peek proves no immutable kind. Retry it on the next poll.
       }
     }
+    return received;
   }
 
   // Reconcile DM state with the relay and return the workspace's DM list.
@@ -7231,10 +7192,20 @@ function registerIpcHandlers(
     await warmCredentialCache();
     const relay = dmRelayConnection();
     const store = linkedChatStoreFor(workspace);
+    let pending: Array<{ shareId: string; granterEmail: string | null }> = [];
+    let declined: Array<{ shareId: string; granterEmail: string | null }> = [];
     if (relay) {
       try {
-        // Born-shared auto-join: discover + join received DM grants.
-        await autoJoinReceivedDms(workspace, relay);
+        const received = await refreshDmRequestKinds(relay);
+        const claimed = shareIdsClaimedByAnyWorkspace();
+        const declinedShareIds = readDeclinedDms(dmRequestFile());
+        const requests = received.filter(
+          (row) =>
+            peekedReceivedGrantKinds.get(row.shareId) === "dm" &&
+            !claimed.has(row.shareId),
+        );
+        pending = requests.filter((row) => !declinedShareIds.has(row.shareId));
+        declined = requests.filter((row) => declinedShareIds.has(row.shareId));
         // Push the member's local ops, pull everyone else's, for the joined
         // DMs (and other shared channels) this bounded pass reaches. The DM the
         // caller has OPEN is named, so the 4 s poll behind an open conversation
@@ -7259,7 +7230,133 @@ function registerIpcHandlers(
       store,
       sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
     });
-    return SyncDmsResult.parse({ available: relay !== null, dms: dms.map(dmRecordForIpc) });
+    return SyncDmsResult.parse({
+      available: relay !== null,
+      dms: dms.map(dmRecordForIpc),
+      pending,
+      declined,
+    });
+  });
+
+  ipcMain.handle(CHANNELS.acceptDm, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AcceptDmPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
+    const entry = requireWorkspace(input.workspaceId);
+    if (entry.shareView) {
+      throw new Error("Shared views are read-only — add messages to a workspace you own.");
+    }
+
+    if (dmAcceptedByOtherWorkspace(input.shareId, input.workspaceId)) {
+      throw new Error(
+        "This conversation already lives in another workspace. Open that workspace to continue.",
+      );
+    }
+
+    const acceptedHere = (entry.sharedChannels ?? []).some(
+      (channel) => channel.shareId === input.shareId,
+    );
+    if (!acceptedHere) {
+      if (peekedReceivedGrantKinds.get(input.shareId) !== "dm") {
+        throw new Error("Could not find that message request. Refresh Chats and try again.");
+      }
+      await warmCredentialCache();
+      const acceptCredentials = cachedCredentials;
+      if (!acceptCredentials) throw new Error("Sign in to dohc Cloud first.");
+      if (!acceptCredentials.relayUrl) {
+        throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
+      }
+      const acceptedRelayUrl = acceptCredentials.relayUrl;
+      const relay = {
+        baseUrl: normalizeServerUrl(acceptedRelayUrl),
+        token: acceptCredentials.token,
+        fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+      };
+      const info = await fetchSharedChannelInfo({ relay, shareId: input.shareId }).catch(
+        (error: unknown) => {
+          if (error instanceof ShareUnavailableError) {
+            throw new Error(
+              "That conversation isn't available anymore. Ask the sender to message you again.",
+            );
+          }
+          throw error;
+        },
+      );
+      const joined: JoinedSharedChannel = {
+        shareId: info.shareId,
+        channelWireId: info.channelWireId,
+        access: info.access,
+        granterEmail: info.granterEmail,
+        relayUrl: acceptedRelayUrl,
+        recipientUserId: acceptCredentials.userId,
+      };
+      // Recheck after the relay awaits. Two open Chats views can accept the
+      // same account-wide request concurrently; only the first may reserve it.
+      if (dmAcceptedByOtherWorkspace(input.shareId, input.workspaceId)) {
+        throw new Error(
+          "This conversation already lives in another workspace. Open that workspace to continue.",
+        );
+      }
+      setWorkspaceSharedChannels(
+        input.workspaceId,
+        mergeJoinedChannel(
+          findWorkspace(input.workspaceId)?.sharedChannels ?? [],
+          joined,
+        ),
+      );
+      try {
+        await serializeSharedChannelSync(input.workspaceId, async () => {
+          const daemonRelay = relayClientForWorkspace({
+            workspaceId: workspace.workspaceId,
+            rootPath: workspace.rootPath,
+            relay,
+          });
+          const pulled = await daemonRelay.pullSharedChannel({
+            shareId: info.shareId,
+            channelWireId: info.channelWireId,
+          });
+          if (pulled.applied > 0) {
+            await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
+          }
+        });
+      } catch (error) {
+        if (error instanceof ShareUnavailableError) {
+          throw new Error(
+            "That conversation isn't available anymore. Ask the sender to message you again.",
+          );
+        }
+        throw error;
+      }
+    }
+
+    void requestDmAgain(dmRequestFile(), input.shareId);
+    const dm = (
+      await listDmRecords({
+        workspaceId: input.workspaceId,
+        store: linkedChatStoreFor(workspace),
+        sharedChannels: findWorkspace(input.workspaceId)?.sharedChannels ?? [],
+      })
+    ).find((record) => record.shareId === input.shareId);
+    if (!dm) throw new Error("Could not open that conversation.");
+    return AcceptDmResult.parse({ dm: dmRecordForIpc(dm) });
+  });
+
+  ipcMain.handle(CHANNELS.declineDm, (event, payload) => {
+    assertTrustedSender(event);
+    const input = DeclineDmPayload.parse(payload);
+    if (!declineDm(dmRequestFile(), input.shareId)) {
+      throw new Error("dohc could not save this choice. Try again.");
+    }
+    return undefined;
+  });
+
+  ipcMain.handle(CHANNELS.requestDmAgain, (event, payload) => {
+    assertTrustedSender(event);
+    const input = RequestDmAgainPayload.parse(payload);
+    if (!requestDmAgain(dmRequestFile(), input.shareId)) {
+      throw new Error("dohc could not save this choice. Try again.");
+    }
+    return undefined;
   });
 
   // Start (or continue) a DM: dedupe by recipient set, ensure one live grant

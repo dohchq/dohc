@@ -454,10 +454,10 @@ describe("peekReceivedGrantKind", () => {
         : { ops: [], nextCursor: 0, hasMore: false };
 
     // First syncDms poll: grant exists, but the owner has not pushed its
-    // channel/thread/message bootstrap. UNKNOWN must not enter the non-DM cache.
+    // channel/thread/message bootstrap. UNKNOWN must not enter the kind cache.
     await expect(peekReceivedGrantKind({ fetchPage })).resolves.toBe("unknown");
     ownerBootstrapVisible = true;
-    // Later poll sees the immutable create and proceeds to auto-join.
+    // A later poll sees the immutable create and can list the message request.
     await expect(peekReceivedGrantKind({ fetchPage })).resolves.toBe("dm");
   });
 });
@@ -568,12 +568,12 @@ describe("listDmRecords", () => {
     expect(dms.map((d) => d.channelId)).toEqual(["dm-live"]);
   });
 
-  it("keeps a PARTICIPANT DM with no thread yet visible (a real pending conversation)", async () => {
+  it("keeps an accepted participant DM visible while its first thread is still missing", async () => {
     const { store, loopback } = await makeStore();
     // A replayed DM whose owner granted before sending — channel.create only,
     // no thread.create yet. Current Rust replay preserves the owner's channel
     // id, so the durable joined-share row is the participant provenance.
-    // The pending DM must remain visible instead of looking like an owner orphan.
+    // The accepted DM stays visible instead of looking like an owner orphan.
     loopback.seedChannel({
       workspace: WS,
       channelId: "owner-channel-1",

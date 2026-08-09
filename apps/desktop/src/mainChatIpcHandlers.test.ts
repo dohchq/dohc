@@ -586,6 +586,41 @@ describe("readRelayChatShareLanes", () => {
     });
   });
 
+  it("excludes a cached DM share id from the ordinary received-channel lane", async () => {
+    const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set(["share-dm"]),
+      fetchListing: () =>
+        Promise.resolve({
+          received: [
+            {
+              shareId: "share-dm",
+              granterEmail: "dm@example.com",
+              selector: { kind: "chat-channel", channelWireId: "wire-dm" },
+            },
+            {
+              shareId: "share-channel",
+              granterEmail: "owner@example.com",
+              selector: { kind: "chat-channel", channelWireId: "wire-channel" },
+            },
+          ],
+        }),
+      remoteWorkspaceId: "remote-1",
+    });
+
+    expect(lanes).toEqual({
+      state: "answered",
+      granted: [],
+      received: [
+        {
+          shareId: "share-channel",
+          channelWireId: "wire-channel",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+        },
+      ],
+    });
+  });
+
   it("drops every grant when the workspace has no remote identity", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),

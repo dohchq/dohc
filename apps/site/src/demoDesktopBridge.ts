@@ -257,6 +257,9 @@ type DemoDesktopBridge = Pick<
   | "listChatChannelShares"
   | "listJoinedSharedChannels"
   | "syncDms"
+  | "acceptDm"
+  | "declineDm"
+  | "requestDmAgain"
   | "listChannelThreads"
   | "listChatMessages"
   | "listChatReactions"
@@ -641,7 +644,16 @@ const demoBridge = {
     return { joined: answerDemoJoinedLane(payload.channelWireIds) };
   },
   async syncDms() {
-    return { available: false, dms: [] };
+    return { available: false, dms: [], pending: [], declined: [] };
+  },
+  async acceptDm() {
+    throw new Error("Message requests aren't available in the demo.");
+  },
+  async declineDm() {
+    return undefined;
+  },
+  async requestDmAgain() {
+    return undefined;
   },
   async listChannelThreads(payload: { channelId: string }) {
     return {

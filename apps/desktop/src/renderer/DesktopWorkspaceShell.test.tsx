@@ -161,6 +161,13 @@ const CANONICAL_DM: DmRecord = {
   connected: true,
 };
 
+function dmSyncResult(
+  dms: DmRecord[] = [],
+  available = true,
+): SyncDmsResult {
+  return { available, dms, pending: [], declined: [] };
+}
+
 Element.prototype.scrollIntoView = vi.fn();
 
 // The dirty-draft test types into the real markdown editor, which needs the
@@ -475,10 +482,8 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       throw new Error("sharing unavailable in shell tests");
     }),
     syncDms: vi.fn(
-      async (_payload: SyncDmsPayload): Promise<SyncDmsResult> => ({
-        available: false,
-        dms: [],
-      }),
+      async (_payload: SyncDmsPayload): Promise<SyncDmsResult> =>
+        dmSyncResult([], false),
     ),
     listFileChats: vi.fn(async () => ({ fileObjectId: null, threads: [] })),
   });
@@ -1571,7 +1576,7 @@ describe("ui-state merge-on-load", () => {
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
-    const sync = deferred<{ available: boolean; dms: never[] }>();
+    const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(
       Promise.resolve({
@@ -1614,7 +1619,7 @@ describe("ui-state merge-on-load", () => {
     // The navigation answers late. It is stale, so it must not open Chats
     // over the tab the close just activated.
     await act(async () => {
-      sync.resolve({ available: true, dms: [] });
+      sync.resolve(dmSyncResult());
       await sync.promise;
     });
     expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
@@ -1627,7 +1632,7 @@ describe("ui-state merge-on-load", () => {
   // since the navigation holds that very object, its isCurrent() compared the
   // object against itself and the cancellation did nothing.
   it("discards an in-flight DM navigation when the user opens a file", async () => {
-    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
@@ -1657,7 +1662,7 @@ describe("ui-state merge-on-load", () => {
     // The navigation answers late, with the DM it would have opened. It is
     // stale, so it must not open Chats over the file the user just opened.
     await act(async () => {
-      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
     expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
@@ -1677,7 +1682,7 @@ describe("ui-state merge-on-load", () => {
       incoming: 1,
       outgoing: 0,
     };
-    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
@@ -1706,7 +1711,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
 
     await act(async () => {
-      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
     expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
@@ -1732,7 +1737,7 @@ describe("ui-state merge-on-load", () => {
     });
     const first = channelNode("thread-planning", "planning", "Planning discussion");
     const second = channelNode("thread-hiring", "hiring", "Hiring discussion");
-    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
@@ -1781,7 +1786,7 @@ describe("ui-state merge-on-load", () => {
     // The DM answers late. It must not remount Chats over the conversation the
     // user chose.
     await act(async () => {
-      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
     expect(screen.getByText("Hiring discussion")).toBeTruthy();
@@ -1792,7 +1797,7 @@ describe("ui-state merge-on-load", () => {
   // cancellation test above also passes when NOTHING ever lands, so a fix that
   // cancelled the navigation the moment it started would read as green.
   it("lands a DM navigation that nothing interrupts", async () => {
-    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
@@ -1813,7 +1818,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
 
     await act(async () => {
-      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
 
@@ -1830,7 +1835,7 @@ describe("ui-state merge-on-load", () => {
       configurable: true,
       value: vi.fn(),
     });
-    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
@@ -1862,7 +1867,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(panel.style.width).toBe("420px"));
 
     await act(async () => {
-      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
 
@@ -1873,7 +1878,7 @@ describe("ui-state merge-on-load", () => {
   // above cannot see it — but the user did navigate, and a late DM would open
   // Chats over the line they just jumped to.
   it("discards an in-flight DM navigation when a search result moves within the active file", async () => {
-    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
@@ -1927,7 +1932,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
 
     await act(async () => {
-      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
     expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
@@ -1954,7 +1959,7 @@ describe("ui-state merge-on-load", () => {
       incoming: 1,
       outgoing: 0,
     };
-    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
@@ -1999,7 +2004,7 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByText("Planning discussion")).toBeTruthy();
 
     await act(async () => {
-      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
     expect(screen.getByText("Planning discussion")).toBeTruthy();
@@ -2093,12 +2098,10 @@ describe("ui-state merge-on-load", () => {
   // engine bridge only stubs the navigator's overview surface.
   function chatsPageBridge(uiState: WorkspaceUiState) {
     const bridge = makeEngineBridge(Promise.resolve(uiState));
-    const syncAnswers: Array<
-      (value: { available: boolean; dms: DmRecord[] }) => void
-    > = [];
+    const syncAnswers: Array<(value: SyncDmsResult) => void> = [];
     bridge.syncDms = vi.fn(
       () =>
-        new Promise<{ available: boolean; dms: DmRecord[] }>((resolve) => {
+        new Promise<SyncDmsResult>((resolve) => {
           syncAnswers.push(resolve);
         }),
     );
@@ -2224,7 +2227,7 @@ describe("ui-state merge-on-load", () => {
     // wins this race — the passive nav report flushes too late.
     const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
     await act(async () => {
-      bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
+      bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM]));
       postButton.dispatchEvent(
         new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
@@ -2273,7 +2276,7 @@ describe("ui-state merge-on-load", () => {
     const backButton = screen.getByTestId("chats-thread-back");
     const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
     await act(async () => {
-      bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
+      bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM]));
       backButton.dispatchEvent(
         new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
@@ -2299,7 +2302,7 @@ describe("ui-state merge-on-load", () => {
     // The DM section renders only once the page's own DM sync answers.
     await screen.findByTestId("chats-feed-link");
     await act(async () => {
-      bridge.syncAnswers[0]!({ available: true, dms: [] });
+      bridge.syncAnswers[0]!(dmSyncResult());
       await Promise.resolve();
     });
     const newDmButton = await screen.findByTestId("chats-new-dm");
@@ -2318,7 +2321,7 @@ describe("ui-state merge-on-load", () => {
     // The DM answers in the same tick the user clicks "New message".
     const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
     await act(async () => {
-      bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
+      bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM]));
       newDmButton.dispatchEvent(
         new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
@@ -2356,7 +2359,7 @@ describe("ui-state merge-on-load", () => {
     await user.click(post.closest("button")!);
     expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
     await act(async () => {
-      bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
+      bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM]));
       await Promise.resolve();
     });
     expect(screen.getByTestId("chats-thread-view")).toBeTruthy();
@@ -2426,7 +2429,7 @@ describe("ui-state merge-on-load", () => {
     // The DM answers in the same tick the user jumps to the parent.
     const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
     await act(async () => {
-      bridge.syncAnswers.at(-1)!({ available: true, dms: [CANONICAL_DM] });
+      bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM]));
       backlink.dispatchEvent(
         new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
@@ -2454,7 +2457,7 @@ describe("ui-state merge-on-load", () => {
       incoming: 1,
       outgoing: 0,
     };
-    const sync = deferred<{ available: boolean; dms: DmRecord[] }>();
+    const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(
       Promise.resolve({
@@ -2492,7 +2495,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
 
     await act(async () => {
-      sync.resolve({ available: true, dms: [CANONICAL_DM] });
+      sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
     expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();

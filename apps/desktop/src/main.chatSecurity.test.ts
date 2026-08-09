@@ -113,7 +113,12 @@ describe("main-process chat authorization", () => {
     expect(handlerSource("joinSharedChannel")).toContain(
       "recipientUserId: joinedRecipientUserId",
     );
-    expect(mainSource).toContain("const recipientUserId = joinCredentials.userId;");
+    expect(mainSource).toContain(
+      "const joinedRecipientUserId = joinCredentials.userId;",
+    );
+    expect(handlerSource("acceptDm")).toContain(
+      "recipientUserId: acceptCredentials.userId",
+    );
     expect(mainSource).toContain(
       "joinedChannelMatchesCredentials(channel, syncCredentials)",
     );
@@ -231,9 +236,8 @@ describe("main-process chat authorization", () => {
     ).toContain("engineOffRefusal(");
   });
 
-  // #617 codex P1. Both join paths pull the share's log into this workspace's
-  // chat store, and autoJoinReceivedDms claims the DM home first — both
-  // durable. A joined-lane refusal raised AFTER either one leaves the pulled
+  // Both explicit join paths pull the share's log into the chosen workspace.
+  // A joined-lane refusal raised AFTER either one leaves the pulled
   // messages with no registry row, and no row is what
   // joinedSharedChannelForTarget answers null for: assertSharedChannelWritable
   // and channelIsLocked then read a READ-ONLY shared channel as a local one
@@ -245,14 +249,9 @@ describe("main-process chat authorization", () => {
   // the cached registry — is what has to precede the pull. The loser then
   // refuses having pulled nothing.
   it("reserves the joined-lane slot before either join path pulls anything", () => {
-    const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");
-    const autoJoinEnd = mainSource.indexOf("ipcMain.handle(", autoJoinStart);
-    expect(autoJoinStart).toBeGreaterThan(-1);
-    expect(autoJoinEnd).toBeGreaterThan(autoJoinStart);
-
     for (const [label, source] of [
       ["joinSharedChannel", handlerSource("joinSharedChannel")],
-      ["autoJoinReceivedDms", mainSource.slice(autoJoinStart, autoJoinEnd)],
+      ["acceptDm", handlerSource("acceptDm")],
     ] as const) {
       const reserveAt = source.indexOf("mergeJoinedChannel(");
       const pullAt = source.indexOf("pullSharedChannel({");
@@ -307,11 +306,9 @@ describe("main-process chat authorization", () => {
       "return serializeSharedChannelSync(workspaceId, () =>\n    runSharedChannelSyncPass(workspaceId, priorityChannelWireId),",
     );
 
-    const autoJoinStart = mainSource.indexOf("async function autoJoinReceivedDms(");
-    const autoJoinEnd = mainSource.indexOf("ipcMain.handle(", autoJoinStart);
     for (const [label, source] of [
       ["joinSharedChannel", handlerSource("joinSharedChannel")],
-      ["autoJoinReceivedDms", mainSource.slice(autoJoinStart, autoJoinEnd)],
+      ["acceptDm", handlerSource("acceptDm")],
     ] as const) {
       const serializeAt = source.indexOf("serializeSharedChannelSync(");
       const pullAt = source.indexOf("pullSharedChannel({");
@@ -319,6 +316,73 @@ describe("main-process chat authorization", () => {
       // The pull happens INSIDE the serialized run, not beside it.
       expect(serializeAt, label).toBeLessThan(pullAt);
     }
+  });
+
+  it("keeps received DMs as requests until acceptDm chooses a workspace", () => {
+    const refreshStart = mainSource.indexOf("async function refreshDmRequestKinds(");
+    const refreshEnd = mainSource.indexOf("ipcMain.handle(CHANNELS.syncDms", refreshStart);
+    expect(refreshStart).toBeGreaterThan(-1);
+    expect(refreshEnd).toBeGreaterThan(refreshStart);
+    const refresh = mainSource.slice(refreshStart, refreshEnd);
+    expect(refresh).toContain("peekedReceivedGrantKinds.set(shareId, kind)");
+    expect(refresh).not.toContain("mergeJoinedChannel(");
+    expect(refresh).not.toContain("pullSharedChannel({");
+    expect(refresh).not.toContain("fetchSharedChannelInfo({");
+
+    const sync = handlerSource("syncDms");
+    expect(sync).toContain("await refreshDmRequestKinds(relay)");
+    expect(sync).toContain('peekedReceivedGrantKinds.get(row.shareId) === "dm"');
+    expect(sync).toContain("pending,");
+    expect(sync).toContain("declined,");
+    expect(mainSource).not.toContain("autoJoinReceivedDms");
+    expect(mainSource).not.toContain("dohc-dm-homes.json");
+  });
+
+  it("accepts only once and keys every write and pull to the chosen workspace", () => {
+    const handler = handlerSource("acceptDm");
+    const exclusivityAt = handler.indexOf(
+      "dmAcceptedByOtherWorkspace(input.shareId, input.workspaceId)",
+    );
+    const credentialsAt = handler.indexOf("await warmCredentialCache()");
+    const reserveAt = handler.indexOf("setWorkspaceSharedChannels(");
+    const pullAt = handler.indexOf("pullSharedChannel({");
+    expect(exclusivityAt).toBeGreaterThan(-1);
+    expect(exclusivityAt).toBeLessThan(credentialsAt);
+    expect(
+      handler.match(/dmAcceptedByOtherWorkspace\(input\.shareId, input\.workspaceId\)/gu),
+    ).toHaveLength(2);
+    const exclusivity = mainSource.slice(
+      mainSource.indexOf("function dmAcceptedByOtherWorkspace("),
+      mainSource.indexOf("async function refreshDmRequestKinds("),
+    );
+    expect(exclusivity).toContain("candidate.workspaceId !== workspaceId");
+    expect(exclusivity).toContain("channel.shareId === shareId");
+    expect(handler).toContain(
+      "This conversation already lives in another workspace. Open that workspace to continue.",
+    );
+    expect(handler).toContain("if (!acceptedHere)");
+    expect(reserveAt).toBeGreaterThan(credentialsAt);
+    expect(reserveAt).toBeLessThan(pullAt);
+    expect(handler).toContain("serializeSharedChannelSync(input.workspaceId");
+    expect(handler).toContain("workspaceId: input.workspaceId");
+    expect(handler).not.toContain("activity.queueCloudSync");
+  });
+
+  it("checks renderer trust on every DM request mutation", () => {
+    for (const channel of ["acceptDm", "declineDm", "requestDmAgain"]) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain("assertTrustedSender(event);");
+      expect(handler.indexOf("assertTrustedSender(event);"), channel).toBeLessThan(
+        handler.indexOf(".parse(payload)"),
+      );
+    }
+  });
+
+  it("filters confirmed DMs from the ordinary received-channel lane", () => {
+    const handler = handlerSource("listChatChannelShares");
+    expect(handler).toContain("for (const [shareId, kind] of peekedReceivedGrantKinds)");
+    expect(handler).toContain('if (kind === "dm") shareIdsClaimedElsewhere.add(shareId)');
+    expect(handler).toContain("shareIdsClaimedElsewhere,");
   });
 
   // #640: the joined lane crosses IPC scoped to the channels the caller

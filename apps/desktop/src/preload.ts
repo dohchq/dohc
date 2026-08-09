@@ -230,6 +230,9 @@ const bridge: DohcDesktopBridge = {
   setChatReaction: (payload) =>
     ipcRenderer.invoke(CHANNELS.setChatReaction, payload),
   syncDms: (payload) => ipcRenderer.invoke(CHANNELS.syncDms, payload),
+  acceptDm: (payload) => ipcRenderer.invoke(CHANNELS.acceptDm, payload),
+  declineDm: (payload) => ipcRenderer.invoke(CHANNELS.declineDm, payload),
+  requestDmAgain: (payload) => ipcRenderer.invoke(CHANNELS.requestDmAgain, payload),
   startDm: (payload) => ipcRenderer.invoke(CHANNELS.startDm, payload),
   presencePublish: (payload) => ipcRenderer.invoke(CHANNELS.presencePublish, payload),
   presencePoll: (payload) => ipcRenderer.invoke(CHANNELS.presencePoll, payload),

@@ -33,6 +33,7 @@ import type {
   ChatFeedItemRecord,
   ChatReactionRecord,
   ChatRunRecord,
+  DmRequestRow,
   DmRecord,
   FileChatThreadRecord,
   JoinedChannelAnswer,
@@ -41,6 +42,7 @@ import type {
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { Overlay } from "../Overlay";
 import type { AgentNotification } from "./agentNotifications";
 import {
   ChatMessageList,
@@ -1129,8 +1131,114 @@ function AddressedToMe(props: { notifications: readonly AgentNotification[] }) {
   );
 }
 
+type DmWorkspaceOption = { workspaceId: string; label: string };
+
+function AcceptDmDialog(props: {
+  request: DmRequestRow;
+  currentWorkspaceId: string;
+  workspaces: readonly DmWorkspaceOption[];
+  onAccept: (workspaceId: string) => Promise<void>;
+  onClose: () => void;
+}) {
+  const defaultWorkspaceId = props.workspaces.some(
+    (workspace) => workspace.workspaceId === props.currentWorkspaceId,
+  )
+    ? props.currentWorkspaceId
+    : (props.workspaces[0]?.workspaceId ?? "");
+  const [workspaceId, setWorkspaceId] = useState(defaultWorkspaceId);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const chosen = props.workspaces.find(
+    (workspace) => workspace.workspaceId === workspaceId,
+  );
+  const title = props.request.granterEmail
+    ? `Add ${props.request.granterEmail}'s message to a workspace`
+    : "Add this message to a workspace";
+
+  async function accept() {
+    if (!chosen || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      await props.onAccept(chosen.workspaceId);
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Overlay
+      onClose={() => {
+        if (!busyRef.current) props.onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="chats-accept-dm-title"
+        data-testid="chats-accept-dm-dialog"
+        className="dohc-elevated flex w-105 max-w-[80vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
+      >
+        <div className="flex flex-col gap-1">
+          <h2
+            id="chats-accept-dm-title"
+            className="m-0 text-sm font-semibold text-ink"
+          >
+            {title}
+          </h2>
+          <p className="m-0 text-xs text-muted">
+            The conversation lives in the workspace you pick.
+          </p>
+        </div>
+        <fieldset className="m-0 grid gap-1 border-0 p-0" disabled={busy}>
+          <legend className="sr-only">Workspace</legend>
+          {props.workspaces.map((workspace) => (
+            <label
+              key={workspace.workspaceId}
+              data-testid="chats-accept-dm-workspace-option"
+              data-workspace-id={workspace.workspaceId}
+              className="flex cursor-pointer items-center gap-2 rounded-md border border-line px-3 py-2 text-xs text-ink hover:bg-panel-2"
+            >
+              <input
+                type="radio"
+                name="chats-accept-dm-workspace"
+                value={workspace.workspaceId}
+                checked={workspaceId === workspace.workspaceId}
+                onChange={() => setWorkspaceId(workspace.workspaceId)}
+              />
+              <span className="truncate">{workspace.label}</span>
+            </label>
+          ))}
+        </fieldset>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            data-testid="chats-accept-dm-cancel"
+            disabled={busy}
+            onClick={props.onClose}
+            className="rounded border border-line px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            data-testid="chats-accept-dm-confirm"
+            disabled={!chosen || busy}
+            onClick={() => void accept()}
+            className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
+          >
+            {chosen ? `Add to ${chosen.label}` : "Choose a workspace"}
+          </button>
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
 export function ChatsView(props: {
   workspaceId: string;
+  workspaces: readonly DmWorkspaceOption[];
   // Jump a file-linked Chat to where it lives: the file's side rail.
   onOpenFileChat: (thread: FileChatThreadRecord, focusMessageId?: string) => void;
   // The shell's normal file navigation path. Attachment chips use it when
@@ -1252,6 +1360,12 @@ export function ChatsView(props: {
   // sees none of it.
   const [dms, setDms] = useState<DmRecord[]>([]);
   const [dmAvailable, setDmAvailable] = useState(false);
+  const [pendingDmRequests, setPendingDmRequests] = useState<DmRequestRow[]>([]);
+  const [declinedDmRequests, setDeclinedDmRequests] = useState<DmRequestRow[]>([]);
+  const [acceptingDmRequest, setAcceptingDmRequest] = useState<DmRequestRow | null>(
+    null,
+  );
+  const [dmRequestBusy, setDmRequestBusy] = useState<string | null>(null);
   const [dmRecipients, setDmRecipients] = useState("");
   const [dmDraft, setDmDraft] = useState("");
   const [startingDm, setStartingDm] = useState(false);
@@ -1849,8 +1963,8 @@ export function ChatsView(props: {
     }
   }, [workspaceId]);
 
-  // DM sync: reconcile with the relay (auto-join received DM grants, push the
-  // member's local ops, pull the peers') and refresh the list. Best-effort —
+  // DM sync: refresh received requests, push the member's local ops, pull the
+  // peers' ops, and refresh the established DM list. Best-effort —
   // offline keeps the current list and the next pass retries. A late response
   // for a stale workspace/nav is dropped by the token guard.
   //
@@ -1879,6 +1993,8 @@ export function ChatsView(props: {
           if (token !== liveToken.current) return;
           setDmAvailable(result.available);
           setDms(result.dms);
+          setPendingDmRequests(result.pending);
+          setDeclinedDmRequests(result.declined);
         } catch {
           // DMs are optional: Chats stays fully usable without them.
         }
@@ -1942,6 +2058,10 @@ export function ChatsView(props: {
     setJoiningShareId(null);
     setDms([]);
     setDmAvailable(false);
+    setPendingDmRequests([]);
+    setDeclinedDmRequests([]);
+    setAcceptingDmRequest(null);
+    setDmRequestBusy(null);
     setDmRecipients("");
     setDmDraft("");
     setBookmarks([]);
@@ -2213,6 +2333,8 @@ export function ChatsView(props: {
         }
         setDmAvailable(result.available);
         setDms(result.dms);
+        setPendingDmRequests(result.pending);
+        setDeclinedDmRequests(result.declined);
         const syncedDm = result.dms.find(
           (entry) => entry.channelId === dm.channelId,
         );
@@ -3139,6 +3261,69 @@ export function ChatsView(props: {
       setStartingDm(false);
     }
   }, [dmDraft, dmRecipients, openDm, props, startingDm, workspaceId]);
+
+  const acceptDmRequest = useCallback(
+    async (request: DmRequestRow, chosenWorkspaceId: string) => {
+      const token = liveToken.current;
+      try {
+        const result = await bridge().acceptDm({
+          workspaceId: chosenWorkspaceId,
+          shareId: request.shareId,
+        });
+        if (token !== liveToken.current) return;
+        setAcceptingDmRequest(null);
+        props.onNavCommand?.({ level: "dm", dm: result.dm });
+        void openDm(result.dm);
+        void refreshDms();
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(
+          ipcErrorMessage(error, "Could not add that message to a workspace."),
+        );
+      }
+    },
+    [openDm, props, refreshDms],
+  );
+
+  const declineDmRequest = useCallback(
+    async (request: DmRequestRow) => {
+      if (dmRequestBusy !== null) return;
+      const token = liveToken.current;
+      setDmRequestBusy(request.shareId);
+      try {
+        await bridge().declineDm({ shareId: request.shareId });
+        if (token !== liveToken.current) return;
+        await refreshDms();
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(ipcErrorMessage(error, "Could not decline that request."));
+      } finally {
+        if (token === liveToken.current) setDmRequestBusy(null);
+      }
+    },
+    [dmRequestBusy, props, refreshDms],
+  );
+
+  const requestDmAgain = useCallback(
+    async (request: DmRequestRow) => {
+      if (dmRequestBusy !== null) return;
+      const token = liveToken.current;
+      setDmRequestBusy(request.shareId);
+      try {
+        await bridge().requestDmAgain({ shareId: request.shareId });
+        if (token !== liveToken.current) return;
+        await refreshDms();
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(
+          ipcErrorMessage(error, "Could not move that message back to requests."),
+        );
+      } finally {
+        if (token === liveToken.current) setDmRequestBusy(null);
+      }
+    },
+    [dmRequestBusy, props, refreshDms],
+  );
 
   const grantedByWire = useMemo(() => {
     const map = new Map<string, ChatChannelShareGrantRow[]>();
@@ -5181,6 +5366,86 @@ export function ChatsView(props: {
             ) : null}
           </div>
         ) : null}
+        {pendingDmRequests.length > 0 || declinedDmRequests.length > 0 ? (
+          <div data-testid="chats-dm-requests-section">
+            <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+              Message requests
+            </p>
+            <ul className="m-0 list-none p-0">
+              {pendingDmRequests.map((request) => (
+                <li
+                  key={request.shareId}
+                  data-testid="chats-dm-request-item"
+                  className="border-b border-line"
+                >
+                  <div className="flex items-center gap-1.5 px-3 py-2">
+                    <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12px] font-medium text-ink">
+                        {request.granterEmail ?? "A teammate"}
+                      </span>
+                      <span className="block text-[10px] text-subtle">
+                        Wants to message you
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      data-testid="chats-dm-request-accept"
+                      onClick={() => setAcceptingDmRequest(request)}
+                      className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+                    >
+                      Accept
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="chats-dm-request-decline"
+                      disabled={dmRequestBusy !== null}
+                      onClick={() => void declineDmRequest(request)}
+                      className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                    >
+                      Decline
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {declinedDmRequests.length > 0 ? (
+              <div className="border-t border-line/60 bg-panel-2/40">
+                <p className="m-0 px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+                  Declined
+                </p>
+                <ul className="m-0 list-none p-0">
+                  {declinedDmRequests.map((request) => (
+                    <li
+                      key={request.shareId}
+                      data-testid="chats-dm-declined-item"
+                      className="border-b border-line"
+                    >
+                      <div className="flex items-center gap-1.5 px-3 py-2">
+                        <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[12px] font-medium text-ink">
+                            {request.granterEmail ?? "A teammate"}
+                          </span>
+                          <span className="block text-[10px] text-subtle">Declined</span>
+                        </span>
+                        <button
+                          type="button"
+                          data-testid="chats-dm-request-again"
+                          disabled={dmRequestBusy !== null}
+                          onClick={() => void requestDmAgain(request)}
+                          className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                        >
+                          Request again
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {receivedNotJoined.length > 0 || shareReadFailure !== null ? (
           <div data-testid="chats-shared-with-you">
             <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
@@ -5307,6 +5572,18 @@ export function ChatsView(props: {
           </form>
         )}
       </div>
+      {acceptingDmRequest ? (
+        <AcceptDmDialog
+          key={acceptingDmRequest.shareId}
+          request={acceptingDmRequest}
+          currentWorkspaceId={workspaceId}
+          workspaces={props.workspaces}
+          onAccept={(chosenWorkspaceId) =>
+            acceptDmRequest(acceptingDmRequest, chosenWorkspaceId)
+          }
+          onClose={() => setAcceptingDmRequest(null)}
+        />
+      ) : null}
     </div>
   );
 }

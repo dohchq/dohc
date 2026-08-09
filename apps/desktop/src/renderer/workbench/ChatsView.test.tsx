@@ -11,10 +11,26 @@ import type {
   FileChatThreadRecord,
 } from "../../ipc/bridgeContract";
 import {
-  ChatsView,
+  ChatsView as ProductionChatsView,
   reconcileResolvedChatDecision,
   type ChatsNav,
 } from "./ChatsView";
+
+type TestChatsViewProps = Omit<
+  Parameters<typeof ProductionChatsView>[0],
+  "workspaces"
+> & {
+  workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
+};
+
+function ChatsView(props: TestChatsViewProps) {
+  return (
+    <ProductionChatsView
+      workspaces={[{ workspaceId: props.workspaceId, label: "Work" }]}
+      {...props}
+    />
+  );
+}
 
 // Chats view (PR 13, WS-E): fast, natural chat — the channel composer sends
 // on Enter with NO title prompt, unread badges derive from the store's read
@@ -141,6 +157,9 @@ const bridgeMock = {
   listChatReactions: vi.fn(),
   setChatReaction: vi.fn(),
   syncDms: vi.fn(),
+  acceptDm: vi.fn(),
+  declineDm: vi.fn(),
+  requestDmAgain: vi.fn(),
   startDm: vi.fn(),
   chatDispatchStateForThread: vi.fn(),
   stopAgentRun: vi.fn(),
@@ -360,12 +379,24 @@ beforeEach(() => {
     viewerAuthorId: "you@example.com",
   });
   // Solo default (collaboration off): the DM surface stays invisible.
-  bridgeMock.syncDms.mockResolvedValue({ available: false, dms: [] });
+  bridgeMock.syncDms.mockResolvedValue({
+    available: false,
+    dms: [],
+    pending: [],
+    declined: [],
+  });
+  bridgeMock.declineDm.mockResolvedValue(undefined);
+  bridgeMock.requestDmAgain.mockResolvedValue(undefined);
   // main scopes the joined lane to what the caller named; so does this. The
   // underlying mocks still record every call, so payload assertions and
   // mockImplementation stay exactly as they were.
   vi.stubGlobal("dohcDesktop", {
     ...bridgeMock,
+    syncDms: async (payload: { workspaceId: string; openChannelId?: string }) => ({
+      pending: [],
+      declined: [],
+      ...(await bridgeMock.syncDms(payload)),
+    }),
     listChatChannelShares: async (payload: {
       workspaceId: string;
       channelWireIds: string[];
@@ -413,6 +444,10 @@ function renderView(onOpenFileChat = vi.fn(), onError = vi.fn(), extra: ExtraPro
   render(
     <ChatsView
       workspaceId="workspace-a"
+      workspaces={[
+        { workspaceId: "workspace-a", label: "Work" },
+        { workspaceId: "workspace-b", label: "Personal" },
+      ]}
       onOpenFileChat={onOpenFileChat}
       onError={onError}
       {...extra}
@@ -5543,6 +5578,88 @@ describe("ChatsView shared channels (MU-C4)", () => {
 // zero-bloat rule — and the DM conversation is one running thread whose
 // composer sends on Enter (anti-forum).
 describe("ChatsView direct messages", () => {
+  it("accepts a message request into the workspace picked in the dialog", async () => {
+    const user = userEvent.setup();
+    const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
+    const accepted = dm({
+      role: "participant",
+      shareId: request.shareId,
+      peerLabel: "bob@example.com",
+    });
+    const onNavCommand = vi.fn();
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [],
+      pending: [request],
+      declined: [],
+    });
+    bridgeMock.acceptDm.mockResolvedValue({ dm: accepted });
+
+    renderView(vi.fn(), vi.fn(), { variant: "page", onNavCommand });
+    expect(await screen.findByText("Message requests")).toBeTruthy();
+    expect(screen.getByText("Wants to message you")).toBeTruthy();
+    await user.click(screen.getByTestId("chats-dm-request-accept"));
+
+    expect(await screen.findByTestId("chats-accept-dm-dialog")).toBeTruthy();
+    const options = screen.getAllByTestId("chats-accept-dm-workspace-option");
+    const currentOption = options.find(
+      (option) => option.getAttribute("data-workspace-id") === "workspace-a",
+    );
+    const personalOption = options.find(
+      (option) => option.getAttribute("data-workspace-id") === "workspace-b",
+    );
+    expect(currentOption?.querySelector("input")?.checked).toBe(true);
+    await user.click(personalOption!);
+    expect(screen.getByTestId("chats-accept-dm-confirm").textContent).toBe(
+      "Add to Personal",
+    );
+    await user.click(screen.getByTestId("chats-accept-dm-confirm"));
+
+    await waitFor(() => {
+      expect(bridgeMock.acceptDm).toHaveBeenCalledWith({
+        workspaceId: "workspace-b",
+        shareId: request.shareId,
+      });
+    });
+    await waitFor(() => {
+      expect(onNavCommand).toHaveBeenCalledWith({ level: "dm", dm: accepted });
+    });
+    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+  });
+
+  it("moves a request through declined and back to pending", async () => {
+    const user = userEvent.setup();
+    const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
+    let state: "pending" | "declined" = "pending";
+    bridgeMock.syncDms.mockImplementation(() =>
+      Promise.resolve({
+        available: true,
+        dms: [],
+        pending: state === "pending" ? [request] : [],
+        declined: state === "declined" ? [request] : [],
+      }),
+    );
+    bridgeMock.declineDm.mockImplementation(() => {
+      state = "declined";
+      return Promise.resolve(undefined);
+    });
+    bridgeMock.requestDmAgain.mockImplementation(() => {
+      state = "pending";
+      return Promise.resolve(undefined);
+    });
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-request-decline"));
+    expect(await screen.findByTestId("chats-dm-declined-item")).toBeTruthy();
+    expect(bridgeMock.declineDm).toHaveBeenCalledWith({ shareId: request.shareId });
+
+    await user.click(screen.getByTestId("chats-dm-request-again"));
+    expect(await screen.findByTestId("chats-dm-request-item")).toBeTruthy();
+    expect(bridgeMock.requestDmAgain).toHaveBeenCalledWith({
+      shareId: request.shareId,
+    });
+  });
+
   it("shows no DM surface at all for a solo user", async () => {
     // Even a stray dm-kind channel row never leaks into the channel list.
     bridgeMock.listChatChannels.mockResolvedValue({
