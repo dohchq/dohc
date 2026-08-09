@@ -3,9 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Editor, Extension } from '@tiptap/core'
 import { StarterKit } from '@tiptap/starter-kit'
 import { Markdown } from '@tiptap/markdown'
-import { TaskItem, TaskList } from '@tiptap/extension-list'
+import { TaskList } from '@tiptap/extension-list'
 import { TextSelection } from '@tiptap/pm/state'
-import { dohcMarkdownExtensions } from './extensions'
+import { DohcTaskItem, dohcMarkdownExtensions } from './extensions'
 import {
   computeMermaidBlocks,
   isMermaidBlockCollapsed,
@@ -357,7 +357,7 @@ describe('makeMermaidPreviewPlugin — DOM wiring', () => {
         StarterKit.configure({ trailingNode: false }),
         ...dohcMarkdownExtensions,
         TaskList,
-        TaskItem,
+        DohcTaskItem,
         Markdown.configure({ indentation: { style: 'space', size: 2 } }),
         mermaidPreview,
       ],

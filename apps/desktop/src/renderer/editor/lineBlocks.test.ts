@@ -182,10 +182,9 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- one\n2. matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("- one\n1) matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("1) one\n- matched\n\nAfter", 2).index).toBe(1);
-    expect(blockForLine("1) a\n1. b", 2).index).toBe(1);
-    // A `.`-ordered list absorbs whatever list line follows it, the same
-    // leniency that gives it a one-column continuation indent.
-    expect(blockForLine("1. one\n- matched\n\nAfter", 2).index).toBe(0);
+    expect(blockForLine("1. one\n- matched\n\nAfter", 2).index).toBe(1);
+    // Ordered delimiters are not part of the list's identity.
+    expect(blockForLine("1) a\n1. b", 2).index).toBe(0);
     expect(blockForLine("1. a\n1) b", 2).index).toBe(0);
     // Indented, it is a nested list and stays in the item.
     expect(blockForLine("- one\n  1. matched\n\nAfter", 2).index).toBe(0);
@@ -446,8 +445,9 @@ describe("blockForLine — the index", () => {
 
   it("ends an open list at a quote, but not at a table or display math", () => {
     expect(blockForLine("- item\n> matched\n\nAfter", 2).index).toBe(1);
-    // A `.`-ordered list absorbs the quote, as it absorbs a following list.
+    // An ordered-list item keeps the quote as nested content.
     expect(blockForLine("1. item\n> matched\n\nAfter", 2).index).toBe(0);
+    expect(blockForLine("1) item\n> matched\n\nAfter", 2).index).toBe(0);
     // A table and display math interrupt a PARAGRAPH only.
     expect(blockForLine("- item\n$$x$$\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("- item\n| A |\n| --- |\n| r |\n\nAfter", 2).index).toBe(0);
@@ -456,13 +456,12 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- item\n  > matched\n\nAfter", 2).index).toBe(0);
   });
 
-  it("takes any indent for a `.`-ordered item, and the column for `)`", () => {
-    // Measured, not derived: the tokenizer keeps a one-column continuation
-    // inside `1. item` but wants the content column under `1) item`.
+  it("takes any indent for an ordered item", () => {
+    // Measured, not derived: either delimiter keeps a one-column continuation.
     expect(blockForLine("1. item\n\n para\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("1. item\n\npara\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("10. item\n\n   para\n\nAfter", 3).index).toBe(0);
-    expect(blockForLine("1) item\n\n  para\n\nAfter", 3).index).toBe(1);
+    expect(blockForLine("1) item\n\n  para\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("1) item\n\n   para\n\nAfter", 3).index).toBe(0);
   });
 
@@ -510,8 +509,8 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- one\n* two", 2).index).toBe(1);
     expect(blockForLine("- one\n+ two", 2).index).toBe(1);
     expect(blockForLine("- a\n\n* b\n\n- c\n\nAfter", 5).index).toBe(2);
-    // An ordered list's delimiter counts the same way across a blank line.
-    expect(blockForLine("1. a\n\n2) b\n\nAfter", 3).index).toBe(1);
+    // An ordered list's delimiter does not change its identity.
+    expect(blockForLine("1. a\n\n2) b\n\nAfter", 3).index).toBe(0);
     // The same marker still resumes, and an indented one is a nested list.
     expect(blockForLine("- one\n\n- two\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("1. a\n\n2. b\n\nAfter", 3).index).toBe(0);
@@ -1099,7 +1098,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "an ordered delimiter change starts a new list",
+      name: "ordered delimiters share one list",
       body: "1. a\n\n2) b\n\nAfter",
       lands: [
         [1, "a"],
@@ -1255,7 +1254,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "a `)`-ordered item wants its content column",
+      name: "a `)`-ordered item accepts any indented continuation",
       body: "1) item\n\n  para\n\nAfter",
       lands: [
         [1, "item"],
@@ -1282,7 +1281,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "a `.`-ordered list absorbs the list line under it",
+      name: "a bullet ends a `.`-ordered list",
       body: "1. one\n- matched\n\nAfter",
       lands: [
         [2, "matched"],
@@ -1290,7 +1289,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "an ordered delimiter change needs no blank line",
+      name: "an ordered delimiter change stays in one list",
       body: "1) a\n1. b",
       lands: [
         [1, "a"],
@@ -1448,7 +1447,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "a `.`-ordered list absorbs the quote under it",
+      name: "an ordered list absorbs the quote under it",
       body: "1. item\n> matched\n\nAfter",
       lands: [
         [2, "matched"],

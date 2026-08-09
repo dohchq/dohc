@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as Y from "yjs";
 import { markdownToYDoc, plainTextToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 import { canonicalContent, contentDiff, contentsEqual, stableStringify, undeclaredRoots } from "./canonical.js";
 import { DOHC_SCHEMA, RustPeer } from "./rustPeer.js";
 import { CORPUS } from "./corpus.js";

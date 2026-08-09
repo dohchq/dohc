@@ -53,6 +53,19 @@ function expectStableMarkdownRoundTrip(
 }
 
 describe('Y.Doc markdown import/export', () => {
+  it('keeps comment-only frontmatter empty under the js-yaml 5 parser', () => {
+    const input = ['---', '# metadata', '', '---', '# Body'].join('\n')
+    const doc = markdownToYDoc(input)
+
+    expect(getDohcYDocFrontmatter(doc)).toEqual({})
+    expect(yDocToMarkdown(doc)).toBe('# Body')
+  })
+
+  it('keeps literal punctuation and explicit escapes byte-stable', () => {
+    const input = 'internal_name [label] and \\*literal asterisks\\*'
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+  })
+
   it('keeps malformed frontmatter visible instead of dropping it', () => {
     const input = [
       '---',

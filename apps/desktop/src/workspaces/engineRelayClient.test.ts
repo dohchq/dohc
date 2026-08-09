@@ -832,21 +832,24 @@ describe("EngineRelayClient", () => {
       refusedOps: 0,
       refusedDetail: null,
     });
+    const revokedRows = [
+      {
+        shareId: "channel-revoked",
+        channelWireId: "wire-revoked",
+        access: "read-only" as const,
+        granterEmail: "owner@example.com",
+        relayUrl: relay.baseUrl,
+        recipientUserId: "member-1",
+      },
+    ];
     await expect(
       syncJoinedSharedChannels({
         rootDir: rootPath,
         workspaceId: "workspace-a",
         relay,
-        channels: [
-          {
-            shareId: "channel-revoked",
-            channelWireId: "wire-revoked",
-            access: "read-only",
-            granterEmail: "owner@example.com",
-            relayUrl: relay.baseUrl,
-            recipientUserId: "member-1",
-          },
-        ],
+        passRows: 1,
+        registryOrder: revokedRows,
+        channels: revokedRows,
         pull: async (input) =>
           await client.pullSharedChannel({
             shareId: input.shareId,

@@ -5638,6 +5638,35 @@ describe("ChatsView direct messages", () => {
     expect(normallyOpened.className).not.toContain("ring-2");
   });
 
+  // #718: the main-side shared-channel pass is bounded, so a poll that does not
+  // name the DM it is showing can refresh sixteen other channels and leave this
+  // conversation stale while the surface looks refreshed. The list poll names
+  // nothing (it is showing the list); the open-DM refresh names the DM.
+  it("names the open DM on its refresh, and nothing on the list poll", async () => {
+    const user = userEvent.setup();
+    // A DM whose thread has not replicated yet refreshes the moment it opens,
+    // which is the same refreshOpenDm path the 4 s poll runs.
+    const pending = dm({ threadId: null });
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [pending] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+    renderView();
+    await screen.findByTestId("chats-dm-item");
+    expect(
+      bridgeMock.syncDms.mock.calls.every(
+        ([payload]) => payload.openChannelId === undefined,
+      ),
+    ).toBe(true);
+
+    const listCalls = bridgeMock.syncDms.mock.calls.length;
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    await waitFor(() =>
+      expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThan(listCalls),
+    );
+    expect(
+      bridgeMock.syncDms.mock.calls.slice(listCalls).map(([payload]) => payload.openChannelId),
+    ).toContain("channel-dm-1");
+  });
+
   it("opens a DM into its single running conversation and sends on Enter", async () => {
     const user = userEvent.setup();
     const pendingRefresh = new Promise<never>(() => undefined);

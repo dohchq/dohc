@@ -572,6 +572,8 @@ export const ReadWorkspaceGraphPayload = z.object({
 export type ReadWorkspaceGraphPayload = z.infer<typeof ReadWorkspaceGraphPayload>;
 
 export const WorkspaceGraphResult = z.object({
+  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   nodes: z.array(WorkspaceGraphNode).max(2000),
   edges: z.array(WorkspaceGraphEdge).max(10000),
   unresolvedLinks: z.number().int().nonnegative(),
@@ -950,6 +952,14 @@ export const ChatFileMentionRecord = z.object({
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
 
 export const ListChatFileMentionsResult = z.object({
+  // #718: these responses are built from the local store after ONE bounded
+  // shared-channel sync pass. This is how many joined rows that pass did not
+  // leave fresh — the ones its window never reached, plus the ones it reached
+  // and could not sync (offline, relay hiccup). A pass that died outright, or
+  // never ran because the account is signed out, reports every live row.
+  // Absent means the pass that ran left no row behind, which is the only claim
+  // of full freshness this field ever makes.
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   mentions: z.array(ChatFileMentionRecord).max(2000),
 });
 export type ListChatFileMentionsResult = z.infer<
@@ -1262,6 +1272,8 @@ export const ListChatChannelsPayload = z.object({
 export type ListChatChannelsPayload = z.infer<typeof ListChatChannelsPayload>;
 
 export const ListChatChannelsResult = z.object({
+  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   channels: z.array(ChatChannelRecord),
   // The "Files" grouping: file-linked Chats listed read-only beside the
   // channels (they live in the file rail; the Chats view cross-links).
@@ -1338,6 +1350,8 @@ export const ListPersonalChatFeedPayload = z.object({
 });
 export type ListPersonalChatFeedPayload = z.infer<typeof ListPersonalChatFeedPayload>;
 export const ListPersonalChatFeedResult = z.object({
+  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  sharedChannelRowsUncovered: z.number().int().positive().optional(),
   items: z.array(ChatFeedItemRecord).max(50),
   nextCursor: z.string().max(1000).optional(),
   headCursor: z.string().max(1000).optional(),
@@ -1472,6 +1486,10 @@ export type DmRecord = z.infer<typeof DmRecord>;
 
 export const SyncDmsPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  // The DM the caller is reading, when it is reading one. The shared-channel
+  // pass is bounded, so a poll that names its open conversation keeps that one
+  // fresh instead of waiting for the rotation to reach it (#718).
+  openChannelId: CHAT_CHANNEL_ID.optional(),
 });
 export type SyncDmsPayload = z.infer<typeof SyncDmsPayload>;
 
