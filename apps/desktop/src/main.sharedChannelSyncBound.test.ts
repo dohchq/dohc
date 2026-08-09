@@ -292,9 +292,12 @@ describe("the shared-channel sync pass is bounded in production", () => {
       "async function startDesktopCliServer(",
       "\n}\n",
     );
+    // Named through the SAME target-priority helper syncDms uses (:276-279),
+    // not a plain untargeted pass: a chat read past the pass's row bound must
+    // still cover the thread or channel it actually asked for.
     expect(cliServerSource).toContain(
-      "onRead: async (workspace) => {\n" +
-        "      await syncWorkspaceSharedChannels(workspace.workspaceId);\n" +
+      "onRead: async (workspace, target) => {\n" +
+        "      await syncSharedChannelsForChatTarget(workspace.workspaceId, target);\n" +
         "    },",
     );
   });

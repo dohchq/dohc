@@ -2699,11 +2699,12 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       });
     },
     // No renderer poll runs the sync pass on the CLI's or MCP's behalf (#731):
-    // AWAIT the same bounded rotating pass listChatChannels does before a chat
-    // read serves the store. Never throws — offline, it returns fast and the
-    // local rows answer.
-    onRead: async (workspace) => {
-      await syncWorkspaceSharedChannels(workspace.workspaceId);
+    // AWAIT (bounded — see cliServer.ts's CHAT_READ_SYNC_BUDGET_MS) the same
+    // pass syncDms already names a target for, so the read's own channel is
+    // covered past the pass's row bound. Never throws — offline, it returns
+    // fast and the local rows answer.
+    onRead: async (workspace, target) => {
+      await syncSharedChannelsForChatTarget(workspace.workspaceId, target);
     },
     onRunMessageLinkPending: (link) => {
       pendingCliRunMessageLinks.add(cliRunMessageLinkKey(link));

@@ -175,6 +175,7 @@ describe("CLI socket server", () => {
   let token: string;
   let calls: CallCounts;
   let writeTargets: Array<{ channelId: string } | { threadId: string } | undefined>;
+  let readTargets: Array<{ channelId: string } | { threadId: string } | undefined>;
   // Lets an individual test simulate what a real sync pass would have pulled,
   // or made unavailable, by the time it resolves.
   let onReadEffect: (() => Promise<void> | void) | null;
@@ -348,6 +349,7 @@ describe("CLI socket server", () => {
       reads: 0,
     };
     writeTargets = [];
+    readTargets = [];
     onReadEffect = null;
     errors = [];
     debugLines = [];
@@ -398,8 +400,9 @@ describe("CLI socket server", () => {
         calls.writes += 1;
         writeTargets.push(target);
       },
-      async onRead(_workspace) {
+      async onRead(_workspace, target) {
         calls.reads += 1;
+        readTargets.push(target);
         await onReadEffect?.();
       },
       onError(error) {
@@ -1388,6 +1391,82 @@ describe("CLI socket server", () => {
       "Local-only message",
     ]);
     expect(errors).toEqual([expect.objectContaining({ message: "relay unreachable" })]);
+  });
+
+  // #749 review: the CLI client itself gives up after its own 30 s response
+  // timeout. An unbounded await of a hanging sync pass would exceed that and
+  // kill the read entirely — worse than the stale read a bound leaves behind.
+  it("serves local rows within budget when the sync pass hangs past it", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Local-only message",
+    });
+    // Never resolves within the test — a permanently hung pass is the exact
+    // worst case the budget exists for. A real socket transport in play here
+    // (server may be non-null) rules out fake timers, so a short override
+    // proves the bound with real wall-clock time instead — the same knob
+    // regexScanTimeoutMs and the runMessageLink*Ms options already are.
+    onReadEffect = () => new Promise<void>(() => {});
+    serverOptions.chatReadSyncBudgetMs = 40;
+
+    const startedAtMs = Date.now();
+    const chat = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: thread.id,
+    });
+    const elapsedMs = Date.now() - startedAtMs;
+    if (!chat.ok) throw new Error(chat.reason);
+
+    expect(chat.messages.map((message) => message.body)).toEqual([
+      "Local-only message",
+    ]);
+    // Waited roughly the configured budget — not zero (skipping the pass
+    // entirely) and not the unbounded hang the mutation this pins against
+    // leaves behind.
+    expect(elapsedMs).toBeGreaterThanOrEqual(35);
+    expect(elapsedMs).toBeLessThan(5_000);
+  });
+
+  it("names the read's own channel or thread as the sync priority", async () => {
+    const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store!.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Priority-target message",
+    });
+
+    readTargets.length = 0;
+    await invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: thread.id });
+    expect(readTargets.at(-1)).toEqual({ threadId: thread.id });
+
+    readTargets.length = 0;
+    await invoke("show", {
+      cwd: workspaceRoot,
+      actor: "human",
+      target: thread.id,
+      peek: true,
+    });
+    expect(readTargets.at(-1)).toEqual({ threadId: thread.id });
+
+    readTargets.length = 0;
+    await invoke("threads", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      channel: general.id,
+    });
+    expect(readTargets.at(-1)).toEqual({ channelId: general.id });
+
+    // A verb whose args carry no single channel or thread runs the plain
+    // rotation instead of guessing one.
+    readTargets.length = 0;
+    await invoke("channelsFull", { cwd: workspaceRoot, actor: "agent" });
+    expect(readTargets.at(-1)).toBeUndefined();
   });
 
   it("round-trips post, reply, and show with main-derived identity and CLI origin", async () => {

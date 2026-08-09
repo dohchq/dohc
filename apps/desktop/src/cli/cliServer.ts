@@ -194,14 +194,21 @@ export interface CliServerOptions {
     target?: { channelId: string } | { threadId: string },
   ): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
-  // else ever runs a sync pass for it (#731). AWAITED before the verb reads the
-  // store, the same bounded rotating pass the renderer's reads trigger.
-  onRead?(workspace: CliWorkspaceContext): void | Promise<void>;
+  // else ever runs a sync pass for it (#731). AWAITED (up to a bound — see
+  // CHAT_READ_SYNC_BUDGET_MS) before the verb reads the store, the same
+  // bounded rotating pass the renderer's reads trigger. `target` names the
+  // read's own channel or thread, when the verb's args carry one, so that
+  // channel is covered even past the pass's own row bound.
+  onRead?(
+    workspace: CliWorkspaceContext,
+    target?: { channelId: string } | { threadId: string },
+  ): void | Promise<void>;
   onError?(error: unknown): void;
   onDebug?(message: string): void;
   nowMs?: () => number;
   platform?: NodeJS.Platform;
   regexScanTimeoutMs?: number;
+  chatReadSyncBudgetMs?: number;
   runMessageLinkRetryMs?: number;
   runMessageLinkDeadlineMs?: number;
   runMessageLinkForegroundBudgetMs?: number;
@@ -947,17 +954,37 @@ async function notifyWrite(
   }
 }
 
-// A hook failure must never block a read for local data that already exists —
-// the same offline-degrades-silently contract the sync pass itself keeps.
+// The CLI client itself gives up after DEFAULT_RESPONSE_TIMEOUT_MS (30 s,
+// packages/cli/src/index.ts) — an unbounded await of the sync pass (up to
+// SHARED_CHANNEL_SYNC_PASS_ROWS rows, each up to its own relay timeout) can
+// outlast that budget and kill the read entirely, which is worse than the
+// stale read a bound leaves behind. A hook failure must never block a read for
+// local data that already exists either — the same offline-degrades-silently
+// contract the sync pass itself keeps.
+const CHAT_READ_SYNC_BUDGET_MS = 10_000;
+
 async function notifyRead(
   options: CliServerOptions,
   context: CliWorkspaceContext,
+  target?: { channelId: string } | { threadId: string },
 ): Promise<void> {
-  try {
-    await options.onRead?.(context);
-  } catch (error) {
-    options.onError?.(error);
-  }
+  const pending = Promise.resolve()
+    .then(() => options.onRead?.(context, target))
+    .catch((error) => {
+      options.onError?.(error);
+    });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<void>((resolveBudget) => {
+    timer = setTimeout(
+      resolveBudget,
+      options.chatReadSyncBudgetMs ?? CHAT_READ_SYNC_BUDGET_MS,
+    );
+  });
+  // Past the budget, the read proceeds on whatever the store already has —
+  // `pending` keeps running (main.ts's pass is serialized per workspace, so it
+  // is never duplicated) and the NEXT read benefits from what it finishes.
+  await Promise.race([pending, budget]);
+  clearTimeout(timer);
 }
 
 // Every verb that reads chat content before doing anything else. `moments` and
@@ -974,6 +1001,26 @@ function isChatReadVerb(verb: CliRequest["verb"]): boolean {
     verb === "chat" ||
     verb === "channelsFull"
   );
+}
+
+// The chat/show/threads verbs name their target directly in their args — no
+// resolution against the (not-yet-synced) local channel/thread list needed,
+// the way #725's write side already resolves it. A wrong or unresolvable
+// guess is harmless: syncSharedChannelsForChatTarget falls back to a plain
+// pass, so this can only add coverage, never remove it.
+function chatReadTarget(
+  request: CliRequest,
+): { channelId: string } | { threadId: string } | undefined {
+  switch (request.verb) {
+    case "chat":
+      return { threadId: request.args.threadId };
+    case "show":
+      return { threadId: request.args.target };
+    case "threads":
+      return { channelId: request.args.channel };
+    default:
+      return undefined;
+  }
 }
 
 type RunMessageLinkInput = {
@@ -2241,7 +2288,7 @@ async function workspaceContextForRequest(
   }
   const context = await options.openWorkspace(workspace);
   if (isChatReadVerb(request.verb)) {
-    await notifyRead(options, context);
+    await notifyRead(options, context, chatReadTarget(request));
   }
   return context;
 }
