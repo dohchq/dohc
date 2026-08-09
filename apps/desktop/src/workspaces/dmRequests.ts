@@ -9,13 +9,13 @@ export interface DmRequestRow {
   granterEmail: string | null;
 }
 
-export interface ReceivedDmGrantRow {
+interface ReceivedDmGrantRow {
   shareId?: unknown;
   granterEmail?: unknown;
   selector?: { kind?: unknown; channelWireId?: unknown };
 }
 
-export interface WorkspaceSharedChannelRegistry {
+interface WorkspaceSharedChannelRegistry {
   workspaceId: string;
   rootPath: string;
   sharedChannels?: readonly JoinedSharedChannel[];

@@ -536,7 +536,6 @@ describe("DM request decisions", () => {
       declinedShareIds: new Set(["share-declined"]),
     };
 
-    expect("writeSharedChannels" in input).toBe(false);
     await expect(classifyDmRequests(input)).resolves.toEqual({
       pending: [
         { shareId: "share-pending", granterEmail: "pending@example.com" },

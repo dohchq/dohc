@@ -5639,6 +5639,62 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-accepted-elsewhere")).toBeNull();
   });
 
+  it("keeps the cross-workspace confirmation when accept queues behind a DM refresh", async () => {
+    const user = userEvent.setup();
+    const request = { shareId: "share-dm-race", granterEmail: "bob@example.com" };
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [],
+      pending: [request],
+      declined: [],
+    });
+    bridgeMock.acceptDm.mockResolvedValue({
+      dm: dm({ role: "participant", shareId: request.shareId }),
+    });
+
+    renderView();
+    await screen.findByTestId("chats-dm-request-item");
+    const syncsBefore = bridgeMock.syncDms.mock.calls.length;
+    let resolvePoll!: (result: {
+      available: boolean;
+      dms: DmRecord[];
+      pending: (typeof request)[];
+      declined: (typeof request)[];
+    }) => void;
+    const pendingPoll = new Promise<{
+      available: boolean;
+      dms: DmRecord[];
+      pending: (typeof request)[];
+      declined: (typeof request)[];
+    }>((resolve) => {
+      resolvePoll = resolve;
+    });
+    bridgeMock.syncDms
+      .mockImplementationOnce(() => pendingPoll)
+      .mockImplementation(() => new Promise<never>(() => undefined));
+
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1),
+    );
+    await user.click(screen.getByTestId("chats-dm-request-accept"));
+    const personalOption = screen
+      .getAllByTestId("chats-accept-dm-workspace-option")
+      .find((option) => option.dataset.workspaceId === "workspace-b");
+    await user.click(personalOption!);
+    await user.click(screen.getByTestId("chats-accept-dm-confirm"));
+    await screen.findByTestId("chats-dm-accepted-elsewhere");
+
+    await act(async () => {
+      resolvePoll({ available: true, dms: [], pending: [], declined: [] });
+      await pendingPoll;
+    });
+    await waitFor(() =>
+      expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2),
+    );
+    expect(screen.getByTestId("chats-dm-accepted-elsewhere")).toBeTruthy();
+  });
+
   it("accepts a message request in the current workspace and opens it", async () => {
     const user = userEvent.setup();
     const request = {

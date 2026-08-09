@@ -153,7 +153,7 @@ export interface ShareLogPage {
 }
 
 // The outcome of peeking a received grant's channel kind:
-//   "dm"      — a DM grant; auto-join it.
+//   "dm"      — a pending DM request.
 //   "not-dm"  — a DEFINITIVE ordinary-channel answer: an authoritative
 //               channel.create was observed with kind "channel". Safe to
 //               CACHE because a grant's channel kind is immutable.
@@ -191,9 +191,9 @@ export function shareIdsToWithholdFromOrdinaryInvites(input: {
   );
 }
 
-// Peek a received chat-channel grant's KIND without mutating the local store,
-// to decide whether it should AUTO-JOIN (only `kind:"dm"` grants do; a regular
-// shared-channel grant stays manual-join). The share filter serves the
+// Peek a received chat-channel grant's KIND without mutating the local store
+// to classify it as a pending DM request or an ordinary shared-channel invite.
+// The share filter serves the
 // channel.create as the join bootstrap, so the EARLIEST SERVED op carries the
 // channel kind. But the log GET paginates raw rows before filtering — a normal
 // owner log has `workspace.init` before `chat.channel.create`, so the first

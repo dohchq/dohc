@@ -345,7 +345,7 @@ export async function readRelayChatShareLanes(input: {
   }>;
   remoteWorkspaceId: string | null;
   // Received shares that belong to ANOTHER local workspace: already joined
-  // there, or pinned there by the DM home map. A received grant is
+  // there. A received grant is
   // account-wide, so without this the lane is the same in every workspace —
   // one account-wide problem with it blanks a workspace that has shares of its
   // own, and an invitation already accepted in Work keeps offering Join in

@@ -367,6 +367,7 @@ import {
   liveSharedChannelHoldersByShareId,
   otherLiveSharedChannelHolder,
   reserveAndPullSharedChannel,
+  type DmRequestRow,
 } from "./workspaces/dmRequests";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import {
@@ -4627,6 +4628,43 @@ function registerIpcHandlers(
     });
   }
 
+  function assertShareNotHeldElsewhere(
+    shareId: string,
+    workspaceId: string,
+  ): void {
+    const holder = otherWorkspaceHoldingShare(shareId, workspaceId);
+    if (!holder) return;
+    const workspaceName =
+      holder.rootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "workspace";
+    throw new Error(
+      `This conversation already lives in ${workspaceName}. Open that workspace to continue.`,
+    );
+  }
+
+  function reserveAndPullSharedChannelForWorkspace(input: {
+    relay: SyncRelayConnection;
+    shareId: string;
+    workspaceId: string;
+    rootPath: string;
+    recipientUserId: string;
+    relayUrl: string;
+  }): Promise<JoinedSharedChannel> {
+    return reserveAndPullSharedChannel({
+      ...input,
+      readSharedChannels: (workspaceId) =>
+        findWorkspace(workspaceId)?.sharedChannels ?? [],
+      writeSharedChannels: setWorkspaceSharedChannels,
+      fetchInfo: fetchSharedChannelInfo,
+      pull: ({ workspaceId, rootPath, relay, shareId, channelWireId }) =>
+        relayClientForWorkspace({ workspaceId, rootPath, relay }).pullSharedChannel({
+          shareId,
+          channelWireId,
+        }),
+      serialize: serializeSharedChannelSync,
+      afterPull: projectPendingChatBookmarksAfterPull,
+    });
+  }
+
   ipcMain.handle(CHANNELS.listChatChannelShares, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatChannelSharesPayload.parse(payload);
@@ -4737,24 +4775,13 @@ function registerIpcHandlers(
     };
     let joined: JoinedSharedChannel;
     try {
-      joined = await reserveAndPullSharedChannel({
+      joined = await reserveAndPullSharedChannelForWorkspace({
         relay,
         shareId: input.shareId,
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
         recipientUserId: joinedRecipientUserId,
         relayUrl: joinedRelayUrl,
-        readSharedChannels: (workspaceId) =>
-          findWorkspace(workspaceId)?.sharedChannels ?? [],
-        writeSharedChannels: setWorkspaceSharedChannels,
-        fetchInfo: fetchSharedChannelInfo,
-        pull: ({ workspaceId, rootPath, relay, shareId, channelWireId }) =>
-          relayClientForWorkspace({ workspaceId, rootPath, relay }).pullSharedChannel({
-            shareId,
-            channelWireId,
-          }),
-        serialize: serializeSharedChannelSync,
-        afterPull: projectPendingChatBookmarksAfterPull,
       });
     } catch (error) {
       if (error instanceof ShareUnavailableError) {
@@ -7121,8 +7148,8 @@ function registerIpcHandlers(
     await warmCredentialCache();
     const relay = dmRelayConnection();
     const store = linkedChatStoreFor(workspace);
-    let pending: Array<{ shareId: string; granterEmail: string | null }> = [];
-    let declined: Array<{ shareId: string; granterEmail: string | null }> = [];
+    let pending: DmRequestRow[] = [];
+    let declined: DmRequestRow[] = [];
     if (relay) {
       try {
         const listing = await relayShareJson<{
@@ -7183,14 +7210,7 @@ function registerIpcHandlers(
       );
     }
 
-    const existingHolder = otherWorkspaceHoldingShare(input.shareId, input.workspaceId);
-    if (existingHolder) {
-      const workspaceName =
-        existingHolder.rootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "workspace";
-      throw new Error(
-        `This conversation already lives in ${workspaceName}. Open that workspace to continue.`,
-      );
-    }
+    assertShareNotHeldElsewhere(input.shareId, input.workspaceId);
 
     const acceptedHere = isShareAcceptedInWorkspace(
       entry.sharedChannels ?? [],
@@ -7216,37 +7236,15 @@ function registerIpcHandlers(
       };
       // Recheck after the relay awaits. Two open Chats views can accept the
       // same account-wide request concurrently; only the first may reserve it.
-      const holderAfterCredentials = otherWorkspaceHoldingShare(
-        input.shareId,
-        input.workspaceId,
-      );
-      if (holderAfterCredentials) {
-        const workspaceName =
-          holderAfterCredentials.rootPath.split(/[\\/]/).filter(Boolean).at(-1) ??
-          "workspace";
-        throw new Error(
-          `This conversation already lives in ${workspaceName}. Open that workspace to continue.`,
-        );
-      }
+      assertShareNotHeldElsewhere(input.shareId, input.workspaceId);
       try {
-        await reserveAndPullSharedChannel({
+        await reserveAndPullSharedChannelForWorkspace({
           relay,
           shareId: input.shareId,
           workspaceId: workspace.workspaceId,
           rootPath: workspace.rootPath,
           recipientUserId: acceptCredentials.userId,
           relayUrl: acceptedRelayUrl,
-          readSharedChannels: (workspaceId) =>
-            findWorkspace(workspaceId)?.sharedChannels ?? [],
-          writeSharedChannels: setWorkspaceSharedChannels,
-          fetchInfo: fetchSharedChannelInfo,
-          pull: ({ workspaceId, rootPath, relay, shareId, channelWireId }) =>
-            relayClientForWorkspace({ workspaceId, rootPath, relay }).pullSharedChannel({
-              shareId,
-              channelWireId,
-            }),
-          serialize: serializeSharedChannelSync,
-          afterPull: projectPendingChatBookmarksAfterPull,
         });
       } catch (error) {
         if (error instanceof ShareUnavailableError) {
@@ -7258,6 +7256,7 @@ function registerIpcHandlers(
       }
     }
 
+    // Acceptance succeeded, so this obsolete marker cleanup is best-effort; decline and undecline handlers must persist their requested change.
     void clearDeclinedDm(dmRequestFile(), input.shareId);
     const dm = (
       await listDmRecords({

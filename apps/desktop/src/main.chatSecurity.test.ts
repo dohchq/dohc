@@ -253,13 +253,27 @@ describe("main-process chat authorization", () => {
   // the cached registry — is what has to precede the pull. The loser then
   // refuses having pulled nothing.
   it("reserves the joined-lane slot before either join path pulls anything", () => {
+    const helperStart = mainSource.indexOf(
+      "function reserveAndPullSharedChannelForWorkspace(",
+    );
+    const helperEnd = mainSource.indexOf(
+      "ipcMain.handle(CHANNELS.listChatChannelShares",
+      helperStart,
+    );
+    expect(helperStart).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    const helper = mainSource.slice(helperStart, helperEnd);
+    expect(helper).toContain("return reserveAndPullSharedChannel({");
+    expect(helper).toContain(
+      "writeSharedChannels: setWorkspaceSharedChannels",
+    );
+    expect(helper).toContain("serialize: serializeSharedChannelSync");
     for (const [label, source] of [
       ["joinSharedChannel", handlerSource("joinSharedChannel")],
       ["acceptDm", handlerSource("acceptDm")],
     ] as const) {
-      expect(source, label).toContain("reserveAndPullSharedChannel({");
       expect(source, label).toContain(
-        "writeSharedChannels: setWorkspaceSharedChannels",
+        "reserveAndPullSharedChannelForWorkspace({",
       );
     }
     const reserveAt = dmRequestsSource.indexOf("input.writeSharedChannels(");
@@ -304,12 +318,6 @@ describe("main-process chat authorization", () => {
       "return serializeSharedChannelSync(workspaceId, () =>\n    runSharedChannelSyncPass(workspaceId, priorityChannelWireId),",
     );
 
-    for (const [label, source] of [
-      ["joinSharedChannel", handlerSource("joinSharedChannel")],
-      ["acceptDm", handlerSource("acceptDm")],
-    ] as const) {
-      expect(source, label).toContain("serialize: serializeSharedChannelSync");
-    }
     const serializeAt = dmRequestsSource.indexOf("await input.serialize(");
     const pullAt = dmRequestsSource.indexOf("await input.pull({");
     expect(serializeAt).toBeGreaterThan(-1);
@@ -331,21 +339,35 @@ describe("main-process chat authorization", () => {
 
   it("accepts only once and keys every write and pull to the chosen workspace", () => {
     const handler = handlerSource("acceptDm");
-    const exclusivityAt = handler.indexOf("otherWorkspaceHoldingShare(");
+    const exclusivityAt = handler.indexOf("assertShareNotHeldElsewhere(");
     const credentialsAt = handler.indexOf("await warmCredentialCache()");
-    const reserveAt = handler.indexOf("reserveAndPullSharedChannel({");
+    const reserveAt = handler.indexOf(
+      "reserveAndPullSharedChannelForWorkspace({",
+    );
     expect(exclusivityAt).toBeGreaterThan(-1);
     expect(exclusivityAt).toBeLessThan(credentialsAt);
     expect(
-      handler.match(/otherWorkspaceHoldingShare\(/gu),
+      handler.match(/assertShareNotHeldElsewhere\(/gu),
     ).toHaveLength(2);
-    expect(handler).toContain(
+    const assertionStart = mainSource.indexOf(
+      "function assertShareNotHeldElsewhere(",
+    );
+    const assertionEnd = mainSource.indexOf(
+      "function reserveAndPullSharedChannelForWorkspace(",
+      assertionStart,
+    );
+    expect(assertionStart).toBeGreaterThan(-1);
+    expect(assertionEnd).toBeGreaterThan(assertionStart);
+    const assertion = mainSource.slice(assertionStart, assertionEnd);
+    expect(assertion).toContain(
+      "otherWorkspaceHoldingShare(shareId, workspaceId)",
+    );
+    expect(assertion).toContain(
       "This conversation already lives in ${workspaceName}. Open that workspace to continue.",
     );
     expect(handler).toContain("if (!acceptedHere)");
     expect(reserveAt).toBeGreaterThan(credentialsAt);
     expect(handler).toContain("workspaceId: workspace.workspaceId");
-    expect(handler).toContain("serialize: serializeSharedChannelSync");
     expect(handler).not.toContain("activity.queueCloudSync");
   });
 
