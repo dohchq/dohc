@@ -62,6 +62,20 @@ function plaintextUpdate(
   return Y.encodeStateAsUpdate(mirror, before);
 }
 
+function richdocUpdate(initialUpdate: Uint8Array, text: string): Uint8Array {
+  const mirror = new Y.Doc();
+  mirror.getMap("frontmatter");
+  mirror.getMap("meta");
+  mirror.getText("plainText");
+  const body = mirror.getXmlFragment("body");
+  Y.applyUpdate(mirror, initialUpdate);
+  const before = Y.encodeStateVector(mirror);
+  const paragraph = new Y.XmlElement("paragraph");
+  paragraph.insert(0, [new Y.XmlText(text)]);
+  body.insert(0, [paragraph]);
+  return Y.encodeStateAsUpdate(mirror, before);
+}
+
 function findPartiallyAppliedMalformedUpdate(fullUpdate: Uint8Array): Uint8Array {
   for (let cut = 1; cut < fullUpdate.byteLength; cut += 1) {
     const candidate = fullUpdate.slice(0, cut);
@@ -1622,6 +1636,13 @@ describe("YdocLiveAdapter", () => {
       },
       scheduleSettle: () => () => undefined,
     });
+    // A recorded update, so the settle below finds durable state to
+    // project instead of hitting the daemon's NoMarker guard.
+    provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (text) => {
+        text.insert(0, "typed");
+      }),
+    );
 
     await expect(provider.settleNow()).rejects.toBe(landingFailure);
     expect(settleErrors).toEqual([landingFailure]);
@@ -1697,6 +1718,13 @@ describe("YdocLiveAdapter", () => {
       onRemoteUpdate: () => undefined,
       scheduleSettle: () => () => undefined,
     });
+    // A recorded update, so the settle below finds durable state instead
+    // of hitting the daemon's NoMarker guard.
+    await provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (text) => {
+        text.insert(0, "typed");
+      }),
+    );
 
     const settling = provider.settleNow();
     const closing = provider.close({ settle: false });
@@ -1780,6 +1808,13 @@ describe("YdocLiveAdapter", () => {
       },
       scheduleSettle: () => () => undefined,
     });
+    // A recorded update, so both settles below find durable state instead
+    // of hitting the daemon's NoMarker guard.
+    await provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (text) => {
+        text.insert(0, "typed");
+      }),
+    );
 
     const first = provider.settleNow();
     const second = provider.settleNow();
@@ -1911,6 +1946,13 @@ describe("YdocLiveAdapter", () => {
       onRemoteUpdate: () => undefined,
       scheduleSettle: () => () => undefined,
     });
+    // A recorded update, so the escalated settling close below finds
+    // durable state instead of hitting the daemon's NoMarker guard.
+    await provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (text) => {
+        text.insert(0, "typed");
+      }),
+    );
 
     await expect(provider.close({ settle: false })).resolves.toBeUndefined();
     expect(closes).toEqual([false, true]);
@@ -2015,6 +2057,9 @@ describe("YdocLiveAdapter", () => {
       onRemoteUpdate: () => undefined,
       scheduleSettle: () => () => undefined,
     });
+    // A recorded update, so the escalated settling close below finds
+    // durable state instead of hitting the daemon's NoMarker guard.
+    await provider.applyLocalUpdate(richdocUpdate(provider.initialUpdate, "typed"));
 
     await expect(provider.close({ settle: false })).resolves.toBeUndefined();
     // Richdoc settles since R15-3's full-fidelity projection: the retry
@@ -2157,6 +2202,9 @@ describe("YdocLiveAdapter", () => {
       path: PATH,
       contentKind: "plaintext",
     });
+    // A recorded update, so the settles below find durable state instead
+    // of hitting the daemon's NoMarker guard.
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "typed" });
 
     await expect(session.settle()).resolves.toMatchObject({
       materialized: true,
@@ -2164,6 +2212,7 @@ describe("YdocLiveAdapter", () => {
     // The resync sits BETWEEN the two settles. Reordered or missing, the
     // second settle projects the same state the first was refused for.
     expect(methods.filter((method) => method !== YDOC_METHOD.open)).toEqual([
+      YDOC_METHOD.recordUpdate,
       YDOC_METHOD.settle,
       YDOC_METHOD.resync,
       YDOC_METHOD.settle,
@@ -2953,7 +3002,10 @@ describe("the ydoc.open deadline (#616)", () => {
     expect(reusedPath.doc.getText("plainText").toString()).toBe(
       "a completely different file",
     );
-    await reusedPath.close({ settle: true });
+    // settle:false, not true: this session never recorded an update, so an
+    // explicit settle would hit the daemon's NoMarker guard
+    // (ydoc_settle_on_store) instead of materializing anything.
+    await reusedPath.close({ settle: false });
 
     // The SAME object, renamed to a NEW path. MUTATION: key the lineage by
     // path -> this open seeds fresh from the file instead of resurrecting
@@ -3145,7 +3197,9 @@ describe("the ydoc.open deadline (#616)", () => {
     // close went on to prune the lineage exactly as an explicit
     // settle:true close would.
     expect(reopened.lineage).toBe("absent");
-    await reopened.close({ settle: true });
+    // settle:false, not true: this reopened session never recorded an
+    // update either, so an explicit settle would hit the NoMarker guard.
+    await reopened.close({ settle: false });
     adapter.dispose();
   });
 
@@ -3272,7 +3326,9 @@ describe("the ydoc.open deadline (#616)", () => {
     expect(recaptured.doc.getText("plainText").toString()).toBe(
       "a completely unrelated new file",
     );
-    await recaptured.close({ settle: true });
+    // settle:false, not true: this session never recorded an update, so an
+    // explicit settle would hit the NoMarker guard.
+    await recaptured.close({ settle: false });
 
     // A's own lineage, at its new path, is untouched.
     const reopenedA = await adapter.openSession({
@@ -3376,6 +3432,206 @@ describe("the ydoc.open deadline (#616)", () => {
     // ydoc-unsettled-close, because the file record now lives at PATH2 and
     // a path-first lookup at PATH1 finds nothing.
     await expect(session.close({ settle: false })).resolves.toBeUndefined();
+    adapter.dispose();
+  });
+
+  // Codex round on #728 head 6cf9700e, finding 1. `capturedFileFor` scanned
+  // by object id alone. The daemon's `captured_head_sha` proof query is
+  // scoped by (workspace_id, version_id, object_id) (durable.rs) — object
+  // ids are only unique WITHIN that scope, so a fixture reusing one across
+  // scopes must never let one scope's row cover another's close.
+  it("captured-head coverage is scoped by workspace and version, not object id alone", async () => {
+    const OTHER_VERSION = "version-2";
+    const engine = new YdocLoopbackEngine();
+    const adapter = new YdocLiveAdapter(engine);
+
+    // No file seeded in THIS scope at all — the session's object id is
+    // plain-derived from its own path, and nothing in `files` matches it
+    // yet.
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(session.lineage).toBe("absent");
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "same object id, wrong scope: ",
+    });
+
+    // A DIFFERENT version's fixture reuses the SAME (derived) object id
+    // string, with markdown matching this session's content — a plausible
+    // fixture collision the daemon's DocKey always keeps apart. This is
+    // the ONLY `files` entry with this object id, in either scope.
+    // MUTATION: scan `files` by object id alone, ignoring workspace/version
+    // -> this close SUCCEEDS against the OTHER scope's snapshot.
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: OTHER_VERSION,
+      path: PATH,
+      markdown: "same object id, wrong scope: ",
+      contentKind: "plaintext",
+      objectId: session.objectId,
+    });
+
+    await expect(session.close({ settle: false })).rejects.toThrow(
+      /ydoc-unsettled-close/,
+    );
+    adapter.dispose();
+  });
+
+  // Codex round on #728 head 6cf9700e, finding 2. `seedFile` never removed
+  // an object's OLD row when it was re-seeded at a new path, so a scan
+  // (`capturedFileFor`) found the STALE row first (Map iteration is
+  // insertion order) and never reached the current one. The daemon keeps
+  // one snapshot row per object; re-seeding must replace, not append.
+  it("re-seeding the same object at a new path retires its old row, so coverage reads the CURRENT one", async () => {
+    const OBJECT_ID = "object-moved-with-new-bytes";
+    const PATH_A = "notes/first.md";
+    const PATH_B = "notes/second.md";
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH_A,
+      markdown: "stale bytes at the old path",
+      contentKind: "plaintext",
+      objectId: OBJECT_ID,
+    });
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH_A,
+      contentKind: "plaintext",
+    });
+    expect(session.objectId).toBe(OBJECT_ID);
+
+    // Two edits that net back to bytes matching the object's NEW capture at
+    // PATH_B, never its stale row at PATH_A.
+    await session.applyLocalEdit((doc) => {
+      const text = doc.getText("plainText");
+      text.delete(0, text.length);
+      text.insert(0, "fresh bytes at the new path");
+    });
+    expect(session.doc.getText("plainText").toString()).toBe(
+      "fresh bytes at the new path",
+    );
+
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH_B,
+      markdown: "fresh bytes at the new path",
+      contentKind: "plaintext",
+      objectId: OBJECT_ID,
+    });
+
+    // MUTATION: leave the object's OLD row at PATH_A in the map instead of
+    // retiring it on the re-seed above -> `capturedFileFor`'s scan returns
+    // PATH_A's stale row FIRST (it was inserted first), which never
+    // matches this session's current content, and this close refuses.
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+    adapter.dispose();
+  });
+
+  // Codex round on #728 head 6cf9700e, finding 3, closing the certifier's
+  // named false-green gap. The fresh no-file OPEN branch derived a plain
+  // id without checking for a live alias, silently resurrecting a renamed
+  // object's lineage under a document that never saw it. The daemon
+  // refuses instead (actor.rs ydoc_open_state_on_store,
+  // object_has_live_alias) — only capture's locked resolution may mint a
+  // disambiguated id for this case.
+  it("opening a vacated path refuses object-alias-collision instead of resurrecting the renamed object's lineage", async () => {
+    const PATH_A = "notes/original.md";
+    const PATH_B = "notes/renamed.md";
+    const engine = new YdocLoopbackEngine();
+    const adapter = new YdocLiveAdapter(engine);
+
+    // Object A originates at PATH_A via an ordinary absent-head open.
+    const first = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH_A,
+      contentKind: "plaintext",
+    });
+    await first.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "A's edit, never settled: ",
+    });
+    await first.evict();
+    const aObjectId = first.objectId;
+
+    // A is renamed to PATH_B and stays live there.
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH_B,
+      markdown: "A, now at its new path",
+      contentKind: "plaintext",
+      objectId: aObjectId,
+    });
+
+    // MUTATION: derive the plain id for a fresh open without checking for
+    // a live alias -> this open silently resurrects A's lineage under a
+    // document that never saw it, instead of refusing.
+    await expect(
+      adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH_A,
+        contentKind: "plaintext",
+      }),
+    ).rejects.toThrow(/ydoc-object-alias-collision/);
+
+    // A's own lineage, at its new path, is untouched.
+    const reopenedA = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH_B,
+      contentKind: "plaintext",
+    });
+    expect(reopenedA.objectId).toBe(aObjectId);
+    expect(reopenedA.lineage).toBe("existing");
+    expect(reopenedA.doc.getText("plainText").toString()).toBe(
+      "A's edit, never settled: ",
+    );
+    await reopenedA.close({ settle: true });
+    adapter.dispose();
+  });
+
+  // Codex round on #728 head 6cf9700e, finding 4. An explicit settle:true
+  // on an UNTOUCHED absent-lineage session projected the empty doc and
+  // materialized it — the daemon's `ydoc_settle_on_store` finds no marker
+  // row at all for a session that never recorded a durable update, and
+  // refuses (NoMarker) rather than letting an empty projection clobber
+  // whatever the artifact holds.
+  it("an explicit settle:true close on an untouched absent-lineage session refuses instead of materializing an empty projection", async () => {
+    const materialized: Array<{ path: string; markdown: string }> = [];
+    const engine = new YdocLoopbackEngine({
+      materialize: (input) => materialized.push(input),
+    });
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(session.lineage).toBe("absent");
+
+    // MUTATION: settle unconditionally on an explicit settle:true, without
+    // checking absent-and-first-update-pending -> this close SUCCEEDS,
+    // materializing an EMPTY projection over whatever the artifact holds.
+    await expect(session.close({ settle: true })).rejects.toThrow();
+    expect(materialized).toHaveLength(0);
+
+    // The session is still the daemon's: a non-settling close succeeds
+    // cleanly.
+    await session.close({ settle: false });
     adapter.dispose();
   });
 

@@ -13,6 +13,11 @@ import {
 } from "./ydocWireContract";
 
 interface LoopbackFile {
+  // Object ids are only unique WITHIN a scope, matching the daemon's
+  // `DocKey` (workspace_id, version_id, object_id) — a fixture that reuses
+  // an id across scopes must never let one scope's row cover another's.
+  workspace: string;
+  versionId: string;
   objectId: string;
   contentKind: YdocContentKind;
   markdown: string;
@@ -108,6 +113,32 @@ function unsettledCloseRefusal(): Error {
     wireError: {
       code: "INVALID_PARAMS",
       message: "ydoc-unsettled-close",
+      retry: "no",
+    },
+  });
+}
+
+// The literal from crates/dohc-workspace-engine/src/lib.rs's
+// `CollabError::ObjectAliasCollision` mapping.
+function objectAliasCollisionRefusal(): Error {
+  return Object.assign(new Error("ydoc-object-alias-collision"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "ydoc-object-alias-collision",
+      retry: "no",
+    },
+  });
+}
+
+// `CollabError::NoMarker` has no specific message mapping in
+// crates/dohc-workspace-engine/src/lib.rs — it falls through to the
+// generic InvalidParams tail, so this is the literal the wire actually
+// carries.
+function noMarkerRefusal(): Error {
+  return Object.assign(new Error("workspace operation failed"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "workspace operation failed",
       retry: "no",
     },
   });
@@ -241,8 +272,25 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   seedFile(input: SeedLoopbackFileInput): void {
     const key = fileKey(input.workspace, input.versionId, input.path);
+    const objectId = input.objectId ?? this.resolveDefaultObjectId(key);
+    // The daemon keeps ONE snapshot row per object: a capture that lands
+    // the SAME object at a new path replaces its row rather than adding a
+    // second one, or a scan over `files` (capturedFileFor) would find the
+    // stale row first and never reach the current one.
+    for (const [otherKey, file] of this.files) {
+      if (
+        otherKey !== key &&
+        file.workspace === input.workspace &&
+        file.versionId === input.versionId &&
+        file.objectId === objectId
+      ) {
+        this.files.delete(otherKey);
+      }
+    }
     this.files.set(key, {
-      objectId: input.objectId ?? this.resolveDefaultObjectId(key),
+      workspace: input.workspace,
+      versionId: input.versionId,
+      objectId,
       contentKind: input.contentKind ?? "richdoc",
       markdown: input.markdown,
       head: input.head ?? "present",
@@ -254,12 +302,26 @@ export class YdocLoopbackEngine implements EngineTransport {
   // collide with an object that renamed away and is still live elsewhere.
   private resolveDefaultObjectId(key: string): string {
     const derived = deriveObjectId(key);
-    const liveElsewhere = [...this.files.entries()].some(
-      ([otherKey, file]) => otherKey !== key && file.objectId === derived,
-    );
-    return liveElsewhere
+    return this.objectHasLiveAliasElsewhere(key, derived)
       ? `${derived}#recaptured-${this.nextRecaptureOrder++}`
       : derived;
+  }
+
+  // Mirrors `object_has_live_alias` (crates/dohc-engine-domain/src/store.rs):
+  // true when some path OTHER than `excludingKey` currently holds this
+  // exact object id — the sign an object renamed away and is still
+  // referenced elsewhere. Shared by capture's id resolution (above) and
+  // open's collision refusal (`open()`, actor.rs
+  // ydoc_open_state_on_store) — the SAME rule, at the two sites that mint
+  // an id from a bare path.
+  private objectHasLiveAliasElsewhere(
+    excludingKey: string,
+    objectId: string,
+  ): boolean {
+    for (const [otherKey, file] of this.files) {
+      if (otherKey !== excludingKey && file.objectId === objectId) return true;
+    }
+    return false;
   }
 
   // Test-only seam for the sync-promotion the daemon does inside
@@ -385,8 +447,22 @@ export class YdocLoopbackEngine implements EngineTransport {
     }
     const fileLookupKey = fileKey(request.workspace, versionId, path);
     const file = this.files.get(fileLookupKey);
+    let objectId: string;
+    if (file) {
+      objectId = file.objectId;
+    } else {
+      const derived = deriveObjectId(fileLookupKey);
+      // A derived id still LIVE at another alias means this path's former
+      // file was renamed away: only capture's locked resolution may mint a
+      // disambiguated id for that (resolve_capture_object); an open cannot
+      // reserve one pre-commit, so it refuses instead of grafting onto the
+      // renamed file's lineage (actor.rs ydoc_open_state_on_store).
+      if (this.objectHasLiveAliasElsewhere(fileLookupKey, derived)) {
+        throw objectAliasCollisionRefusal();
+      }
+      objectId = derived;
+    }
     const sessionId = `session-${this.nextSessionId++}`;
-    const objectId = file?.objectId ?? deriveObjectId(fileLookupKey);
     // A surviving lineage RESURRECTS: it is the document's own state, and it
     // outranks the file exactly as the daemon's does. Keyed by OBJECT
     // IDENTITY (workspace, version, objectId) — see `lineageKey` — so a
@@ -467,6 +543,17 @@ export class YdocLoopbackEngine implements EngineTransport {
     markdown: string;
     sha256: string;
   } {
+    // `ydoc_settle_on_store`'s `load_persisted` finds no marker row at all
+    // for a session that has never recorded a durable update — a marker is
+    // created lazily, by the first recordUpdate, not by open. Mirrors that
+    // with NoMarker's wire shape rather than letting an untouched session's
+    // structurally-empty projection materialize and clobber whatever the
+    // artifact already holds. `close()`'s implicit default already avoids
+    // this; this guards the EXPLICIT settle:true override, and the direct
+    // `ydoc.settle` RPC, which share this same path.
+    if (session.lineageAbsentAtOpen && session.firstUpdatePending) {
+      throw noMarkerRefusal();
+    }
     const markdown = project(session);
     const digest = sha256(markdown);
     this.options.materialize?.({ path: session.path, markdown });
@@ -576,7 +663,11 @@ export class YdocLoopbackEngine implements EngineTransport {
       // and keeps the rows regardless of settle state (see
       // `markSessionReplicated`).
       const currentSha = settled?.sha256 ?? sha256(project(session));
-      const capturedFile = this.capturedFileFor(session.objectId);
+      const capturedFile = this.capturedFileFor(
+        session.workspace,
+        session.versionId,
+        session.objectId,
+      );
       const coveredByCapture =
         capturedFile !== undefined &&
         capturedFile.head === "present" &&
@@ -636,13 +727,25 @@ export class YdocLoopbackEngine implements EngineTransport {
     return lineageKey(session.workspace, session.versionId, session.objectId);
   }
 
-  // The daemon's `captured_head_sha` query is scoped by object id, not by
-  // path (durable.rs) — the loopback's disk read must resolve the same
-  // way, so a renamed object's capture at its NEW path is still found for
-  // an OLD session still bound to it.
-  private capturedFileFor(objectId: string): LoopbackFile | undefined {
+  // The daemon's `captured_head_sha` query is scoped by
+  // (workspace, version, object_id), not by path (durable.rs) — the
+  // loopback's disk read must resolve the same way, so a renamed object's
+  // capture at its NEW path is still found for an OLD session still bound
+  // to it, and a fixture reusing an object id in a DIFFERENT scope never
+  // covers this one.
+  private capturedFileFor(
+    workspace: string,
+    versionId: string,
+    objectId: string,
+  ): LoopbackFile | undefined {
     for (const file of this.files.values()) {
-      if (file.objectId === objectId) return file;
+      if (
+        file.workspace === workspace &&
+        file.versionId === versionId &&
+        file.objectId === objectId
+      ) {
+        return file;
+      }
     }
     return undefined;
   }
