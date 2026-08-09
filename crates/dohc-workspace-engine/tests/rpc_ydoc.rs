@@ -1792,6 +1792,163 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
     call(&transport, &handle, 10, "workspace.close", json!({})).await;
 }
 
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "notes/seed.md", b"seed");
+
+    let workspace_id = "ws-rpc-ydoc-delete-cancels-pending";
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/deleted.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+
+    let doc = Ydoc::wire();
+    let first = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v1"));
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": first }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "v1" }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/deleted.md")).expect("v1 on disk"),
+        "v1"
+    );
+
+    // Hold the target with NO sharing, exactly like the transient-failure
+    // siblings above: the next settle commits its head but its replace
+    // fails, leaving a job PENDING with the v1 bytes as its expected
+    // preimage.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(scratch.path().join("notes/deleted.md"))
+        .expect("exclusive lock");
+    let second = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v2 "));
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": second }),
+    )
+    .await;
+    let failed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                6,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "summary": "v2 blocked" }),
+            ),
+        )
+        .await
+        .expect_err("a locked target must fail the settle");
+    assert_eq!(failed.code, ErrorCode::Overloaded);
+    assert_eq!(failed.message, "file-locked");
+    drop(lock);
+
+    // The user's desktop, having seen the settle fail, gives up on the
+    // session rather than retrying the settle — the daemon-side twin of the
+    // JS "detached debt" issue #739 names — and evicts it (#665's third
+    // exit: the lease is dropped, the pending job is untouched) before
+    // deleting the path outright.
+    let evicted = call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(evicted["evicted"], json!(true));
+
+    call(
+        &transport,
+        &handle,
+        8,
+        "versionedText.delete",
+        json!({
+            "versionId": "main",
+            "path": "notes/deleted.md",
+            "origin": "api",
+            "requestId": "delete-with-pending-job",
+        }),
+    )
+    .await;
+    // The delete is DB-only for text (mirroring it to disk is a desktop
+    // concern, #738), so the pre-delete bytes are still sitting there —
+    // exactly the state a real crash would leave. The pending job's preimage
+    // (Present, v1) still matches those bytes, so nothing but the
+    // delete-time cancellation stands between it and a replay that clobbers
+    // this path back into existence.
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/deleted.md")).expect("still on disk"),
+        "v1"
+    );
+    call(&transport, &handle, 9, "workspace.close", json!({})).await;
+    drop(transport);
+
+    // Simulate a daemon restart against the same on-disk database: a fresh
+    // service, a fresh transport, reopening the same workspace root.
+    let restarted_service = Arc::new(EngineService::new());
+    let restarted_transport = InProcessTransport::new(restarted_service);
+    let restarted_handle = open_workspace(&restarted_transport, &scratch, workspace_id, 1).await;
+
+    // RED (pre-#739): the stale pending job survives the delete, its
+    // preimage still matches the untouched v1 bytes, and startup replay
+    // (`workspace.open` -> `materialize_replay_pending`) materializes it —
+    // the deleted path comes back with "v2 v1" on a path the registry no
+    // longer tracks.
+    //
+    // GREEN (#739): the delete cancelled the job in the same transaction, so
+    // replay finds nothing pending for this path and the bytes stay exactly
+    // as the delete left them.
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/deleted.md")).expect("unchanged"),
+        "v1",
+        "a stale pending job replayed and resurrected a path the delete removed"
+    );
+
+    call(
+        &restarted_transport,
+        &restarted_handle,
+        3,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
 /// Poll capture until the head for `path` holds exactly `text`. One sleep plus
 /// one flush cannot carry that proof: a watcher that has not queued the write
 /// yet makes the flush report quiescence.

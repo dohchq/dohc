@@ -29,7 +29,8 @@ use crate::records::{
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MAX_IDENTIFIER_BYTES, MaterializationJobSpec, Preimage,
-    StorageError, TxnOutcome, enqueue_delete_job, enqueue_job, put_binary_blob,
+    StorageError, TxnOutcome, cancel_pending_jobs_for_path, enqueue_delete_job, enqueue_job,
+    put_binary_blob,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -3581,6 +3582,13 @@ pub fn delete_text_in_tx(
         params![ws, input.version_id, before.object_id],
     )
     .map_err(DomainError::sql_persist)?;
+    // #739: a materialization job left PENDING by this path's OWN prior
+    // write (a locked target, a busy store — #595/#663) survives this
+    // delete unless cancelled HERE, in the same transaction. Left pending,
+    // startup/fence replay (`materialize_replay_pending`) would later find
+    // its preimage still matching untouched disk bytes and materialize it —
+    // resurrecting a path the registry no longer tracks.
+    cancel_pending_jobs_for_path(tx, ws, &input.path, input.now_ms)?;
 
     let result = DeleteResult {
         object,

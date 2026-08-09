@@ -62,6 +62,10 @@ pub enum JobStatus {
     /// preserved both and did not overwrite. Terminal until a human/agent
     /// resolves it (never silently replayed).
     Conflict,
+    /// Its target path was deleted before the job ever reached disk (#739).
+    /// Terminal, and distinct from `Conflict`: nothing needs a human's
+    /// resolution here — the delete is the resolution. Never replayed.
+    Cancelled,
 }
 
 impl JobStatus {
@@ -70,6 +74,7 @@ impl JobStatus {
             JobStatus::Pending => "pending",
             JobStatus::Complete => "complete",
             JobStatus::Conflict => "conflict",
+            JobStatus::Cancelled => "cancelled",
         }
     }
     fn parse(raw: &str) -> Option<Self> {
@@ -77,6 +82,7 @@ impl JobStatus {
             "pending" => Some(JobStatus::Pending),
             "complete" => Some(JobStatus::Complete),
             "conflict" => Some(JobStatus::Conflict),
+            "cancelled" => Some(JobStatus::Cancelled),
             _ => None,
         }
     }
@@ -130,6 +136,37 @@ pub fn enqueue_delete_job(
     spec: &MaterializationJobSpec,
 ) -> Result<(), StorageError> {
     enqueue_operation(tx, spec, MaterializationOperation::Delete)
+}
+
+/// Cancel every PENDING job targeting `path`, in the SAME transaction as the
+/// delete that removes the path from `path_aliases` (#739). A pending job
+/// predating this delete describes intent for a path the registry is about
+/// to stop tracking; left pending, a later replay (crash recovery, a fresh
+/// daemon start) would materialize it and resurrect exactly the bytes the
+/// delete removed — the daemon-side twin of the desktop capture's
+/// delete-wins rule (#697).
+///
+/// `Cancelled`, not deleted: the row stays as the durable record that a
+/// delete overtook it, the same way `Conflict` records an external write did
+/// — but never surfaced as something to resolve, because there is nothing to
+/// resolve.
+///
+/// Scoped like [`max_completed_generation_for_path`]: an empty
+/// `workspace_id` is the legacy global sentinel, matching every workspace's
+/// jobs for the path.
+pub fn cancel_pending_jobs_for_path(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    path: &str,
+    now_ms: i64,
+) -> Result<usize, StorageError> {
+    tx.execute(
+        "UPDATE materialization_jobs SET status = 'cancelled', completed_at_ms = ?3 \
+         WHERE status = 'pending' AND target_path = ?2 \
+           AND (?1 = '' OR workspace_id = ?1 OR workspace_id = '')",
+        rusqlite::params![workspace_id, path, now_ms],
+    )
+    .map_err(StorageError::persist)
 }
 
 /// Insert or refresh a durable projection intent. Active-version switching

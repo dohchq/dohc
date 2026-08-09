@@ -5981,7 +5981,7 @@ fn replay_pending_materializations(
                 .map(|write_job| write_job.status)
             {
                 Some(JobStatus::Complete) => {}
-                Some(JobStatus::Conflict) => {
+                Some(JobStatus::Conflict) | Some(JobStatus::Cancelled) => {
                     store.mark_materialization_conflict(&job.job_id, now_ms)?;
                     summary.failed += 1;
                     continue;
@@ -10122,7 +10122,7 @@ fn materialize_expected_job(
             )
             .0
         }
-        JobStatus::Conflict => false,
+        JobStatus::Conflict | JobStatus::Cancelled => false,
     }
 }
 
@@ -10313,7 +10313,9 @@ fn versioned_text_rollback_on_store(
                 job.created_at_ms,
                 faults,
             ),
-            JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
+            JobStatus::Conflict | JobStatus::Cancelled => {
+                (false, PostCommitMaterializeOutcome::Conflict)
+            }
         };
         return Ok(RollbackExecutionResult {
             deduped,
@@ -10352,7 +10354,9 @@ fn versioned_text_rollback_on_store(
             write_job.created_at_ms,
             faults,
         ),
-        JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
+        JobStatus::Conflict | JobStatus::Cancelled => {
+            (false, PostCommitMaterializeOutcome::Conflict)
+        }
     };
     if !write_materialized {
         if write_outcome == PostCommitMaterializeOutcome::Conflict
@@ -10393,7 +10397,9 @@ fn versioned_text_rollback_on_store(
             delete_job.created_at_ms,
             faults,
         ),
-        JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
+        JobStatus::Conflict | JobStatus::Cancelled => {
+            (false, PostCommitMaterializeOutcome::Conflict)
+        }
     };
     Ok(RollbackExecutionResult {
         deduped,
