@@ -8129,7 +8129,11 @@ describe("set-aside draft recovery", () => {
       throw new Error("switch failed mid-way");
     });
     const openEngineYDocSession = vi.fn(async () => ({ available: false }));
-    Object.assign(bridge, { openEngineYDocSession });
+    // Subscribed before every open (#697 P2-E) — a bridge missing this
+    // degrades to not-engine-backed instead of ever attempting the open, so
+    // this mock needs it even though this test never emits through it.
+    const onEngineYDocSaveState = vi.fn(() => () => undefined);
+    Object.assign(bridge, { openEngineYDocSession, onEngineYDocSaveState });
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
@@ -8212,7 +8216,11 @@ describe("set-aside draft recovery", () => {
       return { activeVersionId: "v2", changedFileCount: 0 };
     });
     const openEngineYDocSession = vi.fn(async () => ({ available: false }));
-    Object.assign(bridge, { openEngineYDocSession });
+    // Subscribed before every open (#697 P2-E) — a bridge missing this
+    // degrades to not-engine-backed instead of ever attempting the open, so
+    // this mock needs it even though this test never emits through it.
+    const onEngineYDocSaveState = vi.fn(() => () => undefined);
+    Object.assign(bridge, { openEngineYDocSession, onEngineYDocSaveState });
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
