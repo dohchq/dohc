@@ -4,8 +4,8 @@ import { Editor, Extension } from "@tiptap/core";
 import { NodeSelection } from "@tiptap/pm/state";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
-import { TaskItem, TaskList } from "@tiptap/extension-list";
-import { dohcMarkdownExtensions } from "./extensions";
+import { TaskList } from "@tiptap/extension-list";
+import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 
 const calloutChrome = Extension.create({
@@ -28,7 +28,7 @@ function makeEditor(markdown: string): Editor {
       StarterKit.configure({ trailingNode: false }),
       ...dohcMarkdownExtensions,
       TaskList,
-      TaskItem,
+      DohcTaskItem,
       Markdown.configure({ indentation: { style: "space", size: 2 } }),
       calloutChrome,
     ],

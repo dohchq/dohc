@@ -11,6 +11,7 @@ import {
   getDohcYDocFrontmatter,
   getDohcYDocMeta,
   getDohcYDocPlainText,
+  getDohcYDocSelectionSeed,
   yDocToMarkdown,
   markdownToYDoc,
   plainTextToYDoc,
@@ -974,5 +975,77 @@ describe('desktop editor markdown import: indented code fences', () => {
   it('keeps a fence inside a plain blockquote quoted', () => {
     const input = ['> ```', '> code', '> ```'].join('\n')
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+  })
+})
+
+describe('getDohcYDocSelectionSeed', () => {
+  // Structural proof, not a timing test: the walk touches only the first
+  // element on each level, never the rest of the document. A second
+  // top-level sibling with a node type unknown to the schema proves this —
+  // the OLD implementation (yDocBodyToJSON -> yXmlFragmentToProseMirrorRootNode)
+  // resolves EVERY element through the schema and would throw building this
+  // one; the direct-walk seed never looks past the first element, so it
+  // must not throw even though the malformed sibling is present.
+  it('walks only the first-node path, never a later sibling', () => {
+    const ydoc = new Y.Doc()
+    const bodyFragment = getDohcYDocBodyFragment(ydoc)
+    const firstParagraph = new Y.XmlElement('paragraph')
+    const bogusSibling = new Y.XmlElement('totallyNotARealNodeType')
+    // Types must be integrated into the doc (via the fragment) before their
+    // own content is populated, or Yjs logs an "Invalid access" advisory.
+    ydoc.transact(() => {
+      bodyFragment.push([firstParagraph, bogusSibling])
+      firstParagraph.push([new Y.XmlText('first')])
+      bogusSibling.push([new Y.XmlText('should never be read')])
+    })
+
+    let seed: ReturnType<typeof getDohcYDocSelectionSeed>
+    expect(() => {
+      seed = getDohcYDocSelectionSeed(ydoc)
+    }).not.toThrow()
+    expect(seed).toEqual({ type: 'doc', content: [{ type: 'paragraph' }] })
+
+    ydoc.destroy()
+  })
+
+  it('returns the first-node path only, dropping later top-level siblings', () => {
+    const ydoc = markdownToYDoc('First paragraph.\n\nSecond paragraph.')
+    expect(getDohcYDocSelectionSeed(ydoc)).toEqual({
+      type: 'doc',
+      content: [{ type: 'paragraph' }],
+    })
+    ydoc.destroy()
+  })
+
+  it('descends attrs and nested element paths, e.g. a task list', () => {
+    const ydoc = markdownToYDoc('- [ ] parent\n  - child one')
+    expect(getDohcYDocSelectionSeed(ydoc)).toEqual({
+      type: 'doc',
+      content: [
+        {
+          type: 'taskList',
+          content: [
+            {
+              type: 'taskItem',
+              attrs: { checked: false },
+              content: [{ type: 'paragraph' }],
+            },
+          ],
+        },
+      ],
+    })
+    ydoc.destroy()
+  })
+
+  it('returns undefined for an empty body', () => {
+    const ydoc = markdownToYDoc('')
+    expect(getDohcYDocSelectionSeed(ydoc)).toBeUndefined()
+    ydoc.destroy()
+  })
+
+  it('returns undefined for a frontmatter-only body', () => {
+    const ydoc = markdownToYDoc('---\ntitle: Plan\n---\n')
+    expect(getDohcYDocSelectionSeed(ydoc)).toBeUndefined()
+    ydoc.destroy()
   })
 })
