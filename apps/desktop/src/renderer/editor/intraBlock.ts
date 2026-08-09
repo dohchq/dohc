@@ -11,6 +11,8 @@
 // start — the behaviour before this module existed.
 // A gap or trailing-blank match inside the block's span lands the item or
 // content immediately above it, following lineBlocks.ts's gap rule.
+// A proven later list item can descend through nested lists or fences. Every
+// level must pass the same count, shape, and text checks.
 //
 // UNSURE, every case, all of which fall back to the block start:
 //
@@ -29,8 +31,8 @@
 //    whose counted child's rendered text does not contain the matched line's
 //    rendered text. The count rejects drift and unmodeled shapes; because it
 //    can agree by coincidence, the text check rejects the wrong child.
-//  - A list whose matched line belongs to its FIRST item, nested lines
-//    included — that item starts where the block does.
+//  - A top-level list whose matched line belongs to its FIRST item, nested
+//    lines included — that item starts where the block does.
 
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { blockForLine, columnAt, leadingColumns } from "./lineBlocks";
@@ -54,6 +56,37 @@ export type InlineTextRenderer = (source: string) => string;
 // recognizes the wrong ones.
 const LIST_ITEM_RE = /^[ \t]{0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/;
 const LIST_TYPES = new Set(["bulletList", "orderedList", "taskList"]);
+
+function listItemLineSource(line: string, task: boolean): string {
+  const marker = LIST_ITEM_RE.exec(line);
+  let source = line
+    .slice(marker?.[0].length ?? 0)
+    .replace(/^[ \t]*/, "");
+  if (task) source = source.replace(/^\[[ xX]\](?:[ \t]+|$)/, "");
+  return source;
+}
+
+/** Remove exactly `columns` of list indent. A crossing tab becomes spaces for
+ *  its overshoot, so later column checks preserve the remaining indentation. */
+function dedentLine(line: string, columns: number): string {
+  let index = 0;
+  let column = 0;
+  while (index < line.length && column < columns) {
+    const character = line[index];
+    if (character !== " " && character !== "\t") break;
+    if (character === "\t") {
+      const next = column + 4 - (column % 4);
+      if (next > columns) {
+        return " ".repeat(next - columns) + line.slice(index + 1);
+      }
+      column = next;
+    } else {
+      column += 1;
+    }
+    index += 1;
+  }
+  return line.slice(index);
+}
 
 /** PURE: which top-level block of `body` holds 1-based `line`, and the block's
  *  own source around it. The seam a search jump rides: the index reveals the
@@ -86,6 +119,7 @@ export function intraBlockRange(
   containerPos: number,
   match: IntraBlockMatch,
   renderInlineText: InlineTextRenderer = (source) => source,
+  topLevel = true,
 ): DocRange | null {
   const { lines, offset } = match;
   if (offset <= 0 || offset >= lines.length) return null;
@@ -99,6 +133,7 @@ export function intraBlockRange(
       lines,
       offset,
       renderInlineText,
+      topLevel,
     );
   }
   return null;
@@ -146,6 +181,7 @@ function listItemRange(
   lines: readonly string[],
   offset: number,
   renderInlineText: InlineTextRenderer,
+  topLevel: boolean,
 ): DocRange | null {
   const first = lines[0] ?? "";
   const firstMarker = LIST_ITEM_RE.exec(first);
@@ -154,27 +190,79 @@ function listItemRange(
   const content = columnAt(first, firstMarker[0].length + spaces.length);
   let itemCount = 1;
   let child = 0;
+  const itemStarts = [0];
   for (let line = 1; line < lines.length; line += 1) {
     const text = lines[line] ?? "";
     if (leadingColumns(text) >= content || !LIST_ITEM_RE.test(text)) continue;
     if (line <= offset) child = itemCount;
+    itemStarts.push(line);
     itemCount += 1;
   }
   if (itemCount !== container.childCount) return null;
-  if (child <= 0) return null;
+  // The first item starts where the block does only at the TOP level — a
+  // proven descent's own synthetic document always starts below the outer
+  // item's first line, so its first item is ground the outer level never
+  // reached.
+  if (child <= 0 && topLevel) return null;
   const matched = lines[offset] ?? "";
-  const matchedMarker = LIST_ITEM_RE.exec(matched);
-  let matchedSource = matched
-    .slice(matchedMarker?.[0].length ?? 0)
-    .replace(/^[ \t]*/, "");
-  if (container.type.name === "taskList") {
-    matchedSource = matchedSource.replace(/^\[[ xX]\](?:[ \t]+|$)/, "");
-  }
+  const task = container.type.name === "taskList";
+  const matchedSource = listItemLineSource(matched, task);
   const matchedText = renderInlineText(matchedSource);
-  if (!container.child(child).textContent.includes(matchedText)) return null;
+  const itemNode = container.child(child);
+  if (!itemNode.textContent.includes(matchedText)) return null;
   let from = containerPos + 1;
   for (let before = 0; before < child; before += 1) {
     from += container.child(before).nodeSize;
   }
-  return { from: from + 1, to: from + container.child(child).nodeSize - 1 };
+  const itemRange = { from: from + 1, to: from + itemNode.nodeSize - 1 };
+  if (itemNode.childCount !== 2 || itemNode.child(0).type.name !== "paragraph") {
+    return itemRange;
+  }
+  const nested = itemNode.child(1);
+  if (nested.type.name !== "codeBlock" && !LIST_TYPES.has(nested.type.name)) {
+    return itemRange;
+  }
+  const itemStart = itemStarts[child];
+  if (itemStart === undefined) return itemRange;
+  const itemLines = lines.slice(itemStart, itemStarts[child + 1] ?? lines.length);
+  const itemLocalOffset = offset - itemStart;
+  const dedentedLines = [
+    listItemLineSource(itemLines[0] ?? "", task),
+    ...itemLines.slice(1).map((line) => dedentLine(line, content)),
+  ];
+  const nestedTarget = blockTargetForLine(
+    dedentedLines.join("\n"),
+    itemLocalOffset + 1,
+  );
+  const nestedIndex = dedentedLines[0] === "" ? 0 : 1;
+  if (nestedTarget.index !== nestedIndex || !nestedTarget.match) return itemRange;
+  const nestedPos = from + 1 + itemNode.child(0).nodeSize;
+  const refined = intraBlockRange(
+    nested,
+    nestedPos,
+    nestedTarget.match,
+    renderInlineText,
+    false,
+  );
+  if (refined) return refined;
+  if (nested.type.name !== "codeBlock" || content <= 0) return itemRange;
+  const nestedStart = itemLocalOffset - nestedTarget.match.offset;
+  const rawNestedLines = itemLines.slice(
+    nestedStart,
+    nestedStart + nestedTarget.match.lines.length,
+  );
+  const codeLines = rawNestedLines.map((line, index) =>
+    dedentLine(line, index === 0 ? content : content - 1),
+  );
+  // The list parser leaves its separator column in fenced body text. The
+  // full-body code check must still prove that alternate normalization.
+  return (
+    intraBlockRange(
+      nested,
+      nestedPos,
+      { lines: codeLines, offset: nestedTarget.match.offset },
+      renderInlineText,
+      false,
+    ) ?? itemRange
+  );
 }

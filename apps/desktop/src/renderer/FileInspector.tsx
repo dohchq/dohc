@@ -438,8 +438,8 @@ function useTextContent(
         if (cancelled) return;
         setText(null);
         setError(true);
-        // A failed reread still ANSWERS: leaving writes refused forever would
-        // strand every later save on a file the user can still edit.
+        // A failed read still answers for request bookkeeping. Switch safety
+        // also checks `error` and keeps writes refused until a later success.
         setReadSeq((seq) => seq + 1);
       });
     return () => {
@@ -633,9 +633,10 @@ function useAutosavedTextDraft(props: {
   // Bumped when the active version changes. The transition sets a pending
   // draft aside exactly as MarkdownView's render-phase capture does.
   reopenKey?: number;
-  // Live refusal from the parent: a version switch whose reread has not
-  // answered yet. Reactive, because the hook must also see it LIFT.
-  writesRefused?: boolean;
+  // Reactive wake signal for the reread landing. The shared ref below remains
+  // armed until this hook applies the landed body.
+  switchReadPending: boolean;
+  switchUnresyncedRef: { current: boolean };
   onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
 }) {
@@ -647,21 +648,21 @@ function useAutosavedTextDraft(props: {
   // Assigned during render, read at call time — `readOnlyRef` precedent.
   const disabledRef = useRef(props.disabled);
   disabledRef.current = props.disabled;
-  const writesRefusedRef = useRef(props.writesRefused);
-  writesRefusedRef.current = props.writesRefused;
   const writesBlocked = () =>
-    disabledRef.current === true || writesRefusedRef.current === true;
+    disabledRef.current === true || props.switchUnresyncedRef.current === true;
 
   useEffect(() => {
     props.onSaveStateChange?.(saveState);
   }, [saveState, props.onSaveStateChange]);
 
   useEffect(() => {
+    if (props.switchReadPending) return;
     if (unsavedDraft.current) return;
     setDraft(props.body);
     latestDraft.current = props.body;
     setSaveState("saved");
-  }, [props.body, props.path]);
+    props.switchUnresyncedRef.current = false;
+  }, [props.body, props.path, props.switchReadPending, props.switchUnresyncedRef]);
 
   // Cancel-and-restore, during the render that first sees the new version
   // (#567, extended to these views by #579's adversarial review). The armed
@@ -670,13 +671,13 @@ function useAutosavedTextDraft(props: {
   // the same store the markdown notice reads, and the surface goes back to the
   // document.
   const reopenKeyRef = useRef(props.reopenKey);
-  const wasRefused = useRef(props.writesRefused);
+  const wasRefused = useRef(props.switchReadPending);
   // Two moments, one transition: the switch itself, and the reread landing
   // with something typed while writes were refused. Both leave a draft built
   // on the version the user has left.
   const refusalLifted =
-    wasRefused.current === true && props.writesRefused !== true;
-  wasRefused.current = props.writesRefused;
+    wasRefused.current === true && props.switchReadPending !== true;
+  wasRefused.current = props.switchReadPending;
   if (props.reopenKey !== reopenKeyRef.current || refusalLifted) {
     reopenKeyRef.current = props.reopenKey;
     if (saveTimer.current) {
@@ -737,10 +738,9 @@ function useAutosavedTextDraft(props: {
       if (!unsavedDraft.current) return;
       // A pending draft that cannot be written is SET ASIDE, never dropped
       // (#579 adversarial review, F3). A reread that REJECTS selects the error
-      // branch in the same commit that lifts the refusal, so this view is gone
-      // before it can render again and act on the lift — waiting to observe it
-      // loses the user's text with no notice. Capturing here needs nothing to
-      // survive: it is the last moment this draft exists.
+      // branch while the refusal stays live, so this view is gone before a
+      // later success can let it act on the lift. Capturing here needs nothing
+      // to survive: it is the last moment this draft exists.
       unsavedDraft.current = false;
       if (writesBlocked()) {
         captureOrphanedDraft(workspaceId, path, latestDraft.current);
@@ -853,6 +853,8 @@ function MarkdownView(props: {
   // to useEngineDoc so switching the active version reopens the engine session
   // against the new version's lineage.
   reopenKey?: number;
+  switchReadPending: boolean;
+  switchUnresyncedRef: { current: boolean };
   // Workspace-activity token: bumps after saves / external edits so the linked
   // mentions section recomputes without polling.
   refreshKey?: number;
@@ -882,10 +884,10 @@ function MarkdownView(props: {
   // Owned by the inspector, like the open itself. REQUIRED: the notice must
   // never render without its retry, and the one caller always passes it.
   onRetryEngineOpen: () => void;
-  // Set by the inspector the instant the engine refuses this path. Read by
-  // every write guard BESIDE `readOnlyRef`, because the refusal arrives in the
-  // same commit that unmounts this component — there is no render of it here to
-  // fold into `readOnly` (#534).
+  // Set by the inspector during every render for its live write refusal,
+  // including a pending switch reread. Read by every write guard beside
+  // `readOnlyRef`, because an engine refusal can arrive in the commit that
+  // unmounts this component, with no child render to fold into `readOnly`.
   writesRefusedRef: { current: boolean };
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
@@ -895,6 +897,7 @@ function MarkdownView(props: {
   );
   const [draft, setDraft] = useState(props.body);
   const [savedBody, setSavedBody] = useState(props.body);
+  const [wysiwygResyncEpoch, setWysiwygResyncEpoch] = useState(0);
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
 
@@ -1197,12 +1200,13 @@ function MarkdownView(props: {
   readOnlyRef.current = readOnly;
   // The single question all three write paths ask. Both refs, because they
   // close different gaps: `readOnlyRef` a flip this component rendered,
-  // `writesRefusedRef` a refusal it never got to render.
+  // `writesRefusedRef` an engine refusal or unapplied switch resync that a
+  // long-lived closure may never get to render.
   const { writesRefusedRef } = props;
-  const writesBlocked = useCallback(
-    () => readOnlyRef.current || writesRefusedRef.current,
-    [writesRefusedRef],
-  );
+  const writesBlocked = () =>
+    readOnlyRef.current ||
+    writesRefusedRef.current ||
+    props.switchUnresyncedRef.current;
   const engineMode = engine.available && engine.doc !== null;
 
   // "View markdown as source" (engine mode): a READ-ONLY projection of the
@@ -1221,11 +1225,14 @@ function MarkdownView(props: {
     number | null
   >(null);
   const headingTargetNonce = props.headingTarget?.nonce;
-  useEffect(() => {
-    if (!props.headingTarget || props.truncated) return;
+  function applyHeadingTarget(
+    targetMode: "read" | "wysiwyg" | "source" = surfaceMode,
+    replaySource?: string,
+  ): boolean {
+    if (!props.headingTarget || props.truncated) return false;
     // Search-line jumps intentionally keep their established source-mode
     // behavior when both targets are present.
-    if (props.scrollTarget?.path === props.path) return;
+    if (props.scrollTarget?.path === props.path) return false;
     if (engineMode) {
       // The engine editor owns canonical live content (which may be newer than
       // the markdown cache below). Reveal it and let OutlinePanel resolve the
@@ -1235,28 +1242,122 @@ function MarkdownView(props: {
       // has not landed yet is over. Left pending it lands the moment the lazy
       // editor arrives and pulls them off the heading they just chose.
       setJump(null);
-      return;
+      return true;
     }
-    const source = surfaceMode === "source" ? latestDraft.current : savedBody;
+    const source =
+      replaySource ?? (targetMode === "source" ? latestDraft.current : savedBody);
     const markdown = markdownEditorBody(source);
     const headings = extractWorkspaceHeadings(markdown);
     const heading = resolveWorkspaceHeadingAnchorTarget(headings, props.headingTarget);
-    if (!heading) return;
-    if (surfaceMode === "source") {
+    if (!heading) return false;
+    if (targetMode === "source") {
       // Local source is an intentional editing/viewing mode. Keep it visible
       // and select the heading's real markdown line instead of replacing it
       // with the rich editor merely to navigate.
       setJump({ kind: "line", line: heading.line + frontmatterLineCount(source) });
-      return;
+      return true;
     }
-    if (readOnly || surfaceMode === "read") {
+    if (readOnly || targetMode === "read") {
       // Read-only documents do not mount Tiptap, so navigate the rendered
       // heading with the same document-order identity used by the parser.
       setPendingRenderedHeadingIndex(headings.indexOf(heading));
-      return;
+      return true;
     }
     setMode("wysiwyg");
-    // Applied once per jump; nonce permits repeating the same anchor.
+    return true;
+  }
+  const appliedHeadingNonce = useRef<number | undefined>(undefined);
+  const headingReopenKey = useRef(props.reopenKey);
+  const armedHeadingReplayMode = useRef<"read" | "source" | null>(null);
+  // A version switch refuses every write until its reread succeeds, and any
+  // local editable mode active during that window resyncs after success,
+  // preserving a pending edit as an orphaned draft first. A standing heading
+  // target is an optional replay layered on that resync, never its gate.
+  const armedLocalResyncMode = useRef<"source" | "wysiwyg" | null>(null);
+  // External changes (agent edits, sync pulls) flow into the open document
+  // only while NOT editing AND with no unsaved draft — mid-edit, the user's
+  // draft wins until saved. Read mode now edits frontmatter inline (title/icon
+  // via PageIdentity, properties via PropertiesPanel) without switching to an
+  // "editing" mode, so a pending property save must be guarded here too or an
+  // external refresh mid-edit would clobber the unsaved change.
+  //
+  // This runs before the switch fire effect. A read-mode resync therefore
+  // applies before that effect lifts the shared write refusal.
+  useEffect(() => {
+    if (!editing && !unsavedDraft.current) {
+      setDraft(props.body);
+      setSavedBody(props.body);
+      latestDraft.current = props.body;
+    }
+  }, [props.body, editing]);
+  useEffect(() => {
+    if (props.reopenKey === headingReopenKey.current) return;
+    headingReopenKey.current = props.reopenKey;
+    if (
+      headingTargetNonce === appliedHeadingNonce.current &&
+      !engineMode &&
+      (mode === "source" || readOnly || mode === "read")
+    ) {
+      // A fresh arm retires whatever the LAST one was still waiting on — a
+      // read-mode replay's MutationObserver, still watching for a heading the
+      // new document may not even have, must not land on an unrelated ordinal
+      // as the new doc backfills. Unconditional: a wait carried from an
+      // earlier read-mode visit survives a later switch to source and back,
+      // so the mode AT ARM TIME does not prove none is pending.
+      setPendingRenderedHeadingIndex(null);
+      armedHeadingReplayMode.current = mode === "source" ? "source" : "read";
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.reopenKey]);
+  useEffect(() => {
+    if (
+      !engineMode &&
+      props.switchReadPending &&
+      (mode === "source" || mode === "wysiwyg")
+    ) {
+      armedLocalResyncMode.current = mode;
+    }
+  }, [mode, props.switchReadPending, engineMode]);
+  useEffect(() => {
+    if (props.switchReadPending) return;
+    const resyncMode = armedLocalResyncMode.current;
+    if (resyncMode) {
+      armedLocalResyncMode.current = null;
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      if (unsavedDraft.current) {
+        unsavedDraft.current = false;
+        captureOrphanedDraft(
+          props.workspaceId,
+          props.path,
+          serializeDraftRef.current(),
+        );
+        setSaveState("saved");
+      }
+      setDraft(props.body);
+      setSavedBody(props.body);
+      latestDraft.current = props.body;
+      if (resyncMode === "wysiwyg") {
+        setWysiwygResyncEpoch((epoch) => epoch + 1);
+      }
+    }
+    const replayMode = armedHeadingReplayMode.current;
+    if (replayMode) {
+      armedHeadingReplayMode.current = null;
+      applyHeadingTarget(replayMode, props.body);
+    }
+    props.switchUnresyncedRef.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.switchReadPending]);
+  useEffect(() => {
+    const applied = applyHeadingTarget();
+    // Only a target that actually landed counts as "standing" for a later
+    // switch to replay. One suppressed by an active scrollTarget, or one that
+    // resolved to no heading, must not be replayed later as if the reader had
+    // visited it.
+    if (applied) appliedHeadingNonce.current = headingTargetNonce;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [headingTargetNonce]);
   useEffect(() => {
@@ -1442,20 +1543,6 @@ function MarkdownView(props: {
     // the open they triggered (never a stale value from the previous file).
     rendererMarks.mark("markdown-opened");
   }, [props.path]);
-
-  // External changes (agent edits, sync pulls) flow into the open document
-  // only while NOT editing AND with no unsaved draft — mid-edit, the user's
-  // draft wins until saved. Read mode now edits frontmatter inline (title/icon
-  // via PageIdentity, properties via PropertiesPanel) without switching to an
-  // "editing" mode, so a pending property save must be guarded here too or an
-  // external refresh mid-edit would clobber the unsaved change.
-  useEffect(() => {
-    if (!editing && !unsavedDraft.current) {
-      setDraft(props.body);
-      setSavedBody(props.body);
-      latestDraft.current = props.body;
-    }
-  }, [props.body, editing]);
 
   async function writeDraftNow(
     options: { rejectOnError?: boolean; fromFlush?: boolean } = {},
@@ -1707,8 +1794,8 @@ function MarkdownView(props: {
       // text from before the caller's change.
     });
     return () => registerDraftFlush(null);
-    // writeDraftNow reads refs (latestDraft) + per-mount-stable props only, so the
-    // first render's closure stays correct for the whole mount.
+    // writeDraftNow and this flush read mutable state through refs plus
+    // per-mount-stable props, so the first closure stays correct for the mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
 
@@ -2060,6 +2147,7 @@ function MarkdownView(props: {
               }
             >
               <LazyMarkdownEditor
+                key={wysiwygResyncEpoch}
                 ref={wysiwygRef}
                 value={markdownEditorBody(draft)}
                 onDirty={scheduleSave}
@@ -2126,12 +2214,14 @@ function CsvView({
   onOpenPath,
   truncated,
   reopenKey,
-  writesRefused,
+  switchReadPending,
+  switchUnresyncedRef,
   onSaveStateChange,
   registerDraftFlush,
 }: {
   reopenKey?: number;
-  writesRefused?: boolean;
+  switchReadPending: boolean;
+  switchUnresyncedRef: { current: boolean };
   body: string;
   workspaceId: string;
   path: string;
@@ -2149,7 +2239,8 @@ function CsvView({
     path,
     disabled: truncated,
     reopenKey,
-    writesRefused,
+    switchReadPending,
+    switchUnresyncedRef,
     onSaveStateChange,
     registerDraftFlush,
   });
@@ -2593,14 +2684,16 @@ function TextEditorView({
   path,
   truncated,
   reopenKey,
-  writesRefused,
+  switchReadPending,
+  switchUnresyncedRef,
   onSaveStateChange,
   registerDraftFlush,
   pendingUndo,
   onPendingUndoConsumed,
 }: {
   reopenKey?: number;
-  writesRefused?: boolean;
+  switchReadPending: boolean;
+  switchUnresyncedRef: { current: boolean };
   body: string;
   testId: string;
   language: string;
@@ -2621,7 +2714,8 @@ function TextEditorView({
     path,
     disabled: truncated,
     reopenKey,
-    writesRefused,
+    switchReadPending,
+    switchUnresyncedRef,
     onSaveStateChange,
     registerDraftFlush,
   });
@@ -2865,32 +2959,39 @@ export function FileInspector(props: {
   // the PRE-switch body on screen until it answers. Markdown has the engine
   // open to tell it so; the plain-text views have nothing, so this window is
   // where their autosave landed pre-switch text on the post-switch tree
-  // (#579 adversarial review, F1). True from the switch until the next read
-  // ANSWERS — success or failure, so a failed reread cannot strand writes.
+  // (#579 adversarial review, F1). True from the switch until a reread
+  // SUCCEEDS. A failure leaves the selected version unverified and writes
+  // refused until a later read succeeds.
   const switchReadPending = useRef(false);
+  // True from a reopenKey change until the child that owns this surface's
+  // resync has actually applied it — not merely until the reread lands.
+  // The parent only ever arms this. The resyncing child clears it, so writes
+  // cannot unblock ahead of the content they would write.
+  const switchUnresyncedRef = useRef(false);
   const seenVersionKey = useRef(props.engineVersionKey);
   const seenReadSeq = useRef(readSeq);
   if (seenVersionKey.current !== props.engineVersionKey) {
     seenVersionKey.current = props.engineVersionKey;
     seenReadSeq.current = readSeq;
     switchReadPending.current = true;
+    switchUnresyncedRef.current = true;
   }
-  if (switchReadPending.current && readSeq !== seenReadSeq.current) {
+  if (switchReadPending.current && readSeq !== seenReadSeq.current && !error) {
     switchReadPending.current = false;
   }
-  // Every engine state that is not a bound document, carried for a child that
-  // might never render it. This component has exactly two branches that
-  // replace the document — path-not-in-version (#534) and the failed read
-  // below — and each one replaces the child in the same commit that learns of
-  // the state, so the child's own refs still hold the pre-refusal value when
-  // its unmount flush runs. A guard that works because a child observes a
-  // state is defeated by unmounting that child, which is why these are
-  // carried here rather than derived there. A REF the PARENT assigns during
-  // render is what crosses that gap: the object identity is stable, so even
-  // the child's first-render closures read the live value.
+  // Every parent-owned write refusal, including the pending switch reread,
+  // is carried for a child that might never render it. Path-not-in-version
+  // (#534) and the failed read below replace the child in the commit that
+  // learns of the state, so the child's own refs still hold the old value when
+  // its unmount flush runs. A REF the PARENT assigns during render crosses
+  // that gap: the object identity is stable, so even the child's first-render
+  // closures read the live value.
   const writesRefusedRef = useRef(false);
   writesRefusedRef.current =
-    notInVersion || engine.opening || engine.engineMayHoldDocument;
+    notInVersion ||
+    engine.opening ||
+    engine.engineMayHoldDocument ||
+    switchUnresyncedRef.current;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
     text === props.pendingUndo.restoredText
@@ -3020,6 +3121,8 @@ export function FileInspector(props: {
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             forceReadOnly={props.readOnly}
             reopenKey={props.engineVersionKey}
+            switchReadPending={switchReadPending.current}
+            switchUnresyncedRef={switchUnresyncedRef}
             refreshKey={props.refreshKey}
             registerSourceToggle={props.registerSourceToggle}
             onPendingDraftChange={setPendingDraft}
@@ -3047,7 +3150,8 @@ export function FileInspector(props: {
             onOpenPath={props.onOpenPath}
             truncated={truncated || !!props.readOnly}
             reopenKey={props.engineVersionKey}
-            writesRefused={switchReadPending.current}
+            switchReadPending={switchReadPending.current}
+            switchUnresyncedRef={switchUnresyncedRef}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
           />
@@ -3073,7 +3177,8 @@ export function FileInspector(props: {
             path={props.path}
             truncated={truncated || !!props.readOnly}
             reopenKey={props.engineVersionKey}
-            writesRefused={switchReadPending.current}
+            switchReadPending={switchReadPending.current}
+            switchUnresyncedRef={switchUnresyncedRef}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
             scrollLine={
