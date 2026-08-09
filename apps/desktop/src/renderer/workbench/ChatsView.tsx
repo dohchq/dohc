@@ -1282,7 +1282,7 @@ function LeaveDmDialog(props: {
             {`Leave your conversation with ${props.dm.peerLabel}?`}
           </h2>
           <p className="m-0 text-xs text-muted">
-            {`The conversation leaves ${props.workspaceLabel}. It appears again as a message request, so you can add it to a workspace later. Messages stay on the relay.`}
+            {`The conversation leaves ${props.workspaceLabel}. It appears again as a message request, so you can add it to a workspace later. Your messages are kept.`}
           </p>
         </div>
         <div className="flex justify-end gap-2">
@@ -1300,7 +1300,7 @@ function LeaveDmDialog(props: {
             data-testid="chats-leave-dm-confirm"
             disabled={busy}
             onClick={() => void confirm()}
-            className="rounded bg-danger px-3 py-1.5 text-xs text-white disabled:opacity-50"
+            className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
           >
             Leave conversation
           </button>

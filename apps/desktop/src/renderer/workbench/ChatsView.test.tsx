@@ -6185,7 +6185,7 @@ describe("ChatsView direct messages", () => {
         "Leave your conversation with alice@example.com?",
       );
       expect(dialog.textContent).toContain(
-        "The conversation leaves Work. It appears again as a message request, so you can add it to a workspace later. Messages stay on the relay.",
+        "The conversation leaves Work. It appears again as a message request, so you can add it to a workspace later. Your messages are kept.",
       );
 
       await user.click(screen.getByTestId("chats-leave-dm-cancel"));
