@@ -1460,16 +1460,22 @@ export function createWorkspaceEngineCapture(
     // refused release puts the debt back — release-only — rather than
     // letting go of it. Rejects when the lease is still held.
     discard: () => Promise<void>;
-    // Set once by a terminal stand-down, to the message that explains it.
-    // null while the write is still pending. A stood-down debt used to
+    // Set once the write is abandoned for good. A stood-down debt used to
     // DELETE this entry, and `beginFileRename` read that absence as proof
     // the write landed — recording the stale pre-lock artifact as if it had
-    // (#681). Keeping the entry with this marker set is what lets the
-    // rename seam tell "abandoned" from "landed" instead of reading both as
-    // silence. It is not immortal: the next successful open of this path
-    // clears it (see `openYDocSessionTask`), and the delete/move seam never
-    // restores a cancelled debt at all.
-    terminal: string | null;
+    // (#681). Keeping the entry with this flag set is what lets the rename
+    // seam tell "abandoned" from "landed" instead of reading both as
+    // silence; `onError` already carries the stand-down's message, so
+    // nothing here needs to repeat it.
+    //
+    // Not immortal, and cleared only by PROOF, never by attempt: a
+    // materialized settle of this exact path (`onSettled`) is the moment
+    // "its last edit reached disk" becomes true, so that is what clears it —
+    // an open alone proves only that no lease is held, not that anything
+    // landed. The delete/move seams and the watcher's own external-delete
+    // capture all cancel a debt outright (never restore a cancelled one), so
+    // a removed path drops its marker the same way.
+    stoodDown: boolean;
   }
   const detachedLockedDebts = new Map<string, DetachedLockedDebt>();
 
@@ -2553,6 +2559,16 @@ export function createWorkspaceEngineCapture(
     // content instead of replaying stale event snapshots.
     if (event.operation === "delete") {
       if (consumeExpectedEvent("delete", event.path)) return;
+      // An EXTERNAL delete — never ran through the delete/move seams, so no
+      // debt for this path was ever suspended. Left alone, a stood-down
+      // debt's marker would answer every rename onto this now-free path
+      // with an instruction that cannot be followed, and a still-pending
+      // debt would reopen and recreate the file the watcher just confirmed
+      // gone (#681).
+      cancelSuspendedDebts(
+        suspendDetachedDebts((path) => path === event.path),
+        `an external delete of ${event.path}`,
+      );
       await deleteIfTracked(engine, versionId, event.path, metadata, author);
       return;
     }
@@ -2560,6 +2576,12 @@ export function createWorkspaceEngineCapture(
     if (disk.kind === "unreadable") return;
     if (disk.kind === "absent") {
       if (consumeExpectedEvent("delete", event.path)) return;
+      // Same external removal as the delete branch above, reached through a
+      // write-classified event instead (#681).
+      cancelSuspendedDebts(
+        suspendDetachedDebts((path) => path === event.path),
+        `an external delete of ${event.path}`,
+      );
       await deleteIfTracked(engine, versionId, event.path, metadata, author);
       return;
     }
@@ -3256,6 +3278,16 @@ export function createWorkspaceEngineCapture(
             reportSaveState("error", token);
             return;
           }
+          // The engine just wrote this path's settled content to disk — the
+          // proof a stand-down marker denies (#681). This fires for every
+          // settle on this session, including the pre-close one a rename's
+          // vacate runs, so a mid-session rename over a recovered path is
+          // covered too. An open alone is not this proof: it shows no
+          // conflicting lease, not that anything reached disk.
+          const clearedStandDown = detachedLockedDebts.get(input.path);
+          if (clearedStandDown?.stoodDown) {
+            detachedLockedDebts.delete(input.path);
+          }
           // #338. The ENGINE owns the artifact: a settle it reports as
           // materialized either wrote the file or found those bytes already
           // there. The desktop used to write them AGAIN ("the mirror of the same
@@ -3378,18 +3410,6 @@ export function createWorkspaceEngineCapture(
           onSettleStart,
           onSettleError,
         });
-        // This open just succeeded, which proves the daemon holds no
-        // conflicting lease on this path — an unreleased lease from an
-        // earlier stand-down answers every open ydoc-session-busy until it
-        // clears. So any terminal marker left here is stale: this session
-        // now owns the path's write, and a rename mid-session already
-        // vacates it (settleAndCloseLiveYDocSessions, below) before reading
-        // disk. Clear it (#681) — its only other exit is the path's removal,
-        // which the delete/move seam already never restores.
-        const staleStandDown = detachedLockedDebts.get(input.path);
-        if (staleStandDown?.terminal) {
-          detachedLockedDebts.delete(input.path);
-        }
         // Register the live session only after the open succeeds (a secret/
         // already-live/path-not-in-version rejection propagates to the caller
         // and never guards a path that has no session). The close below drops the entry
@@ -3495,16 +3515,14 @@ export function createWorkspaceEngineCapture(
         // this. L is untouched: the debt survives whenever a lease is still
         // held, so the ladder keeps retrying the release alone.
         //
-        // The entry stays in the registry, marked terminal, rather than
-        // being deleted: absence used to read as "landed" everywhere,
-        // including at the rename seam, which cannot tell it from a real
-        // payment (#681). Marking it is what lets that seam refuse instead
-        // of recording stale content as a save.
+        // The entry stays, marked stood-down, instead of being deleted
+        // (#681): a stood-down debt refuses the rename instead of reading
+        // as paid.
         const standDownFromWrite = (message: string): void => {
           writeCancelled = true;
           onError(`ydoc close retry of ${input.path}`, new Error(message));
           const entry = detachedLockedDebts.get(input.path);
-          if (entry) entry.terminal = message;
+          if (entry) entry.stoodDown = true;
           if (pendingRelease === null) return;
           armDetachedLockedRetry();
         };
@@ -3602,9 +3620,16 @@ export function createWorkspaceEngineCapture(
               // debt names is gone, or its write is refused for good, and
               // reopening it would recreate what the user removed.
               await releaseRetainedSession();
-              // W's terminal marker survives this — nothing here proves the
-              // write, only that the lease is free. It clears at the next
-              // open of this path, or never, if the path is removed first.
+              // This release proves the lease, not the write. A stood-down
+              // debt's marker survives it (#681) — but a debt cancelled by
+              // the delete/move seam (`discardDetachedLockedDebt`, no
+              // marker) had only its lease left to finish: drop the entry
+              // now, or it sits forever and a later rename onto this freed
+              // path would read it as still locked.
+              const entry = detachedLockedDebts.get(input.path);
+              if (entry && !entry.stoodDown) {
+                detachedLockedDebts.delete(input.path);
+              }
               return;
             }
             const live = liveYDocSessions.get(input.path);
@@ -3819,7 +3844,7 @@ export function createWorkspaceEngineCapture(
             pay: payDetachedLockedDebt,
             arm: armDetachedLockedRetry,
             discard: discardDetachedLockedDebt,
-            terminal: null,
+            stoodDown: false,
           });
           armDetachedLockedRetry();
         };
@@ -5483,8 +5508,26 @@ export function createWorkspaceEngineCapture(
       // payment is the one payment this move NEEDS to land.
       let closeRemovalWindow: () => void = () => undefined;
       return enqueueResult("prepare rename", async () => {
+        // A live Y.Doc session over either endpoint is vacated FIRST, ahead
+        // of the detached-debt drain below (#681 round 2). A session
+        // recovering a stood-down path (reopened, per every stand-down's
+        // own instruction) proves nothing by merely existing — only a real
+        // settle does — so it needs its chance to settle here, on the
+        // chain, before the drain reads whatever marker it left behind.
+        // Without this order, reopening and immediately renaming would
+        // refuse on a marker the session was about to clear itself.
+        //
+        // WS-G2-C-2 (gate fix 3): required regardless — a live session over
+        // either endpoint must be flushed + released before the file moves,
+        // or a later settle would write the OLD path, resurrecting the
+        // moved-from file / orphaning the object. Vacate first (a teardown
+        // failure fails the rename).
+        await settleAndCloseLiveYDocSessions(
+          (p) => p === fromPath || p === toPath,
+          "Saved latest edits before renaming",
+        );
         // A DETACHED locked-write debt is another live thing a
-        // rename must vacate — its session is gone, so the vacate below
+        // rename must vacate — its session is gone, so the vacate above
         // cannot see it, and without this drain the rename would read the
         // STALE pre-lock artifact, record old bytes, and leave the retry
         // targeting the moved-from path. We are on the chain, so nothing
@@ -5499,21 +5542,22 @@ export function createWorkspaceEngineCapture(
         // so the rename REFUSES and the debt survives for the retry ladder.
         //
         // Read it in that direction ONLY. Absence still means paid — a
-        // stand-down no longer clears the entry (#681): it stays, marked
-        // terminal, so this loop can tell "abandoned" from "landed" instead
-        // of reading both as silence. A terminal debt refuses the rename
-        // too, on its own copy — recording the stale pre-lock artifact under
-        // a new name would be the same silent stale moment the payment
-        // branch above exists to prevent, just reached a different way.
+        // stood-down debt on the SOURCE refuses the rename instead (#681),
+        // below. One on the DESTINATION is a different object's abandoned
+        // write, not this move's: the incoming content was always going to
+        // replace whatever was there, so it is cancelled instead — nothing
+        // durable is lost, the same "stays in the object's own history"
+        // guarantee every stand-down already gives.
         // DESCENDANTS too: this method also serves directory
         // moves, so a debt for `dir/note.md` rides a move of `dir`. Left
         // behind, its delayed payment reopens the moved-from path and
         // recreates the tree the user just moved away — the same prefix rule
         // the delete seam already applies.
+        const isSourceSide = (candidate: string): boolean =>
+          candidate === fromPath || candidate.startsWith(`${fromPath}/`);
         const endpointMatch = (candidate: string): boolean =>
-          candidate === fromPath ||
+          isSourceSide(candidate) ||
           candidate === toPath ||
-          candidate.startsWith(`${fromPath}/`) ||
           candidate.startsWith(`${toPath}/`);
         for (const endpoint of [...detachedLockedDebts.keys()]) {
           if (!endpointMatch(endpoint)) continue;
@@ -5522,11 +5566,18 @@ export function createWorkspaceEngineCapture(
           await debt.pay();
           const after = detachedLockedDebts.get(endpoint);
           if (!after) continue;
-          if (after.terminal) {
+          if (after.stoodDown) {
+            if (!isSourceSide(endpoint)) {
+              cancelSuspendedDebts(
+                suspendDetachedDebts((path) => path === endpoint),
+                `a rename onto ${endpoint}`,
+              );
+              continue;
+            }
             // Explorer renders this verbatim (docs/brand/copy.md): what
             // happened, why, then one instruction per sentence.
             throw new Error(
-              `dohc could not rename ${fromPath}. dohc gave up on writing ${endpoint} earlier, so its last edit never reached disk. Open ${endpoint} to write it again. Then rename ${fromPath} again.`,
+              `dohc could not rename ${fromPath}. dohc gave up on writing ${endpoint} earlier, so its last edits never reached disk. The edits stay in the document's history. Open ${endpoint} to write them again. Then rename ${fromPath} again.`,
             );
           }
           // WHY the payment did not land decides what the user is told. A
@@ -5543,14 +5594,6 @@ export function createWorkspaceEngineCapture(
               : `dohc could not rename ${fromPath}. Another program still has ${endpoint} open, so the last edits are not on disk yet. Close that program. Then rename again.`,
           );
         }
-        // WS-G2-C-2 (gate fix 3): a live Y.Doc session over either endpoint must
-        // be flushed + released before the file moves, or a later settle would
-        // write the OLD path — resurrecting the moved-from file / orphaning the
-        // object. Vacate first (a teardown failure fails the rename).
-        await settleAndCloseLiveYDocSessions(
-          (p) => p === fromPath || p === toPath,
-          "Saved latest edits before renaming",
-        );
         // The drain above sees only the debts that exist NOW. The filesystem
         // move runs off this chain, after the finisher is handed back, so an
         // open of the source can land on the chain inside that window, meet
