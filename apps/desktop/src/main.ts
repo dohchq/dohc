@@ -2698,6 +2698,14 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
         console.error("[desktop] CLI dispatch scan:", error);
       });
     },
+    // No renderer poll runs the sync pass on the CLI's or MCP's behalf (#731):
+    // AWAIT (bounded — see cliServer.ts's CHAT_READ_SYNC_BUDGET_MS) the same
+    // pass syncDms already names a target for, so the read's own channel is
+    // covered past the pass's row bound. Never throws — offline, it returns
+    // fast and the local rows answer.
+    onRead: async (workspace, target) => {
+      await syncSharedChannelsForChatTarget(workspace.workspaceId, target);
+    },
     onRunMessageLinkPending: (link) => {
       pendingCliRunMessageLinks.add(cliRunMessageLinkKey(link));
     },

@@ -282,4 +282,23 @@ describe("the shared-channel sync pass is bounded in production", () => {
       "await syncWorkspaceSharedChannels(",
     );
   });
+
+  // #731: no renderer poll runs behind the CLI or MCP, so their chat reads must
+  // trigger the pass themselves. The CLI server's own dispatch AWAITS
+  // options.onRead before it serves a chat verb (cliServer.test.ts pins that);
+  // this pins that PRODUCTION wires the hook to the real pass, not a stub.
+  it("wires the CLI server's chat reads to the real shared-channel sync pass", () => {
+    const cliServerSource = sourceBetween(
+      "async function startDesktopCliServer(",
+      "\n}\n",
+    );
+    // Named through the SAME target-priority helper syncDms uses (:276-279),
+    // not a plain untargeted pass: a chat read past the pass's row bound must
+    // still cover the thread or channel it actually asked for.
+    expect(cliServerSource).toContain(
+      "onRead: async (workspace, target) => {\n" +
+        "      await syncSharedChannelsForChatTarget(workspace.workspaceId, target);\n" +
+        "    },",
+    );
+  });
 });

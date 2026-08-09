@@ -193,11 +193,22 @@ export interface CliServerOptions {
     workspace: CliWorkspaceContext,
     target?: { channelId: string } | { threadId: string },
   ): void | Promise<void>;
+  // A chat read has no renderer poll behind it — with no window open, nothing
+  // else ever runs a sync pass for it (#731). AWAITED (up to a bound — see
+  // CHAT_READ_SYNC_BUDGET_MS) before the verb reads the store, the same
+  // bounded rotating pass the renderer's reads trigger. `target` names the
+  // read's own channel or thread, when the verb's args carry one, so that
+  // channel is covered even past the pass's own row bound.
+  onRead?(
+    workspace: CliWorkspaceContext,
+    target?: { channelId: string } | { threadId: string },
+  ): void | Promise<void>;
   onError?(error: unknown): void;
   onDebug?(message: string): void;
   nowMs?: () => number;
   platform?: NodeJS.Platform;
   regexScanTimeoutMs?: number;
+  chatReadSyncBudgetMs?: number;
   runMessageLinkRetryMs?: number;
   runMessageLinkDeadlineMs?: number;
   runMessageLinkForegroundBudgetMs?: number;
@@ -940,6 +951,105 @@ async function notifyWrite(
     await options.onWrite?.(context, target);
   } catch (error) {
     options.onError?.(error);
+  }
+}
+
+// The CLI client itself gives up after DEFAULT_RESPONSE_TIMEOUT_MS (30 s,
+// packages/cli/src/index.ts) — an unbounded await of the sync pass (up to
+// SHARED_CHANNEL_SYNC_PASS_ROWS rows, each up to its own relay timeout) can
+// outlast that budget and kill the read entirely, which is worse than the
+// stale read a bound leaves behind. A hook failure must never block a read for
+// local data that already exists either — the same offline-degrades-silently
+// contract the sync pass itself keeps.
+const CHAT_READ_SYNC_BUDGET_MS = 10_000;
+
+// A pass past the budget keeps running detached (see notifyRead below). A
+// slow relay behind a stream of reads would otherwise start one detached pass
+// PER READ — main.ts's own serializer only stops them running concurrently,
+// not from queueing up unboundedly. One in-flight pass per (options,
+// workspace) is tracked here so a read that finds one already running joins
+// its race instead of starting another.
+const chatReadSyncInFlight = new WeakMap<CliServerOptions, Map<string, Promise<void>>>();
+
+function chatReadSyncInFlightFor(options: CliServerOptions): Map<string, Promise<void>> {
+  const existing = chatReadSyncInFlight.get(options);
+  if (existing) return existing;
+  const created = new Map<string, Promise<void>>();
+  chatReadSyncInFlight.set(options, created);
+  return created;
+}
+
+async function notifyRead(
+  options: CliServerOptions,
+  context: CliWorkspaceContext,
+  target?: { channelId: string } | { threadId: string },
+): Promise<void> {
+  const inFlight = chatReadSyncInFlightFor(options);
+  let pending = inFlight.get(context.workspaceId);
+  if (!pending) {
+    // `target` names the pass THIS call starts. A read that instead joins an
+    // already-running pass gets whatever priority that pass already
+    // committed to — the same tradeoff a rotation-only pass always had.
+    pending = Promise.resolve()
+      .then(() => options.onRead?.(context, target))
+      .catch((error) => {
+        options.onError?.(error);
+      })
+      .finally(() => {
+        if (inFlight.get(context.workspaceId) === pending) {
+          inFlight.delete(context.workspaceId);
+        }
+      });
+    inFlight.set(context.workspaceId, pending);
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<void>((resolveBudget) => {
+    timer = setTimeout(
+      resolveBudget,
+      options.chatReadSyncBudgetMs ?? CHAT_READ_SYNC_BUDGET_MS,
+    );
+  });
+  // Past the budget, the read proceeds on whatever the store already has —
+  // `pending` keeps running (tracked above, so a concurrent read joins it
+  // instead of starting a second one) and the NEXT read benefits from what it
+  // finishes.
+  await Promise.race([pending, budget]);
+  clearTimeout(timer);
+}
+
+// Every verb that reads chat content before doing anything else. `moments` and
+// `moment` read workspace-version history, not chat, so they sit outside it.
+function isChatReadVerb(verb: CliRequest["verb"]): boolean {
+  return (
+    verb === "channels" ||
+    verb === "threads" ||
+    verb === "inbox" ||
+    verb === "show" ||
+    verb === "grep" ||
+    verb === "export" ||
+    verb === "fileChats" ||
+    verb === "chat" ||
+    verb === "channelsFull"
+  );
+}
+
+// The chat/show/threads verbs name their target directly in their args — no
+// resolution against the (not-yet-synced) local channel/thread list needed,
+// the way #725's write side already resolves it. A wrong or unresolvable
+// guess is harmless: syncSharedChannelsForChatTarget falls back to a plain
+// pass, so this can only add coverage, never remove it.
+function chatReadTarget(
+  request: CliRequest,
+): { channelId: string } | { threadId: string } | undefined {
+  switch (request.verb) {
+    case "chat":
+      return { threadId: request.args.threadId };
+    case "show":
+      return { threadId: request.args.target };
+    case "threads":
+      return { channelId: request.args.channel };
+    default:
+      return undefined;
   }
 }
 
@@ -2206,7 +2316,11 @@ async function workspaceContextForRequest(
   if (workspace.readOnly && writeRequest) {
     throw new CliCommandError("chats are not available in a read-only shared view");
   }
-  return options.openWorkspace(workspace);
+  const context = await options.openWorkspace(workspace);
+  if (isChatReadVerb(request.verb)) {
+    await notifyRead(options, context, chatReadTarget(request));
+  }
+  return context;
 }
 
 export async function handleCliRequestLine(

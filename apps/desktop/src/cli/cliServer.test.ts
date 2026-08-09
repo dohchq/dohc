@@ -53,6 +53,7 @@ interface CallCounts {
   identity: number;
   writable: number;
   writes: number;
+  reads: number;
 }
 
 function momentFixtures(
@@ -174,6 +175,10 @@ describe("CLI socket server", () => {
   let token: string;
   let calls: CallCounts;
   let writeTargets: Array<{ channelId: string } | { threadId: string } | undefined>;
+  let readTargets: Array<{ channelId: string } | { threadId: string } | undefined>;
+  // Lets an individual test simulate what a real sync pass would have pulled,
+  // or made unavailable, by the time it resolves.
+  let onReadEffect: (() => Promise<void> | void) | null;
   let errors: unknown[];
   let debugLines: string[];
   let registryWorkspace: CliRegistryWorkspace;
@@ -341,8 +346,11 @@ describe("CLI socket server", () => {
       identity: 0,
       writable: 0,
       writes: 0,
+      reads: 0,
     };
     writeTargets = [];
+    readTargets = [];
+    onReadEffect = null;
     errors = [];
     debugLines = [];
     const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
@@ -391,6 +399,11 @@ describe("CLI socket server", () => {
       async onWrite(_workspace, target) {
         calls.writes += 1;
         writeTargets.push(target);
+      },
+      async onRead(_workspace, target) {
+        calls.reads += 1;
+        readTargets.push(target);
+        await onReadEffect?.();
       },
       onError(error) {
         errors.push(error);
@@ -1260,6 +1273,271 @@ describe("CLI socket server", () => {
         threadId: (repliedTarget as { threadId: string }).threadId,
       }),
     ).toEqual(expect.any(String));
+  });
+
+  // #731: no renderer poll runs the sync pass behind the CLI or MCP, so a chat
+  // read must AWAIT it itself. `onReadEffect` stands in for what a real pass
+  // pulls from a peer — it lands in the store only if the read genuinely waits
+  // on the hook before it serves results.
+  it("awaits the sync pass before a chat read serves its result", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Local message",
+    });
+    onReadEffect = async () => {
+      await store!.sendMessage({
+        workspaceId: WORKSPACE_ID,
+        threadId: thread.id,
+        author: { kind: "human", displayName: "Peer" },
+        body: "Peer message synced in",
+      });
+    };
+
+    const chat = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: thread.id,
+    });
+    if (!chat.ok) throw new Error(chat.reason);
+
+    expect(calls.reads).toBe(1);
+    expect(chat.messages.map((message) => message.body)).toEqual([
+      "Local message",
+      "Peer message synced in",
+    ]);
+  });
+
+  it("triggers the sync pass for every chat read verb, not a fixed subset", async () => {
+    const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store!.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Read-coverage message",
+    });
+    const chatReads: Array<[CliVerb, unknown]> = [
+      ["channels", { cwd: workspaceRoot, actor: "agent" }],
+      ["channelsFull", { cwd: workspaceRoot, actor: "agent" }],
+      ["threads", { cwd: workspaceRoot, actor: "agent", channel: general.id }],
+      ["inbox", { cwd: workspaceRoot, actor: "agent" }],
+      ["chat", { cwd: workspaceRoot, actor: "agent", threadId: thread.id }],
+      ["fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }],
+      [
+        "show",
+        { cwd: workspaceRoot, actor: "human", target: thread.id, peek: true },
+      ],
+      [
+        "grep",
+        {
+          cwd: workspaceRoot,
+          actor: "agent",
+          pattern: "message",
+          ignoreCase: false,
+          filesWithMatches: false,
+          context: 0,
+          limit: 20,
+          regex: false,
+        },
+      ],
+      [
+        "export",
+        {
+          cwd: workspaceRoot,
+          actor: "agent",
+          scope: { kind: "all" },
+          outDir: "export-coverage",
+        },
+      ],
+    ];
+    for (const [verb, args] of chatReads) {
+      calls.reads = 0;
+      await invoke(verb, args as ArgsFor<typeof verb>);
+      expect(calls.reads, verb).toBe(1);
+    }
+
+    // moments/moment read version history, not chat — they must not pay for a
+    // sync pass they have no use for.
+    calls.reads = 0;
+    await invoke("moments", { cwd: workspaceRoot, actor: "agent", includeFiles: false });
+    await invoke("moment", { cwd: workspaceRoot, actor: "agent", id: "moment_primary" });
+    expect(calls.reads).toBe(0);
+  });
+
+  it("keeps serving local data when the sync pass itself fails", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Local-only message",
+    });
+    onReadEffect = () => {
+      throw new Error("relay unreachable");
+    };
+
+    const chat = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: thread.id,
+    });
+    if (!chat.ok) throw new Error(chat.reason);
+
+    expect(chat.messages.map((message) => message.body)).toEqual([
+      "Local-only message",
+    ]);
+    expect(errors).toEqual([expect.objectContaining({ message: "relay unreachable" })]);
+  });
+
+  // #749 review: the CLI client itself gives up after its own 30 s response
+  // timeout. An unbounded await of a hanging sync pass would exceed that and
+  // kill the read entirely — worse than the stale read a bound leaves behind.
+  it("serves local rows within budget when the sync pass hangs past it", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Local-only message",
+    });
+    // Never resolves within the test — a permanently hung pass is the exact
+    // worst case the budget exists for. A real socket transport in play here
+    // (server may be non-null) rules out fake timers, so a short override
+    // proves the bound with real wall-clock time instead — the same knob
+    // regexScanTimeoutMs and the runMessageLink*Ms options already are.
+    onReadEffect = () => new Promise<void>(() => {});
+    serverOptions.chatReadSyncBudgetMs = 40;
+
+    const startedAtMs = Date.now();
+    const chat = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: thread.id,
+    });
+    const elapsedMs = Date.now() - startedAtMs;
+    if (!chat.ok) throw new Error(chat.reason);
+
+    expect(chat.messages.map((message) => message.body)).toEqual([
+      "Local-only message",
+    ]);
+    // Waited roughly the configured budget — not zero (skipping the pass
+    // entirely) and not the unbounded hang the mutation this pins against
+    // leaves behind.
+    expect(elapsedMs).toBeGreaterThanOrEqual(35);
+    expect(elapsedMs).toBeLessThan(5_000);
+  });
+
+  // #749 review: a detached pass past the budget stays running. Without
+  // coalescing, a slow relay behind a stream of reads starts one detached
+  // pass PER READ — main.ts's serializer only stops them running
+  // concurrently, not from queueing up unboundedly.
+  it("coalesces concurrent chat reads for the same workspace onto one pass", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Local-only message",
+    });
+    // Never resolves within the test — the worst case for unbounded queueing.
+    onReadEffect = () => new Promise<void>(() => {});
+    serverOptions.chatReadSyncBudgetMs = 40;
+
+    const [first, second] = await Promise.all([
+      invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: thread.id }),
+      invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: thread.id }),
+    ]);
+    if (!first.ok) throw new Error(first.reason);
+    if (!second.ok) throw new Error(second.reason);
+
+    // Two reads raced the budget, but only ONE of them actually started the
+    // hook — the second joined its race instead of starting a second pass.
+    expect(calls.reads).toBe(1);
+  });
+
+  it("starts a fresh pass once the prior one for that workspace has settled", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Local-only message",
+    });
+    const release: { firstPass: (() => void) | null } = { firstPass: null };
+    let hookCalls = 0;
+    onReadEffect = () => {
+      hookCalls += 1;
+      if (hookCalls > 1) return undefined;
+      return new Promise<void>((resolveHang) => {
+        release.firstPass = resolveHang;
+      });
+    };
+    serverOptions.chatReadSyncBudgetMs = 40;
+
+    const first = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: thread.id,
+    });
+    if (!first.ok) throw new Error(first.reason);
+    expect(hookCalls).toBe(1);
+
+    release.firstPass?.();
+    // Let the settled pass's own `.finally` cleanup run before the next read.
+    await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+
+    const second = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: thread.id,
+    });
+    if (!second.ok) throw new Error(second.reason);
+    // Not stuck coalescing onto a pass that already finished.
+    expect(hookCalls).toBe(2);
+  });
+
+  it("names the read's own channel or thread as the sync priority", async () => {
+    const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store!.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Priority-target message",
+    });
+
+    readTargets.length = 0;
+    await invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: thread.id });
+    expect(readTargets.at(-1)).toEqual({ threadId: thread.id });
+
+    readTargets.length = 0;
+    await invoke("show", {
+      cwd: workspaceRoot,
+      actor: "human",
+      target: thread.id,
+      peek: true,
+    });
+    expect(readTargets.at(-1)).toEqual({ threadId: thread.id });
+
+    readTargets.length = 0;
+    await invoke("threads", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      channel: general.id,
+    });
+    expect(readTargets.at(-1)).toEqual({ channelId: general.id });
+
+    // A verb whose args carry no single channel or thread runs the plain
+    // rotation instead of guessing one.
+    readTargets.length = 0;
+    await invoke("channelsFull", { cwd: workspaceRoot, actor: "agent" });
+    expect(readTargets.at(-1)).toBeUndefined();
   });
 
   it("round-trips post, reply, and show with main-derived identity and CLI origin", async () => {
