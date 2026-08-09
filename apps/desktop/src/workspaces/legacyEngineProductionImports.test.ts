@@ -167,7 +167,6 @@ function isErasedImport(node: t.ImportDeclaration): boolean {
 // None changes the runtime value, so none may change what this guard sees.
 function unwrapExpression(node: t.Expression): t.Expression {
   if (
-    t.isParenthesizedExpression(node) ||
     t.isTSAsExpression(node) ||
     t.isTSTypeAssertion(node) ||
     t.isTSSatisfiesExpression(node) ||
@@ -261,29 +260,9 @@ function workerRunsEval(
   );
 }
 
-function isAstNode(value: unknown): value is t.Node {
-  return typeof value === "object" && value !== null && "type" in value;
-}
-
-function walkAst(node: t.Node, visitor: (node: t.Node) => void): void {
-  visitor(node);
-  const fields = node as unknown as Record<string, unknown>;
-  for (const key of t.VISITOR_KEYS[node.type] ?? []) {
-    const value = fields[key];
-    if (Array.isArray(value)) {
-      for (const child of value) {
-        if (isAstNode(child)) walkAst(child, visitor);
-      }
-    } else if (isAstNode(value)) {
-      walkAst(value, visitor);
-    }
-  }
-}
-
 function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean {
   const sourceFile = parse(source, {
     createImportExpressions: true,
-    createParenthesizedExpressions: true,
     plugins: parserPluginsFor(fileName),
     sourceFilename: fileName,
     sourceType: "unambiguous",
@@ -343,7 +322,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       }
     }
   };
-  walkAst(sourceFile, collectNames);
+  t.traverseFast(sourceFile, collectNames);
   const collectAliases = (node: t.Node): void => {
     if (t.isVariableDeclarator(node) && t.isIdentifier(node.id)) {
       const init = node.init;
@@ -359,7 +338,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       }
     }
   };
-  walkAst(sourceFile, collectAliases);
+  t.traverseFast(sourceFile, collectAliases);
   let found = false;
   const visit = (node: t.Node): void => {
     if (found) return;
@@ -466,7 +445,7 @@ function hasRuntimeLegacyImport(source: string, fileName = "probe.ts"): boolean 
       }
     }
   };
-  walkAst(sourceFile, visit);
+  t.traverseFast(sourceFile, visit);
   return found;
 }
 
