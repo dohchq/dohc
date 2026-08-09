@@ -1078,14 +1078,29 @@ pub fn close_session(
             return Err(CollabError::UnsettledClose);
         }
         // The settle may have COMMITTED while its materialization failed
-        // transiently: last_settled_sha matches the projection but the
-        // `ydoc-mat_` job is still pending and the DISK holds the old bytes.
-        // Pruning now would discard the CRDT with the artifact never
-        // replaced — refuse until the replay (retry-settle or open-time)
-        // lands the job.
+        // transiently: last_settled_sha matches the projection but the job
+        // that would land it on disk is still pending. Pruning now would
+        // discard the CRDT with the artifact never replaced — refuse until
+        // the replay (retry-settle or open-time) lands the job.
+        //
+        // Matched on the object's TARGET PATH rather than a job-id prefix.
+        // `enqueue_write` mints several spellings for this same intent
+        // (`ydoc-mat_`, `resolve-mat_`, `merge-mat_`, `sync-resolve-mat_`,
+        // `secret-mat_`, …) and a prefix list drifts out of sync with them
+        // (#715: three of five went unmatched, each a stale-disk window).
+        // Every kind sets `target_path` to the disk path it intends to
+        // write, so asking "is any pending job aimed at this object's disk
+        // artifact" via that path is the fact itself, not a proxy for it —
+        // and it needs no update when a future job kind is added.
         let job_pending: bool = store.read_with(|conn| {
             conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM materialization_jobs j                    JOIN moments m ON j.job_id = 'ydoc-mat_' || m.moment_id                      OR j.job_id = 'resolve-mat_' || m.moment_id                   WHERE m.workspace_id = ?1 AND m.version_id = ?2                     AND m.object_id = ?3 AND j.status = 'pending'                     AND (j.workspace_id = ?1 OR j.workspace_id = ''))",
+                "SELECT EXISTS (SELECT 1 FROM materialization_jobs j \
+                 WHERE j.target_path = ( \
+                     SELECT path FROM moments \
+                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+                      ORDER BY moment_order DESC LIMIT 1) \
+                   AND j.status = 'pending' \
+                   AND (j.workspace_id = ?1 OR j.workspace_id = ''))",
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id],
                 |row| row.get(0),
             )
@@ -1286,18 +1301,25 @@ fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, C
 /// Answering "covered" from such a head would prune the CRDT over a file that
 /// disagrees with it.
 ///
-/// Matched on content and path rather than on a job-id prefix, so a job kind
-/// added later cannot slip past this by being spelled differently.
+/// Matched on the recorded DIRECTION itself
+/// (`dohc_engine_domain::store::CAPTURE_ORIGIN`), not on a job-row absence.
+/// #723: a `NOT EXISTS(materialization_jobs …)` heuristic reads a leftover
+/// TERMINAL job row for the same content+path (from an earlier, unrelated
+/// engine settle) as "not captured" — a reversion to previously-engine-written
+/// bytes then refuses a valid discharge. `claim_foreign_head`'s dedupe writes
+/// `metadata_origin` directly and mints no job row either way, so it is the
+/// fact this function needs, not a proxy for it.
 fn captured_head_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
     conn.query_row(
         "SELECT s.blob_sha256 FROM snapshots s \
          WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
-           AND NOT EXISTS ( \
-             SELECT 1 FROM materialization_jobs j \
-             WHERE j.content_sha256 = s.blob_sha256 \
-               AND j.target_path = s.path \
-               AND (j.workspace_id = ?1 OR j.workspace_id = ''))",
-        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+           AND s.metadata_origin = ?4",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            dohc_engine_domain::store::CAPTURE_ORIGIN,
+        ],
         // NULL for a BINARY head (schema v10), which a path whose bytes stop
         // round-tripping as UTF-8 becomes. It covers nothing, and reading it
         // as a plain String would raise InvalidColumnType instead —
