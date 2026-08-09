@@ -177,10 +177,12 @@ function escapedPunctuationValue(token: {
 function imageAltText(token: {
   content?: unknown
   text?: unknown
-  tokens?: Array<{ text?: unknown }>
+  tokens?: Array<{ content?: unknown; text?: unknown; value?: unknown }>
 }): string {
   if (Array.isArray(token.tokens)) {
-    return token.tokens.map((child) => String(child.text ?? '')).join('')
+    return token.tokens
+      .map((child) => String(child.content ?? child.text ?? child.value ?? ''))
+      .join('')
   }
   return String(token.content ?? token.text ?? '')
 }
@@ -295,11 +297,22 @@ const DohcEscapedPunctuation = Node.create({
     ]
   },
 
-  markdownTokenName: 'escape',
+  markdownTokenName: 'dohcEscape',
+
+  markdownTokenizer: {
+    name: 'dohcEscape',
+    level: 'inline',
+    start: '\\',
+    tokenize(src) {
+      const match = /^\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/.exec(src)
+      if (!match) return undefined
+      return { type: 'dohcEscape', raw: match[0], value: match[1] }
+    },
+  },
 
   parseMarkdown: (token, helpers) =>
     helpers.createNode('escapedPunctuation', {
-      value: escapedPunctuationValue(token),
+      value: token.value ?? escapedPunctuationValue(token),
     }),
 
   renderMarkdown: (node) =>

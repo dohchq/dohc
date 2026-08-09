@@ -14,7 +14,7 @@ import {
   TableRow,
 } from '@tiptap/extension-table'
 import { TaskList } from '@tiptap/extension-list'
-import yaml from 'js-yaml'
+import * as yaml from 'js-yaml'
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
@@ -185,6 +185,7 @@ export function serializeRichdocBody(root: JSONContent): string {
   const source = JSON.stringify(root)
   const sourceCharacters = new Set(source)
   const inlineCodeEntitySentinels = new Map<string, string>()
+  const markdownSyntaxSentinels = new Map<string, string>()
   const codeBlocks = new Map<string, string>()
   const reservedTokens = new Set(
     source.match(/\uE000DOHC_[A-Z_]+_\d+\uE001/gu) ?? [],
@@ -230,6 +231,11 @@ export function serializeRichdocBody(root: JSONContent): string {
         inlineCodeEntitySentinels,
         sourceCharacters,
       )
+      content = protectMarkdownSyntax(
+        content,
+        markdownSyntaxSentinels,
+        sourceCharacters,
+      )
     }
 
     return content ? { ...node, content } : { ...node }
@@ -257,11 +263,38 @@ export function serializeRichdocBody(root: JSONContent): string {
   markdown = restoreCharacterSentinels(
     markdown,
     new Map(Array.from(
+      markdownSyntaxSentinels,
+      ([character, sentinel]) => [sentinel, character] as const,
+    )),
+  )
+  markdown = restoreCharacterSentinels(
+    markdown,
+    new Map(Array.from(
       inlineCodeEntitySentinels,
       ([character, sentinel]) => [sentinel, character] as const,
     )),
   )
   return rewriteCodeBlockFences(markdown, codeBlocks)
+}
+
+function protectMarkdownSyntax(
+  content: JSONContent[],
+  sentinels: Map<string, string>,
+  sourceCharacters: ReadonlySet<string>,
+): JSONContent[] {
+  return content.map((node) => {
+    if (typeof node.text !== 'string') return node
+    return {
+      ...node,
+      text: replaceCharacters(
+        node.text,
+        sentinels,
+        sourceCharacters,
+        /[\\`*_[\]~]/g,
+        true,
+      ),
+    }
+  })
 }
 
 function textContent(content: JSONContent[]): string {
@@ -307,14 +340,17 @@ function replaceCharacters(
   value: string,
   replacements: Map<string, string>,
   sourceCharacters: ReadonlySet<string>,
+  pattern = /[&<>]/g,
+  reverseSentinelRange = false,
 ): string {
-  return value.replace(/[&<>]/g, character => {
+  return value.replace(pattern, character => {
     const existing = replacements.get(character)
     if (existing) return existing
 
-    const sentinel = reserveInlineCodeEntitySentinel(
+    const sentinel = reserveCharacterSentinel(
       sourceCharacters,
       replacements,
+      reverseSentinelRange,
     )
     replacements.set(character, sentinel)
     return sentinel
@@ -406,11 +442,16 @@ function continuationPrefixForListMarker(prefix: string): string | null {
   return `${listItem[1]}${' '.repeat(listItem[2].length + 1)}`
 }
 
-function reserveInlineCodeEntitySentinel(
+function reserveCharacterSentinel(
   sourceCharacters: ReadonlySet<string>,
   reserved: Map<string, string>,
+  reverse = false,
 ): string {
-  for (let codePoint = 0xE002; codePoint <= 0xF8FF; codePoint += 1) {
+  for (
+    let codePoint = reverse ? 0xF8FF : 0xE002;
+    reverse ? codePoint >= 0xE002 : codePoint <= 0xF8FF;
+    codePoint += reverse ? -1 : 1
+  ) {
     const candidate = String.fromCodePoint(codePoint)
     if (
       !sourceCharacters.has(candidate)
@@ -447,13 +488,10 @@ function parseFrontmatter(src: string): {
 
   const [, raw, rest] = match
   let meta: Record<string, unknown> = {}
+  if (isEmptyFrontmatter(raw ?? '')) return { meta, body: rest ?? '' }
   try {
     const parsed = yaml.load(raw ?? '')
-    if (parsed == null) {
-      return isEmptyFrontmatter(raw ?? '')
-        ? { meta, body: rest ?? '' }
-        : { meta: {}, body: src }
-    }
+    if (parsed == null) return { meta: {}, body: src }
     if (!isFrontmatterMap(parsed)) return { meta: {}, body: src }
     meta = parsed
   } catch {

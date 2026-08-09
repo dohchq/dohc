@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
+import { serializeRichdocBody } from "@dohc/ydoc-projection";
 import { NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { Node as ProseMirrorNode, Slice } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
@@ -552,17 +553,15 @@ export function activeTurnIntoId(editor: Editor | null): BlockMenuTurnIntoId {
 }
 
 /**
- * Serialize a single block node to markdown via the editor's markdown storage.
- * Wraps the node in a minimal `doc` so the manager serializes it the same way
- * `editor.getMarkdown()` serializes the whole document.
+ * Serialize one block through the shared projection contract.
+ * The storage guard keeps the plain-text fallback for editors without Markdown.
  */
 export function serializeBlockToMarkdown(
   editor: Editor,
   node: ProseMirrorNode,
 ): string {
-  const manager = editor.storage.markdown?.manager;
-  if (!manager) return node.textContent;
-  return manager.serialize(
+  if (!editor.storage.markdown?.manager) return node.textContent;
+  return serializeRichdocBody(
     escapeHighlightMarkdown({ type: "doc", content: [node.toJSON()] }),
   );
 }
