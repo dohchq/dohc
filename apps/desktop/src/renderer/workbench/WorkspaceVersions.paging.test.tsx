@@ -250,7 +250,14 @@ describe("ConflictReviewDialog paging", () => {
     screen.getByRole("alert");
     // The window is unchanged and the button remains for a retry.
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
-    expect(screen.getByTestId("conflict-list-show-more")).toBeTruthy();
+    // MUTATION: clear loadingMore only in the success path -> the button
+    // reads "Loading…", disabled, forever after a failed page and this
+    // assertion fails.
+    const showMore = screen.getByTestId(
+      "conflict-list-show-more",
+    ) as HTMLButtonElement;
+    expect(showMore.textContent).toBe("Show more files");
+    expect(showMore.disabled).toBe(false);
   });
 });
 
@@ -484,6 +491,13 @@ describe("VersionComparePage paging", () => {
     await settle();
     screen.getByRole("alert");
     expect(screen.getAllByTestId("version-compare-file")).toHaveLength(1);
-    expect(screen.getByTestId("version-compare-show-more")).toBeTruthy();
+    // MUTATION: clear loadingMore only in the success path -> the button
+    // reads "Loading…", disabled, forever after a failed page and this
+    // assertion fails.
+    const showMore = screen.getByTestId(
+      "version-compare-show-more",
+    ) as HTMLButtonElement;
+    expect(showMore.textContent).toBe("Show more files");
+    expect(showMore.disabled).toBe(false);
   });
 });
