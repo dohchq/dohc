@@ -616,6 +616,225 @@ afterEach(() => {
   resetOrphanedDrafts();
 });
 
+describe("global letter shortcut ownership", () => {
+  function dispatchShortcut(
+    key: string,
+    init: KeyboardEventInit = {},
+    target: Window | Element = window,
+  ) {
+    const event = new KeyboardEvent("keydown", {
+      key,
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    fireEvent(target, event);
+    return event;
+  }
+
+  it("leaves editor Ctrl+B with the editor", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+    const editor = document.createElement("textarea");
+    screen.getByTestId("workspace-shell").append(editor);
+    editor.addEventListener("keydown", (event) => event.preventDefault(), {
+      once: true,
+    });
+
+    dispatchShortcut("b", {}, editor);
+
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+    dispatchShortcut("b", {}, editor);
+    await waitFor(() => expect(screen.queryByTestId("side-panel")).toBeNull());
+    editor.remove();
+  });
+
+  it("routes an unclaimed shortcut from an editable target", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+    const editor = document.createElement("textarea");
+    screen.getByTestId("workspace-shell").append(editor);
+
+    dispatchShortcut("n", {}, editor);
+
+    expect(await screen.findByRole("textbox", { name: "File name" })).toBeTruthy();
+    editor.remove();
+  });
+
+  it("does not claim a letter shortcut another handler prevented", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+    const event = new KeyboardEvent("keydown", {
+      key: "b",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    event.preventDefault();
+
+    fireEvent(window, event);
+
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+  });
+
+  it("leaves combined Control+Command chords unclaimed", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+
+    const event = dispatchShortcut("b", { metaKey: true });
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+  });
+
+  it.each([
+    ["auto-repeat", { repeat: true }],
+    ["composition", { isComposing: true }],
+  ] as const)("does not claim a shortcut during %s", async (_name, init) => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+
+    const event = dispatchShortcut("b", init);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+  });
+
+  it("routes uppercase N to new file", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+
+    dispatchShortcut("N");
+
+    expect(await screen.findByRole("textbox", { name: "File name" })).toBeTruthy();
+  });
+
+  it("routes uppercase K to the command palette", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+
+    dispatchShortcut("K");
+
+    expect(await screen.findByTestId("command-palette")).toBeTruthy();
+  });
+
+  it("routes uppercase P to quick open", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+
+    dispatchShortcut("P");
+
+    expect(await screen.findByTestId("quick-open")).toBeTruthy();
+  });
+
+  it.each([
+    ["Control", { ctrlKey: true, metaKey: false }],
+    ["Command", { ctrlKey: false, metaKey: true }],
+  ] as const)(
+    "leaves unsupported %s+Alt letter chords unclaimed",
+    async (_name, modifier) => {
+      renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+      await screen.findByTestId("side-panel");
+
+      for (const [key, shiftKey] of [
+        ["n", false],
+        ["k", false],
+        ["p", false],
+        ["p", true],
+        ["w", false],
+      ] as const) {
+        const event = dispatchShortcut(key, {
+          ...modifier,
+          altKey: true,
+          shiftKey,
+        });
+        expect(event.defaultPrevented, `${key} shift=${shiftKey}`).toBe(false);
+      }
+    },
+  );
+
+  it("routes uppercase B to the sidebar", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+
+    dispatchShortcut("B");
+
+    await waitFor(() => expect(screen.queryByTestId("side-panel")).toBeNull());
+  });
+
+  it("routes uppercase W to the active tab", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("tab-b.md");
+
+    dispatchShortcut("W");
+
+    await waitFor(() => expect(screen.queryByTestId("tab-b.md")).toBeNull());
+  });
+
+  it("routes Ctrl+Shift+P to the command palette when the key is lowercase", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+
+    dispatchShortcut("p", { shiftKey: true });
+
+    expect(await screen.findByTestId("command-palette")).toBeTruthy();
+    expect(screen.queryByTestId("quick-open")).toBeNull();
+  });
+
+  it("routes canonical uppercase Ctrl+Shift+P to the command palette", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+
+    dispatchShortcut("P", { shiftKey: true });
+
+    expect(await screen.findByTestId("command-palette")).toBeTruthy();
+    expect(screen.queryByTestId("quick-open")).toBeNull();
+  });
+
+  it("leaves unadvertised shifted letter chords unclaimed", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    await screen.findByTestId("side-panel");
+    await screen.findByTestId("tab-b.md");
+
+    const newFile = dispatchShortcut("N", { shiftKey: true });
+    const sidebar = dispatchShortcut("B", { shiftKey: true });
+    const closeTab = dispatchShortcut("W", { shiftKey: true });
+
+    expect(newFile.defaultPrevented).toBe(false);
+    expect(sidebar.defaultPrevented).toBe(false);
+    expect(closeTab.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+});
+
+describe("application menu command routing", () => {
+  it("toggles the Chats panel when the command exists", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+    await screen.findByTestId("chats-panel");
+
+    act(() => bridge.emitMenuCommand("toggle-chats"));
+    await waitFor(() => expect(screen.queryByTestId("chats-panel")).toBeNull());
+
+    act(() => bridge.emitMenuCommand("toggle-chats"));
+    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+  });
+
+  it("ignores Toggle Chats when the workspace has no Chats command", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+    await screen.findByTestId("side-panel");
+
+    act(() => bridge.emitMenuCommand("toggle-chats"));
+
+    expect(screen.queryByTestId("chats-panel")).toBeNull();
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+  });
+});
+
 describe("targeted chat navigation", () => {
   const threadNav = (threadId: string, focusMessageId?: string): ChatsNav => ({
     level: "thread",
@@ -7594,19 +7813,44 @@ describe("shared view chats surface", () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
-  it("claims Ctrl+Alt+B for a workspace that is not a shared view", async () => {
+  it.each([
+    ["Control", { ctrlKey: true }],
+    ["Command", { metaKey: true }],
+  ] as const)(
+    "claims %s+Alt+B for a workspace that is not a shared view",
+    async (_name, modifier) => {
+      const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+      renderShell(bridge);
+      await screen.findByTestId("chats-panel");
+
+      // The handler re-registers in a passive effect whenever `chatsEnabled`
+      // changes, so a single dispatch can land in the commit before that effect
+      // runs. Retry with a FRESH event: a stale one carries the previous
+      // attempt's defaultPrevented and would pass on the first arming forever.
+      await waitFor(() => {
+        const event = new KeyboardEvent("keydown", {
+          key: "b",
+          ...modifier,
+          altKey: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        window.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(true);
+      });
+    },
+  );
+
+  it("claims Command+Option+B when macOS reports the Option glyph", async () => {
     const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
     await screen.findByTestId("chats-panel");
 
-    // The handler re-registers in a passive effect whenever `chatsEnabled`
-    // changes, so a single dispatch can land in the commit before that effect
-    // runs. Retry with a FRESH event: a stale one carries the previous
-    // attempt's defaultPrevented and would pass on the first arming forever.
     await waitFor(() => {
       const event = new KeyboardEvent("keydown", {
-        key: "b",
-        ctrlKey: true,
+        key: "\u222b",
+        code: "KeyB",
+        metaKey: true,
         altKey: true,
         bubbles: true,
         cancelable: true,
@@ -7614,6 +7858,25 @@ describe("shared view chats surface", () => {
       window.dispatchEvent(event);
       expect(event.defaultPrevented).toBe(true);
     });
+  });
+
+  it("leaves AltGr characters on physical KeyB unclaimed", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+    await screen.findByTestId("chats-panel");
+
+    const event = new KeyboardEvent("keydown", {
+      key: "∫",
+      code: "KeyB",
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.getByTestId("chats-panel")).toBeTruthy();
   });
 
   // The last ungated chat call. Linked mentions ride on every markdown open

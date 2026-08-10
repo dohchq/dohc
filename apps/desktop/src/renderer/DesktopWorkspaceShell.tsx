@@ -3280,6 +3280,13 @@ export function DesktopWorkspaceShell(props: {
     function onKeyDown(event: KeyboardEvent) {
       const mod = event.metaKey || event.ctrlKey;
       if (!mod) return;
+      if (event.metaKey && event.ctrlKey) return;
+      if (event.defaultPrevented) return;
+      if (event.repeat || event.isComposing) return;
+      const key = event.key.toLowerCase();
+      const secondarySidebarKey =
+        event.altKey &&
+        (key === "b" || (event.metaKey && event.code === "KeyB"));
       if (event.key === "," && !event.shiftKey && !event.altKey) {
         if (!hasBlockingModal()) {
           event.preventDefault();
@@ -3288,7 +3295,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       if (
-        event.key.toLowerCase() === "z" &&
+        key === "z" &&
         !event.shiftKey &&
         !event.altKey
       ) {
@@ -3301,32 +3308,34 @@ export function DesktopWorkspaceShell(props: {
         }
         return;
       }
-      // The application menu DISPLAYS these accelerators but does not
-      // register them (registerAccelerator: false) — this handler is the one
-      // owner of the keystrokes. Shift+P is "P" (uppercase) in event.key.
-      if (event.key === "n") {
+      // This handler owns main-frame shortcuts. On Windows/Linux the menu only
+      // displays them. On macOS it is the unhandled fallback, so preventing a
+      // claimed keydown also prevents a duplicate menu command. Shift and Caps
+      // Lock affect key casing, so routing uses modifiers and a normalized key.
+      if (event.shiftKey && key !== "p") return;
+      if (event.altKey && !secondarySidebarKey) return;
+      if (key === "n") {
         event.preventDefault();
         setNewFileOpen(true);
-      } else if (event.key === "k" || (event.shiftKey && event.key === "P")) {
+      } else if (key === "k" || (key === "p" && event.shiftKey)) {
         event.preventDefault();
         setPaletteOpen((open) => !open);
-      } else if (event.key === "p") {
+      } else if (key === "p") {
         event.preventDefault();
         setQuickOpenOpen((open) => !open);
-      } else if (event.key === "b" && event.altKey) {
-        // Ctrl+Alt+B mirrors VS Code's secondary-sidebar toggle. No-op for
-        // unflagged workspaces and shared views (they have no Chats panel to
-        // show).
+      } else if (secondarySidebarKey) {
+        // CommandOrControl+Alt+B mirrors VS Code's secondary-sidebar toggle.
+        // It is a no-op when the workspace has no Chats panel.
         if (engineSurfacesExist) {
           event.preventDefault();
           mutateWb(toggleChats);
         }
-      } else if (event.key === "b") {
+      } else if (key === "b") {
         event.preventDefault();
         mutateWb(toggleSidebar);
-      } else if (event.key === "w") {
-        // Ctrl+W closes the TAB (the menu's Close Window moved to
-        // Ctrl+Shift+W so the close role can't swallow this keystroke).
+      } else if (key === "w") {
+        // CommandOrControl+W closes the tab. Close Window keeps the separate
+        // CommandOrControl+Shift+W native accelerator.
         event.preventDefault();
         closeActiveTab();
       }

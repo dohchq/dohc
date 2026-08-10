@@ -11,6 +11,7 @@ export const MENU_COMMANDS = [
   "command-palette",
   "quick-open",
   "toggle-sidebar",
+  "toggle-chats",
   "toggle-theme",
   "settings",
   "check-updates",
