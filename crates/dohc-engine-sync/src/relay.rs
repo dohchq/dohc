@@ -728,10 +728,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         if !retained_retryable.is_empty() {
             let first_unresolved = retained_retryable
                 .iter()
-                .map(|op| op.relay_seq.ok_or(RelayError::InvalidResponse))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .min()
+                .try_fold(None::<i64>, |minimum, op| {
+                    let relay_seq = op.relay_seq.ok_or(RelayError::InvalidResponse)?;
+                    Ok::<_, RelayError>(Some(
+                        minimum.map_or(relay_seq, |minimum| minimum.min(relay_seq)),
+                    ))
+                })?
                 .ok_or(RelayError::InvalidResponse)?;
             cursor = first_unresolved
                 .checked_sub(1)
@@ -2405,6 +2407,18 @@ fn validate_pull_page(
     }
     for op in &response.ops {
         if op.workspace_id != workspace_id || op.validate().is_err() {
+            return Err(RelayError::InvalidResponse);
+        }
+        // Every base served by pull has a relay coordinate. Reject a malformed
+        // page before any healthy op in that page can apply.
+        if op.op_kind == "ydoc.update"
+            && op
+                .payload
+                .get("isBaseState")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            && op.relay_seq.is_none()
+        {
             return Err(RelayError::InvalidResponse);
         }
     }

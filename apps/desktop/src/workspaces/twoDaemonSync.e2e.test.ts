@@ -317,9 +317,7 @@ it.skipIf(engine.missing)(
       const conflict = conflicts.conflicts.find((candidate) => candidate.path === path);
       expect(conflict).toBeDefined();
       expect(localConflictOrigin(rootB, workspaceId)).toBe("sync-independent-origin");
-      // The desktop's closed public-origin union deliberately maps new engine
-      // provenance tags to unknown instead of rendering the raw string.
-      expect(conflict?.metadata.origin).toBe("unknown");
+      expect(conflict?.metadata.origin).toBe("sync-independent-origin");
       expect(conflict?.base.exists).toBe(false);
       expect(conflict?.current.text).toBe(loserText);
       expect(conflict?.incoming.text).toBe(winnerText);

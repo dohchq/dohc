@@ -1018,7 +1018,7 @@ pub fn apply_ydoc_envelope(
         // update rows (a crash left them behind): the projection must be the
         // reconstructed lineage PLUS the base, or the visible snapshot would
         // drop local content that is still durably part of the CRDT.
-        let (base_doc, _lineage_has_state) = {
+        let (base_doc, loser_projection) = {
             let persisted =
                 dohc_engine_collab::load_persisted(store, &key).map_err(map_collab_hard_error)?;
             let lineage_has_state = persisted.as_ref().is_some_and(|persisted| {
@@ -1028,6 +1028,13 @@ pub fn apply_ydoc_envelope(
                 Some(persisted) => persisted.doc,
                 None => dohc_engine_collab::Ydoc::wire(),
             };
+            let loser_projection = if lineage_has_state {
+                Some(doc.project(kind).map_err(|_| SyncError::InvalidInput {
+                    reason: "ydoc projection exceeds materialization cap",
+                })?)
+            } else {
+                None
+            };
             if doc.apply(&claim_bytes).is_err() {
                 return refuse_ydoc(
                     store,
@@ -1036,7 +1043,7 @@ pub fn apply_ydoc_envelope(
                     "ydoc.update base bytes fail validation",
                 );
             }
-            (doc, lineage_has_state)
+            (doc, loser_projection)
         };
         let base_path = payload.path.clone();
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
@@ -1152,8 +1159,23 @@ pub fn apply_ydoc_envelope(
                             reason: "ydoc projection exceeds materialization cap",
                         })?;
                 let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
-                if snapshot.blob_sha256 != projected_sha {
+                let (current_sha, current_markdown) = match (replaced, loser_projection.as_ref()) {
+                    (true, Some(projection)) => (
+                        dohc_engine_storage::hex_sha256(projection.markdown.as_bytes()),
+                        Some(projection.markdown.as_str()),
+                    ),
+                    _ => (snapshot.blob_sha256.clone(), None),
+                };
+                if current_sha != projected_sha {
+                    if let Some(markdown) = current_markdown {
+                        put_projection_text_blob(tx, markdown, &current_sha)?;
+                    }
                     put_projection_text_blob(tx, &projection.markdown, &projected_sha)?;
+                    let conflict_origin = if replaced {
+                        "sync-independent-origin"
+                    } else {
+                        "sync"
+                    };
                     let incoming_moment_id =
                         ydoc_apply_moment_id(&claim_key, &base_path, &op.origin_id, op.origin_seq);
                     let conflict_id = crate::moment_apply::sync_conflict_id(
@@ -1172,7 +1194,7 @@ pub fn apply_ydoc_envelope(
                         path: snapshot.path.clone(),
                         object_id: Some(snapshot.object_id.clone()),
                         kind: Some(crate::moment_apply::ContentKind::Text),
-                        digest: Some(snapshot.blob_sha256.clone()),
+                        digest: Some(current_sha),
                         updated_at_ms: Some(snapshot.updated_at_ms),
                         latest_moment_id: Some(snapshot.latest_moment_id.clone()),
                         metadata: Some(crate::moment_apply::Metadata {
@@ -1190,12 +1212,7 @@ pub fn apply_ydoc_envelope(
                         updated_at_ms: Some(op.recorded_at_ms),
                         latest_moment_id: Some(incoming_moment_id.clone()),
                         metadata: Some(crate::moment_apply::Metadata {
-                            origin: if replaced {
-                                "sync-independent-origin"
-                            } else {
-                                "sync"
-                            }
-                            .to_owned(),
+                            origin: conflict_origin.to_owned(),
                             summary: None,
                             correlation_id: None,
                         }),
@@ -1215,11 +1232,7 @@ pub fn apply_ydoc_envelope(
                             current: &current_side,
                             incoming: &incoming_side,
                             recorded_at_ms: op.recorded_at_ms,
-                            metadata_origin: if replaced {
-                                "sync-independent-origin"
-                            } else {
-                                "sync"
-                            },
+                            metadata_origin: conflict_origin,
                         },
                     )?;
                     // Immutable per-envelope record of what THIS coordinate

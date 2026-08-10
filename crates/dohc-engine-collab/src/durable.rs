@@ -827,7 +827,12 @@ pub fn claim_base_in_tx(
                 .map_err(map_sql)?;
             let incoming_sha = crate::hex_sha256(base_bytes);
             return match stored_sha {
-                Some(sha) if sha == incoming_sha => Ok(ClaimOutcome::Resumed),
+                Some(sha) if sha == incoming_sha => {
+                    if let Some(relay_seq) = origin.relay_seq() {
+                        stamp_base_relay_seq_min(tx, key, relay_seq, now_ms)?;
+                    }
+                    Ok(ClaimOutcome::Resumed)
+                }
                 Some(_) => {
                     let Some(incoming_relay_seq) = origin.relay_seq() else {
                         return Err(CollabError::BaseStateDiverged);
@@ -855,30 +860,12 @@ pub fn claim_base_in_tx(
                 }
                 // Compaction legitimately folds the seq-0 base away once
                 // updates supersede it. Pre-migration rows can therefore lack
-                // a digest; keep the earlier fail-safe behavior for those rows.
+                // a digest; keep the earlier fail-open behavior for those rows.
                 None => Ok(ClaimOutcome::Resumed),
             };
         }
 
-        let base_sha = put_binary_blob(tx, base_bytes)?;
-        let sv_sha = put_binary_blob(tx, sv_bytes)?;
-        // The base IS the seq-0 snapshot. INSERT (not REPLACE): a genuine second
-        // base at up_to_seq = 0 would conflict, a hard backstop under the flag.
-        tx.execute(
-            "INSERT INTO ydoc_snapshots \
-             (workspace_id, version_id, object_id, up_to_seq, \
-              snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms) \
-             VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
-            rusqlite::params![
-                key.workspace_id,
-                key.version_id,
-                key.object_id,
-                base_sha,
-                sv_sha,
-                now_ms,
-            ],
-        )
-        .map_err(map_sql)?;
+        let base_sha = write_base_snapshot_row(tx, key, base_bytes, sv_bytes, now_ms)?;
         tx.execute(
             "UPDATE ydoc_docs SET base_claimed = 1, base_relay_seq=?4,
                base_snapshot_sha256=?5, updated_at_ms = ?6 \
@@ -911,58 +898,65 @@ pub fn confirm_base_relay_seq(
     now_ms: i64,
 ) -> Result<TxnOutcome<bool>, CollabError> {
     store.write_with(faults, |tx| {
-        let row: Option<(Option<String>, Option<i64>)> = tx
+        let stored_sha: Option<String> = tx
             .query_row(
-                "SELECT base_snapshot_sha256, base_relay_seq FROM ydoc_docs
+                "SELECT base_snapshot_sha256 FROM ydoc_docs
                  WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
                    AND base_claimed=1",
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()
-            .map_err(map_sql)?;
-        if !matches!(row, Some((Some(ref sha), None)) if sha == base_snapshot_sha) {
+            .map_err(map_sql)?
+            .flatten();
+        if stored_sha.as_deref() != Some(base_snapshot_sha) {
             return Ok(false);
         }
-        tx.execute(
-            "UPDATE ydoc_docs SET base_relay_seq=?4, updated_at_ms=?5
-             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
-               AND base_relay_seq IS NULL",
-            rusqlite::params![
-                key.workspace_id,
-                key.version_id,
-                key.object_id,
-                relay_seq,
-                now_ms
-            ],
-        )
-        .map_err(map_sql)?;
+        stamp_base_relay_seq_min(tx, key, relay_seq, now_ms)?;
         Ok(true)
     })
 }
 
-fn replace_base_snapshot(
+/// Stamp `relay_seq` onto a claimed base's arbitration coordinate, reducing
+/// toward the EARLIEST relay position any write path has observed. A
+/// byte-identical base can be learned by different paths in different
+/// orders (a remote apply's Resumed arm, a local origination's own echo);
+/// every path must converge on the same minimum or a later divergent base
+/// can be decided differently by different observers. NULL always stamps; a
+/// strictly larger stored value reduces; anything else is a no-op.
+fn stamp_base_relay_seq_min(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    relay_seq: i64,
+    now_ms: i64,
+) -> Result<(), CollabError> {
+    tx.execute(
+        "UPDATE ydoc_docs SET base_relay_seq=?4, updated_at_ms=?5
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+           AND (base_relay_seq IS NULL OR base_relay_seq > ?4)",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            relay_seq,
+            now_ms
+        ],
+    )
+    .map_err(map_sql)?;
+    Ok(())
+}
+
+fn write_base_snapshot_row(
     tx: &Transaction<'_>,
     key: &DocKey,
     base_bytes: &[u8],
     sv_bytes: &[u8],
-    relay_seq: i64,
     now_ms: i64,
-) -> Result<(), CollabError> {
+) -> Result<String, CollabError> {
     let base_sha = put_binary_blob(tx, base_bytes)?;
     let sv_sha = put_binary_blob(tx, sv_bytes)?;
-    tx.execute(
-        "DELETE FROM ydoc_updates
-         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-    )
-    .map_err(map_sql)?;
-    tx.execute(
-        "DELETE FROM ydoc_snapshots
-         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-    )
-    .map_err(map_sql)?;
+    // The base IS the seq-0 snapshot. INSERT (not REPLACE): a genuine second
+    // base at up_to_seq = 0 conflicts as a hard backstop.
     tx.execute(
         "INSERT INTO ydoc_snapshots
          (workspace_id, version_id, object_id, up_to_seq,
@@ -978,6 +972,30 @@ fn replace_base_snapshot(
         ],
     )
     .map_err(map_sql)?;
+    Ok(base_sha)
+}
+
+fn replace_base_snapshot(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    base_bytes: &[u8],
+    sv_bytes: &[u8],
+    relay_seq: i64,
+    now_ms: i64,
+) -> Result<(), CollabError> {
+    tx.execute(
+        "DELETE FROM ydoc_updates
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "DELETE FROM ydoc_snapshots
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
+    let base_sha = write_base_snapshot_row(tx, key, base_bytes, sv_bytes, now_ms)?;
     tx.execute(
         "UPDATE ydoc_docs
          SET head_update_seq=0, head_snapshot_seq=0, base_claimed=1,

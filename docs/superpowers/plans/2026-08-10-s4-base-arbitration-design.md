@@ -35,11 +35,10 @@ to the loser's content.
 1. **Arbiter:** the relay's log order. The first base claim to commit at the
    relay owns the lineage coordinate. Deterministic, no clocks, no
    coordination protocol — the log already serializes claims.
-2. **The loser keeps everything, visibly.** The losing machine's content
-   materializes through the existing conflict machinery: its state lands as a
-   conflict side on the winning lineage's head, and the user resolves it in
-   the conflict UI they already know. Its Y.Doc re-seeds from the winning
-   lineage going forward.
+2. **The loser's last-settled text stays visible.** The text becomes a conflict
+   side on the winning lineage's head, and the user resolves it in the existing
+   conflict UI. The losing Y.Doc update rows do not survive arbitration. Its
+   Y.Doc re-seeds from the winning lineage going forward.
 3. **No auto-merge in S4.** A three-way text merge could resolve some cases
    without a conflict, but there is no common ancestor for independently
    created files, so any merge is a heuristic. S4 stays obvious: same path,
@@ -50,13 +49,8 @@ No silent loss: both contents are durable before, during, and after
 arbitration. Reversible: the conflict record is the reverse path. Obvious:
 the user sees exactly what happened — two machines made the same file, pick.
 
-## Questions for Ice
+## Resolved
 
-1. Approve first-claim-owns-coordinate with loser-as-conflict?
-2. Should S4 attempt any automatic content merge before materializing the
-   conflict (recommendation: no — keep it a visible conflict)?
-3. Anything about the conflict copy/UX for this case you want different from
-   ordinary edit conflicts? (It reads "two machines created this file
-   independently", not "your edit collided".)
-
-Answer here, in the PR that carries this file, or by telling the orchestrator.
+1. The first claim owns the coordinate. The loser becomes a visible conflict.
+2. S4 does not attempt an automatic content merge.
+3. The conflict says that another machine created the file. It does not describe the case as an edit collision.

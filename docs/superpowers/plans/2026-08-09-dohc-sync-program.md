@@ -1,7 +1,6 @@
 # The sync program (#356)
 
-Status: PLAN — awaiting Ice's review. No shard starts until this document
-is approved. Measured facts and every citation live in `SCAFFOLD-SYNC.md`
+Status: APPROVED — shards are in progress. Measured facts and every citation live in `SCAFFOLD-SYNC.md`
 (repo root, 134 validated `file:line` references); this document carries
 the decisions.
 

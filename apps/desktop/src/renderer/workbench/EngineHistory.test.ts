@@ -46,6 +46,7 @@ describe("engineOriginLabel", () => {
     expect(engineOriginLabel("local-file")).toBe("Local file edit");
     expect(engineOriginLabel("restore")).toBe("Restore");
     expect(engineOriginLabel("sync")).toBe("Sync");
+    expect(engineOriginLabel("sync-independent-origin")).toBe("Created on another machine");
     expect(engineOriginLabel("api")).toBe("dohc");
     expect(engineOriginLabel("ydoc")).toBe("Live edit");
     expect(engineOriginLabel("unknown")).toBe("Unknown source");

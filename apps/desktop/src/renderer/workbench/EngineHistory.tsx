@@ -52,6 +52,8 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
       return "Restore";
     case "sync":
       return "Sync";
+    case "sync-independent-origin":
+      return "Created on another machine";
     case "api":
       return "dohc";
     case "ydoc":

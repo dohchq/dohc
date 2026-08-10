@@ -1131,6 +1131,93 @@ fn relay_order_arbitrates_divergent_bases_after_close_compaction() {
     assert_eq!(relay_seq, Some(10));
 }
 
+#[test]
+fn identical_base_observations_reduce_to_the_earliest_relay_position() {
+    let mut ts = fresh_store("base-relay-min");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+
+    let x = Ydoc::wire();
+    x.plaintext_insert(0, "X");
+    let x_base = x.encode_full_state();
+    committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &x_base,
+            BaseClaimOrigin::LocalOrigination,
+            &NoFaults,
+            1_000,
+        )
+        .expect("local X base"),
+    );
+    let x_sha = dohc_engine_storage::hex_sha256(&x_base);
+    assert!(committed(
+        confirm_base_relay_seq(&mut ts.store, &key, &x_sha, 20, &NoFaults, 1_100)
+            .expect("own relay echo")
+    ));
+
+    let resumed = committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &x_base,
+            BaseClaimOrigin::RemoteApply { relay_seq: 5 },
+            &NoFaults,
+            1_200,
+        )
+        .expect("earlier identical base observation"),
+    );
+    assert!(matches!(resumed, ClaimOutcome::Resumed));
+    let relay_seq: Option<i64> = ts
+        .store
+        .read_with(|connection| {
+            connection
+                .query_row(
+                    "SELECT base_relay_seq FROM ydoc_docs
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("relay sequence");
+    assert_eq!(relay_seq, Some(5));
+
+    let y = Ydoc::wire();
+    y.plaintext_insert(0, "Y");
+    let y_base = y.encode_full_state();
+    let later = committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &y_base,
+            BaseClaimOrigin::RemoteApply { relay_seq: 10 },
+            &NoFaults,
+            1_300,
+        )
+        .expect("later divergent base"),
+    );
+    assert!(matches!(later, ClaimOutcome::AlreadyWon));
+    let stored_sha: String = ts
+        .store
+        .read_with(|connection| {
+            connection
+                .query_row(
+                    "SELECT base_snapshot_sha256 FROM ydoc_docs
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("stored base digest");
+    assert_eq!(stored_sha, x_sha);
+}
+
 // ---- replication: idempotent + echo-suppressed ------------------------------
 
 #[test]

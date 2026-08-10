@@ -7336,6 +7336,143 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
 }
 
 #[test]
+fn a_replaced_independent_base_preserves_the_crashed_drafts_full_projection() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws', 'object-replaced-draft', 1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-replaced-draft".to_owned(),
+                    path: "notes/replaced-draft.md".to_owned(),
+                    text: "seed".to_owned(),
+                    moment_id: "m-replaced-draft-seed".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed file");
+    let key =
+        dohc_engine_collab::DocKey::new("ws", "main", "object-replaced-draft").expect("doc key");
+
+    let loser = dohc_engine_collab::Ydoc::wire();
+    loser.plaintext_insert(0, "seed");
+    let loser_base_bytes = loser.encode_full_state();
+    let loser_base_sha = dohc_engine_storage::hex_sha256(&loser_base_bytes);
+    assert!(matches!(
+        dohc_engine_collab::claim_base(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &loser_base_bytes,
+            dohc_engine_collab::BaseClaimOrigin::LocalOrigination,
+            &NoFaults,
+            1_600,
+        ),
+        Ok(TxnOutcome::Committed(
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+        ))
+    ));
+    let typed_delta = loser.plaintext_insert(4, " typed draft");
+    dohc_engine_collab::record_local_update(&mut engine, &key, &typed_delta, &NoFaults, 1_700)
+        .expect("durable crashed draft");
+    assert!(matches!(
+        dohc_engine_collab::confirm_base_relay_seq(
+            &mut engine,
+            &key,
+            &loser_base_sha,
+            20,
+            &NoFaults,
+            1_800,
+        ),
+        Ok(TxnOutcome::Committed(true))
+    ));
+
+    let expected_loser = dohc_engine_collab::Ydoc::wire();
+    expected_loser
+        .apply(&loser_base_bytes)
+        .expect("loser base applies");
+    expected_loser
+        .apply(&typed_delta)
+        .expect("loser draft applies");
+    let expected_projection = expected_loser
+        .project(dohc_engine_collab::ContentKind::Plaintext)
+        .expect("loser projection");
+    let expected_current_sha =
+        dohc_engine_storage::hex_sha256(expected_projection.markdown.as_bytes());
+
+    let winner = dohc_engine_collab::Ydoc::wire();
+    winner.plaintext_insert(0, "winning independent base");
+    let winner_bytes = winner.encode_full_state();
+    let winner_sha = engine.put_binary_blob(&winner_bytes).expect("winner blob");
+    let mut winner_base = envelope(
+        "winning-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-replaced-draft",
+            "path": "notes/replaced-draft.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_sha,
+            "isBaseState": true
+        }),
+    );
+    winner_base.relay_seq = Some(0);
+    let outcome = apply_ydoc_envelope(&mut engine, &winner_base, &NoFaults, &NoLiveLeases)
+        .expect("winning base applies");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-base-conflict"),
+            conflicts_opened: 1,
+        })
+    );
+
+    let (current_sha, current_text, update_count): (String, String, i64) = engine
+        .read_with(|conn| {
+            let (current_sha, current_text) = conn.query_row(
+                "SELECT c.current_blob_sha256, b.text
+                 FROM conflicts c JOIN blobs b ON b.sha256=c.current_blob_sha256
+                 WHERE c.workspace_id='ws' AND c.status='open'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let update_count = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_updates
+                 WHERE workspace_id='ws' AND version_id='main'
+                   AND object_id='object-replaced-draft'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((current_sha, current_text, update_count))
+        })
+        .expect("conflict capture");
+    assert_eq!(current_sha, expected_current_sha);
+    assert_eq!(current_text, expected_projection.markdown);
+    assert_eq!(update_count, 0, "replacement purges the losing update rows");
+}
+
+#[test]
 fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
     // The convergent twin of the divergence test: a head whose bytes already
     // equal the base's projection fast-forwards silently.
@@ -14815,6 +14952,60 @@ fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "hydrate-order-missing-peer")
             .expect("missing ack"),
+        -1
+    );
+}
+
+#[test]
+fn pull_page_with_a_base_missing_its_relay_sequence_applies_nothing() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let healthy = envelope(
+        "healthy-page-peer",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "✅", 20, "healthy-page-author"),
+    );
+    let mut malformed_base = envelope(
+        "malformed-base-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "malformed-base-object",
+            "path": "notes/malformed-base.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": dohc_engine_storage::hex_sha256(b"not downloaded"),
+            "isBaseState": true
+        }),
+    );
+    malformed_base.relay_seq = None;
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![healthy, malformed_base],
+            next_cursor: 2,
+            has_more: false,
+        })),
+    });
+
+    assert_eq!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        Err(RelayError::InvalidResponse)
+    );
+    assert!(
+        read_relay_cursor(&engine, "ws")
+            .expect("read cursor")
+            .is_none()
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "healthy-page-peer").expect("healthy ack"),
+        -1,
+        "page validation must run before the healthy envelope applies"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "malformed-base-peer")
+            .expect("malformed base ack"),
         -1
     );
 }
