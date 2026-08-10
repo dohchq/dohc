@@ -356,10 +356,7 @@ export interface VersionCreatePayload {
   forkVersionId?: VersionId;
   forkMomentId?: VersionedTextMomentId;
   createdAtMs: number;
-  // Lazy additive (0P-A gate fix): absent only in payloads journaled before
-  // fork-state shipping; importers then fall back to copying their local
-  // source-version snapshots (the legacy, divergence-prone behavior).
-  forkSnapshots?: VersionCreateForkSnapshot[];
+  forkSnapshots: VersionCreateForkSnapshot[];
 }
 
 export interface ConflictResolvePayload {
