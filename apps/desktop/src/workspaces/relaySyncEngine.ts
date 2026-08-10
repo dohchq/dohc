@@ -230,6 +230,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         console.error(`[desktop] shared channel sync failed for ${options.rootDir}:`, error);
       }
     }
+    for (const declined of pullResult.sharingDeclined) {
+      console.warn(
+        `[desktop] document sharing declined for ${options.rootDir}: ${declined.constraint} allows ${declined.limitBytes} bytes; observed ${declined.observedBytes} bytes.`,
+      );
+    }
     for (const pending of pullResult.pendingResolves ?? []) {
       pendingRemoteResolves.set(pending.remoteConflictId, pending);
     }

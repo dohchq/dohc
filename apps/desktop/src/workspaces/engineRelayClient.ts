@@ -14,6 +14,7 @@ import {
   MAX_REPORTED_REFUSALS,
   type PullShareViewResult,
   type ShareViewRefusal,
+  type SharingDeclined,
   type PullWorkspaceFromRelayResult,
   type PushSharedChannelResult,
   type PushWorkspaceToRelayResult,
@@ -428,6 +429,24 @@ function shareViewRefusals(
   });
 }
 
+function sharingDeclined(
+  value: JsonValue | undefined,
+  label: string,
+): SharingDeclined[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`Rust engine ${label}.sharingDeclined must be an array.`);
+  }
+  return value.map((entry, index) => {
+    const at = `${label}.sharingDeclined[${index}]`;
+    const record = resultRecord(entry, at);
+    return {
+      constraint: stringField(record, "constraint", at),
+      limitBytes: numberField(record, "limitBytes", at),
+      observedBytes: numberField(record, "observedBytes", at),
+    };
+  });
+}
+
 function pendingResolves(
   value: JsonValue | undefined,
 ): PendingConflictResolve[] {
@@ -694,6 +713,7 @@ export class EngineRelayClient {
         let previousCursor: number | null = null;
         let finalCursor: Record<string, JsonValue | undefined> | null = null;
         const resolves: PendingConflictResolve[] = [];
+        const declines: SharingDeclined[] = [];
         const changed = new Map<
           string,
           {
@@ -727,6 +747,7 @@ export class EngineRelayClient {
             "sync.pull",
           );
           resolves.push(...pendingResolves(result.pendingResolves));
+          declines.push(...sharingDeclined(result.sharingDeclined, "sync.pull"));
           for (const path of changedPaths(result.changedPaths, "sync.pull")) {
             changed.set(path.path, path);
           }
@@ -746,6 +767,7 @@ export class EngineRelayClient {
           conflictsOpened,
           pendingConflictResolves: resolves.length,
           pendingResolves: resolves,
+          sharingDeclined: declines,
           fastForwardedPaths: [...changed.values()],
           nextCursor,
           commitFetchCursor: async () => await commitCursor(finalCursor),

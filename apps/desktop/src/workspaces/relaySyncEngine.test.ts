@@ -40,6 +40,7 @@ function pullResult(
     nextCursor: 0,
     commitFetchCursor: vi.fn(async () => {}),
     ...overrides,
+    sharingDeclined: overrides.sharingDeclined ?? [],
   };
 }
 
@@ -282,6 +283,35 @@ describe("relaySyncEngine", () => {
     expect(commit).toHaveBeenCalledTimes(1);
     expect(sync.snapshot().conflictCount).toBe(2);
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
+  });
+
+  it("logs each sharing decline at the current desktop UI boundary", async () => {
+    const result = pullResult() as PullWorkspaceFromRelayResult & {
+      sharingDeclined: Array<{
+        constraint: string;
+        limitBytes: number;
+        observedBytes: number;
+      }>;
+    };
+    result.sharingDeclined = [
+      {
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 21,
+      },
+    ];
+    pullMock.mockResolvedValueOnce(result);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sync = engine({ capture: capture() });
+
+    await sync.start();
+
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining("MAX_YDOC_UPDATE_BYTES"),
+    );
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("21 bytes"));
+    warning.mockRestore();
+    await sync.stop();
   });
 
   // 0P sync-hardening item 3: a RelayOriginDivergedError (restored/cloned

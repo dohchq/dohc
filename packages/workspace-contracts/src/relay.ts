@@ -17,6 +17,12 @@ export interface RelayMaterializedPath {
   contentKind: "text" | "binary";
 }
 
+export interface SharingDeclined {
+  constraint: string;
+  limitBytes: number;
+  observedBytes: number;
+}
+
 export interface PullWorkspaceFromRelayResult {
   fetched: number;
   applied: number;
@@ -27,6 +33,7 @@ export interface PullWorkspaceFromRelayResult {
   // engine tracks these so its "a choice needs a look" notice clears when
   // the referenced conflict is later resolved, instead of accumulating.
   pendingResolves: PendingConflictResolve[];
+  sharingDeclined: SharingDeclined[];
   fastForwardedPaths: RelayMaterializedPath[];
   // The relay cursor this pull reached. NOT persisted by the pull itself:
   // the caller must invoke commitFetchCursor() only after fastForwardedPaths

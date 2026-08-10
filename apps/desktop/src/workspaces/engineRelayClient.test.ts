@@ -102,6 +102,7 @@ class MockDaemon implements EngineDaemonClient {
                 reason: "stale-head",
               },
             ],
+            sharingDeclined: [],
           };
         case "sync.commitCursor":
           return { committed: true };
@@ -286,6 +287,55 @@ describe("EngineRelayClient", () => {
       },
       { method: "sync.claim", params: { workspaceId: "workspace-a" } },
       { method: "sync.probe", params: { workspaceId: "workspace-a" } },
+    ]);
+    await sessions.closeAll();
+  });
+
+  it("carries sharing declines from every workspace pull page", async () => {
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.pull") return undefined;
+      pulls += 1;
+      return {
+        status: "complete",
+        pushed: 0,
+        fetched: 1,
+        applied: 1,
+        skipped: 0,
+        conflictsOpened: 0,
+        hasMore: pulls === 1,
+        nextCursor: pulls,
+        pendingCursor: { kind: "relay", token: `cursor-${pulls}` },
+        changedPaths: [],
+        pendingResolves: [],
+        refusals: [],
+        sharingDeclined: [
+          {
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limitBytes: 20,
+            observedBytes: 20 + pulls,
+          },
+        ],
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    const pull = await client.pull();
+
+    expect(
+      (pull as unknown as { sharingDeclined: unknown }).sharingDeclined,
+      "the desktop client must not discard the engine's actionable declines",
+    ).toEqual([
+      {
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 21,
+      },
+      {
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 22,
+      },
     ]);
     await sessions.closeAll();
   });
@@ -966,6 +1016,7 @@ describe("EngineRelayClient", () => {
             },
           ],
           pendingResolves: [],
+          sharingDeclined: [],
         };
       }
       if (request.method === "share.channel.pull") {
