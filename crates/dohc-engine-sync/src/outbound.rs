@@ -125,7 +125,7 @@ pub fn journal_moment_append_in_tx(
             "correlationId": row.before_metadata_correlation_id,
         })
     });
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "momentId": row.moment_id,
         "versionId": row.version_id,
         "objectId": row.object_id,
@@ -158,6 +158,9 @@ pub fn journal_moment_append_in_tx(
         "beforeLatestMomentId": row.before_latest_moment_id,
         "beforeMetadata": before_metadata,
     });
+    if measured_json_len(&payload)? > PAYLOAD_PACKING_TARGET_BYTES {
+        payload["beforeMetadata"] = serde_json::Value::Null;
+    }
     journal_local_op_in_tx(
         tx,
         workspace_id,
@@ -382,7 +385,7 @@ pub fn journal_secret_version_fork_in_tx(
     Ok(())
 }
 
-/// How far below the payload cap the packer stops.
+/// How far below the payload cap payload packing stops.
 ///
 /// The relay re-measures every pushed payload with its own serializer
 /// (`stableJsonStringify`, `services/sync-relay/src/server.ts`), so two
@@ -390,15 +393,17 @@ pub fn journal_secret_version_fork_in_tx(
 /// between them — a dependency upgrade or an escaping edge case — which would
 /// otherwise refuse an op the engine had already journaled and wedge the
 /// outbound queue. `journal_local_op_in_tx` remains the single enforced limit;
-/// this only decides where a split lands, and packing smaller never refuses
-/// valid work.
-const FORK_CHUNK_HEADROOM_BYTES: usize = 4096;
-const FORK_CHUNK_TARGET_BYTES: usize = crate::MAX_PAYLOAD_JSON_BYTES - FORK_CHUNK_HEADROOM_BYTES;
+/// fork packing uses the target to split rows, and `moment.append` trimming
+/// uses it to shed optional before-state metadata. Packing smaller never
+/// refuses valid work.
+const PAYLOAD_PACKING_HEADROOM_BYTES: usize = 4096;
+const PAYLOAD_PACKING_TARGET_BYTES: usize =
+    crate::MAX_PAYLOAD_JSON_BYTES - PAYLOAD_PACKING_HEADROOM_BYTES;
 
 /// Split fork rows into payload-sized groups, measuring the header once and
 /// each row once.
 ///
-/// Every group this returns serializes at or below `FORK_CHUNK_TARGET_BYTES`,
+/// Every group this returns serializes at or below `PAYLOAD_PACKING_TARGET_BYTES`,
 /// so a larger fork costs more operations and is never refused. The packer only
 /// splits: `journal_local_op_in_tx` stays the single owner of the payload cap,
 /// and refuses the one row a split cannot help — a row wider than a whole
@@ -421,7 +426,7 @@ fn pack_fork_rows(
         let row_len = measured_json_len(&row)?;
         // The header already carries the empty `[]`, so a row costs its own
         // length plus the one comma that follows the row before it.
-        if !chunk.is_empty() && chunk_len + 1 + row_len > FORK_CHUNK_TARGET_BYTES {
+        if !chunk.is_empty() && chunk_len + 1 + row_len > PAYLOAD_PACKING_TARGET_BYTES {
             chunks.push(std::mem::take(&mut chunk));
             chunk_len = header_len;
         }
@@ -507,12 +512,72 @@ mod tests {
         assert_eq!(payload_len, 203_572);
         // Measured against the packing target, not the cap: the target is the
         // bound a row has to clear for a fork to split instead of refuse.
-        assert_eq!(FORK_CHUNK_TARGET_BYTES, 258_048);
-        assert!(payload_len <= FORK_CHUNK_TARGET_BYTES);
-        assert_eq!(FORK_CHUNK_TARGET_BYTES - payload_len, 54_476);
+        assert_eq!(PAYLOAD_PACKING_TARGET_BYTES, 258_048);
+        assert!(payload_len <= PAYLOAD_PACKING_TARGET_BYTES);
+        assert_eq!(PAYLOAD_PACKING_TARGET_BYTES - payload_len, 54_476);
         assert_eq!(
             pack_fork_rows(&header, vec![row]).expect("pack row").len(),
             1
+        );
+    }
+
+    #[test]
+    fn worst_case_moment_metadata_fits_after_shedding_before_metadata() {
+        const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
+        let identifier = "\"".repeat(crate::model::MAX_IDENTIFIER_BYTES);
+        let path = format!("{}.md", "\"".repeat(crate::model::MAX_IDENTIFIER_BYTES - 3));
+        let blob_sha = "f".repeat(64);
+        let metadata = "\0".repeat(MAX_METADATA_FIELD_BYTES);
+        let mut payload = serde_json::json!({
+            "momentId": &identifier,
+            "versionId": &identifier,
+            "objectId": &identifier,
+            "objectCreatedAtMs": 1,
+            "path": &path,
+            "recordedAtMs": 2,
+            "operation": "write",
+            "payloadBeforeBlobSha256": &blob_sha,
+            "payloadBeforePath": &path,
+            "payloadAfterBlobSha256": &blob_sha,
+            "payloadAfterPath": &path,
+            "payloadBeforeContentKind": "text",
+            "payloadBeforeByteLength": 1,
+            "payloadAfterContentKind": "text",
+            "payloadAfterByteLength": 1,
+            "metadata": {
+                "origin": "api",
+                "summary": &metadata,
+                "correlationId": &metadata,
+            },
+            "author": null,
+            "beforePresent": "present",
+            "beforeObjectId": &identifier,
+            "beforeVersionId": &identifier,
+            "beforePath": &path,
+            "beforeBlobSha256": &blob_sha,
+            "beforeContentKind": "text",
+            "beforeByteLength": 1,
+            "beforeUpdatedAtMs": 1,
+            "beforeLatestMomentId": &identifier,
+            "beforeMetadata": {
+                "origin": "api",
+                "summary": &metadata,
+                "correlationId": &metadata,
+            },
+        });
+
+        let with_before_metadata = measured_json_len(&payload).expect("measure full payload");
+        payload["beforeMetadata"] = serde_json::Value::Null;
+        let without_before_metadata = measured_json_len(&payload).expect("measure trimmed payload");
+        assert_eq!(PAYLOAD_PACKING_HEADROOM_BYTES, 4_096);
+        assert_eq!(PAYLOAD_PACKING_TARGET_BYTES, 258_048);
+        assert_eq!(with_before_metadata, 404_314);
+        assert_eq!(without_before_metadata, 207_662);
+        assert!(with_before_metadata > PAYLOAD_PACKING_TARGET_BYTES);
+        assert!(without_before_metadata < PAYLOAD_PACKING_TARGET_BYTES);
+        assert_eq!(
+            PAYLOAD_PACKING_TARGET_BYTES - without_before_metadata,
+            50_386
         );
     }
 }

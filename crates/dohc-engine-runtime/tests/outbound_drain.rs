@@ -452,6 +452,85 @@ async fn named_fork_splits_an_oversized_snapshot_payload_into_bounded_ops() {
 }
 
 #[tokio::test]
+async fn moment_append_sheds_oversized_before_metadata_without_truncating_the_write() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-moment-before-metadata";
+    initialize_workspace(&source_db, workspace_id, true);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
+    let metadata = "\0".repeat(16 * 1024);
+
+    for (moment_id, text, now_ms) in [
+        ("moment-metadata-before", "before\n", 10),
+        ("moment-metadata-after", "after\n", 20),
+    ] {
+        actor
+            .versioned_text_write_indexed(
+                WriteText {
+                    workspace_id: workspace_id.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-metadata".to_owned(),
+                    path: "notes/metadata.md".to_owned(),
+                    text: text.to_owned(),
+                    moment_id: moment_id.to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: Some(metadata.clone()),
+                    metadata_correlation_id: Some(metadata.clone()),
+                    author_json: None,
+                    now_ms,
+                    request_id: None,
+                },
+                source.path().to_path_buf(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("write moment with worst-case metadata");
+    }
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ops(&source_db);
+    let op = ops
+        .iter()
+        .find(|op| op.payload["momentId"] == "moment-metadata-after")
+        .expect("second moment op");
+    assert!(
+        serde_json::to_vec(&op.payload)
+            .expect("encode payload")
+            .len()
+            <= MAX_PAYLOAD_JSON_BYTES
+    );
+    assert_eq!(op.payload["beforeMetadata"], serde_json::Value::Null);
+    assert_eq!(op.payload["metadata"]["summary"], metadata);
+    assert_eq!(op.payload["metadata"]["correlationId"], metadata);
+
+    let peer = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer.engine_db_path().expect("peer db");
+    initialize_workspace(&peer_db, workspace_id, false);
+    let source_store = EngineStore::open(&source_db, 3).expect("open source store");
+    let mut peer_store = EngineStore::open(&peer_db, 4).expect("open peer store");
+    let before_op = ops
+        .iter()
+        .find(|op| op.payload["momentId"] == "moment-metadata-before")
+        .expect("first moment op");
+    copy_op_blobs(&source_store, &mut peer_store, before_op);
+    copy_op_blobs(&source_store, &mut peer_store, op);
+    peer_store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_peers (workspace_id,origin_id,acked_seq) VALUES (?1,?2,?3)",
+                params![workspace_id, op.origin_id, op.origin_seq - 1],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("prime peer sequence");
+    apply_moment_envelope_detailed(&mut peer_store, &op.envelope(workspace_id), &NoFaults)
+        .expect("apply trimmed moment envelope");
+}
+
+#[tokio::test]
 async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
     let source = ScratchDir::new().expect("source scratch");
     let source_db = source.engine_db_path().expect("source db");
