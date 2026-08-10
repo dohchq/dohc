@@ -4,7 +4,9 @@ use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, MergeTextFileFromVersion, RenameTextFile, SecretDelete,
     SecretDiskIntent, SecretWrite, VersionedTextStore, WriteBinary, WriteText,
 };
-use dohc_engine_runtime::{CancellationToken, NoFaults, SelfWriteRecorder, WorkspaceSupervisor};
+use dohc_engine_runtime::{
+    ActorHandle, CancellationToken, NoFaults, SelfWriteRecorder, WorkspaceSupervisor,
+};
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
 use dohc_engine_sync::{
     ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, apply_moment_envelope_detailed,
@@ -737,19 +739,11 @@ async fn lagging_peer_applies_prior_ops_then_a_chunked_fork_in_sequence() {
     }
 }
 
-#[tokio::test]
-async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
-    let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
-    let workspace_id = "ws-outbound-enabled";
-    initialize_workspace(&source_db, workspace_id, true);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
-
+async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root_dir: &Path) {
     actor
         .versioned_text_write_indexed(
             write_input(workspace_id, "moment-write-one", "first\n", 10),
-            source.path().to_path_buf(),
+            root_dir.to_path_buf(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -758,7 +752,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
     actor
         .versioned_text_write_indexed(
             write_input(workspace_id, "moment-write-two", "second\n", 20),
-            source.path().to_path_buf(),
+            root_dir.to_path_buf(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -779,7 +773,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
                 author_json: None,
                 now_ms: 30,
             },
-            source.path().to_path_buf(),
+            root_dir.to_path_buf(),
             Arc::new(NoRecorder),
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -800,7 +794,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
                 author_json: None,
                 now_ms: 40,
             },
-            source.path().to_path_buf(),
+            root_dir.to_path_buf(),
             Arc::new(NoRecorder),
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -823,7 +817,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
                 now_ms: 50,
                 request_id: None,
             },
-            source.path().to_path_buf(),
+            root_dir.to_path_buf(),
             Arc::new(NoRecorder),
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -900,7 +894,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
                 "delete through merge\n",
                 85,
             ),
-            source.path().to_path_buf(),
+            root_dir.to_path_buf(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1006,7 +1000,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
                 author_json: None,
                 now_ms: 140,
             },
-            source.path().to_path_buf(),
+            root_dir.to_path_buf(),
             Arc::new(NoRecorder),
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -1027,7 +1021,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
                 author_json: None,
                 now_ms: 150,
             },
-            source.path().to_path_buf(),
+            root_dir.to_path_buf(),
             Arc::new(NoRecorder),
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -1051,7 +1045,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
                 author_json: None,
                 now_ms: 160,
             },
-            source.path().to_path_buf(),
+            root_dir.to_path_buf(),
             Arc::new(NoRecorder),
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -1246,6 +1240,17 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
         )
         .await
         .expect("standalone secret fork");
+}
+
+#[tokio::test]
+async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-outbound-enabled";
+    initialize_workspace(&source_db, workspace_id, true);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
+    drive_every_mutation_kind(&actor, workspace_id, source.path()).await;
     supervisor.close(&source_db).expect("close source actor");
 
     let ops = local_ops(&source_db);
@@ -1547,53 +1552,9 @@ async fn never_synced_mutations_keep_only_the_diagnostic_journal() {
     initialize_workspace(&db, workspace_id, false);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 2).expect("open actor").actor;
-
-    actor
-        .versioned_text_write_indexed(
-            write_input(workspace_id, "moment-local-only", "local\n", 10),
-            scratch.path().to_path_buf(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("write local-only moment");
-    actor
-        .create_named_version(
-            CreateNamedVersion {
-                workspace_id: workspace_id.to_owned(),
-                new_version_id: "version-local-only".to_owned(),
-                name: "Local only".to_owned(),
-                from_version_id: "main".to_owned(),
-                now_ms: 20,
-                request_id: None,
-            },
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("create local-only version");
-    actor
-        .write_secret_file(
-            SecretWrite {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                path: ".env".to_owned(),
-                text: "TOKEN=local".to_owned(),
-                moment_id: "secret-local-only".to_owned(),
-                metadata_origin: "api".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms: 30,
-                disk_intent: SecretDiskIntent::Materialize,
-            },
-            SecretDataKey::from_bytes(&[0x22; 32]).expect("secret key"),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("write local-only secret");
+    drive_every_mutation_kind(&actor, workspace_id, scratch.path()).await;
     supervisor.close(&db).expect("close actor");
 
     assert!(local_ops(&db).is_empty());
-    assert_eq!(replication_journal_count(&db), 4);
+    assert_eq!(replication_journal_count(&db), 30);
 }
