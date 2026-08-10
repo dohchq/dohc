@@ -17,7 +17,7 @@ use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
 /// Wire origins describe the originating peer's provenance. Local capture and
 /// close guards treat `snapshots.metadata_origin` as proof of local disk state,
 /// so replicated heads must carry the established replication origin instead.
-const REPLICATED_SNAPSHOT_ORIGIN: &str = "sync";
+pub(crate) const REPLICATED_SNAPSHOT_ORIGIN: &str = "sync";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
