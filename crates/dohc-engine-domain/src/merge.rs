@@ -16,7 +16,7 @@ use crate::store::{
     validate_write_input, write_result_from_moment, write_text_in_tx,
 };
 use dohc_engine_storage::{FaultInjector, Preimage, StorageError, TxnOutcome};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -317,7 +317,7 @@ impl VersionedTextStore<'_> {
         after: F,
     ) -> Result<MergeTextFileResult, DomainError>
     where
-        F: Fn(&Connection, &MergeTextFileResult) -> Result<(), DomainError>,
+        F: Fn(&Transaction<'_>, &MergeTextFileResult) -> Result<(), DomainError>,
     {
         validate_path(&input.path)?;
         let (author_kind, author_json) = match input.author_json.as_deref() {
@@ -709,14 +709,14 @@ fn validate_compare_versions(
 }
 
 fn finish_merge<F>(
-    tx: &Connection,
+    tx: &Transaction<'_>,
     input: &MergeTextFileFromVersion,
     payload_hash: &str,
     result: MergeTextFileResult,
     after: &F,
 ) -> Result<MergeTextFileResult, DomainError>
 where
-    F: Fn(&Connection, &MergeTextFileResult) -> Result<(), DomainError>,
+    F: Fn(&Transaction<'_>, &MergeTextFileResult) -> Result<(), DomainError>,
 {
     after(tx, &result)?;
     let result_seq = match &result {

@@ -199,62 +199,86 @@ fn apply_fork(
     op: &ReplicationEnvelope,
     payload: SecretFork,
 ) -> Result<(), SyncError> {
+    validate_fork_versions(tx, op, &payload.from_version_id, &payload.to_version_id)?;
+    let source_by_path = source_by_path(tx, op, &payload.from_version_id)?;
+    validate_fork_rows(&payload.rows, &source_by_path)?;
+
+    tx.execute(
+        "DELETE FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
+        params![op.workspace_id, payload.to_version_id],
+    )
+    .map_err(SyncError::persist)?;
+    tx.execute(
+        "DELETE FROM secret_fork_bases WHERE workspace_id=?1 AND version_id=?2",
+        params![op.workspace_id, payload.to_version_id],
+    )
+    .map_err(SyncError::persist)?;
+    insert_fork_rows(tx, op, &payload.to_version_id, payload.rows)
+}
+
+fn validate_fork_versions(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    from_version_id: &str,
+    to_version_id: &str,
+) -> Result<(), SyncError> {
     crate::model::bounded(
-        &payload.from_version_id,
+        from_version_id,
         "secret fork source version id must be non-empty and bounded",
     )?;
     crate::model::bounded(
-        &payload.to_version_id,
+        to_version_id,
         "secret fork destination version id must be non-empty and bounded",
     )?;
-    if payload.from_version_id == payload.to_version_id {
+    if from_version_id == to_version_id {
         return Err(SyncError::InvalidInput {
             reason: "secret fork source and destination must differ",
         });
     }
-    // An honest fork with an empty source journals NO op (`fork_version_in_tx`
-    // only journals when it copied a row), so an empty wire fork has no valid
-    // producer — while the unconditional destination wipe below would erase
-    // every secret tip and fork base the destination already holds.
-    if payload.rows.is_empty() {
-        return Err(SyncError::InvalidInput {
-            reason: "secret fork must carry at least one row",
-        });
-    }
-    require_version(tx, &op.workspace_id, &payload.from_version_id)?;
-    require_version(tx, &op.workspace_id, &payload.to_version_id)?;
-    for row in &payload.rows {
-        validate_fork_row(row)?;
-    }
+    require_version(tx, &op.workspace_id, from_version_id)?;
+    require_version(tx, &op.workspace_id, to_version_id)
+}
 
-    let source_by_path = {
-        let mut statement = tx
-            .prepare(
-                "SELECT path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length \
-                 FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
-            )
-            .map_err(SyncError::corrupt)?;
-        statement
-            .query_map(params![op.workspace_id, payload.from_version_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    SealedSourceRow {
-                        iv_base64: row.get(1)?,
-                        auth_tag_base64: row.get(2)?,
-                        ciphertext_base64: row.get(3)?,
-                        byte_length: row.get(4)?,
-                    },
-                ))
-            })
-            .map_err(SyncError::corrupt)?
-            .collect::<Result<HashMap<_, _>, _>>()
-            .map_err(SyncError::corrupt)?
-    };
-    if payload.rows.len() != source_by_path.len() {
+fn source_by_path(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    from_version_id: &str,
+) -> Result<HashMap<String, SealedSourceRow>, SyncError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length \
+             FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
+        )
+        .map_err(SyncError::corrupt)?;
+    statement
+        .query_map(params![op.workspace_id, from_version_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                SealedSourceRow {
+                    iv_base64: row.get(1)?,
+                    auth_tag_base64: row.get(2)?,
+                    ciphertext_base64: row.get(3)?,
+                    byte_length: row.get(4)?,
+                },
+            ))
+        })
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(SyncError::corrupt)
+}
+
+fn validate_fork_rows(
+    rows: &[SecretForkRow],
+    source_by_path: &HashMap<String, SealedSourceRow>,
+) -> Result<(), SyncError> {
+    if rows.len() != source_by_path.len() {
         return Err(secret_fork_mismatch());
     }
-    let mut seen = HashSet::with_capacity(payload.rows.len());
-    for row in &payload.rows {
+    for row in rows {
+        validate_fork_row(row)?;
+    }
+    let mut seen = HashSet::with_capacity(rows.len());
+    for row in rows {
         if !seen.insert(row.path.as_str()) {
             return Err(SyncError::InvalidInput {
                 reason: "secret fork contains duplicate paths",
@@ -276,34 +300,33 @@ fn apply_fork(
             return Err(secret_fork_mismatch());
         }
     }
+    Ok(())
+}
 
-    tx.execute(
-        "DELETE FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
-        params![op.workspace_id, payload.to_version_id],
-    )
-    .map_err(SyncError::persist)?;
-    tx.execute(
-        "DELETE FROM secret_fork_bases WHERE workspace_id=?1 AND version_id=?2",
-        params![op.workspace_id, payload.to_version_id],
-    )
-    .map_err(SyncError::persist)?;
-    for row in payload.rows {
+fn insert_fork_rows(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    to_version_id: &str,
+    rows: Vec<SecretForkRow>,
+) -> Result<(), SyncError> {
+    for (index, row) in rows.into_iter().enumerate() {
         let ciphertext = load_ciphertext(tx, &row.ciphertext_sha256, row.byte_length)?;
         let ciphertext_base64 = STANDARD.encode(ciphertext);
+        let latest_moment_id = format!("secret-sync-{}-{}-{index}", op.origin_id, op.origin_seq);
         tx.execute(
             "INSERT INTO secret_files \
              (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 op.workspace_id,
-                payload.to_version_id,
+                to_version_id,
                 row.path,
                 row.iv_base64,
                 row.auth_tag_base64,
                 ciphertext_base64,
                 row.byte_length,
                 row.updated_at_ms,
-                row.latest_moment_id
+                latest_moment_id
             ],
         )
         .map_err(SyncError::persist)?;
@@ -313,7 +336,7 @@ fn apply_fork(
              VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
                 op.workspace_id,
-                payload.to_version_id,
+                to_version_id,
                 row.path,
                 row.iv_base64,
                 row.auth_tag_base64,

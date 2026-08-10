@@ -258,6 +258,7 @@ pub struct SecretRestoreResult {
     pub restored: &'static str,
     pub restored_moment_id: String,
     pub path: String,
+    pub moment: Option<SecretMomentRecord>,
 }
 
 /// Inputs to a secret delete.
@@ -708,8 +709,7 @@ impl<'a> SecretFileStore<'a> {
     /// Fork a version's secret files into `to_version_id`: copies every tip
     /// verbatim as ciphertext (no decryption — the AAD is not version-bound) and
     /// seeds `secret_fork_bases` with the same copy. Existing destination secret
-    /// rows are cleared first. Journals one `secret.version.fork` op when the
-    /// source had any secret files.
+    /// rows are cleared first. Journals one `secret.version.fork` op.
     pub fn fork_version(
         &mut self,
         workspace_id: &str,
@@ -718,48 +718,14 @@ impl<'a> SecretFileStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<(), DomainError> {
-        self.fork_version_with(
+        fork_version_keyless(
+            self.store,
             workspace_id,
             from_version_id,
             to_version_id,
             now_ms,
             faults,
-            |_, _| Ok(()),
         )
-    }
-
-    /// Fork secrets with a caller-supplied same-transaction side effect.
-    pub fn fork_version_with<F>(
-        &mut self,
-        workspace_id: &str,
-        from_version_id: &str,
-        to_version_id: &str,
-        now_ms: i64,
-        faults: &dyn FaultInjector,
-        after: F,
-    ) -> Result<(), DomainError>
-    where
-        F: FnOnce(&Transaction<'_>, &()) -> Result<(), DomainError>,
-    {
-        validate_identifier(workspace_id, "workspace_id")?;
-        if from_version_id == to_version_id {
-            return Err(DomainError::InvalidInput {
-                reason: "fork source and destination versions must differ",
-            });
-        }
-        let ws = workspace_id.to_owned();
-        let from = from_version_id.to_owned();
-        let to = to_version_id.to_owned();
-        self.store.read_with(|conn| {
-            require_version(conn, &ws, &from)?;
-            require_version(conn, &ws, &to)
-        })?;
-        let outcome = self.store.write_with(faults, |tx| {
-            fork_version_in_tx(tx, &ws, &from, &to, now_ms)?;
-            after(tx, &())?;
-            Ok::<(), DomainError>(())
-        })?;
-        committed(outcome)
     }
 
     // ------------------------------------------------------------- internals
@@ -785,16 +751,15 @@ pub(crate) fn fork_version_in_tx(
         params![workspace_id, to_version_id],
     )
     .map_err(DomainError::sql_persist)?;
-    let copied = tx
-        .execute(
-            "INSERT INTO secret_files (workspace_id, version_id, path, iv_base64, \
+    tx.execute(
+        "INSERT INTO secret_files (workspace_id, version_id, path, iv_base64, \
              auth_tag_base64, ciphertext_base64, byte_length, updated_at_ms, latest_moment_id) \
              SELECT workspace_id, ?2, path, iv_base64, auth_tag_base64, ciphertext_base64, \
              byte_length, updated_at_ms, latest_moment_id FROM secret_files \
              WHERE workspace_id = ?1 AND version_id = ?3",
-            params![workspace_id, to_version_id, from_version_id],
-        )
-        .map_err(DomainError::sql_persist)?;
+        params![workspace_id, to_version_id, from_version_id],
+    )
+    .map_err(DomainError::sql_persist)?;
     tx.execute(
         "INSERT INTO secret_fork_bases (workspace_id, version_id, path, iv_base64, \
          auth_tag_base64, ciphertext_base64, byte_length) \
@@ -803,9 +768,7 @@ pub(crate) fn fork_version_in_tx(
         params![workspace_id, to_version_id, from_version_id],
     )
     .map_err(DomainError::sql_persist)?;
-    if copied > 0 {
-        journal(tx, to_version_id, "secret.version.fork", now_ms)?;
-    }
+    journal(tx, to_version_id, "secret.version.fork", now_ms)?;
     Ok(())
 }
 
@@ -826,7 +789,7 @@ pub fn fork_version_keyless(
         to_version_id,
         now_ms,
         faults,
-        |_, _| Ok(()),
+        |_| Ok(()),
     )
 }
 
@@ -841,7 +804,7 @@ pub fn fork_version_keyless_with<F>(
     after: F,
 ) -> Result<(), DomainError>
 where
-    F: FnOnce(&Transaction<'_>, &()) -> Result<(), DomainError>,
+    F: FnOnce(&Transaction<'_>) -> Result<(), DomainError>,
 {
     validate_identifier(workspace_id, "workspace_id")?;
     if from_version_id == to_version_id {
@@ -855,7 +818,7 @@ where
     })?;
     let outcome = store.write_with(faults, |tx| {
         fork_version_in_tx(tx, workspace_id, from_version_id, to_version_id, now_ms)?;
-        after(tx, &())?;
+        after(tx)?;
         Ok::<(), DomainError>(())
     })?;
     committed(outcome)
@@ -1157,6 +1120,19 @@ pub fn apply_secret_file_from_version(
     input: &ApplySecretFileFromVersion,
     faults: &dyn FaultInjector,
 ) -> Result<SecretWriteResult, DomainError> {
+    apply_secret_file_from_version_with(store, key, input, faults, |_, _| Ok(()))
+}
+
+pub fn apply_secret_file_from_version_with<F>(
+    store: &mut EngineStore,
+    key: &SecretDataKey,
+    input: &ApplySecretFileFromVersion,
+    faults: &dyn FaultInjector,
+    after: F,
+) -> Result<SecretWriteResult, DomainError>
+where
+    F: FnOnce(&Transaction<'_>, &SecretWriteResult) -> Result<(), DomainError>,
+{
     let ApplySecretFileFromVersion {
         workspace_id,
         path,
@@ -1181,38 +1157,34 @@ pub fn apply_secret_file_from_version(
         let source = select_tip(tx, workspace_id, from_version_id, &path)?;
         let target = select_tip(tx, workspace_id, to_version_id, &path)?;
         let base = select_fork_base(tx, workspace_id, from_version_id, &path)?;
-        if source.is_none() && target.is_none() {
-            return Ok(SecretWriteResult {
-                changed: false,
-                moment: None,
-            });
-        }
-        if source.as_ref() == target.as_ref() {
-            return Ok(SecretWriteResult {
-                changed: false,
-                moment: None,
-            });
-        }
-        let source_text = source
-            .as_ref()
-            .map(|sealed| aead::open(key, workspace_id, &path, sealed))
-            .transpose()?;
-        let target_text = target
-            .as_ref()
-            .map(|sealed| aead::open(key, workspace_id, &path, sealed))
-            .transpose()?;
-        let base_text = base
-            .as_ref()
-            .map(|sealed| aead::open(key, workspace_id, &path, sealed))
-            .transpose()?;
-        if secret_plaintexts_equal(source_text.as_ref(), target_text.as_ref())
-            || secret_plaintexts_equal(source_text.as_ref(), base_text.as_ref())
+        let result = if (source.is_none() && target.is_none())
+            || source.as_ref() == target.as_ref()
         {
-            return Ok(SecretWriteResult {
+            SecretWriteResult {
                 changed: false,
                 moment: None,
-            });
-        }
+            }
+        } else {
+            let source_text = source
+                .as_ref()
+                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
+                .transpose()?;
+            let target_text = target
+                .as_ref()
+                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
+                .transpose()?;
+            let base_text = base
+                .as_ref()
+                .map(|sealed| aead::open(key, workspace_id, &path, sealed))
+                .transpose()?;
+            if secret_plaintexts_equal(source_text.as_ref(), target_text.as_ref())
+                || secret_plaintexts_equal(source_text.as_ref(), base_text.as_ref())
+            {
+                SecretWriteResult {
+                    changed: false,
+                    moment: None,
+                }
+            } else {
         if secret_moment_exists(tx, workspace_id, moment_id)? {
             return Err(DomainError::DuplicateMomentId);
         }
@@ -1281,10 +1253,14 @@ pub fn apply_secret_file_from_version(
             .map_err(DomainError::sql_persist)?;
             journal(tx, &path, "secret.file.delete", now_ms)?;
         }
-        Ok(SecretWriteResult {
-            changed: true,
-            moment: Some(moment),
-        })
+                SecretWriteResult {
+                    changed: true,
+                    moment: Some(moment),
+                }
+            }
+        };
+        after(tx, &result)?;
+        Ok::<_, DomainError>(result)
     })?;
     committed(outcome)
 }
@@ -1338,6 +1314,38 @@ pub fn restore_secret_file_verbatim_with_metadata(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<SecretRestoreResult, DomainError> {
+    restore_secret_file_verbatim_with_metadata_and_after(
+        store,
+        workspace_id,
+        path,
+        before_moment_id,
+        moment_id,
+        metadata_origin,
+        metadata_summary,
+        metadata_correlation_id,
+        now_ms,
+        faults,
+        |_, _| Ok(()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn restore_secret_file_verbatim_with_metadata_and_after<F>(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    path: &str,
+    before_moment_id: &str,
+    moment_id: &str,
+    metadata_origin: &str,
+    metadata_summary: Option<String>,
+    metadata_correlation_id: Option<String>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    after: F,
+) -> Result<SecretRestoreResult, DomainError>
+where
+    F: FnOnce(&Transaction<'_>, &SecretRestoreResult) -> Result<(), DomainError>,
+{
     validate_identifier(workspace_id, "workspace_id")?;
     validate_identifier(before_moment_id, "moment_id")?;
     validate_identifier(moment_id, "moment_id")?;
@@ -1391,13 +1399,14 @@ pub fn restore_secret_file_verbatim_with_metadata(
             Some(_) => return Err(DomainError::StateCorrupt { reason: "secret moment has invalid presence" }),
         };
         let current = select_tip(tx, workspace_id, &before.version_id, &before.path)?;
-        if target.as_ref() == current.as_ref() {
-            return Ok(SecretRestoreResult {
+        let result = if target.as_ref() == current.as_ref() {
+            SecretRestoreResult {
                 restored: if target.is_some() { "text" } else { "deleted" },
                 restored_moment_id: before.moment_id,
                 path: before.path,
-            });
-        }
+                moment: None,
+            }
+        } else {
         if secret_moment_exists(tx, workspace_id, moment_id)? {
             return Err(DomainError::DuplicateMomentId);
         }
@@ -1456,11 +1465,15 @@ pub fn restore_secret_file_verbatim_with_metadata(
             .map_err(DomainError::sql_persist)?;
             journal(tx, &record.path, "secret.file.delete", now_ms)?;
         }
-        Ok(SecretRestoreResult {
-            restored: if target.is_some() { "text" } else { "deleted" },
-            restored_moment_id: record.moment_id,
-            path: record.path,
-        })
+            SecretRestoreResult {
+                restored: if target.is_some() { "text" } else { "deleted" },
+                restored_moment_id: record.moment_id.clone(),
+                path: record.path.clone(),
+                moment: Some(record),
+            }
+        };
+        after(tx, &result)?;
+        Ok::<_, DomainError>(result)
     })?;
     committed(outcome)
 }

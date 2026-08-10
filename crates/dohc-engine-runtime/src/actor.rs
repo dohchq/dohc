@@ -53,12 +53,12 @@ use dohc_engine_domain::{
     MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, RenameResult,
     RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
     RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
-    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretRestoreResult,
-    SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotContent,
-    SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict, TextSnapshot,
-    ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
+    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
+    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
+    SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
+    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
     VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
-    apply_secret_file_from_version, binary_delete_job_id, binary_rename_delete_job_id,
+    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
     binary_rename_write_job_id, binary_rollback_job_identity, capture_ingest_binary_in_tx,
     capture_ingest_in_tx, capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
     compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
@@ -66,7 +66,7 @@ use dohc_engine_domain::{
     enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_secret_moment_keyless,
     has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
     list_secret_files_keyless_page, list_secret_moments_page_keyless,
-    restore_secret_file_verbatim_with_metadata, secret_file_len_keyless,
+    restore_secret_file_verbatim_with_metadata_and_after, secret_file_len_keyless,
     select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
     write_projected_text_in_tx, write_text_in_tx,
 };
@@ -6961,7 +6961,7 @@ fn worker_main(
                         &to_version_id,
                         now_ms,
                         faults.as_ref(),
-                        |tx, _| {
+                        |tx| {
                             journal_secret_fork_outbound_in_tx(
                                 tx,
                                 &workspace_id,
@@ -7042,7 +7042,7 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    apply_secret_file_from_version(
+                    apply_secret_file_from_version_with(
                         &mut store,
                         &key,
                         &dohc_engine_domain::ApplySecretFileFromVersion {
@@ -7057,6 +7057,17 @@ fn worker_main(
                             now_ms,
                         },
                         faults.as_ref(),
+                        |tx, result| {
+                            let Some(moment) = result.moment.as_ref() else {
+                                return Ok(());
+                            };
+                            match moment.operation {
+                                SecretOp::Write => journal_secret_put_outbound_in_tx(tx, result),
+                                SecretOp::Delete => {
+                                    journal_secret_delete_outbound_in_tx(tx, moment)
+                                }
+                            }
+                        },
                     )
                     .map_err(RuntimeError::from)
                 };
@@ -7078,7 +7089,7 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    restore_secret_file_verbatim_with_metadata(
+                    restore_secret_file_verbatim_with_metadata_and_after(
                         &mut store,
                         &workspace_id,
                         &path,
@@ -7089,6 +7100,19 @@ fn worker_main(
                         metadata_correlation_id,
                         now_ms,
                         faults.as_ref(),
+                        |tx, result| {
+                            let Some(moment) = result.moment.as_ref() else {
+                                return Ok(());
+                            };
+                            match moment.operation {
+                                SecretOp::Write => {
+                                    journal_secret_put_moment_outbound_in_tx(tx, moment)
+                                }
+                                SecretOp::Delete => {
+                                    journal_secret_delete_outbound_in_tx(tx, moment)
+                                }
+                            }
+                        },
                     )
                     .map_err(RuntimeError::from)
                 };
@@ -7214,24 +7238,11 @@ fn worker_main(
                 } else {
                     VersionedTextStore::new(&mut store)
                         .create_named_version_with(&input, faults.as_ref(), |tx, record| {
-                            if dohc_engine_sync::workspace_replicates_with_relay_in_tx(
+                            journal_version_create_outbound_in_tx(
                                 tx,
-                                &record.workspace_id,
+                                record,
+                                &input.from_version_id,
                             )
-                            .map_err(outbound_domain)?
-                            {
-                                dohc_engine_sync::journal_version_create_in_tx(tx, record)
-                                    .map_err(outbound_domain)?;
-                                dohc_engine_sync::journal_secret_version_fork_in_tx(
-                                    tx,
-                                    &record.workspace_id,
-                                    &input.from_version_id,
-                                    &record.version_id,
-                                    record.created_at_ms,
-                                )
-                                .map_err(outbound_domain)?;
-                            }
-                            Ok(())
                         })
                         .map_err(RuntimeError::from)
                 };
@@ -10038,16 +10049,21 @@ fn outbound_domain(error: dohc_engine_sync::SyncError) -> DomainError {
     )))
 }
 
+fn relay_enabled_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+) -> Result<bool, DomainError> {
+    dohc_engine_sync::workspace_replicates_with_relay_in_tx(tx, workspace_id)
+        .map_err(outbound_domain)
+}
+
 fn journal_moment_outbound_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     moment_id: &str,
     deduped: bool,
 ) -> Result<(), DomainError> {
-    if deduped
-        || !dohc_engine_sync::workspace_replicates_with_relay_in_tx(tx, workspace_id)
-            .map_err(outbound_domain)?
-    {
+    if deduped || !relay_enabled_in_tx(tx, workspace_id)? {
         return Ok(());
     }
     dohc_engine_sync::journal_moment_append_in_tx(tx, workspace_id, moment_id)
@@ -10061,9 +10077,14 @@ fn journal_secret_put_outbound_in_tx(
     let Some(moment) = result.moment.as_ref() else {
         return Ok(());
     };
-    if !dohc_engine_sync::workspace_replicates_with_relay_in_tx(tx, &moment.workspace_id)
-        .map_err(outbound_domain)?
-    {
+    journal_secret_put_moment_outbound_in_tx(tx, moment)
+}
+
+fn journal_secret_put_moment_outbound_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    moment: &SecretMomentRecord,
+) -> Result<(), DomainError> {
+    if !relay_enabled_in_tx(tx, &moment.workspace_id)? {
         return Ok(());
     }
     dohc_engine_sync::journal_secret_put_in_tx(tx, moment).map_err(outbound_domain)
@@ -10073,9 +10094,7 @@ fn journal_secret_delete_outbound_in_tx(
     tx: &rusqlite::Transaction<'_>,
     moment: &SecretMomentRecord,
 ) -> Result<(), DomainError> {
-    if !dohc_engine_sync::workspace_replicates_with_relay_in_tx(tx, &moment.workspace_id)
-        .map_err(outbound_domain)?
-    {
+    if !relay_enabled_in_tx(tx, &moment.workspace_id)? {
         return Ok(());
     }
     dohc_engine_sync::journal_secret_delete_in_tx(tx, moment).map_err(outbound_domain)
@@ -10088,9 +10107,7 @@ fn journal_secret_fork_outbound_in_tx(
     to_version_id: &str,
     recorded_at_ms: i64,
 ) -> Result<(), DomainError> {
-    if !dohc_engine_sync::workspace_replicates_with_relay_in_tx(tx, workspace_id)
-        .map_err(outbound_domain)?
-    {
+    if !relay_enabled_in_tx(tx, workspace_id)? {
         return Ok(());
     }
     dohc_engine_sync::journal_secret_version_fork_in_tx(
@@ -10099,6 +10116,25 @@ fn journal_secret_fork_outbound_in_tx(
         from_version_id,
         to_version_id,
         recorded_at_ms,
+    )
+    .map_err(outbound_domain)
+}
+
+fn journal_version_create_outbound_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    record: &VersionRecord,
+    from_version_id: &str,
+) -> Result<(), DomainError> {
+    if !relay_enabled_in_tx(tx, &record.workspace_id)? {
+        return Ok(());
+    }
+    dohc_engine_sync::journal_version_create_in_tx(tx, record).map_err(outbound_domain)?;
+    dohc_engine_sync::journal_secret_version_fork_in_tx(
+        tx,
+        &record.workspace_id,
+        from_version_id,
+        &record.version_id,
+        record.created_at_ms,
     )
     .map_err(outbound_domain)
 }
@@ -10578,6 +10614,23 @@ fn versioned_text_merge_on_store(
                 | MergeTextFileResult::Unchanged { .. }
                 | MergeTextFileResult::Conflict { .. } => {}
             }
+            let Some((moment_id, deduped)) = (match result {
+                MergeTextFileResult::Write { write, .. } => {
+                    Some((write.moment.moment_id.as_str(), write.deduped))
+                }
+                MergeTextFileResult::BinaryWrite { write, .. } => {
+                    Some((write.moment.moment_id.as_str(), write.deduped))
+                }
+                MergeTextFileResult::Delete { delete, .. } => {
+                    Some((delete.moment.moment_id.as_str(), delete.deduped))
+                }
+                MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {
+                    None
+                }
+            }) else {
+                return Ok(());
+            };
+            journal_moment_outbound_in_tx(tx, &input.workspace_id, moment_id, deduped)?;
             Ok(())
         })
         .map_err(RuntimeError::from)?;

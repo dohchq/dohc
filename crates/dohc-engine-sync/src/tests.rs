@@ -10895,7 +10895,7 @@ fn relay_page_applies_later_secret_source_before_retrying_an_early_fork() {
             conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM secret_files \
                  WHERE workspace_id='ws' AND version_id='feature' AND path='app/.env' \
-                   AND latest_moment_id='secret-sync-page-source-peer-0')",
+                   AND latest_moment_id='secret-sync-page-fork-peer-0-0')",
                 [],
                 |row| row.get(0),
             )
@@ -11109,14 +11109,10 @@ fn secret_version_fork_defers_set_mismatches_but_refuses_duplicate_paths() {
     );
 }
 
-/// An empty replicated fork satisfies the `rows.len() == source.len()`
-/// bijection whenever the named SOURCE is empty, then falls through to the
-/// UNCONDITIONAL destination wipe — erasing every secret tip and fork base the
-/// destination already holds. An honest local fork with an empty source
-/// journals no op at all (`fork_version_in_tx` only journals when it copied a
-/// row), so an empty wire fork has no valid producer.
+/// An empty fork is the authenticated representation of clearing the
+/// destination from an empty source.
 #[test]
-fn secret_version_fork_with_no_rows_cannot_erase_the_destination_secrets() {
+fn secret_version_fork_with_no_rows_clears_the_destination_secrets() {
     let (_scratch, _path, mut engine) = store();
     let ciphertext = b"sealed source bytes";
     seed_secret_fork_state(&mut engine, ciphertext);
@@ -11133,31 +11129,9 @@ fn secret_version_fork_with_no_rows_cannot_erase_the_destination_secrets() {
         }),
     );
 
-    let refusal = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases);
     assert!(matches!(
-        refusal,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput {
-                ref reason
-            },
-            ..
-        })) if reason == "secret fork must carry at least one row"
-    ));
-    let next = envelope(
-        "empty-fork-peer",
-        1,
-        "chat.channel.create",
-        json!({
-            "channelId": "after-empty-fork",
-            "name": "Still moving",
-            "slug": "still-moving",
-            "kind": "channel",
-            "createdAtMs": 2_001
-        }),
-    );
-    assert!(matches!(
-        apply_replication_envelope(&mut engine, &next, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let destination: (Vec<String>, Vec<String>) = engine
         .read_with(|conn| {
@@ -11180,14 +11154,91 @@ fn secret_version_fork_with_no_rows_cannot_erase_the_destination_secrets() {
         .expect("destination secrets");
     assert_eq!(
         destination,
-        (vec!["stale.env".to_owned()], vec!["stale.env".to_owned()]),
-        "an empty wire fork must not wipe the destination"
+        (Vec::<String>::new(), Vec::<String>::new()),
+        "an empty fork must clear the destination"
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "empty-fork-peer").expect("ack"),
-        1,
-        "the destructive refusal must preserve state without wedging its origin"
+        0
     );
+}
+
+#[test]
+fn secret_version_fork_uses_peer_local_tip_ids() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    seed_replication_version(&mut engine, "feature", "named");
+    let ciphertext = b"sealed source bytes";
+    let sha = engine
+        .put_binary_blob(ciphertext)
+        .expect("secret ciphertext blob");
+    let iv = STANDARD.encode([7_u8; SECRET_IV_BYTES]);
+    let tag = STANDARD.encode([9_u8; SECRET_TAG_BYTES]);
+    let put = envelope(
+        "put-peer",
+        0,
+        "secret.file.put",
+        json!({
+            "versionId": "main",
+            "path": "app/.env",
+            "metadata": {"origin": "sync"},
+            "ivBase64": iv,
+            "authTagBase64": tag,
+            "ciphertextSha256": sha,
+            "byteLength": ciphertext.len()
+        }),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &put, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+    ));
+
+    let fork = envelope(
+        "fork-peer",
+        0,
+        "secret.version.fork",
+        json!({
+            "fromVersionId": "main",
+            "toVersionId": "feature",
+            "rows": [{
+                "path": "app/.env",
+                "ivBase64": iv,
+                "authTagBase64": tag,
+                "ciphertextSha256": sha,
+                "byteLength": ciphertext.len(),
+                "updatedAtMs": 100,
+                "latestMomentId": "origin-put-moment"
+            }]
+        }),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &fork, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+    ));
+
+    let tips: (String, String) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT latest_moment_id FROM secret_files \
+                     WHERE workspace_id='ws' AND version_id='main' AND path='app/.env'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT latest_moment_id FROM secret_files \
+                     WHERE workspace_id='ws' AND version_id='feature' AND path='app/.env'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("secret tip ids");
+    assert_eq!(tips.0, "secret-sync-put-peer-0");
+    assert_eq!(tips.1, "secret-sync-fork-peer-0-0");
 }
 
 /// Secret ciphertext refs ride the shared binary-blob transport (5 MiB cap),

@@ -30,9 +30,6 @@ struct MomentPayloadRow {
     before_object_id: Option<String>,
     before_version_id: Option<String>,
     before_path: Option<String>,
-    before_blob_sha256: Option<String>,
-    before_content_kind: Option<String>,
-    before_byte_length: Option<i64>,
     before_updated_at_ms: Option<i64>,
     before_latest_moment_id: Option<String>,
     before_metadata_origin: Option<String>,
@@ -67,24 +64,16 @@ pub fn journal_moment_append_in_tx(
                     COALESCE(m.before_object_id, CASE WHEN m.before_present=2 THEN m.object_id END), \
                     COALESCE(m.before_version_id, CASE WHEN m.before_present=2 THEN m.version_id END), \
                     COALESCE(m.before_path, m.payload_before_path), \
-                    m.payload_before_blob_sha256, m.payload_before_content_kind, \
-                    CASE m.payload_before_content_kind \
-                      WHEN 'binary' THEN (SELECT byte_length FROM binary_blobs WHERE sha256=m.payload_before_blob_sha256) \
-                      ELSE (SELECT byte_length FROM blobs WHERE sha256=m.payload_before_blob_sha256) END, \
-                    COALESCE(m.before_updated_at_ms, \
-                      (SELECT p.recorded_at_ms FROM moments p WHERE p.workspace_id=m.workspace_id AND p.moment_id=m.before_latest_moment_id), \
-                      (SELECT f.updated_at_ms FROM fork_base_snapshots f WHERE f.workspace_id=m.workspace_id AND f.version_id=m.version_id AND f.object_id=m.object_id AND f.latest_moment_id=m.before_latest_moment_id)), \
+                    COALESCE(m.before_updated_at_ms, p.recorded_at_ms, f.updated_at_ms), \
                     m.before_latest_moment_id, \
-                    COALESCE(m.before_metadata_origin, \
-                      (SELECT p.metadata_origin FROM moments p WHERE p.workspace_id=m.workspace_id AND p.moment_id=m.before_latest_moment_id), \
-                      (SELECT f.metadata_origin FROM fork_base_snapshots f WHERE f.workspace_id=m.workspace_id AND f.version_id=m.version_id AND f.object_id=m.object_id AND f.latest_moment_id=m.before_latest_moment_id)), \
-                    COALESCE(m.before_metadata_summary, \
-                      (SELECT p.metadata_summary FROM moments p WHERE p.workspace_id=m.workspace_id AND p.moment_id=m.before_latest_moment_id), \
-                      (SELECT f.metadata_summary FROM fork_base_snapshots f WHERE f.workspace_id=m.workspace_id AND f.version_id=m.version_id AND f.object_id=m.object_id AND f.latest_moment_id=m.before_latest_moment_id)), \
-                    COALESCE(m.before_metadata_correlation_id, \
-                      (SELECT p.metadata_correlation_id FROM moments p WHERE p.workspace_id=m.workspace_id AND p.moment_id=m.before_latest_moment_id), \
-                      (SELECT f.metadata_correlation_id FROM fork_base_snapshots f WHERE f.workspace_id=m.workspace_id AND f.version_id=m.version_id AND f.object_id=m.object_id AND f.latest_moment_id=m.before_latest_moment_id)) \
-             FROM moments m JOIN file_objects o ON o.workspace_id=m.workspace_id AND o.object_id=m.object_id \
+                    COALESCE(m.before_metadata_origin, p.metadata_origin, f.metadata_origin), \
+                    COALESCE(m.before_metadata_summary, p.metadata_summary, f.metadata_summary), \
+                    COALESCE(m.before_metadata_correlation_id, p.metadata_correlation_id, f.metadata_correlation_id) \
+             FROM moments m \
+             JOIN file_objects o ON o.workspace_id=m.workspace_id AND o.object_id=m.object_id \
+             LEFT JOIN moments p ON p.workspace_id=m.workspace_id AND p.moment_id=m.before_latest_moment_id \
+             LEFT JOIN fork_base_snapshots f ON f.workspace_id=m.workspace_id AND f.version_id=m.version_id \
+               AND f.object_id=m.object_id AND f.latest_moment_id=m.before_latest_moment_id \
              WHERE m.workspace_id=?1 AND m.moment_id=?2",
             params![workspace_id, moment_id],
             |row| {
@@ -112,14 +101,11 @@ pub fn journal_moment_append_in_tx(
                     before_object_id: row.get(20)?,
                     before_version_id: row.get(21)?,
                     before_path: row.get(22)?,
-                    before_blob_sha256: row.get(23)?,
-                    before_content_kind: row.get(24)?,
-                    before_byte_length: row.get(25)?,
-                    before_updated_at_ms: row.get(26)?,
-                    before_latest_moment_id: row.get(27)?,
-                    before_metadata_origin: row.get(28)?,
-                    before_metadata_summary: row.get(29)?,
-                    before_metadata_correlation_id: row.get(30)?,
+                    before_updated_at_ms: row.get(23)?,
+                    before_latest_moment_id: row.get(24)?,
+                    before_metadata_origin: row.get(25)?,
+                    before_metadata_summary: row.get(26)?,
+                    before_metadata_correlation_id: row.get(27)?,
                 })
             },
         )
@@ -147,12 +133,12 @@ pub fn journal_moment_append_in_tx(
         "path": row.path,
         "recordedAtMs": row.recorded_at_ms,
         "operation": row.operation,
-        "payloadBeforeBlobSha256": row.payload_before_blob_sha256,
+        "payloadBeforeBlobSha256": &row.payload_before_blob_sha256,
         "payloadBeforePath": row.payload_before_path,
         "payloadAfterBlobSha256": row.payload_after_blob_sha256,
         "payloadAfterPath": row.payload_after_path,
-        "payloadBeforeContentKind": row.payload_before_content_kind,
-        "payloadBeforeByteLength": row.payload_before_byte_length,
+        "payloadBeforeContentKind": &row.payload_before_content_kind,
+        "payloadBeforeByteLength": &row.payload_before_byte_length,
         "payloadAfterContentKind": row.payload_after_content_kind,
         "payloadAfterByteLength": row.payload_after_byte_length,
         "metadata": {
@@ -165,9 +151,9 @@ pub fn journal_moment_append_in_tx(
         "beforeObjectId": row.before_object_id,
         "beforeVersionId": row.before_version_id,
         "beforePath": row.before_path,
-        "beforeBlobSha256": row.before_blob_sha256,
-        "beforeContentKind": row.before_content_kind,
-        "beforeByteLength": row.before_byte_length,
+        "beforeBlobSha256": &row.payload_before_blob_sha256,
+        "beforeContentKind": &row.payload_before_content_kind,
+        "beforeByteLength": &row.payload_before_byte_length,
         "beforeUpdatedAtMs": row.before_updated_at_ms,
         "beforeLatestMomentId": row.before_latest_moment_id,
         "beforeMetadata": before_metadata,
@@ -327,9 +313,6 @@ pub fn journal_secret_version_fork_in_tx(
         .map_err(SyncError::corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
-    if stored.is_empty() {
-        return Ok(());
-    }
     let rows = stored
         .into_iter()
         .map(
