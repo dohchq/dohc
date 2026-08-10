@@ -5,12 +5,9 @@ use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
-
-const SECRET_FORK_MISMATCH_REASON: &str =
-    "secret fork payload does not match the local sealed source state";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,13 +57,6 @@ struct SecretForkRow {
     byte_length: i64,
     updated_at_ms: i64,
     latest_moment_id: String,
-}
-
-struct SealedSourceRow {
-    iv_base64: String,
-    auth_tag_base64: String,
-    ciphertext_base64: String,
-    byte_length: i64,
 }
 
 pub fn apply_secret_envelope(
@@ -202,8 +192,7 @@ fn apply_fork(
     payload: SecretFork,
 ) -> Result<(), SyncError> {
     validate_fork_versions(tx, op, &payload.from_version_id, &payload.to_version_id)?;
-    let source_by_path = source_by_path(tx, op, &payload.from_version_id)?;
-    validate_fork_rows(&payload.rows, payload.total_rows, &source_by_path)?;
+    validate_fork_rows(&payload.rows, payload.total_rows)?;
 
     if payload.chunk_index == 0 {
         tx.execute(
@@ -243,41 +232,11 @@ fn validate_fork_versions(
     require_version(tx, &op.workspace_id, to_version_id)
 }
 
-fn source_by_path(
-    tx: &Transaction<'_>,
-    op: &ReplicationEnvelope,
-    from_version_id: &str,
-) -> Result<HashMap<String, SealedSourceRow>, SyncError> {
-    let mut statement = tx
-        .prepare(
-            "SELECT path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length \
-             FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
-        )
-        .map_err(SyncError::corrupt)?;
-    statement
-        .query_map(params![op.workspace_id, from_version_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                SealedSourceRow {
-                    iv_base64: row.get(1)?,
-                    auth_tag_base64: row.get(2)?,
-                    ciphertext_base64: row.get(3)?,
-                    byte_length: row.get(4)?,
-                },
-            ))
-        })
-        .map_err(SyncError::corrupt)?
-        .collect::<Result<HashMap<_, _>, _>>()
-        .map_err(SyncError::corrupt)
-}
-
-fn validate_fork_rows(
-    rows: &[SecretForkRow],
-    total_rows: usize,
-    source_by_path: &HashMap<String, SealedSourceRow>,
-) -> Result<(), SyncError> {
-    if total_rows != source_by_path.len() {
-        return Err(secret_fork_mismatch());
+fn validate_fork_rows(rows: &[SecretForkRow], total_rows: usize) -> Result<(), SyncError> {
+    if rows.len() > total_rows {
+        return Err(SyncError::InvalidInput {
+            reason: "secret fork chunk claims more rows than its declared total",
+        });
     }
     for row in rows {
         validate_fork_row(row)?;
@@ -288,21 +247,6 @@ fn validate_fork_rows(
             return Err(SyncError::InvalidInput {
                 reason: "secret fork contains duplicate paths",
             });
-        }
-        let source = source_by_path
-            .get(&row.path)
-            .ok_or_else(secret_fork_mismatch)?;
-        let source_ciphertext = STANDARD.decode(&source.ciphertext_base64).map_err(|_| {
-            SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(
-                "sealed source ciphertext is malformed",
-            )))
-        })?;
-        if source.iv_base64 != row.iv_base64
-            || source.auth_tag_base64 != row.auth_tag_base64
-            || dohc_engine_storage::hex_sha256(&source_ciphertext) != row.ciphertext_sha256
-            || source.byte_length != row.byte_length
-        {
-            return Err(secret_fork_mismatch());
         }
     }
     Ok(())
@@ -452,12 +396,6 @@ fn load_ciphertext(
         ));
     }
     Ok(ciphertext)
-}
-
-const fn secret_fork_mismatch() -> SyncError {
-    SyncError::RetryableState {
-        reason: SECRET_FORK_MISMATCH_REASON,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

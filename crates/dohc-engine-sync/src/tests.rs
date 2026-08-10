@@ -10732,321 +10732,124 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
 }
 
 #[test]
-fn secret_version_fork_retries_after_the_sealed_source_converges() {
+fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
     let (_scratch, _path, mut engine) = store();
-    let ciphertext = b"sealed source bytes";
-    let (_sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
-    let poison_sha = engine
-        .put_binary_blob(b"poison source bytes")
-        .expect("poison ciphertext blob");
-    let operation = envelope(
-        "poison-fork-peer",
-        0,
-        "secret.version.fork",
-        json!({
-            "fromVersionId": "main",
-            "toVersionId": "feature",
-            "chunkIndex": 0,
-            "totalRows": 2,
-            "rows": [{
-                "path": "app/.env",
-                "ivBase64": iv,
-                "authTagBase64": tag,
-                "ciphertextSha256": poison_sha,
-                "byteLength": ciphertext.len(),
-                "updatedAtMs": 100,
-                "latestMomentId": "source-tip"
-            }, {
-                "path": "config/prod.env",
-                "ivBase64": iv,
-                "authTagBase64": tag,
-                "ciphertextSha256": dohc_engine_storage::hex_sha256(ciphertext),
-                "byteLength": ciphertext.len(),
-                "updatedAtMs": 101,
-                "latestMomentId": "source-tip-2"
-            }]
-        }),
-    );
-
-    assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Err(SyncError::RetryableState {
-            reason: "secret fork payload does not match the local sealed source state"
-        })
-    ));
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "poison-fork-peer").expect("ack"),
-        -1,
-        "MUTATION: refusing a receiver-state mismatch permanently retires the fork coordinate"
-    );
-    let destination: Vec<String> = engine
-        .read_with(|conn| {
-            conn.prepare(
-                "SELECT path FROM secret_files WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
-            )?
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()
-        })
-        .expect("destination remains");
-    assert_eq!(destination, vec!["stale.env"]);
-
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE secret_files SET ciphertext_base64=?1,byte_length=?2 \
-                 WHERE workspace_id='ws' AND version_id='main' AND path='app/.env'",
-                params![
-                    STANDARD.encode(b"poison source bytes"),
-                    b"poison source bytes".len() as i64
-                ],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("converge source state");
-    assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
-    ));
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "poison-fork-peer").expect("retry ack"),
-        0
-    );
-    let destination: Vec<String> = engine
-        .read_with(|conn| {
-            conn.prepare(
-                "SELECT path FROM secret_files \
-                 WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
-            )?
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()
-        })
-        .expect("destination after retry");
-    assert_eq!(
-        destination,
-        vec!["app/.env", "config/prod.env"],
-        "the same fork coordinate must apply after its source dependency arrives"
-    );
-}
-
-#[test]
-fn relay_page_applies_later_secret_source_before_retrying_an_early_fork() {
-    let (_scratch, _path, mut engine) = store();
-    let original = b"sealed source bytes";
-    let (_original_sha, iv, tag) = seed_secret_fork_state(&mut engine, original);
-    seed_identity(&mut engine);
-    let converged = b"poison source bytes";
-    let converged_sha = engine
-        .put_binary_blob(converged)
-        .expect("converged source blob");
-    let fork = envelope(
-        "page-fork-peer",
-        0,
-        "secret.version.fork",
-        json!({
-            "fromVersionId": "main",
-            "toVersionId": "feature",
-            "chunkIndex": 0,
-            "totalRows": 2,
-            "rows": [{
-                "path": "app/.env",
-                "ivBase64": iv,
-                "authTagBase64": tag,
-                "ciphertextSha256": converged_sha,
-                "byteLength": converged.len(),
-                "updatedAtMs": 2_000,
-                "latestMomentId": "secret-sync-page-source-peer-0"
-            }, {
-                "path": "config/prod.env",
-                "ivBase64": iv,
-                "authTagBase64": tag,
-                "ciphertextSha256": dohc_engine_storage::hex_sha256(original),
-                "byteLength": original.len(),
-                "updatedAtMs": 101,
-                "latestMomentId": "source-tip-2"
-            }]
-        }),
-    );
-    let source = envelope(
-        "page-source-peer",
+    let fork_point_ciphertext = b"sealed source bytes";
+    let (fork_point_sha, fork_point_iv, fork_point_tag) =
+        seed_secret_fork_state(&mut engine, fork_point_ciphertext);
+    let peer_ciphertext = b"newer peer source bytes";
+    let peer_sha = engine
+        .put_binary_blob(peer_ciphertext)
+        .expect("peer ciphertext blob");
+    let peer_iv = STANDARD.encode([3_u8; SECRET_IV_BYTES]);
+    let peer_tag = STANDARD.encode([5_u8; SECRET_TAG_BYTES]);
+    let peer_edit = envelope(
+        "peer-source-edit",
         0,
         "secret.file.put",
         json!({
             "versionId": "main",
             "path": "app/.env",
             "metadata": {"origin": "sync"},
-            "ivBase64": iv,
-            "authTagBase64": tag,
-            "ciphertextSha256": converged_sha,
-            "byteLength": converged.len()
+            "ivBase64": peer_iv,
+            "authTagBase64": peer_tag,
+            "ciphertextSha256": peer_sha,
+            "byteLength": peer_ciphertext.len()
         }),
     );
-    let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
-        pull: Mutex::new(Some(PullResponse {
-            ops: vec![fork, source],
-            next_cursor: 2,
-            has_more: false,
-        })),
-    });
-
-    let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
-        .expect("page-local dependency retry");
-    let SyncPassOutcome::Complete {
-        applied,
-        refused,
-        pending_cursor,
-        ..
-    } = outcome
-    else {
-        panic!("pull must complete");
-    };
-    assert_eq!(
-        (applied, refused),
-        (2, 0),
-        "MUTATION: aborting on the first retryable fork never reaches its later source operation"
-    );
-    assert!(pending_cursor.is_some());
-    let destination_present: bool = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM secret_files \
-                 WHERE workspace_id='ws' AND version_id='feature' AND path='app/.env' \
-                   AND latest_moment_id='secret-sync-page-fork-peer-0-0')",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("fork destination");
-    assert!(destination_present);
-}
-
-#[test]
-fn secret_version_fork_mismatch_never_acks_without_source_progress() {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-
-    let (_scratch, _path, mut engine) = store();
-    let ciphertext = b"sealed source bytes";
-    let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
-    let operation = envelope(
-        "bounded-fork-peer",
-        0,
-        "secret.version.fork",
-        json!({
-            "fromVersionId": "main",
-            "toVersionId": "feature",
-            "chunkIndex": 0,
-            "totalRows": 2,
-            "rows": [{
-                "path": "app/.env",
-                "ivBase64": STANDARD.encode([9_u8; SECRET_IV_BYTES]),
-                "authTagBase64": tag,
-                "ciphertextSha256": sha,
-                "byteLength": ciphertext.len(),
-                "updatedAtMs": 100,
-                "latestMomentId": "source-tip"
-            }, {
-                "path": "config/prod.env",
-                "ivBase64": iv,
-                "authTagBase64": STANDARD.encode([8_u8; SECRET_TAG_BYTES]),
-                "ciphertextSha256": sha,
-                "byteLength": ciphertext.len(),
-                "updatedAtMs": 101,
-                "latestMomentId": "source-tip-2"
-            }]
-        }),
-    );
-
-    for _ in 0..5 {
-        assert!(matches!(
-            apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-            Err(SyncError::RetryableState {
-                reason: "secret fork payload does not match the local sealed source state"
-            })
-        ));
-    }
-    assert_unacked_and_unjournaled(&engine, "bounded-fork-peer");
-    let refusal_count: i64 = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM replication_pending_refusals \
-                 WHERE workspace_id='ws' AND origin_id='bounded-fork-peer'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("fork refusal count");
-    assert_eq!(
-        refusal_count, 0,
-        "MUTATION: a pull-count cutoff eventually retires an otherwise recoverable fork"
-    );
-}
-
-#[test]
-fn secret_version_fork_malformed_sealed_source_is_local_corruption_and_unacked() {
-    let (_scratch, _path, mut engine) = store();
-    let ciphertext = b"sealed source bytes";
-    let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE secret_files SET ciphertext_base64='***' \
-                 WHERE workspace_id='ws' AND version_id='main' AND path='app/.env'",
-                [],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("corrupt sealed source fixture");
-    let operation = envelope(
-        "corrupt-sealed-source-peer",
-        0,
-        "secret.version.fork",
-        json!({
-            "fromVersionId": "main",
-            "toVersionId": "feature",
-            "chunkIndex": 0,
-            "totalRows": 2,
-            "rows": [{
-                "path": "app/.env",
-                "ivBase64": iv,
-                "authTagBase64": tag,
-                "ciphertextSha256": sha,
-                "byteLength": ciphertext.len(),
-                "updatedAtMs": 100,
-                "latestMomentId": "source-tip"
-            }, {
-                "path": "config/prod.env",
-                "ivBase64": iv,
-                "authTagBase64": tag,
-                "ciphertextSha256": sha,
-                "byteLength": ciphertext.len(),
-                "updatedAtMs": 101,
-                "latestMomentId": "source-tip-2"
-            }]
-        }),
-    );
-
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Err(SyncError::Storage(
-            dohc_engine_storage::StorageError::StateCorrupt { .. }
-        ))
+        apply_secret_envelope(&mut engine, &peer_edit, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
     ));
+
+    let fork = envelope(
+        "fork-after-peer-edit",
+        0,
+        "secret.version.fork",
+        json!({
+            "fromVersionId": "main",
+            "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 2,
+            "rows": [{
+                "path": "app/.env",
+                "ivBase64": fork_point_iv,
+                "authTagBase64": fork_point_tag,
+                "ciphertextSha256": fork_point_sha,
+                "byteLength": fork_point_ciphertext.len(),
+                "updatedAtMs": 100,
+                "latestMomentId": "source-tip"
+            }, {
+                "path": "config/prod.env",
+                "ivBase64": fork_point_iv,
+                "authTagBase64": fork_point_tag,
+                "ciphertextSha256": fork_point_sha,
+                "byteLength": fork_point_ciphertext.len(),
+                "updatedAtMs": 101,
+                "latestMomentId": "source-tip-2"
+            }]
+        }),
+    );
+
+    let outcome = apply_replication_envelope(&mut engine, &fork, &NoFaults, &NoLiveLeases);
+    let ack = read_replication_acked_seq(&engine, "ws", "fork-after-peer-edit").expect("ack");
+    assert!(
+        matches!(
+            outcome,
+            Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        ) && ack == 0,
+        "fork outcome: {outcome:?}; ack: {ack}"
+    );
+
+    let destination = engine
+        .read_with(|conn| {
+            let file = conn.query_row(
+                "SELECT iv_base64,auth_tag_base64,ciphertext_base64,byte_length \
+                 FROM secret_files WHERE workspace_id='ws' AND version_id='feature' AND path='app/.env'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )?;
+            let base = conn.query_row(
+                "SELECT iv_base64,auth_tag_base64,ciphertext_base64,byte_length \
+                 FROM secret_fork_bases WHERE workspace_id='ws' AND version_id='feature' AND path='app/.env'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )?;
+            Ok::<_, rusqlite::Error>((file, base))
+        })
+        .expect("destination snapshot");
+    let shipped = (
+        fork_point_iv,
+        fork_point_tag,
+        STANDARD.encode(fork_point_ciphertext),
+        fork_point_ciphertext.len() as i64,
+    );
+    assert_eq!(destination, (shipped.clone(), shipped));
     assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "corrupt-sealed-source-peer").expect("ack"),
-        -1,
-        "local sealed-source corruption must remain repairable and retryable"
+        read_replication_acked_seq(&engine, "ws", "fork-after-peer-edit").expect("fork ack"),
+        0
     );
 }
 
 #[test]
-fn secret_version_fork_defers_invented_rows_but_refuses_duplicate_paths() {
+fn secret_version_fork_refuses_duplicate_paths() {
     let (_scratch, _path, mut engine) = store();
     let ciphertext = b"sealed source bytes";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
@@ -11061,51 +10864,6 @@ fn secret_version_fork_defers_invented_rows_but_refuses_duplicate_paths() {
             "latestMomentId": latest_moment_id
         })
     };
-    let state_dependent_cases = [(
-        "superset-fork-peer",
-        vec![
-            row("app/.env", 100, "source-tip"),
-            row("config/prod.env", 101, "source-tip-2"),
-            row("extra.env", 102, "extra-tip"),
-        ],
-    )];
-    for (origin, rows) in state_dependent_cases {
-        let operation = envelope(
-            origin,
-            0,
-            "secret.version.fork",
-            json!({
-                "fromVersionId": "main",
-                "toVersionId": "feature",
-                "chunkIndex": 0,
-                "totalRows": 2,
-                "rows": rows
-            }),
-        );
-        assert!(matches!(
-            apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-            Err(SyncError::RetryableState {
-                reason: "secret fork payload does not match the local sealed source state"
-            })
-        ));
-        assert_eq!(
-            read_replication_acked_seq(&engine, "ws", origin).expect("ack"),
-            -1,
-            "MUTATION: {origin} is receiver-state-dependent and must stay retryable"
-        );
-        let destination: Vec<String> = engine
-            .read_with(|conn| {
-                conn.prepare(
-                    "SELECT path FROM secret_files \
-                     WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
-                )?
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()
-            })
-            .expect("destination remains");
-        assert_eq!(destination, vec!["stale.env"], "{origin}");
-    }
-
     let duplicate = envelope(
         "duplicate-fork-peer",
         0,
