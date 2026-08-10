@@ -113,6 +113,14 @@ describe("main-process chat authorization", () => {
     }
   });
 
+  it("returns the new thread viewer identity from main-owned state", () => {
+    const handler = handlerSource("startChannelThread");
+    expect(handler).toContain(
+      "started.message.authorUserId ?? localReactorFallbackId()",
+    );
+    expect(handler).not.toContain("input.viewerAuthorId");
+  });
+
   it("connects account-pinned relay work to its behavior-tested helpers", () => {
     expect(handlerSource("joinSharedChannel")).toContain(
       "recipientUserId: joinedRecipientUserId",

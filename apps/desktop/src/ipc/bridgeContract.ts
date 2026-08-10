@@ -1433,6 +1433,8 @@ export type StartChannelThreadPayload = z.infer<typeof StartChannelThreadPayload
 export const StartChannelThreadResult = z.object({
   thread: ChannelThreadRecord,
   message: ChatMessageRecord,
+  // Main derives this from the author identity used for the opening message.
+  viewerAuthorId: z.string().min(1).max(200),
 });
 export type StartChannelThreadResult = z.infer<typeof StartChannelThreadResult>;
 

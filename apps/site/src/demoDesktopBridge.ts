@@ -701,6 +701,7 @@ const demoBridge = {
     return {
       thread: nextThread,
       message: message(nextThread.id, `message-${Date.now()}`, payload.body),
+      viewerAuthorId: "demo-user",
     };
   },
   async sendChatMessage(payload: { threadId: string; body: string }) {

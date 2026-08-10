@@ -9,6 +9,7 @@ import type {
   ChatMessageRecord,
   DmRecord,
   FileChatThreadRecord,
+  ListChatReactionsResult,
 } from "../../ipc/bridgeContract";
 import {
   ChatsView as ProductionChatsView,
@@ -2090,6 +2091,7 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     bridgeMock.startChannelThread.mockResolvedValue({
       thread: startedThread,
       message: message(),
+      viewerAuthorId: "you@example.com",
     });
     renderView();
 
@@ -2115,6 +2117,51 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     expect(screen.getByTestId("chats-message-body").textContent).toBe(
       "Should we ship on Friday?",
     );
+  });
+
+  it("can react to a newly started thread before any reload", async () => {
+    const user = userEvent.setup();
+    const startedThread = thread();
+    let resolveReactionList!: (result: ListChatReactionsResult) => void;
+    const reactionList = new Promise<ListChatReactionsResult>((resolve) => {
+      resolveReactionList = resolve;
+    });
+    // Keep refresh identity pending so this click depends on the start result.
+    bridgeMock.listChatReactions.mockReturnValue(reactionList);
+    bridgeMock.startChannelThread.mockResolvedValue({
+      thread: startedThread,
+      message: message(),
+      viewerAuthorId: "you@example.com",
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.type(
+      await screen.findByTestId("chats-new-thread-composer"),
+      "Should we ship on Friday?{Enter}",
+    );
+    expect(await screen.findByTestId("chats-message-body")).toBeTruthy();
+
+    await user.click(screen.getByTestId("chats-add-reaction"));
+    const thumbsUp = screen
+      .getAllByTestId("chats-reaction-choice")
+      .find((button) => button.getAttribute("data-emoji") === "👍");
+    expect(thumbsUp).toBeTruthy();
+    await user.click(thumbsUp!);
+
+    await waitFor(() =>
+      expect(bridgeMock.setChatReaction).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+        messageId: "message-1",
+        emoji: "👍",
+        state: "added",
+      }),
+    );
+    await act(async () => {
+      resolveReactionList({ reactions: [], viewerAuthorId: "you@example.com" });
+      await reactionList;
+    });
   });
 
   it("sends a reply from the thread composer and renders agent authorship", async () => {
