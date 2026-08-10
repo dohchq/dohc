@@ -292,7 +292,7 @@ CREATE TABLE materialization_jobs (
     preimage_present  INTEGER NOT NULL,
     preimage_sha256   TEXT,
     target_generation INTEGER NOT NULL,
-    -- 'pending' | 'complete' | 'conflict' | 'cancelled'. Only 'pending' is replayed.
+    -- 'pending' | 'complete' | 'conflict'. Only 'pending' is replayed.
     status            TEXT    NOT NULL DEFAULT 'pending',
     created_at_ms     INTEGER NOT NULL,
     completed_at_ms   INTEGER,
@@ -301,6 +301,10 @@ CREATE TABLE materialization_jobs (
 
 CREATE INDEX idx_materialization_jobs_status ON materialization_jobs(status);
 ";
+// The DDL comment above the `status` column is verbatim in the migration
+// ledger checksum and must stay byte-identical to what shipped, even though
+// `status` now also holds 'cancelled' (see `JobStatus` in `materialize.rs`).
+// Current values: 'pending' | 'complete' | 'conflict' | 'cancelled'.
 
 /// Ordinal 1 (R08 secrets shard, appended via the migration-append capability
 /// contract). Adds the three secret-backed-file tables — encrypted tips, fork
