@@ -204,23 +204,35 @@ pub fn journal_version_create_in_tx(
         .map_err(SyncError::corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
-    let payload = serde_json::json!({
+    let header = serde_json::json!({
         "versionId": record.version_id,
         "name": record.name,
         "kind": record.kind.as_str(),
         "forkVersionId": record.fork_version_id,
         "forkMomentId": record.fork_moment_id,
         "createdAtMs": record.created_at_ms,
-        "forkSnapshots": fork_snapshots,
+        "forkSnapshots": [],
     });
-    journal_local_op_in_tx(
-        tx,
-        &record.workspace_id,
-        "version.create",
-        &payload,
-        record.created_at_ms,
-    )
-    .map(|_| ())
+    // One op per packed group: a bigger fork costs more ops, never a refusal.
+    for fork_snapshots in pack_fork_rows(&header, fork_snapshots)? {
+        let payload = serde_json::json!({
+            "versionId": record.version_id,
+            "name": record.name,
+            "kind": record.kind.as_str(),
+            "forkVersionId": record.fork_version_id,
+            "forkMomentId": record.fork_moment_id,
+            "createdAtMs": record.created_at_ms,
+            "forkSnapshots": fork_snapshots,
+        });
+        journal_local_op_in_tx(
+            tx,
+            &record.workspace_id,
+            "version.create",
+            &payload,
+            record.created_at_ms,
+        )?;
+    }
+    Ok(())
 }
 
 /// Project one committed secret put into the relay-visible log.
@@ -338,19 +350,83 @@ pub fn journal_secret_version_fork_in_tx(
             },
         )
         .collect::<Result<Vec<_>, SyncError>>()?;
-    let payload = serde_json::json!({
+    let total_rows = rows.len();
+    let packing_header = serde_json::json!({
         "toVersionId": to_version_id,
         "fromVersionId": from_version_id,
-        "rows": rows,
+        "chunkIndex": usize::MAX,
+        "totalRows": total_rows,
+        "rows": [],
     });
-    journal_local_op_in_tx(
-        tx,
-        workspace_id,
-        "secret.version.fork",
-        &payload,
-        recorded_at_ms,
-    )
-    .map(|_| ())
+    // The packing header carries the widest `chunkIndex` there can be, so every
+    // real chunk header measures the same or smaller.
+    for (chunk_index, rows) in pack_fork_rows(&packing_header, rows)?
+        .into_iter()
+        .enumerate()
+    {
+        let payload = serde_json::json!({
+            "toVersionId": to_version_id,
+            "fromVersionId": from_version_id,
+            "chunkIndex": chunk_index,
+            "totalRows": total_rows,
+            "rows": rows,
+        });
+        journal_local_op_in_tx(
+            tx,
+            workspace_id,
+            "secret.version.fork",
+            &payload,
+            recorded_at_ms,
+        )?;
+    }
+    Ok(())
+}
+
+/// Split fork rows into payload-sized groups, measuring the header once and
+/// each row once.
+///
+/// Every group this returns serializes at or below `MAX_PAYLOAD_JSON_BYTES`, so
+/// a larger fork costs more operations and is never refused. The packer only
+/// splits: `journal_local_op_in_tx` stays the single owner of the payload cap,
+/// and refuses the one row a split cannot help — a row wider than a whole
+/// payload.
+///
+/// `worst_case_fork_snapshot_row_fits` measures that no capped row reaches the
+/// cap. A row at every field's ceiling — 512-byte ids and paths
+/// (`MAX_IDENTIFIER_BYTES`) and two 16 KiB metadata fields
+/// (`MAX_METADATA_FIELD_BYTES`), each byte escaped at its worst — makes a
+/// 203,572-byte payload against the 262,144-byte cap.
+fn pack_fork_rows(
+    empty_payload: &serde_json::Value,
+    rows: Vec<serde_json::Value>,
+) -> Result<Vec<Vec<serde_json::Value>>, SyncError> {
+    let header_len = measured_json_len(empty_payload)?;
+    let mut chunks = Vec::new();
+    let mut chunk: Vec<serde_json::Value> = Vec::new();
+    let mut chunk_len = header_len;
+    for row in rows {
+        let row_len = measured_json_len(&row)?;
+        // The header already carries the empty `[]`, so a row costs its own
+        // length plus the one comma that follows the row before it.
+        if !chunk.is_empty() && chunk_len + 1 + row_len > crate::MAX_PAYLOAD_JSON_BYTES {
+            chunks.push(std::mem::take(&mut chunk));
+            chunk_len = header_len;
+        }
+        chunk_len += usize::from(!chunk.is_empty()) + row_len;
+        chunk.push(row);
+    }
+    // A fork with no rows still emits one operation, which is how a peer learns
+    // about a version that forked empty.
+    chunks.push(chunk);
+    Ok(chunks)
+}
+
+fn measured_json_len(value: &serde_json::Value) -> Result<usize, SyncError> {
+    serde_json::to_vec(value)
+        .map(|encoded| encoded.len())
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "fork replication payload is malformed",
+        })
 }
 
 fn secret_metadata(moment: &SecretMomentRecord) -> serde_json::Value {
@@ -373,5 +449,53 @@ fn replicated_moment_origin(origin: &str) -> &str {
     match origin {
         "capture" | "ydoc" => "local-file",
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worst_case_fork_snapshot_row_fits() {
+        const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
+        let identifier = "\"".repeat(crate::model::MAX_IDENTIFIER_BYTES);
+        let path = format!("{}.md", "\"".repeat(crate::model::MAX_IDENTIFIER_BYTES - 3));
+        let metadata = "\0".repeat(MAX_METADATA_FIELD_BYTES);
+        let row = serde_json::json!({
+            "objectId": identifier,
+            "objectCreatedAtMs": i64::MIN,
+            "path": path,
+            "contentKind": "binary",
+            "blobSha256": "f".repeat(64),
+            "updatedAtMs": i64::MIN,
+            "latestMomentId": identifier,
+            "metadata": {
+                "origin": "local-file",
+                "summary": metadata,
+                "correlationId": metadata,
+            },
+        });
+        let header = serde_json::json!({
+            "versionId": identifier,
+            "name": "\"".repeat(200),
+            "kind": "named",
+            "forkVersionId": identifier,
+            "forkMomentId": identifier,
+            "createdAtMs": i64::MIN,
+            "forkSnapshots": [],
+        });
+        let row_len = serde_json::to_vec(&row).expect("serialize worst row").len();
+        let payload_len = serde_json::to_vec(&header)
+            .expect("serialize worst header")
+            .len()
+            + row_len;
+        assert_eq!(row_len, 199_968);
+        assert_eq!(payload_len, 203_572);
+        assert!(payload_len <= crate::MAX_PAYLOAD_JSON_BYTES);
+        assert_eq!(
+            pack_fork_rows(&header, vec![row]).expect("pack row").len(),
+            1
+        );
     }
 }

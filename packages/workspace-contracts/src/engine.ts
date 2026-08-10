@@ -399,6 +399,8 @@ export interface SecretFileDeletePayload {
 export interface SecretVersionForkPayload {
   toVersionId: VersionId;
   fromVersionId: VersionId;
+  chunkIndex: number;
+  totalRows: number;
   rows: Array<{
     path: string;
     ivBase64: string;

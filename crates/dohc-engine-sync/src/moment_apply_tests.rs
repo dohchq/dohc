@@ -1440,7 +1440,8 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
             "kind": "named",
             "forkVersionId": null,
             "forkMomentId": null,
-            "createdAtMs": 1_500
+            "createdAtMs": 1_500,
+            "forkSnapshots": []
         }),
         recorded_at_ms: 1_500,
     };

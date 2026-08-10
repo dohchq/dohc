@@ -5,10 +5,10 @@ use dohc_engine_domain::{
     SecretDiskIntent, SecretWrite, VersionedTextStore, WriteBinary, WriteText,
 };
 use dohc_engine_runtime::{CancellationToken, NoFaults, SelfWriteRecorder, WorkspaceSupervisor};
-use dohc_engine_storage::{EngineStore, StorageError};
+use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
 use dohc_engine_sync::{
-    ApplyOutcome, ReplicationEnvelope, apply_moment_envelope_detailed, apply_secret_envelope,
-    apply_version_envelope,
+    ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, apply_moment_envelope_detailed,
+    apply_secret_envelope, apply_version_envelope,
 };
 use dohc_engine_testkit::ScratchDir;
 use rusqlite::params;
@@ -150,6 +150,512 @@ fn write_path_input(
 
 fn secret_key() -> SecretDataKey {
     SecretDataKey::from_bytes(&[0x11; 32]).expect("secret key")
+}
+
+fn workspace_table_rows(
+    store: &EngineStore,
+    workspace_id: &str,
+    table: &str,
+    order_by: &str,
+) -> Vec<Vec<String>> {
+    store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT * FROM {table} WHERE workspace_id=?1 ORDER BY {order_by}"
+            ))?;
+            statement
+                .query_map([workspace_id], |row| {
+                    (0..row.as_ref().column_count())
+                        .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
+                        .collect::<Result<Vec<_>, _>>()
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("read workspace table")
+}
+
+fn version_rows(store: &EngineStore, workspace_id: &str, table: &str) -> Vec<Vec<String>> {
+    workspace_table_rows(store, workspace_id, table, "version_id,path,object_id")
+}
+
+fn one_version_rows(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    table: &str,
+) -> Vec<Vec<String>> {
+    store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT * FROM {table} WHERE workspace_id=?1 AND version_id=?2 ORDER BY path"
+            ))?;
+            statement
+                .query_map(params![workspace_id, version_id], |row| {
+                    (0..row.as_ref().column_count())
+                        .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
+                        .collect::<Result<Vec<_>, _>>()
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("read version table")
+}
+
+fn secret_rows(store: &EngineStore, workspace_id: &str, table: &str) -> Vec<Vec<String>> {
+    workspace_table_rows(store, workspace_id, table, "version_id,path")
+}
+
+fn secret_file_content_rows(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+) -> Vec<Vec<String>> {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms \
+                 FROM secret_files WHERE workspace_id=?1 AND version_id=?2 ORDER BY path",
+            )?
+            .query_map(params![workspace_id, version_id], |row| {
+                (0..row.as_ref().column_count())
+                    .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
+                    .collect::<Result<Vec<_>, _>>()
+            })?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("read secret file content rows")
+}
+
+fn copy_op_blobs(source: &EngineStore, peer: &mut EngineStore, op: &LoggedOp) {
+    let shas = if op.op_kind == "moment.append" {
+        vec![
+            op.payload["payloadAfterBlobSha256"]
+                .as_str()
+                .expect("moment blob sha"),
+        ]
+    } else if op.op_kind == "version.create" {
+        op.payload["forkSnapshots"]
+            .as_array()
+            .expect("version snapshot rows")
+            .iter()
+            .map(|row| row["blobSha256"].as_str().expect("snapshot blob sha"))
+            .collect()
+    } else if op.op_kind == "secret.file.put" {
+        vec![
+            op.payload["ciphertextSha256"]
+                .as_str()
+                .expect("ciphertext sha"),
+        ]
+    } else if op.op_kind == "secret.version.fork" {
+        op.payload["rows"]
+            .as_array()
+            .expect("secret fork rows")
+            .iter()
+            .map(|row| {
+                row["ciphertextSha256"]
+                    .as_str()
+                    .expect("fork ciphertext sha")
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for sha in shas {
+        if let Some(bytes) = source
+            .get_binary_blob(sha)
+            .expect("read source binary blob")
+        {
+            peer.put_binary_blob(&bytes).expect("copy binary blob");
+            continue;
+        }
+        let text = source
+            .read_with(|conn| {
+                conn.query_row("SELECT text FROM blobs WHERE sha256=?1", [sha], |row| {
+                    row.get::<_, String>(0)
+                })
+            })
+            .expect("read source text blob");
+        peer.write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![sha, text.len() as i64, text],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("copy text blob");
+    }
+}
+
+fn apply_logged_op(peer: &mut EngineStore, workspace_id: &str, op: &LoggedOp) {
+    let envelope = op.envelope(workspace_id);
+    match op.op_kind.as_str() {
+        "moment.append" => {
+            apply_moment_envelope_detailed(peer, &envelope, &NoFaults)
+                .expect("apply moment envelope");
+        }
+        "version.create" => {
+            apply_version_envelope(peer, &envelope, &NoFaults).expect("apply version envelope");
+        }
+        kind if kind.starts_with("secret.") => {
+            apply_secret_envelope(peer, &envelope, &NoFaults).expect("apply secret envelope");
+        }
+        other => panic!("unexpected op kind {other}"),
+    }
+}
+
+fn capped_identifier(prefix: &str, byte: char) -> String {
+    format!("{prefix}{}", byte.to_string().repeat(512 - prefix.len()))
+}
+
+fn large_metadata_write(
+    workspace_id: &str,
+    index: usize,
+    metadata: &str,
+    now_ms: i64,
+) -> WriteText {
+    WriteText {
+        workspace_id: workspace_id.to_owned(),
+        version_id: "main".to_owned(),
+        object_id: capped_identifier(&format!("object-{index}-"), 'o'),
+        path: format!("notes/chunk-{index}.md"),
+        text: format!("content {index}\n"),
+        moment_id: capped_identifier(&format!("moment-{index}-"), 'm'),
+        metadata_origin: "api".to_owned(),
+        metadata_summary: Some(metadata.to_owned()),
+        metadata_correlation_id: Some(metadata.to_owned()),
+        author_json: None,
+        now_ms,
+        request_id: None,
+    }
+}
+
+#[tokio::test]
+async fn named_fork_splits_an_oversized_snapshot_payload_into_bounded_ops() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-named-fork-chunks";
+    initialize_workspace(&source_db, workspace_id, true);
+    let metadata = "\0".repeat(16 * 1024);
+    let text = "chunked fork\n";
+    let blob_sha = hex_sha256(text.as_bytes());
+    let mut measured_rows = Vec::new();
+    EngineStore::open(&source_db, 2)
+        .expect("open source store")
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![blob_sha, text.len() as i64, text],
+            )
+            .map_err(StorageError::persist_public)?;
+            for index in 0..2 {
+                let object_id = capped_identifier(&format!("object-{index}-"), 'o');
+                let path = format!("notes/chunk-{index}.md");
+                let moment_id = capped_identifier(&format!("moment-{index}-"), 'm');
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES (?1,?2,?3)",
+                    params![workspace_id, object_id, 10 + index as i64],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) VALUES (?1,'main',?2,?3)",
+                    params![workspace_id, path, object_id],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO snapshots \
+                     (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \
+                     VALUES (?1,'main',?2,?3,?4,?5,?6,'api',?7,?7,'text',NULL)",
+                    params![workspace_id, object_id, path, blob_sha, 20 + index as i64, moment_id, metadata],
+                )
+                .map_err(StorageError::persist_public)?;
+                measured_rows.push(serde_json::json!({
+                    "objectId": object_id,
+                    "objectCreatedAtMs": 10 + index as i64,
+                    "path": path,
+                    "contentKind": "text",
+                    "blobSha256": blob_sha,
+                    "updatedAtMs": 20 + index as i64,
+                    "latestMomentId": moment_id,
+                    "metadata": {
+                        "origin": "api",
+                        "summary": metadata,
+                        "correlationId": metadata,
+                    },
+                }));
+            }
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed source snapshots");
+    let single_payload_size = serde_json::to_vec(&serde_json::json!({
+        "versionId": "version-chunked",
+        "name": "Chunked",
+        "kind": "named",
+        "forkVersionId": "main",
+        "forkMomentId": null,
+        "createdAtMs": 100,
+        "forkSnapshots": measured_rows,
+    }))
+    .expect("measure single payload")
+    .len();
+    assert!(single_payload_size > MAX_PAYLOAD_JSON_BYTES);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&source_db, 3).expect("open actor").actor;
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: workspace_id.to_owned(),
+                new_version_id: "version-chunked".to_owned(),
+                name: "Chunked".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 100,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("chunked named fork commits");
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ops(&source_db);
+    let version_ops = ops
+        .iter()
+        .filter(|op| op.op_kind == "version.create")
+        .collect::<Vec<_>>();
+    assert!(version_ops.len() > 1);
+    assert!(version_ops.iter().all(|op| {
+        assert!(op.payload.get("chunkIndex").is_none());
+        assert!(op.payload.get("totalRows").is_none());
+        serde_json::to_vec(&op.payload)
+            .expect("serialize drained payload")
+            .len()
+            <= MAX_PAYLOAD_JSON_BYTES
+    }));
+
+    let peer = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer.engine_db_path().expect("peer db");
+    initialize_workspace(&peer_db, workspace_id, false);
+    let source_store = EngineStore::open(&source_db, 4).expect("open source store");
+    let mut peer_store = EngineStore::open(&peer_db, 5).expect("open peer store");
+    for op in version_ops {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    for table in ["snapshots", "fork_base_snapshots"] {
+        assert_eq!(
+            one_version_rows(&peer_store, workspace_id, "version-chunked", table),
+            one_version_rows(&source_store, workspace_id, "version-chunked", table),
+            "{table} differs"
+        );
+    }
+}
+
+#[tokio::test]
+async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-secret-fork-chunks";
+    initialize_workspace(&source_db, workspace_id, true);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
+    for index in 0..280 {
+        actor
+            .write_secret_file(
+                SecretWrite {
+                    workspace_id: workspace_id.to_owned(),
+                    version_id: "main".to_owned(),
+                    path: format!("secrets/{index:04}-{}.env", "p".repeat(460)),
+                    text: format!("TOKEN={index}"),
+                    moment_id: capped_identifier(&format!("secret-{index}-"), 'm'),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 10 + index as i64,
+                    disk_intent: SecretDiskIntent::AlreadyOnDisk,
+                },
+                secret_key(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("write source secret");
+    }
+    let measured_rows = local_ops(&source_db)
+        .into_iter()
+        .filter(|op| op.op_kind == "secret.file.put")
+        .enumerate()
+        .map(|(index, op)| {
+            serde_json::json!({
+                "path": op.payload["path"],
+                "ivBase64": op.payload["ivBase64"],
+                "authTagBase64": op.payload["authTagBase64"],
+                "ciphertextSha256": op.payload["ciphertextSha256"],
+                "byteLength": op.payload["byteLength"],
+                "updatedAtMs": 10 + index as i64,
+                "latestMomentId": capped_identifier(&format!("secret-{index}-"), 'm'),
+            })
+        })
+        .collect::<Vec<_>>();
+    let single_payload_size = serde_json::to_vec(&serde_json::json!({
+        "toVersionId": "version-secret-chunked",
+        "fromVersionId": "main",
+        "rows": measured_rows,
+    }))
+    .expect("measure single secret payload")
+    .len();
+    assert!(single_payload_size > MAX_PAYLOAD_JSON_BYTES);
+
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: workspace_id.to_owned(),
+                new_version_id: "version-secret-chunked".to_owned(),
+                name: "Secret chunks".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 1_000,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("chunked secret fork commits");
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ops(&source_db);
+    let fork_ops = ops
+        .iter()
+        .filter(|op| op.op_kind == "secret.version.fork")
+        .collect::<Vec<_>>();
+    assert!(fork_ops.len() > 1);
+    assert!(fork_ops.iter().enumerate().all(|(chunk_index, op)| {
+        assert_eq!(op.payload["chunkIndex"], chunk_index);
+        assert_eq!(op.payload["totalRows"], 280);
+        serde_json::to_vec(&op.payload)
+            .expect("serialize drained payload")
+            .len()
+            <= MAX_PAYLOAD_JSON_BYTES
+    }));
+
+    let peer = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer.engine_db_path().expect("peer db");
+    initialize_workspace(&peer_db, workspace_id, false);
+    let source_store = EngineStore::open(&source_db, 4).expect("open source store");
+    let mut peer_store = EngineStore::open(&peer_db, 5).expect("open peer store");
+    for op in &ops {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    assert!(
+        secret_file_content_rows(&peer_store, workspace_id, "version-secret-chunked")
+            == secret_file_content_rows(&source_store, workspace_id, "version-secret-chunked"),
+        "secret_files content differs"
+    );
+    assert!(
+        one_version_rows(
+            &peer_store,
+            workspace_id,
+            "version-secret-chunked",
+            "secret_fork_bases",
+        ) == one_version_rows(
+            &source_store,
+            workspace_id,
+            "version-secret-chunked",
+            "secret_fork_bases",
+        ),
+        "secret_fork_bases differ"
+    );
+    let latest_moment_ids = peer_store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT latest_moment_id FROM secret_files \
+                 WHERE workspace_id=?1 AND version_id='version-secret-chunked'",
+            )?
+            .query_map([workspace_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("read synthesized secret moments");
+    assert_eq!(
+        latest_moment_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        latest_moment_ids.len()
+    );
+}
+
+#[tokio::test]
+async fn lagging_peer_applies_prior_ops_then_a_chunked_fork_in_sequence() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-lagging-peer-chunked-fork";
+    initialize_workspace(&source_db, workspace_id, true);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
+    let metadata = "\0".repeat(16 * 1024);
+    for index in 0..3 {
+        actor
+            .versioned_text_write_indexed(
+                large_metadata_write(workspace_id, index, &metadata, 10 + index as i64),
+                source.path().to_path_buf(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("write prior moment");
+    }
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: workspace_id.to_owned(),
+                new_version_id: "version-lagging".to_owned(),
+                name: "Lagging".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 100,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("chunked lagging-peer fork commits");
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ops(&source_db);
+    assert!(ops.iter().take(3).all(|op| op.op_kind == "moment.append"));
+    assert!(
+        ops.iter()
+            .filter(|op| op.op_kind == "version.create")
+            .count()
+            > 1
+    );
+    assert_eq!(
+        ops.iter().map(|op| op.origin_seq).collect::<Vec<_>>(),
+        (0..ops.len() as i64).collect::<Vec<_>>()
+    );
+
+    let peer = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer.engine_db_path().expect("peer db");
+    initialize_workspace(&peer_db, workspace_id, false);
+    let source_store = EngineStore::open(&source_db, 4).expect("open source store");
+    let mut peer_store = EngineStore::open(&peer_db, 5).expect("open peer store");
+    for op in &ops {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    for table in ["versions", "snapshots", "fork_base_snapshots"] {
+        let order = if table == "versions" {
+            "version_id"
+        } else {
+            "version_id,path,object_id"
+        };
+        assert_eq!(
+            workspace_table_rows(&peer_store, workspace_id, table, order),
+            workspace_table_rows(&source_store, workspace_id, table, order),
+            "{table} differs"
+        );
+    }
 }
 
 #[tokio::test]
@@ -825,6 +1331,17 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
                 .expect("apply originated secret");
         }
     }
+
+    assert!(
+        version_rows(&peer_store, workspace_id, "fork_base_snapshots")
+            == version_rows(&source_store, workspace_id, "fork_base_snapshots"),
+        "fork_base_snapshots differ"
+    );
+    assert!(
+        secret_rows(&peer_store, workspace_id, "secret_fork_bases")
+            == secret_rows(&source_store, workspace_id, "secret_fork_bases"),
+        "secret_fork_bases differ"
+    );
 
     let snapshot_heads = |store: &EngineStore| {
         store

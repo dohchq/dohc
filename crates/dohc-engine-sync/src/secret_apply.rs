@@ -45,6 +45,8 @@ struct SecretDelete {
 struct SecretFork {
     to_version_id: String,
     from_version_id: String,
+    chunk_index: usize,
+    total_rows: usize,
     rows: Vec<SecretForkRow>,
 }
 
@@ -201,18 +203,20 @@ fn apply_fork(
 ) -> Result<(), SyncError> {
     validate_fork_versions(tx, op, &payload.from_version_id, &payload.to_version_id)?;
     let source_by_path = source_by_path(tx, op, &payload.from_version_id)?;
-    validate_fork_rows(&payload.rows, &source_by_path)?;
+    validate_fork_rows(&payload.rows, payload.total_rows, &source_by_path)?;
 
-    tx.execute(
-        "DELETE FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
-        params![op.workspace_id, payload.to_version_id],
-    )
-    .map_err(SyncError::persist)?;
-    tx.execute(
-        "DELETE FROM secret_fork_bases WHERE workspace_id=?1 AND version_id=?2",
-        params![op.workspace_id, payload.to_version_id],
-    )
-    .map_err(SyncError::persist)?;
+    if payload.chunk_index == 0 {
+        tx.execute(
+            "DELETE FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
+            params![op.workspace_id, payload.to_version_id],
+        )
+        .map_err(SyncError::persist)?;
+        tx.execute(
+            "DELETE FROM secret_fork_bases WHERE workspace_id=?1 AND version_id=?2",
+            params![op.workspace_id, payload.to_version_id],
+        )
+        .map_err(SyncError::persist)?;
+    }
     insert_fork_rows(tx, op, &payload.to_version_id, payload.rows)
 }
 
@@ -269,9 +273,10 @@ fn source_by_path(
 
 fn validate_fork_rows(
     rows: &[SecretForkRow],
+    total_rows: usize,
     source_by_path: &HashMap<String, SealedSourceRow>,
 ) -> Result<(), SyncError> {
-    if rows.len() != source_by_path.len() {
+    if total_rows != source_by_path.len() {
         return Err(secret_fork_mismatch());
     }
     for row in rows {

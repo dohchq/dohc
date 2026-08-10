@@ -9553,7 +9553,8 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
             "kind": "named",
             "forkVersionId": "late-source",
             "forkMomentId": "late-source-tip",
-            "createdAtMs": 30
+            "createdAtMs": 30,
+            "forkSnapshots": []
         }),
     );
     assert!(matches!(
@@ -9571,7 +9572,8 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
             "versionId": "late-source",
             "name": "Late source",
             "kind": "named",
-            "createdAtMs": 20
+            "createdAtMs": 20,
+            "forkSnapshots": []
         }),
     );
     assert!(matches!(
@@ -9885,11 +9887,9 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
         })
         .expect("fork row counts");
     assert_eq!(counts, (2, 2, 2));
-    let mut applier_replay = operation.clone();
-    applier_replay.origin_id = "version-applier-replay-peer".into();
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Skipped)
     ));
     let replay_counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -9917,7 +9917,7 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
         .expect("replayed fork row counts");
     assert_eq!(replay_counts, (2, 2, 2));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Skipped)
     ));
 }
@@ -10251,7 +10251,8 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
             "name": "Feature",
             "kind": "named",
             "forkVersionId": "main",
-            "createdAtMs": 1_500
+            "createdAtMs": 1_500,
+            "forkSnapshots": []
         }),
     );
     assert!(matches!(
@@ -10370,7 +10371,7 @@ fn version_create_fork_snapshot_refuses_a_non_canonical_tracked_path() {
 }
 
 #[test]
-fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
+fn version_create_shipped_payload_materializes_only_workspace_scoped_rows() {
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version_in_workspace(&mut engine, "foreign-ws", "main", "main");
@@ -10441,7 +10442,21 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
             "kind": "named",
             "forkVersionId": "main",
             "forkMomentId": "legacy-moment",
-            "createdAtMs": 1_500
+            "createdAtMs": 1_500,
+            "forkSnapshots": [{
+                "objectId": "legacy-object",
+                "objectCreatedAtMs": 1,
+                "path": "legacy.md",
+                "contentKind": "text",
+                "blobSha256": source_sha,
+                "updatedAtMs": 2,
+                "latestMomentId": "legacy-moment",
+                "metadata": {
+                    "origin": "sync",
+                    "summary": "legacy summary",
+                    "correlationId": "legacy correlation"
+                }
+            }]
         }),
     );
 
@@ -10475,7 +10490,7 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
                 )?,
             ))
         })
-        .expect("legacy copied rows");
+        .expect("shipped rows");
     assert_eq!(counts, (1, 1, 1));
     type Metadata = (String, Option<String>, Option<String>);
     let copied_metadata: (Metadata, Metadata) = engine
@@ -10493,14 +10508,13 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
             };
             Ok::<_, rusqlite::Error>((read("snapshots")?, read("fork_base_snapshots")?))
         })
-        .expect("legacy copied metadata");
+        .expect("shipped metadata");
     let expected_metadata = (
         "sync".to_owned(),
         Some("legacy summary".to_owned()),
         Some("legacy correlation".to_owned()),
     );
-    // MUTATION: either legacy INSERT...SELECT dropping an ordinal-18 column
-    // changes one half of this complete-tuple assertion.
+    // MUTATION: either shipped insert dropping a metadata column changes this tuple.
     assert_eq!(
         copied_metadata,
         (expected_metadata.clone(), expected_metadata)
@@ -10545,7 +10559,8 @@ fn version_create_rejects_a_version_id_owned_by_another_workspace() {
             "versionId": "foreign-version",
             "name": "Collision",
             "kind": "named",
-            "createdAtMs": 1_500
+            "createdAtMs": 1_500,
+            "forkSnapshots": []
         }),
     );
 
@@ -10635,6 +10650,8 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
         json!({
             "fromVersionId": "main",
             "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 2,
             "rows": [{
                 "path": "app/.env",
                 "ivBase64": iv,
@@ -10732,6 +10749,8 @@ fn secret_version_fork_retries_after_the_sealed_source_converges() {
         json!({
             "fromVersionId": "main",
             "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 2,
             "rows": [{
                 "path": "app/.env",
                 "ivBase64": iv,
@@ -10830,6 +10849,8 @@ fn relay_page_applies_later_secret_source_before_retrying_an_early_fork() {
         json!({
             "fromVersionId": "main",
             "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 2,
             "rows": [{
                 "path": "app/.env",
                 "ivBase64": iv,
@@ -10919,6 +10940,8 @@ fn secret_version_fork_mismatch_never_acks_without_source_progress() {
         json!({
             "fromVersionId": "main",
             "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 2,
             "rows": [{
                 "path": "app/.env",
                 "ivBase64": STANDARD.encode([9_u8; SECRET_IV_BYTES]),
@@ -10987,6 +11010,8 @@ fn secret_version_fork_malformed_sealed_source_is_local_corruption_and_unacked()
         json!({
             "fromVersionId": "main",
             "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 2,
             "rows": [{
                 "path": "app/.env",
                 "ivBase64": iv,
@@ -11021,7 +11046,7 @@ fn secret_version_fork_malformed_sealed_source_is_local_corruption_and_unacked()
 }
 
 #[test]
-fn secret_version_fork_defers_set_mismatches_but_refuses_duplicate_paths() {
+fn secret_version_fork_defers_invented_rows_but_refuses_duplicate_paths() {
     let (_scratch, _path, mut engine) = store();
     let ciphertext = b"sealed source bytes";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
@@ -11036,17 +11061,14 @@ fn secret_version_fork_defers_set_mismatches_but_refuses_duplicate_paths() {
             "latestMomentId": latest_moment_id
         })
     };
-    let state_dependent_cases = [
-        ("subset-fork-peer", vec![row("app/.env", 100, "source-tip")]),
-        (
-            "superset-fork-peer",
-            vec![
-                row("app/.env", 100, "source-tip"),
-                row("config/prod.env", 101, "source-tip-2"),
-                row("extra.env", 102, "extra-tip"),
-            ],
-        ),
-    ];
+    let state_dependent_cases = [(
+        "superset-fork-peer",
+        vec![
+            row("app/.env", 100, "source-tip"),
+            row("config/prod.env", 101, "source-tip-2"),
+            row("extra.env", 102, "extra-tip"),
+        ],
+    )];
     for (origin, rows) in state_dependent_cases {
         let operation = envelope(
             origin,
@@ -11055,6 +11077,8 @@ fn secret_version_fork_defers_set_mismatches_but_refuses_duplicate_paths() {
             json!({
                 "fromVersionId": "main",
                 "toVersionId": "feature",
+                "chunkIndex": 0,
+                "totalRows": 2,
                 "rows": rows
             }),
         );
@@ -11089,6 +11113,8 @@ fn secret_version_fork_defers_set_mismatches_but_refuses_duplicate_paths() {
         json!({
             "fromVersionId": "main",
             "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 2,
             "rows": [
                 row("app/.env", 100, "source-tip"),
                 row("app/.env", 100, "source-tip")
@@ -11125,6 +11151,8 @@ fn secret_version_fork_with_no_rows_clears_the_destination_secrets() {
         json!({
             "fromVersionId": "empty-source",
             "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 0,
             "rows": []
         }),
     );
@@ -11203,6 +11231,8 @@ fn secret_version_fork_uses_peer_local_tip_ids() {
         json!({
             "fromVersionId": "main",
             "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 1,
             "rows": [{
                 "path": "app/.env",
                 "ivBase64": iv,
