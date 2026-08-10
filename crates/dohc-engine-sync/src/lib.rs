@@ -41,7 +41,7 @@ pub use cursor::{
     commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
     read_shared_peer_position,
 };
-pub(crate) use error::ShareDisposition;
+use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hydration::{
     BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,

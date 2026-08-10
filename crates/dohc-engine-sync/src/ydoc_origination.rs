@@ -1,4 +1,4 @@
-use dohc_engine_collab::{ClaimOutcome, DocKey};
+use dohc_engine_collab::{ClaimOutcome, ContentKind, DocKey};
 use rusqlite::Transaction;
 
 use crate::{SyncError, journal_local_op_in_tx, workspace_replicates_with_relay_in_tx};
@@ -97,7 +97,7 @@ pub fn originate_ydoc_base_in_tx(
 pub fn ydoc_update_payload(
     key: &DocKey,
     path: &str,
-    content_kind: dohc_engine_collab::ContentKind,
+    content_kind: ContentKind,
     update_blob_sha256: &str,
     is_base_state: bool,
 ) -> serde_json::Value {

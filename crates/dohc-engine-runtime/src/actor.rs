@@ -90,6 +90,7 @@ use dohc_engine_sync::{
     ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
     SharedChannelResponse, SyncPassOutcome, adopt_join_identity, apply_conflict_envelope,
     read_replayed_refusal, read_sync_identity, retain_refusal_for_direct_retry,
+    ydoc_update_payload,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
@@ -9116,7 +9117,7 @@ fn ydoc_record_update_on_store(
                     tx,
                     &journal_key.workspace_id,
                     "ydoc.update",
-                    &dohc_engine_sync::ydoc_update_payload(
+                    &ydoc_update_payload(
                         &journal_key,
                         &journal_path,
                         journal_kind,
