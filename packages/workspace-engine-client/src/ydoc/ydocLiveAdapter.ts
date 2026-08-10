@@ -565,6 +565,7 @@ export class YdocAdapterSession {
 
   private readonly adapter: YdocLiveAdapter;
   private closed = false;
+  private seedReserved = false;
   private lastSettledSha: string | null = null;
   private recordChain: Promise<void> = Promise.resolve();
   private activeLocalRecordCapture: LocalRecordCapture | null = null;
@@ -626,20 +627,32 @@ export class YdocAdapterSession {
   }
 
   applySeedUpdate(update: Uint8Array): Promise<YdocRecordUpdateResult | undefined> {
-    if (this.lineage !== "absent") {
+    if (this.lineage !== "absent" || this.seedReserved) {
       throw new YdocAdapterError(
         "seed-not-permitted",
         "The session already has existing lineage.",
       );
     }
-    return this.runLocalMutation(
-      () => Y.applyUpdate(this.doc, update, LOCAL_EDITOR_ORIGIN),
-      undefined,
-      true,
-    ).then((result) => {
-      this.lineage = "existing";
-      return result;
-    });
+    this.seedReserved = true;
+    try {
+      return this.runLocalMutation(
+        () => Y.applyUpdate(this.doc, update, LOCAL_EDITOR_ORIGIN),
+        undefined,
+        true,
+      ).then(
+        (result) => {
+          this.lineage = "existing";
+          return result;
+        },
+        (error: unknown) => {
+          this.seedReserved = false;
+          throw error;
+        },
+      );
+    } catch (error) {
+      this.seedReserved = false;
+      throw error;
+    }
   }
 
   applyLocalEdit(

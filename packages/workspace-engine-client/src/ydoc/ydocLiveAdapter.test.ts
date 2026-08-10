@@ -162,8 +162,8 @@ describe("YdocLiveAdapter", () => {
     expect(YDOC_METHOD.resync).toBe("ydoc.resync");
   });
 
-  it("rejects direct seed updates after the session has existing lineage", async () => {
-    const engine = seedPlaintextEngine();
+  it("rejects direct seed updates after the loopback seeds absent lineage", async () => {
+    const engine = seedPlaintextEngine("captured seed");
     const adapter = new YdocLiveAdapter(engine);
     const session = await adapter.openSession({
       workspace: WORKSPACE,
@@ -171,9 +171,8 @@ describe("YdocLiveAdapter", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    session.lineage = "existing";
     const seedDoc = new Y.Doc();
-    seedDoc.getText("plainText").insert(0, "\ud800");
+    seedDoc.getText("plainText").insert(0, "second seed");
 
     await expect(
       Promise.resolve().then(() =>
@@ -185,7 +184,37 @@ describe("YdocLiveAdapter", () => {
       message: "The session already has existing lineage.",
     });
 
-    await session.close({ settle: false });
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
+  it("reserves an absent lineage seed before its first record resolves", async () => {
+    const engine = new YdocLoopbackEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(session.lineage).toBe("absent");
+
+    const firstSeed = new Y.Doc();
+    firstSeed.getText("plainText").insert(0, "first seed");
+    const secondSeed = new Y.Doc();
+    secondSeed.getText("plainText").insert(0, "second seed");
+    const first = session.applySeedUpdate(Y.encodeStateAsUpdate(firstSeed));
+    expect(() =>
+      session.applySeedUpdate(Y.encodeStateAsUpdate(secondSeed)),
+    ).toThrowError(
+      expect.objectContaining({
+        name: "YdocAdapterError",
+        code: "seed-not-permitted",
+      }),
+    );
+    await first;
+
+    await session.close({ settle: true });
     adapter.dispose();
   });
 
