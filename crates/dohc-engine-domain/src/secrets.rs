@@ -72,7 +72,7 @@ impl SecretOp {
             SecretOp::Delete => "delete",
         }
     }
-    fn from_db(raw: &str) -> Result<Self, DomainError> {
+    pub fn from_db(raw: &str) -> Result<Self, DomainError> {
         match raw {
             "write" => Ok(SecretOp::Write),
             "delete" => Ok(SecretOp::Delete),

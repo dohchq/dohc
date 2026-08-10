@@ -454,6 +454,8 @@ pub enum SyncPassOutcome {
         /// The rejected mutations were rolled back before those coordinates
         /// were retired.
         refusals: Vec<crate::ReplicationRefusal>,
+        /// Local Y.Doc bases that could not be shared during enrollment.
+        sharing_declined: Vec<crate::SharingDeclined>,
     },
     CrashedAfterRemoteCommit,
     CrashedAfterApply {
@@ -465,6 +467,7 @@ pub enum SyncPassOutcome {
         changed_paths: Vec<crate::MomentMaterializationChange>,
         pending_resolves: Vec<crate::PendingResolve>,
         refusals: Vec<crate::ReplicationRefusal>,
+        sharing_declined: Vec<crate::SharingDeclined>,
     },
 }
 
@@ -492,16 +495,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .ok_or(RelayError::InvalidResponse)?;
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
+        let mut sharing_declined = Vec::new();
 
-        if origins.is_empty() && !has_relay_position(store, workspace_id).map_err(local)? {
-            let response = self.transport.push(PushRequest {
-                workspace_id: workspace_id.to_owned(),
-                replication_epoch: identity.replication_epoch.clone(),
-                stream_identity: identity.stream_identity.clone(),
-                origin_id: identity.origin_id.clone(),
-                after_seq: -1,
-                ops: Vec::new(),
-            })?;
+        let has_position = store
+            .read_with(|conn| has_relay_position(conn, workspace_id))
+            .map_err(local)?;
+        if origins.is_empty() && !has_position {
+            let response = self.transport.push(push_probe_request(
+                workspace_id,
+                &identity,
+                &identity.origin_id,
+                -1,
+            ))?;
             validate_probe_response(&response)?;
             if response.current_max_origin_seq != -1 {
                 return Err(RelayError::OriginDiverged);
@@ -515,16 +520,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             )
             .map_err(local)?
             {
-                TxnOutcome::Committed(()) => {}
+                TxnOutcome::Committed(declined) => sharing_declined.extend(declined),
                 TxnOutcome::Crashed { .. } => {
                     return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                 }
             }
+            // Re-read so the probe's same-transaction backfill enters the push loop.
             origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         }
 
         for origin_id in origins {
-            let local_max = local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
+            let mut local_max =
+                local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
             let mut cursor = read_pushed_seq(store, workspace_id, &origin_id).map_err(local)?;
             let mut attempt = 0_u8;
 
@@ -575,11 +582,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     )
                     .map_err(local)?
                     {
-                        TxnOutcome::Committed(()) => {}
+                        TxnOutcome::Committed(declined) => sharing_declined.extend(declined),
                         TxnOutcome::Crashed { .. } => {
                             return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                         }
                     }
+                    local_max =
+                        local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
                     pushed = pushed
                         .checked_add(response.inserted)
                         .ok_or(RelayError::InvalidResponse)?;
@@ -589,14 +598,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     continue;
                 }
 
-                let probe = self.transport.push(PushRequest {
-                    workspace_id: workspace_id.to_owned(),
-                    replication_epoch: identity.replication_epoch.clone(),
-                    stream_identity: identity.stream_identity.clone(),
-                    origin_id: origin_id.clone(),
-                    after_seq: cursor,
-                    ops: Vec::new(),
-                })?;
+                let probe = self.transport.push(push_probe_request(
+                    workspace_id,
+                    &identity,
+                    &origin_id,
+                    cursor,
+                ))?;
                 validate_probe_response(&probe)?;
                 if probe.current_max_origin_seq > local_max
                     || probe.current_max_origin_seq >= cursor
@@ -634,6 +641,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             changed_paths: Vec::new(),
             pending_resolves: Vec::new(),
             refusals: Vec::new(),
+            sharing_declined,
         })
     }
 
@@ -701,6 +709,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut conflicts_opened = 0_i64;
         let mut pending_resolves = Vec::new();
         let mut refusals = Vec::new();
+        let mut sharing_declined = Vec::new();
         let mut changed_paths = BTreeMap::new();
         let mut retryable = Vec::new();
         for op in &ordered {
@@ -779,7 +788,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 match write_pushed_seq(store, workspace_id, &origin_id, max_seq, faults)
                     .map_err(local)?
                 {
-                    TxnOutcome::Committed(()) => {}
+                    TxnOutcome::Committed(declined) => sharing_declined.extend(declined),
                     TxnOutcome::Crashed { .. } => {
                         return Err(RelayError::Local("injected-crash".to_owned()));
                     }
@@ -803,6 +812,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 changed_paths: changed_paths.into_values().collect(),
                 pending_resolves,
                 refusals,
+                sharing_declined,
             });
         }
         Ok(SyncPassOutcome::Complete {
@@ -817,6 +827,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             changed_paths: changed_paths.into_values().collect(),
             pending_resolves,
             refusals,
+            sharing_declined,
         })
     }
 
@@ -826,7 +837,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         cursor: &RelayCursor,
         faults: &dyn FaultInjector,
-    ) -> Result<TxnOutcome<()>, RelayError> {
+    ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, RelayError> {
         commit_relay_cursor(store, workspace_id, cursor, faults).map_err(local)
     }
 
@@ -2398,6 +2409,22 @@ fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
         return Err(RelayError::InvalidResponse);
     }
     Ok(())
+}
+
+fn push_probe_request(
+    workspace_id: &str,
+    identity: &crate::SyncIdentity,
+    origin_id: &str,
+    after_seq: i64,
+) -> PushRequest {
+    PushRequest {
+        workspace_id: workspace_id.to_owned(),
+        replication_epoch: identity.replication_epoch.clone(),
+        stream_identity: identity.stream_identity.clone(),
+        origin_id: origin_id.to_owned(),
+        after_seq,
+        ops: Vec::new(),
+    }
 }
 
 fn validate_pull_page(

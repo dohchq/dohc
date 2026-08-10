@@ -51,6 +51,9 @@ pub fn originate_ydoc_base_in_tx(
     if marker.base_claimed {
         return Ok(BaseOrigination::NothingToDo);
     }
+    // Check replication before the claim. A later refusal in the caller's
+    // append or backfill transaction would otherwise roll back real work with
+    // a claim that should never have started.
     if !workspace_replicates_with_relay_in_tx(tx, &key.workspace_id)? {
         return Ok(BaseOrigination::NothingToDo);
     }
@@ -81,18 +84,29 @@ pub fn originate_ydoc_base_in_tx(
                 tx,
                 &key.workspace_id,
                 "ydoc.update",
-                &serde_json::json!({
-                    "versionId": key.version_id,
-                    "objectId": key.object_id,
-                    "path": path,
-                    "contentKind": marker.content_kind.as_str(),
-                    "updateBlobSha256": base_snapshot_sha,
-                    "isBaseState": true,
-                }),
+                &ydoc_update_payload(key, path, marker.content_kind, &base_snapshot_sha, true),
                 now_ms,
             )?;
             Ok(BaseOrigination::Originated { base_snapshot_sha })
         }
         ClaimOutcome::Resumed => Ok(BaseOrigination::NothingToDo),
     }
+}
+
+/// Build the one wire payload used by every locally journaled Y.Doc update.
+pub fn ydoc_update_payload(
+    key: &DocKey,
+    path: &str,
+    content_kind: dohc_engine_collab::ContentKind,
+    update_blob_sha256: &str,
+    is_base_state: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "versionId": key.version_id,
+        "objectId": key.object_id,
+        "path": path,
+        "contentKind": content_kind.as_str(),
+        "updateBlobSha256": update_blob_sha256,
+        "isBaseState": is_base_state,
+    })
 }

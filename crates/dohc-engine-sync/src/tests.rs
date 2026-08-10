@@ -5489,13 +5489,13 @@ fn an_unusable_version_id_names_the_limit_the_unit_and_the_observed_length() {
 
 #[derive(Default)]
 struct FakeRelay {
-    pushes: Mutex<usize>,
+    pushes: Mutex<Vec<PushRequest>>,
     pull: Mutex<Option<PullResponse>>,
 }
 
 impl RelayTransport for FakeRelay {
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
-        *self.pushes.lock().expect("push lock") += 1;
+        self.pushes.lock().expect("push lock").push(req.clone());
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
@@ -6265,7 +6265,7 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
                 .expect("seed imported coordinate");
         }
         let client = RelaySyncClient::new(FakeRelay {
-            pushes: Mutex::new(0),
+            pushes: Mutex::new(Vec::new()),
             pull: Mutex::new(Some(PullResponse {
                 ops: vec![envelope(
                     origin_id,
@@ -6315,7 +6315,7 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
         read_pushed_seq(&reopened, "ws", "local").expect("cursor"),
         0
     );
-    assert_eq!(*client.transport().pushes.lock().expect("calls"), 2);
+    assert_eq!(client.transport().pushes.lock().expect("calls").len(), 2);
 }
 
 #[test]
@@ -6395,7 +6395,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         json!({"reactionId":"r","messageId":"m","threadId":"t","emoji":"👍","authorId":"u","authorKind":"human","authorDisplayName":"U","atMs":10,"state":"added"}),
     );
     let fake = FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![remote],
             next_cursor: 1,
@@ -6434,7 +6434,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         client
             .commit_pull_cursor(&mut reopened, "ws", &pending, &NoFaults)
             .expect("commit"),
-        TxnOutcome::Committed(())
+        TxnOutcome::Committed(Vec::new())
     );
 }
 
@@ -6601,7 +6601,7 @@ fn pull_rejects_op_for_foreign_workspace() {
         recorded_at_ms: 2_000,
     };
     let fake = FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![foreign],
             next_cursor: 1,
@@ -11950,7 +11950,7 @@ fn relay_pull_routes_secret_and_conflict_ops_without_cursor_wedge() {
         }),
     );
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![secret, conflict],
             next_cursor: 2,
@@ -14444,9 +14444,136 @@ fn workspace_push_excludes_origins_imported_from_share_views() {
         .push_workspace(&mut engine, "ws", &NoFaults)
         .expect("push owner lane");
     assert_eq!(
-        *client.transport().pushes.lock().expect("push calls"),
+        client.transport().pushes.lock().expect("push calls").len(),
         1,
         "MUTATION: an unfiltered origin scan sends the imported share row through the owner lane"
+    );
+}
+
+#[test]
+fn enrollment_backfill_refreshes_the_origin_bound_before_the_next_push() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "backfilled-object".to_owned(),
+                path: "backfilled.md".to_owned(),
+                text: "captured before enrollment".to_owned(),
+                moment_id: "backfilled-moment".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("captured moment");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE moments SET metadata_origin='capture' \
+                 WHERE workspace_id='ws' AND moment_id='backfilled-moment'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE snapshots SET metadata_origin='capture' \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='backfilled-object'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("stamp autonomous capture origin");
+    let client = RelaySyncClient::new(FakeRelay::default());
+
+    let outcome = client.push_workspace(&mut engine, "ws", &NoFaults);
+
+    assert!(
+        matches!(outcome, Ok(SyncPassOutcome::Complete { pushed: 2, .. })),
+        "the same pass must push the pre-existing op and the newly backfilled moment: {outcome:?}"
+    );
+}
+
+#[test]
+fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let incoming = b"pulled before enrollment";
+    let incoming_sha = dohc_engine_storage::hex_sha256(incoming);
+    engine
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![
+                    incoming_sha,
+                    incoming.len() as i64,
+                    String::from_utf8_lossy(incoming)
+                ],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("hydrate the incoming blob");
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![envelope(
+                "peer",
+                0,
+                "moment.append",
+                json!({
+                    "momentId": "peer-moment",
+                    "versionId": "main",
+                    "objectId": "pulled-object",
+                    "objectCreatedAtMs": 1,
+                    "path": "pulled.md",
+                    "recordedAtMs": 1_000,
+                    "operation": "write",
+                    "payloadBeforeBlobSha256": null,
+                    "payloadBeforePath": null,
+                    "payloadAfterBlobSha256": incoming_sha,
+                    "payloadAfterPath": "pulled.md",
+                    "metadata": {"origin": "api"},
+                    "beforePresent": "absent"
+                }),
+            )],
+            next_cursor: 1,
+            has_more: false,
+        })),
+    });
+
+    let pull = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("first relay contact pulls the moment");
+    let SyncPassOutcome::Complete {
+        pending_cursor: Some(cursor),
+        ..
+    } = pull
+    else {
+        panic!("pull must return a pending cursor: {pull:?}");
+    };
+    client
+        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults)
+        .expect("the pull cursor ends enrollment");
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults)
+        .expect("next push");
+
+    let pushes = client.transport().pushes.lock().expect("pushes");
+    assert!(
+        pushes
+            .iter()
+            .flat_map(|request| &request.ops)
+            .all(|op| op.op_kind != "moment.append" || op.origin_id != "local"),
+        "the next push must not echo the imported moment under the local origin: {pushes:?}"
     );
 }
 
@@ -14902,7 +15029,7 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
         }),
     );
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![local, divergent],
             next_cursor: 2,
@@ -14939,11 +15066,11 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(4), &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     assert_eq!(
         read_relay_cursor(&engine, "ws")
@@ -14963,7 +15090,7 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
     ));
     assert!(matches!(
         commit_share_cursor(&mut engine, "ws", &share(4), &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        Ok(TxnOutcome::Committed(_))
     ));
     assert_eq!(
         read_share_cursor(&engine, "ws", "share", CursorKind::ShareView)
@@ -15002,7 +15129,7 @@ fn relay_hydration_failure_before_apply_retries_and_surfaces_pending_resolve() {
         )],
     );
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![resolve, later],
             next_cursor: 2,
@@ -15102,7 +15229,7 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
         })
         .expect("install later apply failure");
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![refused, later],
             next_cursor: 2,
@@ -15236,7 +15363,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         })
         .expect("install later apply failure");
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![base, later],
             next_cursor: 2,
@@ -15366,7 +15493,7 @@ fn committed_pull_cursor_clears_persisted_pending_resolves() {
         }),
     );
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![resolve],
             next_cursor: 1,
@@ -15414,7 +15541,7 @@ fn committed_pull_cursor_clears_persisted_refusals() {
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![envelope(
                 "cursor-clear-refusal-peer",
@@ -15499,7 +15626,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     ));
 
     let first_client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![envelope(
                 "first-report-peer",
@@ -15590,7 +15717,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     );
 
     let second_client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: Vec::new(),
             next_cursor: 2,
@@ -15685,7 +15812,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     let stored = engine
         .read_with(|conn| {
@@ -15900,7 +16027,7 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![envelope(
                 "reason-peer",
@@ -15973,7 +16100,7 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
     let mut divergent = first.clone();
     divergent.payload = json!({"tampered": true});
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![
                 first,

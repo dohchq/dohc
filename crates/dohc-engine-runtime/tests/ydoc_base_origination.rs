@@ -451,6 +451,76 @@ async fn draining_a_late_predecessor_retries_origination() {
     );
 }
 
+/// The ordinary non-leased apply path can also complete a local dependent
+/// update. It must retry origination after it projects the complete lineage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn applying_a_late_predecessor_without_a_lease_retries_origination() {
+    const WS: &str = "ws-originate-after-ordinary-apply";
+    const PATH: &str = "notes/ordinary.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+    let doc = Ydoc::wire();
+    let predecessor = doc.plaintext_insert(0, "dep base");
+    let dependent = doc.plaintext_insert(0, "more ");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::Replicated,
+            dependent,
+            None,
+            false,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record dependent update");
+    supervisor.close(&db).expect("close actor");
+    assert_eq!(marker_state(&db, &key), (Regime::Replicated, false));
+
+    let mut store = EngineStore::open(&db, 9_510).expect("open store");
+    let predecessor_sha = store
+        .put_binary_blob(&predecessor)
+        .expect("store predecessor blob");
+    let envelope = ReplicationEnvelope {
+        workspace_id: WS.to_owned(),
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "ydoc.update".to_owned(),
+        payload: serde_json::json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": PATH,
+            "contentKind": "plaintext",
+            "updateBlobSha256": predecessor_sha,
+            "isBaseState": false
+        }),
+        recorded_at_ms: 300,
+    };
+    apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
+        .expect("ordinary predecessor apply");
+    drop(store);
+
+    assert_eq!(
+        marker_state(&db, &key),
+        (Regime::Replicated, true),
+        "the ordinary apply retries and claims the base"
+    );
+    let ops = local_ydoc_ops(&db);
+    assert_eq!(ops.len(), 1, "the ordinary apply journals one base");
+    assert!(ops[0].is_base());
+    assert_eq!(replay_into_clean_peer(&db, &ops, WS, PATH), "more dep base");
+}
+
 /// Edit a lineage twice on a workspace prepared by `prepare`, then assert it
 /// stayed private: no replication op, and a prunable local-only marker.
 async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &str)) {

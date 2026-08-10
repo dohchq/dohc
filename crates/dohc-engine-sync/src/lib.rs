@@ -60,8 +60,8 @@ pub use moment_apply::{
     apply_moment_envelope_detailed,
 };
 pub use outbound::{
-    journal_moment_append_in_tx, journal_secret_delete_in_tx, journal_secret_put_in_tx,
-    journal_secret_version_fork_in_tx, journal_version_create_in_tx,
+    journal_moment_append_in_tx, journal_secret_delete_in_tx, journal_secret_put_from_moment_in_tx,
+    journal_secret_put_in_tx, journal_secret_version_fork_in_tx, journal_version_create_in_tx,
 };
 pub use path_policy::{PathClass, classify_share_path};
 pub use relay::{
@@ -86,7 +86,9 @@ pub use ydoc_apply::{
     drain_deferred_ydoc_for_key, fold_resolution_into_ydoc_in_tx, open_sync_conflict_for_object,
     project_and_write_in_tx, retire_ydoc_lineage_in_tx,
 };
-pub use ydoc_origination::{BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx};
+pub use ydoc_origination::{
+    BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx, ydoc_update_payload,
+};
 
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};
 

@@ -1,5 +1,5 @@
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::SyncError;
 use crate::model::bounded;
@@ -79,7 +79,7 @@ pub fn commit_relay_cursor(
     workspace_id: &str,
     cursor: &RelayCursor,
     faults: &dyn FaultInjector,
-) -> Result<TxnOutcome<()>, SyncError> {
+) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     if !(0..=crate::MAX_WIRE_INTEGER).contains(&cursor.cursor) {
         return Err(SyncError::InvalidInput {
@@ -113,13 +113,7 @@ pub fn commit_relay_cursor(
                 ],
             )
             .map_err(SyncError::persist)?;
-            if !was_enrolled {
-                crate::enrolment::backfill_enrolment_window_in_tx(
-                    tx,
-                    workspace_id,
-                    current_time_ms()?,
-                )?;
-            }
+            let sharing_declined = backfill_after_first_position(tx, workspace_id, was_enrolled)?;
             // A committed cursor means the stream never replays coordinates
             // at or before this pull, so persisted pending-resolve decisions
             // kept for retry reconstruction are dead.
@@ -142,7 +136,7 @@ pub fn commit_relay_cursor(
                 )
                 .map_err(SyncError::persist)?;
             }
-            Ok::<(), SyncError>(())
+            Ok::<_, SyncError>(sharing_declined)
     })
 }
 
@@ -173,19 +167,14 @@ pub fn read_pushed_seq(
     })
 }
 
-pub(crate) fn has_relay_position(
-    store: &EngineStore,
-    workspace_id: &str,
-) -> Result<bool, SyncError> {
-    store.read_with(|conn| {
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id=?1) OR \
-                    EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id=?1)",
-            [workspace_id],
-            |row| row.get(0),
-        )
-        .map_err(SyncError::corrupt)
-    })
+pub(crate) fn has_relay_position(conn: &Connection, workspace_id: &str) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id=?1) OR \
+                EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id=?1)",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 pub(crate) fn write_pushed_seq(
@@ -194,7 +183,7 @@ pub(crate) fn write_pushed_seq(
     origin_id: &str,
     pushed_seq: i64,
     faults: &dyn FaultInjector,
-) -> Result<TxnOutcome<()>, SyncError> {
+) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
     if !(-1..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
         return Err(SyncError::InvalidInput {
             reason: "pushed_seq is outside the wire integer range",
@@ -210,15 +199,19 @@ pub(crate) fn write_pushed_seq(
                 params![workspace_id, origin_id, pushed_seq],
             )
             .map_err(SyncError::persist)?;
-            if !was_enrolled {
-                crate::enrolment::backfill_enrolment_window_in_tx(
-                    tx,
-                    workspace_id,
-                    current_time_ms()?,
-                )?;
-            }
-            Ok::<(), SyncError>(())
+            backfill_after_first_position(tx, workspace_id, was_enrolled)
         })
+}
+
+fn backfill_after_first_position(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    was_enrolled: bool,
+) -> Result<Vec<crate::SharingDeclined>, SyncError> {
+    if was_enrolled {
+        return Ok(Vec::new());
+    }
+    crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, current_time_ms()?)
 }
 
 pub(crate) fn rewind_pushed_seq(

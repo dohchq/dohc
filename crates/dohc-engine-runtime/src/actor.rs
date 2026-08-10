@@ -771,13 +771,20 @@ mod deferred_relay_tests {
 #[derive(Debug)]
 pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
-    CursorCommitted,
+    CursorCommitted {
+        sharing_declined: Vec<dohc_engine_sync::SharingDeclined>,
+    },
     Probe(bool),
     Claimed,
     JoinIdentityAdopted,
     Recovered(RecoverResponse),
-    KeyEnvelopeUploaded { etag: String },
-    KeyEnvelopeDownloaded { envelope_json: String, etag: String },
+    KeyEnvelopeUploaded {
+        etag: String,
+    },
+    KeyEnvelopeDownloaded {
+        envelope_json: String,
+        etag: String,
+    },
     SharedChannelPulled(SharedChannelPullOutcome),
     SharedChannelPushed(SharedChannelPushOutcome),
     ShareViewPulled(ShareViewPullOutcome),
@@ -6360,7 +6367,9 @@ fn execute_relay_operation(
             workspace_id,
             cursor,
         } => match client.commit_pull_cursor(store, &workspace_id, &cursor, &NoFaults)? {
-            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
+            TxnOutcome::Committed(sharing_declined) => {
+                Ok(RelayOperationOutcome::CursorCommitted { sharing_declined })
+            }
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
         RelayOperation::Probe { workspace_id } => {
@@ -6498,7 +6507,9 @@ fn execute_relay_operation(
             workspace_id,
             cursor,
         } => match client.commit_share_view_cursor(store, &workspace_id, &cursor, &NoFaults)? {
-            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
+            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted {
+                sharing_declined: Vec::new(),
+            }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
     }
@@ -9105,14 +9116,13 @@ fn ydoc_record_update_on_store(
                     tx,
                     &journal_key.workspace_id,
                     "ydoc.update",
-                    &serde_json::json!({
-                        "versionId": journal_key.version_id,
-                        "objectId": journal_key.object_id,
-                        "path": journal_path,
-                        "contentKind": journal_kind.as_str(),
-                        "updateBlobSha256": update_sha,
-                        "isBaseState": false,
-                    }),
+                    &dohc_engine_sync::ydoc_update_payload(
+                        &journal_key,
+                        &journal_path,
+                        journal_kind,
+                        &update_sha,
+                        false,
+                    ),
                     now_ms,
                 )
                 .map_err(|error| dohc_engine_collab::CollabError::Corrupt {

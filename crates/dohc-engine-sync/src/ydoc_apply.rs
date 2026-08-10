@@ -651,14 +651,13 @@ pub fn fold_resolution_into_ydoc_in_tx(
                 tx,
                 workspace_id,
                 "ydoc.update",
-                &serde_json::json!({
-                    "versionId": key.version_id,
-                    "objectId": key.object_id,
-                    "path": path,
-                    "contentKind": marker.content_kind.as_str(),
-                    "updateBlobSha256": dohc_engine_storage::hex_sha256(&update),
-                    "isBaseState": false,
-                }),
+                &crate::ydoc_update_payload(
+                    &key,
+                    path,
+                    marker.content_kind,
+                    &dohc_engine_storage::hex_sha256(&update),
+                    false,
+                ),
                 now_ms,
             )?;
         }
@@ -1355,6 +1354,12 @@ pub fn apply_ydoc_envelope(
                 search_policy.as_ref(),
             ) {
                 Ok(()) => {
+                    let _ = crate::originate_ydoc_base_in_tx(
+                        tx,
+                        &key,
+                        &update_path,
+                        op.recorded_at_ms,
+                    )?;
                     tx.execute_batch("RELEASE dohc_ydoc_projection")
                         .map_err(SyncError::persist)?;
                 }

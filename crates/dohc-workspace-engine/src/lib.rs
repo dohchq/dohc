@@ -10998,6 +10998,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             changed_paths,
             pending_resolves,
             refusals,
+            sharing_declined,
         } => json!({
             "status": "complete",
             "pushed": pushed,
@@ -11023,6 +11024,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
                 "code": refusal.reason.code(),
                 "reason": refusal.reason.message(),
             })).collect::<Vec<_>>(),
+            "sharingDeclined": sharing_declined_json(sharing_declined),
         }),
         SyncPassOutcome::CrashedAfterRemoteCommit => {
             json!({ "status": "crashedAfterRemoteCommit" })
@@ -11036,6 +11038,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             changed_paths,
             pending_resolves,
             refusals,
+            sharing_declined,
         } => json!({
             "status": "crashedAfterApply",
             "applied": applied,
@@ -11058,14 +11061,31 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
                 "code": refusal.reason.code(),
                 "reason": refusal.reason.message(),
             })).collect::<Vec<_>>(),
+            "sharingDeclined": sharing_declined_json(sharing_declined),
         }),
     }
+}
+
+fn sharing_declined_json(declines: Vec<dohc_engine_sync::SharingDeclined>) -> Vec<Value> {
+    declines
+        .into_iter()
+        .map(|declined| {
+            json!({
+                "constraint": declined.constraint,
+                "limitBytes": declined.limit_bytes,
+                "observedBytes": declined.observed_bytes,
+            })
+        })
+        .collect()
 }
 
 fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError> {
     Ok(match outcome {
         RelayOperationOutcome::Sync(outcome) => sync_outcome_json(outcome),
-        RelayOperationOutcome::CursorCommitted => json!({ "committed": true }),
+        RelayOperationOutcome::CursorCommitted { sharing_declined } => json!({
+            "committed": true,
+            "sharingDeclined": sharing_declined_json(sharing_declined),
+        }),
         RelayOperationOutcome::Probe(has_content) => json!({ "hasContent": has_content }),
         RelayOperationOutcome::Claimed => json!({ "claimed": true }),
         RelayOperationOutcome::JoinIdentityAdopted => json!({ "adopted": true }),
@@ -12391,12 +12411,26 @@ mod tests {
             changed_paths: Vec::new(),
             pending_resolves: Vec::new(),
             refusals: Vec::new(),
+            sharing_declined: vec![dohc_engine_sync::SharingDeclined {
+                constraint: "MAX_YDOC_UPDATE_BYTES",
+                limit_bytes: 20,
+                observed_bytes: 21,
+            }],
         });
 
         assert_eq!(value["status"], "complete");
         assert_eq!(
             value["hasMore"], true,
             "MUTATION: omitting hasMore makes a bounded prefix indistinguishable from a drained relay"
+        );
+        assert_eq!(
+            value["sharingDeclined"],
+            json!([{
+                "constraint": "MAX_YDOC_UPDATE_BYTES",
+                "limitBytes": 20,
+                "observedBytes": 21,
+            }]),
+            "enrollment refusals must reach the workspace RPC result"
         );
     }
 

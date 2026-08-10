@@ -25,7 +25,7 @@ impl VersionKind {
         }
     }
 
-    pub(crate) fn from_db(value: &str) -> Result<Self, DomainError> {
+    pub fn from_db(value: &str) -> Result<Self, DomainError> {
         match value {
             "main" => Ok(VersionKind::Main),
             "named" => Ok(VersionKind::Named),

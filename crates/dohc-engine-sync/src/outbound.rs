@@ -182,7 +182,7 @@ pub fn journal_version_create_in_tx(
                     CASE s.content_kind WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END, \
                     s.updated_at_ms, s.latest_moment_id, s.metadata_origin, \
                     s.metadata_summary, s.metadata_correlation_id \
-             FROM snapshots s JOIN file_objects o \
+             FROM fork_base_snapshots s JOIN file_objects o \
                ON o.workspace_id=s.workspace_id AND o.object_id=s.object_id \
              WHERE s.workspace_id=?1 AND s.version_id=?2 ORDER BY s.path",
         )
@@ -254,7 +254,26 @@ pub fn journal_secret_put_in_tx(
             },
         )
         .map_err(SyncError::corrupt)?;
-    let ciphertext = decode_stored_ciphertext(&ciphertext_base64)?;
+    journal_secret_put_from_moment_in_tx(
+        tx,
+        moment,
+        &iv_base64,
+        &auth_tag_base64,
+        &ciphertext_base64,
+        byte_length,
+    )
+}
+
+/// Project one retained secret moment into the relay-visible log.
+pub fn journal_secret_put_from_moment_in_tx(
+    tx: &Transaction<'_>,
+    moment: &SecretMomentRecord,
+    iv_base64: &str,
+    auth_tag_base64: &str,
+    ciphertext_base64: &str,
+    byte_length: i64,
+) -> Result<(), SyncError> {
+    let ciphertext = decode_stored_ciphertext(ciphertext_base64)?;
     let payload = serde_json::json!({
         "versionId": moment.version_id,
         "path": moment.path,
