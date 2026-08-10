@@ -62,6 +62,10 @@ pub enum JobStatus {
     /// preserved both and did not overwrite. Terminal until a human/agent
     /// resolves it (never silently replayed).
     Conflict,
+    /// Its target path was deleted before the job ever reached disk (#739).
+    /// Terminal, and distinct from `Conflict`: nothing needs a human's
+    /// resolution here — the delete is the resolution. Never replayed.
+    Cancelled,
 }
 
 impl JobStatus {
@@ -70,6 +74,7 @@ impl JobStatus {
             JobStatus::Pending => "pending",
             JobStatus::Complete => "complete",
             JobStatus::Conflict => "conflict",
+            JobStatus::Cancelled => "cancelled",
         }
     }
     fn parse(raw: &str) -> Option<Self> {
@@ -77,6 +82,7 @@ impl JobStatus {
             "pending" => Some(JobStatus::Pending),
             "complete" => Some(JobStatus::Complete),
             "conflict" => Some(JobStatus::Conflict),
+            "cancelled" => Some(JobStatus::Cancelled),
             _ => None,
         }
     }
@@ -130,6 +136,27 @@ pub fn enqueue_delete_job(
     spec: &MaterializationJobSpec,
 ) -> Result<(), StorageError> {
     enqueue_operation(tx, spec, MaterializationOperation::Delete)
+}
+
+/// Cancel pending WRITE jobs targeting `path` in the same transaction as the
+/// delete that removes the path from `path_aliases` (#739). Preserve a prior
+/// pending DELETE for the same path. After the prior delete clears the target,
+/// the replay ladder's "target already absent" short-circuit makes a later
+/// delete idempotent even if its preimage is stale. An empty `workspace_id` is
+/// the legacy global sentinel and matches every workspace's jobs for the path.
+pub fn cancel_pending_jobs_for_path(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    path: &str,
+    now_ms: i64,
+) -> Result<usize, StorageError> {
+    tx.execute(
+        "UPDATE materialization_jobs SET status = 'cancelled', completed_at_ms = ?3 \
+         WHERE status = 'pending' AND operation = 'write' AND target_path = ?2 \
+           AND (?1 = '' OR workspace_id = ?1 OR workspace_id = '')",
+        rusqlite::params![workspace_id, path, now_ms],
+    )
+    .map_err(StorageError::persist)
 }
 
 /// Insert or refresh a durable projection intent. Active-version switching

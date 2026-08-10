@@ -29,7 +29,8 @@ use crate::records::{
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MAX_IDENTIFIER_BYTES, MaterializationJobSpec, Preimage,
-    StorageError, TxnOutcome, enqueue_delete_job, enqueue_job, put_binary_blob,
+    StorageError, TxnOutcome, cancel_pending_jobs_for_path, enqueue_delete_job, enqueue_job,
+    put_binary_blob,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -3581,6 +3582,16 @@ pub fn delete_text_in_tx(
         params![ws, input.version_id, before.object_id],
     )
     .map_err(DomainError::sql_persist)?;
+    // #739: must run in this SAME transaction as the path_aliases removal
+    // above — see `cancel_pending_jobs_for_path` for why. Materialization
+    // jobs carry no version identity — they mirror the ACTIVE version's
+    // working tree only, the same gate `enqueue_binary_delete` applies to
+    // its own job — so an INACTIVE version's delete must not touch them: a
+    // named version deleting its own `note.md` must never cancel a pending
+    // job that belongs to `main`'s `note.md` of the same name.
+    if version_is_active(tx, ws, &input.version_id)? {
+        cancel_pending_jobs_for_path(tx, ws, &input.path, input.now_ms)?;
+    }
 
     let result = DeleteResult {
         object,

@@ -5980,7 +5980,13 @@ fn replay_pending_materializations(
                 .load_materialization_job(&write_job_id)?
                 .map(|write_job| write_job.status)
             {
-                Some(JobStatus::Complete) => {}
+                // #739 follow-up: CANCELLED means the destination path was
+                // explicitly deleted after the rename committed — that
+                // delete already resolved the destination, so THIS paired
+                // delete (removing the rename's OLD path) must still run.
+                // Treating it like Conflict would strand the old path on
+                // disk forever, under a job nothing ever revisits.
+                Some(JobStatus::Complete) | Some(JobStatus::Cancelled) => {}
                 Some(JobStatus::Conflict) => {
                     store.mark_materialization_conflict(&job.job_id, now_ms)?;
                     summary.failed += 1;
@@ -10122,7 +10128,7 @@ fn materialize_expected_job(
             )
             .0
         }
-        JobStatus::Conflict => false,
+        JobStatus::Conflict | JobStatus::Cancelled => false,
     }
 }
 
@@ -10313,7 +10319,9 @@ fn versioned_text_rollback_on_store(
                 job.created_at_ms,
                 faults,
             ),
-            JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
+            JobStatus::Conflict | JobStatus::Cancelled => {
+                (false, PostCommitMaterializeOutcome::Conflict)
+            }
         };
         return Ok(RollbackExecutionResult {
             deduped,
@@ -10352,6 +10360,12 @@ fn versioned_text_rollback_on_store(
             write_job.created_at_ms,
             faults,
         ),
+        // #739 follow-up: same pairing rule as the startup replay's
+        // "binary-rename-1-delete-mat_" case — a CANCELLED write means its
+        // destination was explicitly deleted, already resolving it, so the
+        // paired delete below (the rename's OLD path) must still run rather
+        // than being stranded.
+        JobStatus::Cancelled => (true, PostCommitMaterializeOutcome::Skipped),
         JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
     };
     if !write_materialized {
@@ -10393,7 +10407,9 @@ fn versioned_text_rollback_on_store(
             delete_job.created_at_ms,
             faults,
         ),
-        JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
+        JobStatus::Conflict | JobStatus::Cancelled => {
+            (false, PostCommitMaterializeOutcome::Conflict)
+        }
     };
     Ok(RollbackExecutionResult {
         deduped,

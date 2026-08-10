@@ -301,6 +301,10 @@ CREATE TABLE materialization_jobs (
 
 CREATE INDEX idx_materialization_jobs_status ON materialization_jobs(status);
 ";
+// The DDL comment above the `status` column is verbatim in the migration
+// ledger checksum and must stay byte-identical to what shipped, even though
+// `status` now also holds 'cancelled' (see `JobStatus` in `materialize.rs`).
+// Current values: 'pending' | 'complete' | 'conflict' | 'cancelled'.
 
 /// Ordinal 1 (R08 secrets shard, appended via the migration-append capability
 /// contract). Adds the three secret-backed-file tables — encrypted tips, fork

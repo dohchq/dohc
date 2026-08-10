@@ -1792,6 +1792,440 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
     call(&transport, &handle, 10, "workspace.close", json!({})).await;
 }
 
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "notes/seed.md", b"seed");
+
+    let workspace_id = "ws-rpc-ydoc-delete-cancels-pending";
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/deleted.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+
+    let doc = Ydoc::wire();
+    let first = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v1"));
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": first }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "v1" }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/deleted.md")).expect("v1 on disk"),
+        "v1"
+    );
+
+    // Hold the target with NO sharing, exactly like the transient-failure
+    // siblings above: the next settle commits its head but its replace
+    // fails, leaving a job PENDING with the v1 bytes as its expected
+    // preimage.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(scratch.path().join("notes/deleted.md"))
+        .expect("exclusive lock");
+    let second = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v2 "));
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": second }),
+    )
+    .await;
+    let failed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                6,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "summary": "v2 blocked" }),
+            ),
+        )
+        .await
+        .expect_err("a locked target must fail the settle");
+    assert_eq!(failed.code, ErrorCode::Overloaded);
+    assert_eq!(failed.message, "file-locked");
+    drop(lock);
+
+    // The user's desktop, having seen the settle fail, gives up on the
+    // session rather than retrying the settle — the daemon-side twin of the
+    // JS "detached debt" issue #739 names — and evicts it (#665's third
+    // exit: the lease is dropped, the pending job is untouched) before
+    // deleting the path outright.
+    let evicted = call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(evicted["evicted"], json!(true));
+
+    call(
+        &transport,
+        &handle,
+        8,
+        "versionedText.delete",
+        json!({
+            "versionId": "main",
+            "path": "notes/deleted.md",
+            "origin": "api",
+            "requestId": "delete-with-pending-job",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 9, "workspace.close", json!({})).await;
+    drop(transport);
+
+    // Simulate a daemon restart against the same on-disk database: a fresh
+    // service, a fresh transport, reopening the same workspace root.
+    let restarted_service = Arc::new(EngineService::new());
+    let restarted_transport = InProcessTransport::new(restarted_service);
+    let restarted_handle = open_workspace(&restarted_transport, &scratch, workspace_id, 1).await;
+
+    // RED (pre-#739): the stale pending job survives the delete, its
+    // preimage still matches the untouched v1 bytes, and startup replay
+    // (`workspace.open` -> `materialize_replay_pending`) materializes it —
+    // the deleted path comes back with "v2 v1" on a path the registry no
+    // longer tracks.
+    //
+    // GREEN (#739): the delete cancelled the job in the same transaction, so
+    // replay finds nothing pending for this path and the bytes stay exactly
+    // as the delete left them.
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/deleted.md")).expect("unchanged"),
+        "v1",
+        "a stale pending job replayed and resurrected a path the delete removed"
+    );
+
+    call(
+        &restarted_transport,
+        &restarted_handle,
+        3,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending_job() {
+    // #739 follow-up (codex P1): `cancel_pending_jobs_for_path` is path-keyed
+    // but materialization jobs carry no version identity — they mirror the
+    // ACTIVE version's working tree only (the same gate `enqueue_binary_delete`
+    // applies to its own job). A delete in a NAMED, inactive version must not
+    // touch `main`'s own pending job for a same-named path.
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "notes/seed.md", b"seed");
+
+    let workspace_id = "ws-rpc-ydoc-inactive-delete-preserves-active";
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+
+    // The named version forks main FIRST, before main ever has anything
+    // pending: `versions.createNamed` reconciles its source version's disk
+    // projection as part of the fork, so forking WHILE a job is stuck behind
+    // a lock fails the fork itself rather than leaving the fork clean of it.
+    let feature = call(
+        &transport,
+        &handle,
+        2,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace_id,
+            "name": "feature",
+            "fromVersionId": "main",
+        }),
+    )
+    .await["id"]
+        .as_str()
+        .expect("feature id")
+        .to_owned();
+    // Feature gets its OWN, independently-written "notes/shared.md" — not
+    // main's, so deleting it can never race main's later lock.
+    call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.write",
+        json!({
+            "versionId": feature,
+            "path": "notes/shared.md",
+            "text": "feature copy",
+            "origin": "api",
+            "requestId": "feature-seed",
+        }),
+    )
+    .await;
+
+    // main: settle v1, then lock and leave a pending v2 job — same shape as
+    // the sibling pin above.
+    let opened = call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/shared.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+    let doc = Ydoc::wire();
+    let first = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v1"));
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": first }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "v1" }),
+    )
+    .await;
+
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(scratch.path().join("notes/shared.md"))
+        .expect("exclusive lock");
+    let second = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v2 "));
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": second }),
+    )
+    .await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                8,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "summary": "v2 blocked" }),
+            ),
+        )
+        .await
+        .expect_err("a locked target must fail the settle");
+    drop(lock);
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+
+    // Deletes feature's OWN "notes/shared.md" — a different object at the
+    // same path string in a different, inactive version. This must never
+    // reach main's own pending job.
+    call(
+        &transport,
+        &handle,
+        10,
+        "versionedText.delete",
+        json!({
+            "versionId": feature,
+            "path": "notes/shared.md",
+            "origin": "api",
+            "requestId": "inactive-delete",
+        }),
+    )
+    .await;
+
+    call(&transport, &handle, 11, "workspace.close", json!({})).await;
+    drop(transport);
+
+    let restarted_service = Arc::new(EngineService::new());
+    let restarted_transport = InProcessTransport::new(restarted_service);
+    let restarted_handle = open_workspace(&restarted_transport, &scratch, workspace_id, 1).await;
+
+    // RED (bug): the inactive version's delete cancels main's pending job by
+    // path alone, so replay never applies it — disk stays "v1".
+    //
+    // GREEN (fix): the cancel only runs for an ACTIVE-version delete, so
+    // main's job is untouched and replay applies it normally.
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/shared.md")).expect("v2 after replay"),
+        "v2 v1",
+        "an inactive version's delete must not cancel the active version's own pending job"
+    );
+
+    call(
+        &restarted_transport,
+        &restarted_handle,
+        2,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_source_delete_run() {
+    // #739 follow-up (codex P1): a binary rename enqueues a PAIRED job pair —
+    // a write for the new path, a delete for the old one — and startup replay
+    // (and the rollback post-commit path) refuses to run the paired delete
+    // until the write proves COMPLETE, so the old path is never removed
+    // before the new one is proven durable. Cancelling the write (this PR's
+    // #739 fix, when the new path is deleted before it ever materializes)
+    // must not read as the SAME "abandon the pair" signal `Conflict` is: the
+    // delete already resolved the destination, so the paired delete (the old
+    // path) must still run — or that path is stranded on disk forever.
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "notes/seed.md", b"seed");
+
+    let workspace_id = "ws-rpc-ydoc-rename-pair-not-stranded";
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+
+    let bytes: &[u8] = &[4, 8, 15, 16, 23, 42];
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        json!({ "versionId": "main", "path": "old.bin", "bytes": bytes, "origin": "api" }),
+    )
+    .await;
+    assert!(scratch.path().join("old.bin").exists());
+
+    // An untracked raw file plants a lockable target at the rename's
+    // destination — the engine's own occupancy check reads `path_aliases`,
+    // not disk, so this does not refuse the rename. Matching bytes keeps its
+    // OWN later cleanup (the fresh delete job `versionedText.delete` below
+    // enqueues) preimage-clean instead of spuriously conflicting.
+    std::fs::write(scratch.path().join("new.bin"), bytes).expect("plant destination");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(scratch.path().join("new.bin"))
+        .expect("exclusive lock");
+
+    // The rename commits (moment + path_aliases move to new.bin), but the
+    // destination write's post-commit materialize hits the lock and stays
+    // PENDING — so the paired old.bin delete is never attempted either
+    // (`write_ready` false).
+    let renamed = call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.rename",
+        json!({
+            "versionId": "main",
+            "fromPath": "old.bin",
+            "toPath": "new.bin",
+            "origin": "api",
+            "requestId": "rename-pair-not-stranded",
+        }),
+    )
+    .await;
+    assert_eq!(renamed["moment"]["operation"], "rename");
+    // Neither side materialized yet: the write is locked out, and the
+    // delete never got its turn.
+    assert!(scratch.path().join("old.bin").exists());
+
+    // Delete the renamed destination while its write job is still pending —
+    // the #739 cancellation this PR adds fires here.
+    call(
+        &transport,
+        &handle,
+        4,
+        "versionedText.delete",
+        json!({
+            "versionId": "main",
+            "path": "new.bin",
+            "origin": "api",
+            "requestId": "delete-locked-rename-destination",
+        }),
+    )
+    .await;
+    drop(lock);
+
+    call(&transport, &handle, 5, "workspace.close", json!({})).await;
+    drop(transport);
+
+    let restarted_service = Arc::new(EngineService::new());
+    let restarted_transport = InProcessTransport::new(restarted_service);
+    let restarted_handle = open_workspace(&restarted_transport, &scratch, workspace_id, 1).await;
+
+    // RED (bug): the replay's rename-pair check treats the write's CANCELLED
+    // status like Conflict — it marks the paired old.bin delete conflict too
+    // and abandons it, so old.bin survives on disk forever, stranded.
+    //
+    // GREEN (fix): CANCELLED lets the paired delete proceed like COMPLETE
+    // would, so old.bin is removed.
+    assert!(
+        !scratch.path().join("old.bin").exists(),
+        "the rename's paired source delete must still run when its destination write was cancelled, not stranded"
+    );
+    // No resurrection either: the destination's own cancelled write, and its
+    // own (separately enqueued) delete, never left new.bin behind.
+    assert!(!scratch.path().join("new.bin").exists());
+
+    call(
+        &restarted_transport,
+        &restarted_handle,
+        2,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
 /// Poll capture until the head for `path` holds exactly `text`. One sleep plus
 /// one flush cannot carry that proof: a watcher that has not queued the write
 /// yet makes the flush report quiescence.
