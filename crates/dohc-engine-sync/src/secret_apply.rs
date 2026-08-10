@@ -260,7 +260,7 @@ fn insert_fork_rows(
         let ciphertext_base64 = STANDARD.encode(ciphertext);
         let latest_moment_id = format!("secret-sync-{}-{}-{index}", op.origin_id, op.origin_seq);
         tx.execute(
-            "INSERT INTO secret_files \
+            "INSERT OR IGNORE INTO secret_files \
              (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
@@ -277,7 +277,7 @@ fn insert_fork_rows(
         )
         .map_err(SyncError::persist)?;
         tx.execute(
-            "INSERT INTO secret_fork_bases \
+            "INSERT OR IGNORE INTO secret_fork_bases \
              (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length) \
              VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![

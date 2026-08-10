@@ -10823,6 +10823,85 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
 }
 
 #[test]
+fn later_secret_version_fork_chunk_preserves_a_local_write_to_its_pending_path() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = store();
+    let origin_ciphertext = b"origin pending secret";
+    let (sha, iv, tag) = seed_secret_fork_state(&mut engine, origin_ciphertext);
+    let chunk = |seq, chunk_index, path: &str| {
+        envelope(
+            "chunked-secret-fork-peer",
+            seq,
+            "secret.version.fork",
+            json!({
+                "fromVersionId": "main",
+                "toVersionId": "feature",
+                "chunkIndex": chunk_index,
+                "totalRows": 2,
+                "rows": [{
+                    "path": path,
+                    "ivBase64": iv,
+                    "authTagBase64": tag,
+                    "ciphertextSha256": sha,
+                    "byteLength": origin_ciphertext.len(),
+                    "updatedAtMs": 100 + chunk_index
+                }]
+            }),
+        )
+    };
+    let first = chunk(0, 0, "app/.env");
+    let second = chunk(1, 1, "pending.env");
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &first, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+    ));
+
+    let local_ciphertext = b"local edit";
+    let local_ciphertext_base64 = STANDARD.encode(local_ciphertext);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO secret_files \
+                 (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
+                 VALUES ('ws','feature','pending.env',?1,?2,?3,?4,200,'local-pending-moment')",
+                params![iv, tag, local_ciphertext_base64, local_ciphertext.len() as i64],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("write pending secret locally");
+
+    let second_result = apply_replication_envelope(&mut engine, &second, &NoFaults, &NoLiveLeases);
+    assert!(
+        matches!(
+            second_result,
+            Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        ),
+        "later chunk failed: {second_result:?}"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "chunked-secret-fork-peer").expect("fork ack"),
+        1
+    );
+    let live: (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT ciphertext_base64,latest_moment_id FROM secret_files \
+                 WHERE workspace_id='ws' AND version_id='feature' AND path='pending.env'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("read pending secret");
+    assert_eq!(
+        live,
+        (local_ciphertext_base64, "local-pending-moment".to_owned())
+    );
+}
+
+#[test]
 fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
