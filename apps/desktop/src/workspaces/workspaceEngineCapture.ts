@@ -1430,6 +1430,14 @@ export function createWorkspaceEngineCapture(
     // data-integrity-critical teardown). Reused by the returned session's
     // close(), the renderer close IPC, and every lifecycle op below.
     close: (opts?: WorkspaceEngineYDocCloseOptions) => Promise<void>;
+    // This session's own way to apply a delete directly (codex P1-C
+    // follow-up on #746), read only while `status` is "failing-close":
+    // `captureBatch`'s synchronous delete pass calls it at
+    // watcher-delivery time instead of relying solely on the TTL-bounded
+    // no-debt tombstone map. A close-retry ladder's own doubling delay
+    // caps at the same 10s as that TTL, so a delete landing right after
+    // one retry can otherwise expire before the next retry arrives to ask.
+    armRemovalSuppression: (expected: boolean, deletedAtMs: number) => void;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
   // The detached locked-write debts, by path: each entry is the payment
@@ -3226,12 +3234,23 @@ export function createWorkspaceEngineCapture(
       // the file. `detachedLockedDebts` and `expectedEvents` are plain
       // maps a synchronous read sees exactly as fresh as the enqueued
       // read would, so recording immediately only narrows the window.
+      //
+      // A retrying entry ALSO gets armed directly (codex P1-C follow-up):
+      // the tombstone's own TTL (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`) caps at
+      // the same 10s the close-retry ladder's doubling delay eventually
+      // reaches, so a delete landing right after one retry can otherwise
+      // expire before the next one arrives to consume it. Calling the
+      // session's own door bypasses the TTL for that session entirely —
+      // nothing here can expire, because nothing here is a map entry.
       for (const event of batch) {
-        if (event.operation === "delete" && !detachedLockedDebts.has(event.path)) {
-          noteExternalDeleteWithNoDebt(
-            event.path,
-            peekExpectedEvent("delete", event.path),
-          );
+        if (event.operation !== "delete") continue;
+        const expected = peekExpectedEvent("delete", event.path);
+        if (!detachedLockedDebts.has(event.path)) {
+          noteExternalDeleteWithNoDebt(event.path, expected);
+        }
+        const live = liveYDocSessions.get(event.path);
+        if (live?.status === "failing-close") {
+          live.armRemovalSuppression(expected, now());
         }
       }
       // Registry maintenance, not capture (#681 round 6, codex P2-B): runs
@@ -3438,6 +3457,17 @@ export function createWorkspaceEngineCapture(
         const settleClaims = new Map<string, number>();
         const settleId = (token: number, generation: number): string =>
           `${generation}:${token}`;
+        // WHEN this settle started (codex P1 on #746's synchronous
+        // tombstone): the no-debt tombstone clear below must not erase a
+        // delete newer than the write it certifies. A settle's own
+        // completion callback can run late — behind an occupied capture
+        // chain, or simple scheduling — so an external delete landing
+        // AFTER the write already materialized, but BEFORE this callback
+        // runs, must survive the clear. Keyed on start, not completion:
+        // the write could have landed any time from here on, so a
+        // tombstone recorded at or after this moment might be exactly
+        // that delete.
+        const settleStartedAtMs = new Map<string, number>();
         const noteUpdate = (): void => {
           updatesSeen += 1;
         };
@@ -3468,6 +3498,8 @@ export function createWorkspaceEngineCapture(
           // redeem.
           const claim = settleClaims.get(settleId(token, generation));
           settleClaims.delete(settleId(token, generation));
+          const startedAtMs = settleStartedAtMs.get(settleId(token, generation));
+          settleStartedAtMs.delete(settleId(token, generation));
           if (claim !== undefined && claim > updatesSettled) updatesSettled = claim;
           lastSettledSha = result.sha256;
           // The settle committed, but the engine says the FILE did not move
@@ -3499,7 +3531,22 @@ export function createWorkspaceEngineCapture(
           // this, a still-later transient close failure for the SAME
           // session, over edits made AFTER this recovery, would read as
           // belonging to the deleted incarnation and get wrongly cancelled.
-          recentExternalDeletesWithNoDebt.delete(input.path);
+          //
+          // ONLY a tombstone that PREDATES this settle's own start (codex
+          // P1 follow-up on #746's synchronous recording): this callback
+          // can run late, behind an occupied capture chain, and a delete
+          // landing after the write already materialized but before this
+          // callback runs must survive — clearing it here would erase the
+          // one place that evidence is recorded, purely because an OLDER
+          // settle's completion happened to run after it.
+          const staleTombstone = recentExternalDeletesWithNoDebt.get(input.path);
+          if (
+            staleTombstone !== undefined &&
+            startedAtMs !== undefined &&
+            staleTombstone.deletedAtMs <= startedAtMs
+          ) {
+            recentExternalDeletesWithNoDebt.delete(input.path);
+          }
           //
           // Clear the ABANDONMENT, not the debt (CodeRabbit): this entry may
           // belong to an OLDER generation whose own release is still being
@@ -3583,6 +3630,7 @@ export function createWorkspaceEngineCapture(
         // settle that follows it; one sent after this point is not.
         const onSettleStart = (token: number, generation: number) => {
           settleClaims.set(settleId(token, generation), updatesSeen);
+          settleStartedAtMs.set(settleId(token, generation), now());
           reportSaveState("settling", token);
         };
         // The one place a background settle failure is observable. Log it with
@@ -3613,6 +3661,7 @@ export function createWorkspaceEngineCapture(
           // This settle carried nothing to History, so its claim is dropped
           // unredeemed — and only ITS claim, whichever settle finishes first.
           settleClaims.delete(settleId(token, generation));
+          settleStartedAtMs.delete(settleId(token, generation));
           if (typeof error === "object" && error !== null) {
             settleFailureTokens.set(error, token);
           }
@@ -3790,6 +3839,18 @@ export function createWorkspaceEngineCapture(
           tombstone.expected
             ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
             : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`;
+
+        // `captureBatch`'s direct-arm door (codex P1-C follow-up, #746):
+        // called at watcher-delivery time, bypassing the TTL-bounded
+        // no-debt tombstone map entirely, so nothing here can expire before
+        // a later-stage retry arrives to ask. The same age discrimination
+        // `consumeRecentExternalDeleteWithNoDebt` applies still holds — a
+        // session opened AFTER the delete is this path's later recreation,
+        // not the incarnation the delete orphaned.
+        const armRemovalSuppression = (expected: boolean, deletedAtMs: number): void => {
+          if (writeCancelled || sessionOpenedAtMs >= deletedAtMs) return;
+          standDownFromWrite(removalStandDownMessage({ expected }));
+        };
 
         // A RETRY's own removal check (#746). `scheduleDetachedLockedSettle`
         // (below) is the debt-REGISTRATION door and asks this once, but two
@@ -4405,6 +4466,7 @@ export function createWorkspaceEngineCapture(
           status: "live",
           orphaned: false,
           close: closeEntry,
+          armRemovalSuppression,
         };
         entry = liveEntry;
         // A session whose release FAILED is still the daemon's: a refused
