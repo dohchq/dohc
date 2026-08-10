@@ -40,6 +40,9 @@ use std::collections::{HashMap, HashSet};
 /// UTF-8 bytes. Mirrors the TS engine's 10 MB text cap
 /// (`versions-write-text-file`).
 pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
+pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
+pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
+pub const MAX_AUTHOR_JSON_BYTES: usize = 10 * 1024;
 
 /// The in-band content cap every capped read binds into its SQL and every
 /// RPC references — ONE definition, so the query guard and the wire
@@ -264,6 +267,12 @@ impl<'a> VersionedTextStore<'a> {
         validate_identifier(&input.workspace_id, "workspace_id")?;
         validate_identifier(&input.version_id, "version_id")?;
         validate_moment_id(&input.moment_id)?;
+        validate_moment_metadata(
+            input.metadata_origin.as_str(),
+            input.metadata_summary.as_deref(),
+            input.metadata_correlation_id.as_deref(),
+            input.author_json.as_deref(),
+        )?;
         let mut normalized_input = input.clone();
         normalized_input.from_path = validate_addressable_plaintext_path(&input.from_path)?;
         normalized_input.to_path = validate_plaintext_storable_path(&input.to_path)?;
@@ -434,12 +443,12 @@ impl<'a> VersionedTextStore<'a> {
         input: &RollbackTextFileMutation,
         faults: &dyn FaultInjector,
     ) -> Result<bool, DomainError> {
-        self.rollback_text_file_mutation_with(input, faults, |_, _, _| Ok(()))
+        self.rollback_text_file_mutation_with(input, faults, |_, _, _, _| Ok(()))
     }
 
     /// Roll back with a caller-supplied same-transaction side effect. The
-    /// callback receives the mutated object id and the restored text head, if
-    /// the rollback restores text (binary/absent restores pass `None`).
+    /// callback receives the mutated object id, the restored text head, if
+    /// present, and the compensating moment id.
     pub fn rollback_text_file_mutation_with<F>(
         &mut self,
         input: &RollbackTextFileMutation,
@@ -447,11 +456,17 @@ impl<'a> VersionedTextStore<'a> {
         after: F,
     ) -> Result<bool, DomainError>
     where
-        F: FnOnce(&Transaction<'_>, &str, Option<(&str, &str)>) -> Result<(), DomainError>,
+        F: FnOnce(&Transaction<'_>, &str, Option<(&str, &str)>, &str) -> Result<(), DomainError>,
     {
         validate_identifier(&input.workspace_id, "workspace_id")?;
         validate_identifier(&input.version_id, "version_id")?;
         validate_identifier(&input.mutation_moment_id, "moment_id")?;
+        validate_moment_metadata(
+            input.metadata_origin.as_str(),
+            None,
+            None,
+            input.author_json.as_deref(),
+        )?;
         let mut normalized_input = input.clone();
         normalized_input.path = validate_addressable_plaintext_path(&input.path)?;
         let input = &normalized_input;
@@ -531,6 +546,14 @@ impl<'a> VersionedTextStore<'a> {
             }
             Ok(RollbackPrep { moment, before })
         })?;
+        let compensating_moment_id = format!(
+            "rollback-{}",
+            hash_fields(&[
+                input.workspace_id.as_bytes(),
+                input.version_id.as_bytes(),
+                input.mutation_moment_id.as_bytes(),
+            ])
+        );
 
         let outcome = self.store.write_with(faults, |tx| {
             // A rollback restore is a new disk intent even though history
@@ -760,6 +783,115 @@ impl<'a> VersionedTextStore<'a> {
                 upsert_snapshot(tx, before)?;
             }
 
+            let current_present = prep.moment.operation != MomentOp::Delete;
+            let restored = prep.before.as_ref();
+            let restored_path = restored
+                .map(|snapshot| snapshot.path.as_str())
+                .unwrap_or(prep.moment.path.as_str());
+            let restored_kind = restored
+                .map(|snapshot| snapshot.content_kind.as_str())
+                .unwrap_or(prep.moment.after_content_kind.as_str());
+            let restored_text_sha = restored
+                .and_then(|snapshot| snapshot.blob_sha256.as_deref())
+                .or(prep.moment.after_blob_sha256.as_deref());
+            let restored_binary_sha = restored
+                .and_then(|snapshot| snapshot.binary_sha256.as_deref())
+                .or(prep.moment.after_binary_sha256.as_deref());
+            let restored_digest = if restored_kind == "binary" {
+                restored_binary_sha
+            } else {
+                restored_text_sha
+            };
+            let operation = if restored.is_none() {
+                "delete"
+            } else if restored_path != prep.moment.path {
+                "rename"
+            } else {
+                "write"
+            };
+            let current_digest = if prep.moment.after_content_kind == "binary" {
+                prep.moment.after_binary_sha256.as_deref()
+            } else {
+                prep.moment.after_blob_sha256.as_deref()
+            };
+            tx.execute(
+                "INSERT INTO moments \
+                 (workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms, \
+                  operation,after_blob_sha256,before_present,before_blob_sha256, \
+                  before_latest_moment_id,metadata_origin,metadata_summary, \
+                  metadata_correlation_id,author_json,sync_record_only,after_content_kind, \
+                  after_binary_sha256,before_content_kind,before_binary_sha256, \
+                  before_object_id,before_version_id,before_path,before_updated_at_ms, \
+                  before_metadata_origin,before_metadata_summary,before_metadata_correlation_id, \
+                  payload_before_path,payload_before_content_kind,payload_before_blob_sha256, \
+                  payload_after_path,payload_after_content_kind,payload_after_blob_sha256) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,NULL,NULL,?14,NULL, \
+                         ?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?6,?15,?29)",
+                params![
+                    ws,
+                    restore_generation,
+                    compensating_moment_id,
+                    input.version_id,
+                    prep.moment.object_id,
+                    restored_path,
+                    prep.moment.recorded_at_ms,
+                    operation,
+                    (restored_kind == "text").then_some(restored_text_sha).flatten(),
+                    if current_present { 2 } else { 1 },
+                    current_present
+                        .then_some(prep.moment.after_blob_sha256.as_deref())
+                        .flatten(),
+                    current_present.then_some(input.mutation_moment_id.as_str()),
+                    input.metadata_origin,
+                    input.author_json,
+                    restored_kind,
+                    (restored_kind == "binary")
+                        .then_some(restored_binary_sha)
+                        .flatten(),
+                    prep.moment.after_content_kind,
+                    current_present
+                        .then_some(prep.moment.after_binary_sha256.as_deref())
+                        .flatten(),
+                    current_present.then_some(prep.moment.object_id.as_str()),
+                    current_present.then_some(prep.moment.version_id.as_str()),
+                    current_present.then_some(prep.moment.path.as_str()),
+                    current_present.then_some(prep.moment.recorded_at_ms),
+                    current_present.then_some(prep.moment.metadata_origin.as_str()),
+                    current_present
+                        .then_some(prep.moment.metadata_summary.as_deref())
+                        .flatten(),
+                    current_present
+                        .then_some(prep.moment.metadata_correlation_id.as_deref())
+                        .flatten(),
+                    current_present.then_some(prep.moment.path.as_str()),
+                    current_present.then_some(prep.moment.after_content_kind.as_str()),
+                    current_present.then_some(current_digest).flatten(),
+                    restored_digest,
+                ],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "INSERT INTO replication_journal (doc_id,op_kind,created_at_ms) \
+                 VALUES (?1,'moment.append',?2)",
+                params![prep.moment.object_id, prep.moment.recorded_at_ms],
+            )
+            .map_err(DomainError::sql_persist)?;
+            if restored.is_some() {
+                tx.execute(
+                    "UPDATE snapshots SET latest_moment_id=?1,metadata_origin=?2, \
+                     metadata_summary=NULL,metadata_correlation_id=NULL \
+                     WHERE workspace_id=?3 AND version_id=?4 AND object_id=?5",
+                    params![
+                        compensating_moment_id,
+                        input.metadata_origin,
+                        ws,
+                        input.version_id,
+                        prep.moment.object_id,
+                    ],
+                )
+                .map_err(DomainError::sql_persist)?;
+            }
+
             if !object_has_references(tx, ws, &prep.moment.object_id)? {
                 tx.execute(
                     "DELETE FROM file_objects WHERE workspace_id = ?1 AND object_id = ?2",
@@ -770,7 +902,12 @@ impl<'a> VersionedTextStore<'a> {
             let restored_text = prep.before.as_ref().and_then(|before| {
                 (before.content_kind == "text").then_some((before.path.as_str(), before.text.as_str()))
             });
-            after(tx, &prep.moment.object_id, restored_text)?;
+            after(
+                tx,
+                &prep.moment.object_id,
+                restored_text,
+                &compensating_moment_id,
+            )?;
             record_request(
                 tx,
                 input.request_id.as_deref(),
@@ -1936,6 +2073,12 @@ fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
     validate_identifier(&input.version_id, "version_id")?;
     bounded_identifier(&input.object_id, "object_id")?;
     validate_moment_id(&input.moment_id)?;
+    validate_moment_metadata(
+        input.metadata_origin.as_str(),
+        input.metadata_summary.as_deref(),
+        input.metadata_correlation_id.as_deref(),
+        input.author_json.as_deref(),
+    )?;
     let mut normalized = input.clone();
     normalized.path = validate_plaintext_storable_path(&input.path)?;
     validate_text(&normalized.text)?;
@@ -1965,6 +2108,12 @@ fn normalized_delete_input(input: &DeleteTextFile) -> Result<DeleteTextFile, Dom
     validate_identifier(&input.workspace_id, "workspace_id")?;
     validate_identifier(&input.version_id, "version_id")?;
     validate_moment_id(&input.moment_id)?;
+    validate_moment_metadata(
+        input.metadata_origin.as_str(),
+        input.metadata_summary.as_deref(),
+        input.metadata_correlation_id.as_deref(),
+        input.author_json.as_deref(),
+    )?;
     let mut normalized = input.clone();
     normalized.path = validate_addressable_plaintext_path(&input.path)?;
     Ok(normalized)
@@ -1978,6 +2127,12 @@ pub fn validate_delete_input(input: &DeleteTextFile) -> Result<(), DomainError> 
 fn normalized_capture_ingest(input: &CaptureIngest) -> Result<CaptureIngest, DomainError> {
     validate_identifier(&input.workspace_id, "workspace_id")?;
     validate_identifier(&input.version_id, "version_id")?;
+    validate_moment_metadata(
+        input.metadata_origin.as_str(),
+        input.metadata_summary.as_deref(),
+        input.metadata_correlation_id.as_deref(),
+        input.author_json.as_deref(),
+    )?;
     let mut normalized = input.clone();
     normalized.path = validate_plaintext_storable_path(&input.path)?;
     validate_text(&normalized.text)?;
@@ -1987,6 +2142,12 @@ fn normalized_capture_ingest(input: &CaptureIngest) -> Result<CaptureIngest, Dom
 fn normalized_capture_retire(input: &CaptureRetire) -> Result<CaptureRetire, DomainError> {
     validate_identifier(&input.workspace_id, "workspace_id")?;
     validate_identifier(&input.version_id, "version_id")?;
+    validate_moment_metadata(
+        CAPTURE_ORIGIN,
+        input.metadata_summary.as_deref(),
+        input.metadata_correlation_id.as_deref(),
+        None,
+    )?;
     let mut normalized = input.clone();
     normalized.path = validate_addressable_plaintext_path(&input.path)?;
     Ok(normalized)
@@ -3766,6 +3927,55 @@ pub(crate) fn validate_moment_id(value: &str) -> Result<(), DomainError> {
         return Err(DomainError::InvalidInput {
             reason: "moment_id contains a reserved character",
         });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_moment_metadata(
+    metadata_origin: &str,
+    summary: Option<&str>,
+    correlation_id: Option<&str>,
+    author_json: Option<&str>,
+) -> Result<(), DomainError> {
+    for field in [Some(metadata_origin), summary, correlation_id]
+        .into_iter()
+        .flatten()
+    {
+        if field.len() > MAX_METADATA_FIELD_BYTES {
+            return Err(DomainError::PayloadTooLarge {
+                constraint: "MAX_METADATA_FIELD_BYTES",
+                limit_bytes: MAX_METADATA_FIELD_BYTES,
+                observed_bytes: field.len(),
+            });
+        }
+    }
+    let Some(author_json) = author_json else {
+        return Ok(());
+    };
+    if author_json.len() > MAX_AUTHOR_JSON_BYTES {
+        return Err(DomainError::PayloadTooLarge {
+            constraint: "MAX_AUTHOR_JSON_BYTES",
+            limit_bytes: MAX_AUTHOR_JSON_BYTES,
+            observed_bytes: author_json.len(),
+        });
+    }
+    let Ok(author) = serde_json::from_str::<serde_json::Value>(author_json) else {
+        return Ok(());
+    };
+    let Some(author) = author.as_object() else {
+        return Ok(());
+    };
+    for field in ["agentId", "onBehalfOf", "agentRunId"] {
+        let Some(value) = author.get(field).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if value.len() > MAX_AUTHOR_FIELD_BYTES {
+            return Err(DomainError::PayloadTooLarge {
+                constraint: "MAX_AUTHOR_FIELD_BYTES",
+                limit_bytes: MAX_AUTHOR_FIELD_BYTES,
+                observed_bytes: value.len(),
+            });
+        }
     }
     Ok(())
 }

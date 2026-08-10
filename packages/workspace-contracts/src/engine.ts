@@ -356,10 +356,7 @@ export interface VersionCreatePayload {
   forkVersionId?: VersionId;
   forkMomentId?: VersionedTextMomentId;
   createdAtMs: number;
-  // Lazy additive (0P-A gate fix): absent only in payloads journaled before
-  // fork-state shipping; importers then fall back to copying their local
-  // source-version snapshots (the legacy, divergence-prone behavior).
-  forkSnapshots?: VersionCreateForkSnapshot[];
+  forkSnapshots: VersionCreateForkSnapshot[];
 }
 
 export interface ConflictResolvePayload {
@@ -399,6 +396,8 @@ export interface SecretFileDeletePayload {
 export interface SecretVersionForkPayload {
   toVersionId: VersionId;
   fromVersionId: VersionId;
+  chunkIndex: number;
+  totalRows: number;
   rows: Array<{
     path: string;
     ivBase64: string;
@@ -406,10 +405,6 @@ export interface SecretVersionForkPayload {
     ciphertextSha256: string;
     byteLength: number;
     updatedAtMs: number;
-    // Provenance string copied verbatim from the origin's secret_files row.
-    // Secret moment ids are machine-local, so this may not resolve through
-    // getSecretMoment on replicas; secret_files intentionally has no FK here.
-    latestMomentId: string;
   }>;
 }
 

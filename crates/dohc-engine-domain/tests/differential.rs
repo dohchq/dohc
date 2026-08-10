@@ -177,19 +177,21 @@ fn run_trace(db: &std::path::Path) -> String {
 fn golden() -> String {
     let hello = text_blob_sha256("hello");
     let world = text_blob_sha256("world");
+    let temporary = text_blob_sha256("temporary");
     format!(
         "active=main\n\
          version id=main kind=main name=Main created=1 fork_from=- fork_moment=-\n\
          version id=feat kind=named name=feature created=20 fork_from=main fork_moment=m1\n\
          version id=feat2 kind=named name=feature2 created=25 fork_from=main fork_moment=m1\n\
          snapshot version=feat2 path=a.md object=o1 content=text:{hello} origin=user\n\
-         snapshot version=main path=a.md object=o1 content=text:{hello} origin=user\n\
+         snapshot version=main path=a.md object=o1 content=text:{hello} origin=restore\n\
          forkbase version=feat path=a.md object=o1 content=text:{hello}\n\
          forkbase version=feat2 path=a.md object=o1 content=text:{hello}\n\
          moment order=1 id=m1 version=main object=o1 path=a.md recorded=10 op=write after=text:{hello} before_present=false before=- before_latest=- origin=user sync_only=false\n\
          moment order=2 id=m2 version=feat object=o1 path=a.md recorded=30 op=write after=text:{world} before_present=true before=text:{hello} before_latest=m1 origin=agent sync_only=false\n\
          moment order=3 id=m3 version=feat object=o1 path=renamed.md recorded=40 op=rename after=text:{world} before_present=true before=text:{world} before_latest=m2 origin=agent sync_only=false\n\
-         moment order=4 id=m4 version=feat object=o1 path=renamed.md recorded=50 op=delete after=text:{world} before_present=true before=text:{world} before_latest=m3 origin=agent sync_only=false\n"
+         moment order=4 id=m4 version=feat object=o1 path=renamed.md recorded=50 op=delete after=text:{world} before_present=true before=text:{world} before_latest=m3 origin=agent sync_only=false\n\
+         moment order=6 id=rollback-2b938ed702dc35b2a5c40b5e21e894675255da66dfe9703f91c86e44ca58f692 version=main object=o1 path=a.md recorded=60 op=write after=text:{hello} before_present=true before=text:{temporary} before_latest=m5 origin=restore sync_only=false\n"
     )
 }
 

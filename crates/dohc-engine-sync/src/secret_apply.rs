@@ -5,12 +5,9 @@ use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
-
-const SECRET_FORK_MISMATCH_REASON: &str =
-    "secret fork payload does not match the local sealed source state";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +42,8 @@ struct SecretDelete {
 struct SecretFork {
     to_version_id: String,
     from_version_id: String,
+    chunk_index: usize,
+    total_rows: usize,
     rows: Vec<SecretForkRow>,
 }
 
@@ -57,14 +56,6 @@ struct SecretForkRow {
     ciphertext_sha256: String,
     byte_length: i64,
     updated_at_ms: i64,
-    latest_moment_id: String,
-}
-
-struct SealedSourceRow {
-    iv_base64: String,
-    auth_tag_base64: String,
-    ciphertext_base64: String,
-    byte_length: i64,
 }
 
 pub fn apply_secret_envelope(
@@ -199,121 +190,99 @@ fn apply_fork(
     op: &ReplicationEnvelope,
     payload: SecretFork,
 ) -> Result<(), SyncError> {
+    validate_fork_versions(tx, op, &payload.from_version_id, &payload.to_version_id)?;
+    validate_fork_rows(&payload.rows, payload.total_rows)?;
+
+    if payload.chunk_index == 0 {
+        tx.execute(
+            "DELETE FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
+            params![op.workspace_id, payload.to_version_id],
+        )
+        .map_err(SyncError::persist)?;
+        tx.execute(
+            "DELETE FROM secret_fork_bases WHERE workspace_id=?1 AND version_id=?2",
+            params![op.workspace_id, payload.to_version_id],
+        )
+        .map_err(SyncError::persist)?;
+    }
+    insert_fork_rows(tx, op, &payload.to_version_id, payload.rows)
+}
+
+fn validate_fork_versions(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    from_version_id: &str,
+    to_version_id: &str,
+) -> Result<(), SyncError> {
     crate::model::bounded(
-        &payload.from_version_id,
+        from_version_id,
         "secret fork source version id must be non-empty and bounded",
     )?;
     crate::model::bounded(
-        &payload.to_version_id,
+        to_version_id,
         "secret fork destination version id must be non-empty and bounded",
     )?;
-    if payload.from_version_id == payload.to_version_id {
+    if from_version_id == to_version_id {
         return Err(SyncError::InvalidInput {
             reason: "secret fork source and destination must differ",
         });
     }
-    // An honest fork with an empty source journals NO op (`fork_version_in_tx`
-    // only journals when it copied a row), so an empty wire fork has no valid
-    // producer — while the unconditional destination wipe below would erase
-    // every secret tip and fork base the destination already holds.
-    if payload.rows.is_empty() {
+    require_version(tx, &op.workspace_id, from_version_id)?;
+    require_version(tx, &op.workspace_id, to_version_id)
+}
+
+fn validate_fork_rows(rows: &[SecretForkRow], total_rows: usize) -> Result<(), SyncError> {
+    if rows.len() > total_rows {
         return Err(SyncError::InvalidInput {
-            reason: "secret fork must carry at least one row",
+            reason: "secret fork chunk claims more rows than its declared total",
         });
     }
-    require_version(tx, &op.workspace_id, &payload.from_version_id)?;
-    require_version(tx, &op.workspace_id, &payload.to_version_id)?;
-    for row in &payload.rows {
+    let mut seen = HashSet::with_capacity(rows.len());
+    for row in rows {
         validate_fork_row(row)?;
-    }
-
-    let source_by_path = {
-        let mut statement = tx
-            .prepare(
-                "SELECT path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length \
-                 FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
-            )
-            .map_err(SyncError::corrupt)?;
-        statement
-            .query_map(params![op.workspace_id, payload.from_version_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    SealedSourceRow {
-                        iv_base64: row.get(1)?,
-                        auth_tag_base64: row.get(2)?,
-                        ciphertext_base64: row.get(3)?,
-                        byte_length: row.get(4)?,
-                    },
-                ))
-            })
-            .map_err(SyncError::corrupt)?
-            .collect::<Result<HashMap<_, _>, _>>()
-            .map_err(SyncError::corrupt)?
-    };
-    if payload.rows.len() != source_by_path.len() {
-        return Err(secret_fork_mismatch());
-    }
-    let mut seen = HashSet::with_capacity(payload.rows.len());
-    for row in &payload.rows {
         if !seen.insert(row.path.as_str()) {
             return Err(SyncError::InvalidInput {
                 reason: "secret fork contains duplicate paths",
             });
         }
-        let source = source_by_path
-            .get(&row.path)
-            .ok_or_else(secret_fork_mismatch)?;
-        let source_ciphertext = STANDARD.decode(&source.ciphertext_base64).map_err(|_| {
-            SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(
-                "sealed source ciphertext is malformed",
-            )))
-        })?;
-        if source.iv_base64 != row.iv_base64
-            || source.auth_tag_base64 != row.auth_tag_base64
-            || dohc_engine_storage::hex_sha256(&source_ciphertext) != row.ciphertext_sha256
-            || source.byte_length != row.byte_length
-        {
-            return Err(secret_fork_mismatch());
-        }
     }
+    Ok(())
+}
 
-    tx.execute(
-        "DELETE FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
-        params![op.workspace_id, payload.to_version_id],
-    )
-    .map_err(SyncError::persist)?;
-    tx.execute(
-        "DELETE FROM secret_fork_bases WHERE workspace_id=?1 AND version_id=?2",
-        params![op.workspace_id, payload.to_version_id],
-    )
-    .map_err(SyncError::persist)?;
-    for row in payload.rows {
+fn insert_fork_rows(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    to_version_id: &str,
+    rows: Vec<SecretForkRow>,
+) -> Result<(), SyncError> {
+    for (index, row) in rows.into_iter().enumerate() {
         let ciphertext = load_ciphertext(tx, &row.ciphertext_sha256, row.byte_length)?;
         let ciphertext_base64 = STANDARD.encode(ciphertext);
+        let latest_moment_id = format!("secret-sync-{}-{}-{index}", op.origin_id, op.origin_seq);
         tx.execute(
-            "INSERT INTO secret_files \
+            "INSERT OR IGNORE INTO secret_files \
              (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 op.workspace_id,
-                payload.to_version_id,
+                to_version_id,
                 row.path,
                 row.iv_base64,
                 row.auth_tag_base64,
                 ciphertext_base64,
                 row.byte_length,
                 row.updated_at_ms,
-                row.latest_moment_id
+                latest_moment_id
             ],
         )
         .map_err(SyncError::persist)?;
         tx.execute(
-            "INSERT INTO secret_fork_bases \
+            "INSERT OR IGNORE INTO secret_fork_bases \
              (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length) \
              VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
                 op.workspace_id,
-                payload.to_version_id,
+                to_version_id,
                 row.path,
                 row.iv_base64,
                 row.auth_tag_base64,
@@ -360,7 +329,6 @@ fn validate_fork_row(row: &SecretForkRow) -> Result<(), SyncError> {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         || !is_secret_byte_length(row.byte_length)
-        || row.latest_moment_id.is_empty()
     {
         return Err(SyncError::InvalidInput {
             reason: "secret fork row is malformed",
@@ -424,12 +392,6 @@ fn load_ciphertext(
         ));
     }
     Ok(ciphertext)
-}
-
-const fn secret_fork_mismatch() -> SyncError {
-    SyncError::RetryableState {
-        reason: SECRET_FORK_MISMATCH_REASON,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

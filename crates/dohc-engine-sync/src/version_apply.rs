@@ -16,7 +16,7 @@ struct VersionCreatePayload {
     fork_version_id: Option<String>,
     fork_moment_id: Option<String>,
     created_at_ms: i64,
-    fork_snapshots: Option<Vec<ForkSnapshot>>,
+    fork_snapshots: Vec<ForkSnapshot>,
 }
 
 #[derive(Deserialize)]
@@ -93,19 +93,20 @@ fn apply_workspace_init(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
 }
 
 fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {
-    let has_fork_snapshots = op
+    let has_valid_fork_snapshots = op
         .payload
         .as_object()
-        .is_some_and(|payload| payload.contains_key("forkSnapshots"));
-    let payload: VersionCreatePayload =
-        serde_json::from_value(op.payload.clone()).map_err(|_| SyncError::InvalidInput {
-            reason: "version.create payload is malformed",
-        })?;
-    if has_fork_snapshots && payload.fork_snapshots.is_none() {
+        .and_then(|payload| payload.get("forkSnapshots"))
+        .is_some_and(serde_json::Value::is_array);
+    if !has_valid_fork_snapshots {
         return Err(SyncError::InvalidInput {
             reason: "version.create forkSnapshots is malformed",
         });
     }
+    let payload: VersionCreatePayload =
+        serde_json::from_value(op.payload.clone()).map_err(|_| SyncError::InvalidInput {
+            reason: "version.create payload is malformed",
+        })?;
     validate_version_payload(&payload)?;
 
     let existing: bool = tx
@@ -115,10 +116,7 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    if existing {
-        return Ok(());
-    }
-    if payload.version_id != "main" {
+    if !existing && payload.version_id != "main" {
         let collision: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM versions WHERE version_id=?1)",
@@ -133,72 +131,40 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
         }
     }
 
-    let source = match payload.fork_version_id.as_deref() {
-        Some(version_id) => tx
-            .query_row(
-                "SELECT version_id FROM versions WHERE workspace_id=?1 AND version_id=?2",
-                params![op.workspace_id, version_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(SyncError::corrupt)?
-            .ok_or(SyncError::RetryableState {
-                reason: "version.create source version is missing",
-            })
-            .map(Some)?,
-        None => None,
-    };
-
-    tx.execute(
-        "INSERT INTO versions \
-         (workspace_id,version_id,kind,name,created_at_ms,fork_version_id,fork_moment_id) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7)",
-        params![
-            op.workspace_id,
-            payload.version_id,
-            payload.kind,
-            payload.name,
-            payload.created_at_ms,
-            payload.fork_version_id,
-            payload.fork_moment_id
-        ],
-    )
-    .map_err(SyncError::persist)?;
-    let Some(source) = source else {
-        return Ok(());
-    };
-
-    if let Some(snapshots) = payload.fork_snapshots {
-        validate_shipped_snapshots(&snapshots)?;
-        for snapshot in snapshots {
-            insert_shipped_snapshot(tx, op, &payload.version_id, payload.created_at_ms, snapshot)?;
-        }
-        return Ok(());
+    if let Some(version_id) = payload.fork_version_id.as_deref() {
+        tx.query_row(
+            "SELECT version_id FROM versions WHERE workspace_id=?1 AND version_id=?2",
+            params![op.workspace_id, version_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .ok_or(SyncError::RetryableState {
+            reason: "version.create source version is missing",
+        })?;
     }
 
-    tx.execute(
-        "INSERT INTO snapshots \
-         (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \
-         SELECT workspace_id,?2,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256 \
-         FROM snapshots WHERE workspace_id=?1 AND version_id=?3",
-        params![op.workspace_id, payload.version_id, source],
-    )
-    .map_err(SyncError::persist)?;
-    tx.execute(
-        "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
-         SELECT workspace_id,?2,path,object_id FROM path_aliases \
-         WHERE workspace_id=?1 AND version_id=?3",
-        params![op.workspace_id, payload.version_id, source],
-    )
-    .map_err(SyncError::persist)?;
-    tx.execute(
-        "INSERT INTO fork_base_snapshots \
-         (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \
-         SELECT workspace_id,?2,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256 \
-         FROM snapshots WHERE workspace_id=?1 AND version_id=?3",
-        params![op.workspace_id, payload.version_id, source],
-    )
-    .map_err(SyncError::persist)?;
+    if !existing {
+        tx.execute(
+            "INSERT INTO versions \
+             (workspace_id,version_id,kind,name,created_at_ms,fork_version_id,fork_moment_id) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                op.workspace_id,
+                payload.version_id,
+                payload.kind,
+                payload.name,
+                payload.created_at_ms,
+                payload.fork_version_id,
+                payload.fork_moment_id
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    }
+    validate_shipped_snapshots(&payload.fork_snapshots)?;
+    for snapshot in payload.fork_snapshots {
+        insert_shipped_snapshot(tx, op, &payload.version_id, payload.created_at_ms, snapshot)?;
+    }
     Ok(())
 }
 
@@ -306,7 +272,7 @@ fn insert_shipped_snapshot(
     };
     for table in ["snapshots", "fork_base_snapshots"] {
         let sql = format!(
-            "INSERT INTO {table} \
+            "INSERT OR IGNORE INTO {table} \
              (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"
         );
@@ -330,7 +296,7 @@ fn insert_shipped_snapshot(
         .map_err(SyncError::persist)?;
     }
     tx.execute(
-        "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
+        "INSERT OR IGNORE INTO path_aliases (workspace_id,version_id,path,object_id) \
          VALUES (?1,?2,?3,?4)",
         params![
             op.workspace_id,

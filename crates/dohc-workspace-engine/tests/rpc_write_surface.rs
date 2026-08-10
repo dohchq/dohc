@@ -4181,7 +4181,8 @@ async fn rollback_request_id_replay_is_a_no_op_and_reuse_mismatch_is_refused() {
     .await;
     assert_eq!(replay["deduped"], true);
     let after_replay = moments(&transport, &handle, 6).await.len();
-    assert_eq!(after_replay, 1);
+    // Rollback removes the target moment and appends one compensating moment.
+    assert_eq!(after_replay, 2);
     // MUTATION: omit legacyBeforeText from the rollback ledger hash -> a
     // different legacy preimage silently replays as deduped.
     let mut legacy_flip = params.clone();

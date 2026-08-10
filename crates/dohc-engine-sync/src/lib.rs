@@ -18,6 +18,7 @@ mod hydration;
 mod journal;
 mod model;
 mod moment_apply;
+mod outbound;
 mod path_policy;
 mod relay;
 mod router;
@@ -52,7 +53,14 @@ pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,
     MAX_WIRE_INTEGER, ReplicationEnvelope,
 };
-pub use moment_apply::{MomentMaterializationChange, apply_moment_envelope};
+pub use moment_apply::{
+    MomentApplyResult, MomentMaterializationChange, apply_moment_envelope,
+    apply_moment_envelope_detailed,
+};
+pub use outbound::{
+    journal_moment_append_in_tx, journal_secret_delete_in_tx, journal_secret_put_in_tx,
+    journal_secret_version_fork_in_tx, journal_version_create_in_tx,
+};
 pub use path_policy::{PathClass, classify_share_path};
 pub use relay::{
     BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,

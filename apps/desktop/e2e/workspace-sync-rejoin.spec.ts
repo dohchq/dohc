@@ -1,6 +1,10 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type {
+  DohcDesktopBridge,
+  SyncStatusResult,
+} from "../src/ipc/bridgeContract";
 import { RelayFilePeer } from "../src/testing/relayFilePeer";
 import { claimRelayWorkspace, relayServesWorkspace } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -40,7 +44,40 @@ import {
 // see the note below where it used to live.
 
 const TOKEN = "test:e2e-user";
+type SyncStatusBridge = Pick<DohcDesktopBridge, "getSyncStatus">;
 
+async function readSyncStatus(
+  page: Page,
+  workspaceId: string,
+): Promise<Pick<SyncStatusResult, "lastSyncedAtMs">> {
+  return await page.evaluate(async (id) => {
+    const api = (window as unknown as { dohcDesktop?: SyncStatusBridge })
+      .dohcDesktop;
+    if (!api) throw new Error("desktop bridge is unavailable");
+    return await api.getSyncStatus({ workspaceId: id });
+  }, workspaceId);
+}
+
+async function waitForLaterSync(
+  page: Page,
+  workspaceId: string,
+  previousSyncAtMs: number,
+): Promise<void> {
+  await page.waitForFunction(
+    async ({ id, previousSyncAtMs }) => {
+      const api = (window as unknown as { dohcDesktop?: SyncStatusBridge })
+        .dohcDesktop;
+      if (!api) return false;
+      const status = await api.getSyncStatus({ workspaceId: id });
+      return (
+        status.lastSyncedAtMs !== null &&
+        status.lastSyncedAtMs > previousSyncAtMs
+      );
+    },
+    { id: workspaceId, previousSyncAtMs },
+    { timeout: 30_000 },
+  );
+}
 
 // The two-machine conflict-review scenario that lived here was deleted: it was
 // `test.fixme`d because file content never reaches the relay (#356), and its
@@ -142,43 +179,18 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     // Record the completed bootstrap pass, then queue a local change and wait
     // for a later sync timestamp. This proves a push-capable normal pass has
     // completed before the relay log is scanned.
-    const syncBeforeLocalChange = await page.evaluate(async (id) => {
-      const api = (window as unknown as {
-        dohcDesktop?: {
-          getSyncStatus(payload: { workspaceId: string }): Promise<{
-            lastSyncedAtMs: number | null;
-          }>;
-        };
-      }).dohcDesktop;
-      if (!api) throw new Error("desktop bridge is unavailable");
-      return await api.getSyncStatus({ workspaceId: id });
-    }, workspaceId);
+    const syncBeforeLocalChange = await readSyncStatus(page, workspaceId);
     expect(syncBeforeLocalChange.lastSyncedAtMs).not.toBeNull();
+    if (syncBeforeLocalChange.lastSyncedAtMs === null) {
+      throw new Error("completed bootstrap sync has no timestamp");
+    }
     await writeWorkspaceFiles(temp, [
       { path: "notes/join-local-sync-probe.md", contents: "local sync probe\n" },
     ]);
-    await page.waitForFunction(
-      async ({ id, previousSyncAtMs }) => {
-        const api = (window as unknown as {
-          dohcDesktop?: {
-            getSyncStatus(payload: { workspaceId: string }): Promise<{
-              lastSyncedAtMs: number | null;
-            }>;
-          };
-        }).dohcDesktop;
-        if (!api) return false;
-        const status = await api.getSyncStatus({ workspaceId: id });
-        return (
-          status.lastSyncedAtMs !== null &&
-          previousSyncAtMs !== null &&
-          status.lastSyncedAtMs > previousSyncAtMs
-        );
-      },
-      {
-        id: workspaceId,
-        previousSyncAtMs: syncBeforeLocalChange.lastSyncedAtMs,
-      },
-      { timeout: 30_000 },
+    await waitForLaterSync(
+      page,
+      workspaceId,
+      syncBeforeLocalChange.lastSyncedAtMs,
     );
 
     // The join is pull-first and seeds no starter files. The relay log must
@@ -355,19 +367,9 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
       { ok: true },
     );
 
-    // The workspace is now bound and pushing, and the proof is that the relay
-    // owns a bucket for it: a claimed bucket answers its log with 200 even when
-    // empty, an unclaimed one 404s. That is exactly what this test's title
-    // claims, and all it should assert.
-    //
-    // It used to poll a second machine for `notes/plan.md` instead — asserting
-    // something the daemon CANNOT do. Captured file writes go to
-    // `replication_journal` and nothing drains that into the relay-visible
-    // `replication_log`, so file content never reaches the relay (#356). The
-    // assertion carried no `fixme`, so it has been failing silently since the
-    // cutover, because e2e only runs on demand. Content arriving at a second
-    // machine is #356's acceptance gate and is deliberately not asserted here.
-    // WITH the adopted identity: `cloudEnableSync` claims through
+    // The workspace is now bound and pushing. A claimed bucket answers its log
+    // with 200, while an unclaimed bucket answers 404. WITH the adopted
+    // identity: `cloudEnableSync` claims through
     // execute_relay_operation, which supplies both identity fields, so the relay
     // adopts them and an identity-free log read answers 409 rather than 200.
     //
@@ -398,6 +400,91 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     // but un-adopted bucket answers with 200, so the poll would pass whether or
     // not cloudEnableSync supplied an identity at all.
     expect(identity, "cloudEnableSync must adopt a replication identity").not.toBeNull();
+    if (identity === null) throw new Error("cloudEnableSync did not adopt an identity");
+    const adoptedIdentity: RelayWorkspaceIdentity = identity;
+
+    const syncedBeforeWrite = await readSyncStatus(page, workspaceId);
+    expect(syncedBeforeWrite.lastSyncedAtMs).not.toBeNull();
+    if (syncedBeforeWrite.lastSyncedAtMs === null) {
+      throw new Error("enabled workspace sync has no timestamp");
+    }
+
+    const outboundPath = "notes/after-enable.md";
+    const outboundContents = "captured after sync was enabled\n";
+    await writeWorkspaceFiles(temp, [
+      { path: outboundPath, contents: outboundContents },
+    ]);
+    await waitForLaterSync(page, workspaceId, syncedBeforeWrite.lastSyncedAtMs);
+
+    let outboundBlobSha: string | null = null;
+    const relayBaseUrl = relay.baseUrl;
+    const identityQuery = {
+      replicationEpoch: adoptedIdentity.replicationEpoch,
+      streamIdentity: adoptedIdentity.streamIdentity,
+    };
+    await expect
+      .poll(
+        async () => {
+          let since = 0;
+          while (true) {
+            const query = new URLSearchParams({
+              since: String(since),
+              limit: "500",
+              ...identityQuery,
+            });
+            const response = await fetch(
+              `${relayBaseUrl}/sync/${encodeURIComponent(workspaceId)}/log?${query.toString()}`,
+              { headers: { authorization: `Bearer ${TOKEN}` } },
+            );
+            if (!response.ok) {
+              throw new Error(`relay log read failed (${response.status})`);
+            }
+            const body = (await response.json()) as {
+              ops: Array<{
+                opKind: string;
+                payload?: {
+                  path?: unknown;
+                  payloadAfterPath?: unknown;
+                  payloadAfterBlobSha256?: unknown;
+                };
+              }>;
+              nextCursor: number;
+              hasMore: boolean;
+            };
+            for (const op of body.ops) {
+              const payload = op.payload;
+              if (
+                op.opKind === "moment.append" &&
+                payload?.path === outboundPath &&
+                payload.payloadAfterPath === outboundPath &&
+                typeof payload.payloadAfterBlobSha256 === "string"
+              ) {
+                outboundBlobSha = payload.payloadAfterBlobSha256;
+                return true;
+              }
+            }
+            if (!body.hasMore) return false;
+            if (!Number.isSafeInteger(body.nextCursor) || body.nextCursor <= since) {
+              throw new Error("relay log pagination did not advance");
+            }
+            since = body.nextCursor;
+          }
+        },
+        { timeout: 30_000, intervals: [500] },
+      )
+      .toBe(true);
+    if (outboundBlobSha === null) {
+      throw new Error("relay log did not contain the captured file blob");
+    }
+    const blobQuery = new URLSearchParams(identityQuery);
+    const blobResponse = await fetch(
+      `${relayBaseUrl}/sync/${encodeURIComponent(workspaceId)}/blobs/${encodeURIComponent(outboundBlobSha)}?${blobQuery.toString()}`,
+      { headers: { authorization: `Bearer ${TOKEN}` } },
+    );
+    expect(blobResponse.status).toBe(200);
+    expect(Buffer.from(await blobResponse.arrayBuffer()).toString("utf8")).toBe(
+      outboundContents,
+    );
 
     // The app reflects a synced workspace (the sync-status surface is present,
     // not the local-only absence).

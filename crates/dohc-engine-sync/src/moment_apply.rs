@@ -187,7 +187,7 @@ pub fn apply_moment_envelope(
         .map(|outcome| outcome.map(|result| result.conflicts_opened))
 }
 
-pub(crate) fn apply_moment_envelope_detailed(
+pub fn apply_moment_envelope_detailed(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,

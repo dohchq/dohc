@@ -7,7 +7,8 @@ use crate::records::{
 use crate::store::{
     VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, moment_exists,
     next_moment_order, record_request, validate_delete_input, validate_identifier,
-    validate_moment_id, validate_path, validate_write_input, version_is_active, write_text_in_tx,
+    validate_moment_id, validate_moment_metadata, validate_path, validate_write_input,
+    version_is_active, write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -1187,6 +1188,12 @@ pub fn write_binary_file_in_tx(
     tx: &Transaction<'_>,
     input: &WriteBinaryFile,
 ) -> Result<(), DomainError> {
+    validate_moment_metadata(
+        input.metadata_origin.as_str(),
+        input.metadata_summary.as_deref(),
+        input.metadata_correlation_id.as_deref(),
+        input.author_json.as_deref(),
+    )?;
     validate_path(&input.path)?;
     let (classification, normalized_path) =
         dohc_engine_files::classify_engine_file_path_normalized(&input.path);

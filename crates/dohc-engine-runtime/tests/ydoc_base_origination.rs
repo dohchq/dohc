@@ -45,7 +45,7 @@ impl LoggedOp {
     }
 }
 
-/// The ops this machine ORIGINATED (`imported = 0`) — what a push would send.
+/// The ops this machine originated (`imported = 0`), in relay order.
 fn local_ops(db: &Path) -> Vec<LoggedOp> {
     let store = EngineStore::open(db, 9_100).expect("open store");
     store
@@ -69,6 +69,13 @@ fn local_ops(db: &Path) -> Vec<LoggedOp> {
             Ok::<_, rusqlite::Error>(rows)
         })
         .expect("read local ops")
+}
+
+fn local_ydoc_ops(db: &Path) -> Vec<LoggedOp> {
+    local_ops(db)
+        .into_iter()
+        .filter(|op| op.op_kind == "ydoc.update")
+        .collect()
 }
 
 /// Base ops across the WHOLE log, local and imported alike. Base-once is a
@@ -184,13 +191,24 @@ fn replay_into_clean_peer(
         .ensure_main_version(workspace_id, "main", 1_000, &NoFaults)
         .expect("peer main version");
 
+    // This focused replay omits unrelated ops before the first Y.Doc coordinate.
+    let origins = ops
+        .iter()
+        .map(|op| op.origin_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        origins.len(),
+        1,
+        "sequence rebasing requires one originating stream"
+    );
+    let first_origin_seq = ops.first().map_or(0, |op| op.origin_seq);
     for op in ops {
         let bytes = blob_bytes(source_db, &op.blob_sha());
         peer.put_binary_blob(&bytes).expect("peer blob");
         let envelope = ReplicationEnvelope {
             workspace_id: workspace_id.to_owned(),
             origin_id: op.origin_id.clone(),
-            origin_seq: op.origin_seq,
+            origin_seq: op.origin_seq - first_origin_seq,
             op_kind: op.op_kind.clone(),
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
@@ -283,7 +301,7 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
         .await
         .expect("first update");
 
-    let ops = local_ops(&db);
+    let ops = local_ydoc_ops(&db);
     assert_eq!(ops.len(), 1, "the first edit originates exactly one op");
     assert!(ops[0].is_base(), "and that op is the base state");
     assert_eq!(ops[0].op_kind, "ydoc.update");
@@ -312,7 +330,7 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
         .expect("second update");
     supervisor.close(&db).expect("close actor");
 
-    let ops = local_ops(&db);
+    let ops = local_ydoc_ops(&db);
     assert_eq!(ops.len(), 2, "base once, then deltas");
     assert!(ops[0].is_base());
     assert!(!ops[1].is_base(), "a claimed lineage never re-emits a base");
@@ -364,7 +382,7 @@ async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &s
     supervisor.close(&db).expect("close actor");
 
     assert!(
-        local_ops(&db).is_empty(),
+        local_ydoc_ops(&db).is_empty(),
         "a private workspace journals no replication op"
     );
     assert_eq!(
@@ -443,7 +461,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
         )
         .await
         .expect("local-only edit");
-    assert!(local_ops(&db).is_empty(), "still private");
+    assert!(local_ydoc_ops(&db).is_empty(), "still private");
     // CRASH-SHAPED exit: the Y.Doc session never closes, so its rows survive.
     // A normal local-only close would PRUNE them and destroy the precondition
     // this scenario exists to test.
@@ -519,7 +537,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
         .expect("post-promotion edit");
     supervisor.close(&db).expect("close actor");
 
-    let ops = local_ops(&db);
+    let ops = local_ydoc_ops(&db);
     assert_eq!(ops.len(), 2, "promotion originates one base, then deltas");
     assert!(ops[0].is_base());
     assert!(!ops[1].is_base());
@@ -607,7 +625,7 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
         .expect("local edit onto the peer's lineage");
     supervisor.close(&db).expect("close actor");
 
-    let ops = local_ops(&db);
+    let ops = local_ydoc_ops(&db);
     assert_eq!(ops.len(), 1, "the local edit journals exactly one op");
     assert!(
         !ops[0].is_base(),
@@ -655,7 +673,7 @@ async fn redelivering_an_originated_base_is_idempotent() {
         .expect("originating edit");
     supervisor.close(&db).expect("close actor");
 
-    let ops = local_ops(&db);
+    let ops = local_ydoc_ops(&db);
     assert_eq!(ops.len(), 1);
     assert!(ops[0].is_base());
 
@@ -683,7 +701,7 @@ async fn redelivering_an_originated_base_is_idempotent() {
 
     assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
     assert_eq!(
-        local_ops(&db).len(),
+        local_ydoc_ops(&db).len(),
         1,
         "redelivery originates nothing further"
     );
@@ -882,7 +900,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     }
 
     assert!(
-        local_ops(&db).is_empty(),
+        local_ydoc_ops(&db).is_empty(),
         "an oversize lineage journals nothing rather than half a base"
     );
     assert_eq!(
@@ -968,7 +986,7 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
     );
     assert_eq!(base_ops_in_log(&db), 1, "and journal exactly one base");
 
-    let ops = local_ops(&db);
+    let ops = local_ydoc_ops(&db);
     let base = ops
         .iter()
         .find(|op| op.is_base())

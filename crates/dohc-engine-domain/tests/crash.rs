@@ -6,8 +6,8 @@
 //! `EngineStore::write_with`.
 
 use dohc_engine_domain::{
-    CreateNamedVersion, DeleteTextFile, NoFaults, RenameTextFile, RollbackTextFileMutation,
-    VersionedTextStore, WriteText,
+    CreateNamedVersion, DeleteTextFile, MomentOp, NoFaults, RenameTextFile,
+    RollbackTextFileMutation, VersionedTextStore, WriteText,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -291,7 +291,13 @@ fn rollback_crash_after_commit_is_durable() {
     let vt = VersionedTextStore::new(&mut store);
     let restored = vt.read_text(WS, "main", "a.md").unwrap().unwrap();
     assert_eq!(restored.text, "base");
-    assert_eq!(restored.latest_moment_id, "m1");
+    assert!(restored.latest_moment_id.starts_with("rollback-"));
+    let compensation = vt
+        .get_moment(WS, &restored.latest_moment_id)
+        .expect("compensating moment read")
+        .expect("compensating moment");
+    assert_eq!(compensation.operation, MomentOp::Write);
+    assert_eq!(compensation.before_latest_moment_id.as_deref(), Some("m2"));
     assert!(vt.get_moment(WS, "m2").expect("moment").is_none());
 }
 

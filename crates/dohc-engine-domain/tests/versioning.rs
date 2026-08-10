@@ -1153,8 +1153,8 @@ fn rename_text_file_rejects_occupied_destination() {
     );
 }
 
-// oracle: versions-rollback-text-file-mutation removes a first write without a
-// replacement moment and garbage-collects its now-unreferenced file object.
+// oracle: versions-rollback-text-file-mutation removes a first write and
+// appends a compensating delete that keeps the historical object reachable.
 #[test]
 fn rollback_first_write_removes_file_and_garbage_collects_object() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1170,16 +1170,26 @@ fn rollback_first_write_removes_file_and_garbage_collects_object() {
         assert!(vt.read_text(WS, "main", "a.md").unwrap().is_none());
         assert!(vt.get_moment(WS, "m1").unwrap().is_none());
     }
-    let count: i64 = store
+    let (object_count, compensation_count): (i64, i64) = store
         .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM file_objects WHERE workspace_id = ?1 AND object_id = 'o1'",
-                [WS],
-                |row| row.get(0),
-            )
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM file_objects \
+                     WHERE workspace_id = ?1 AND object_id = 'o1'",
+                    [WS],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments \
+                     WHERE workspace_id = ?1 AND object_id = 'o1' AND operation = 'delete'",
+                    [WS],
+                    |row| row.get(0),
+                )?,
+            ))
         })
-        .expect("count");
-    assert_eq!(count, 0);
+        .expect("counts");
+    assert_eq!(object_count, 1);
+    assert_eq!(compensation_count, 1);
 }
 
 // oracle: versions-rollback-text-file-mutation restores an overwrite's exact
@@ -1199,7 +1209,13 @@ fn rollback_overwrite_restores_prior_text() {
         .expect("rollback");
     let restored = vt.read_text(WS, "main", "a.md").unwrap().unwrap();
     assert_eq!(restored.text, "one");
-    assert_eq!(restored.latest_moment_id, "m1");
+    assert!(restored.latest_moment_id.starts_with("rollback-"));
+    let compensation = vt
+        .get_moment(WS, &restored.latest_moment_id)
+        .unwrap()
+        .expect("compensating write");
+    assert_eq!(compensation.operation, MomentOp::Write);
+    assert_eq!(compensation.before_latest_moment_id.as_deref(), Some("m2"));
 }
 
 // oracle: versions-rollback-text-file-mutation restores the source alias of a rename.
@@ -1365,7 +1381,15 @@ fn rollback_rejects_migrated_null_link_dependent() {
             .expect("child rollback with intact link");
         let restored = vt.read_text(WS, "feat", "a.md").unwrap().unwrap();
         assert_eq!(restored.text, "one");
-        assert_eq!(restored.latest_moment_id, "m1");
+        assert!(restored.latest_moment_id.starts_with("rollback-"));
+        assert_eq!(
+            vt.get_moment(WS, &restored.latest_moment_id)
+                .unwrap()
+                .expect("compensating write")
+                .before_latest_moment_id
+                .as_deref(),
+            Some("m2")
+        );
     }
 
     let reject = ScratchDir::new().expect("reject scratch");
@@ -1499,7 +1523,15 @@ fn rollback_legacy_moment_uses_supplied_before_text() {
         .expect("legacy rollback");
     let restored = vt.read_text(WS, "main", "a.md").unwrap().unwrap();
     assert_eq!(restored.text, "one");
-    assert_eq!(restored.latest_moment_id, "m1");
+    assert!(restored.latest_moment_id.starts_with("rollback-"));
+    assert_eq!(
+        vt.get_moment(WS, &restored.latest_moment_id)
+            .unwrap()
+            .expect("compensating write")
+            .before_latest_moment_id
+            .as_deref(),
+        Some("m2")
+    );
 }
 
 // oracle: versions-rollback-text-file-mutation fails closed for a legacy-unset

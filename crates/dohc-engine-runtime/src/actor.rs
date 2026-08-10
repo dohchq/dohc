@@ -53,20 +53,20 @@ use dohc_engine_domain::{
     MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, RenameResult,
     RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
     RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
-    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretRestoreResult,
-    SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotContent,
-    SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict, TextSnapshot,
-    ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
+    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
+    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
+    SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
+    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
     VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
-    apply_secret_file_from_version, binary_delete_job_id, binary_rename_delete_job_id,
+    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
     binary_rename_write_job_id, binary_rollback_job_identity, capture_ingest_binary_in_tx,
-    capture_ingest_in_tx, capture_manifest_seed, capture_retire_in_tx, capture_secret_retire,
+    capture_ingest_in_tx, capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
     compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
-    delete_secret_file_keyless, derive_capture_object_id, enqueue_binary_delete,
-    enqueue_binary_rename, enqueue_write, fork_version_keyless, get_secret_moment_keyless,
+    delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
+    enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_secret_moment_keyless,
     has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
     list_secret_files_keyless_page, list_secret_moments_page_keyless,
-    restore_secret_file_verbatim_with_metadata, secret_file_len_keyless,
+    restore_secret_file_verbatim_with_metadata_and_after, secret_file_len_keyless,
     select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
     write_projected_text_in_tx, write_text_in_tx,
 };
@@ -6922,7 +6922,9 @@ fn worker_main(
                     Err(RuntimeError::Cancelled)
                 } else {
                     SecretFileStore::new(&mut store, &key)
-                        .write_secret_file(&input, faults.as_ref())
+                        .write_secret_file_with(&input, faults.as_ref(), |tx, result| {
+                            journal_secret_put_outbound_in_tx(tx, result)
+                        })
                         .map_err(RuntimeError::from)
                 };
                 let _ = reply.send(outcome);
@@ -6936,8 +6938,13 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    delete_secret_file_keyless(&mut store, &input, faults.as_ref())
-                        .map_err(RuntimeError::from)
+                    delete_secret_file_keyless_with(
+                        &mut store,
+                        &input,
+                        faults.as_ref(),
+                        journal_secret_delete_outbound_in_tx,
+                    )
+                    .map_err(RuntimeError::from)
                 };
                 let _ = reply.send(outcome);
             }
@@ -6953,13 +6960,22 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    fork_version_keyless(
+                    fork_version_keyless_with(
                         &mut store,
                         &workspace_id,
                         &from_version_id,
                         &to_version_id,
                         now_ms,
                         faults.as_ref(),
+                        |tx| {
+                            journal_secret_fork_outbound_in_tx(
+                                tx,
+                                &workspace_id,
+                                &from_version_id,
+                                &to_version_id,
+                                now_ms,
+                            )
+                        },
                     )
                     .map_err(RuntimeError::from)
                 };
@@ -7032,7 +7048,7 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    apply_secret_file_from_version(
+                    apply_secret_file_from_version_with(
                         &mut store,
                         &key,
                         &dohc_engine_domain::ApplySecretFileFromVersion {
@@ -7047,6 +7063,17 @@ fn worker_main(
                             now_ms,
                         },
                         faults.as_ref(),
+                        |tx, result| {
+                            let Some(moment) = result.moment.as_ref() else {
+                                return Ok(());
+                            };
+                            match moment.operation {
+                                SecretOp::Write => journal_secret_put_outbound_in_tx(tx, result),
+                                SecretOp::Delete => {
+                                    journal_secret_delete_outbound_in_tx(tx, moment)
+                                }
+                            }
+                        },
                     )
                     .map_err(RuntimeError::from)
                 };
@@ -7068,7 +7095,7 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    restore_secret_file_verbatim_with_metadata(
+                    restore_secret_file_verbatim_with_metadata_and_after(
                         &mut store,
                         &workspace_id,
                         &path,
@@ -7079,6 +7106,19 @@ fn worker_main(
                         metadata_correlation_id,
                         now_ms,
                         faults.as_ref(),
+                        |tx, result| {
+                            let Some(moment) = result.moment.as_ref() else {
+                                return Ok(());
+                            };
+                            match moment.operation {
+                                SecretOp::Write => {
+                                    journal_secret_put_moment_outbound_in_tx(tx, moment)
+                                }
+                                SecretOp::Delete => {
+                                    journal_secret_delete_outbound_in_tx(tx, moment)
+                                }
+                            }
+                        },
                     )
                     .map_err(RuntimeError::from)
                 };
@@ -7203,7 +7243,13 @@ fn worker_main(
                     Err(RuntimeError::Cancelled)
                 } else {
                     VersionedTextStore::new(&mut store)
-                        .create_named_version(&input, faults.as_ref())
+                        .create_named_version_with(&input, faults.as_ref(), |tx, record| {
+                            journal_version_create_outbound_in_tx(
+                                tx,
+                                record,
+                                &input.from_version_id,
+                            )
+                        })
                         .map_err(RuntimeError::from)
                 };
                 let _ = reply.send(outcome);
@@ -9806,14 +9852,12 @@ fn versioned_text_write_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let Some(root_dir) = root_dir else {
-        return VersionedTextStore::new(store)
-            .write_text(input, faults)
-            .map_err(RuntimeError::from);
-    };
+    dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
     let outcome = store.write_with(faults, |tx| {
         let result = write_text_in_tx(tx, input).map_err(RuntimeError::from)?;
-        if !result.deduped {
+        if !result.deduped
+            && let Some(root_dir) = root_dir
+        {
             upsert_file_search_index(
                 tx,
                 root_dir,
@@ -9825,6 +9869,13 @@ fn versioned_text_write_on_store(
             )
             .map_err(RuntimeError::from)?;
         }
+        journal_moment_outbound_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.moment.moment_id,
+            result.deduped,
+        )
+        .map_err(RuntimeError::from)?;
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
@@ -9862,6 +9913,13 @@ fn versioned_binary_write_on_store(
             )
             .map_err(RuntimeError::from)?;
         }
+        journal_moment_outbound_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.moment.moment_id,
+            result.deduped,
+        )
+        .map_err(RuntimeError::from)?;
         Ok::<_, RuntimeError>(result)
     })?;
     let result = match outcome {
@@ -9991,6 +10049,102 @@ fn search_domain(error: crate::search::SearchError) -> dohc_engine_domain::Domai
     }
 }
 
+fn outbound_domain(error: dohc_engine_sync::SyncError) -> DomainError {
+    DomainError::Storage(StorageError::persist_public(std::io::Error::other(
+        format!("outbound replication journal append failed: {error}"),
+    )))
+}
+
+fn relay_enabled_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+) -> Result<bool, DomainError> {
+    dohc_engine_sync::workspace_replicates_with_relay_in_tx(tx, workspace_id)
+        .map_err(outbound_domain)
+}
+
+fn journal_moment_outbound_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    deduped: bool,
+) -> Result<(), DomainError> {
+    if deduped || !relay_enabled_in_tx(tx, workspace_id)? {
+        return Ok(());
+    }
+    dohc_engine_sync::journal_moment_append_in_tx(tx, workspace_id, moment_id)
+        .map_err(outbound_domain)
+}
+
+fn journal_secret_put_outbound_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    result: &SecretWriteResult,
+) -> Result<(), DomainError> {
+    let Some(moment) = result.moment.as_ref() else {
+        return Ok(());
+    };
+    journal_secret_put_moment_outbound_in_tx(tx, moment)
+}
+
+fn journal_secret_put_moment_outbound_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    moment: &SecretMomentRecord,
+) -> Result<(), DomainError> {
+    if !relay_enabled_in_tx(tx, &moment.workspace_id)? {
+        return Ok(());
+    }
+    dohc_engine_sync::journal_secret_put_in_tx(tx, moment).map_err(outbound_domain)
+}
+
+fn journal_secret_delete_outbound_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    moment: &SecretMomentRecord,
+) -> Result<(), DomainError> {
+    if !relay_enabled_in_tx(tx, &moment.workspace_id)? {
+        return Ok(());
+    }
+    dohc_engine_sync::journal_secret_delete_in_tx(tx, moment).map_err(outbound_domain)
+}
+
+fn journal_secret_fork_outbound_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    from_version_id: &str,
+    to_version_id: &str,
+    recorded_at_ms: i64,
+) -> Result<(), DomainError> {
+    if !relay_enabled_in_tx(tx, workspace_id)? {
+        return Ok(());
+    }
+    dohc_engine_sync::journal_secret_version_fork_in_tx(
+        tx,
+        workspace_id,
+        from_version_id,
+        to_version_id,
+        recorded_at_ms,
+    )
+    .map_err(outbound_domain)
+}
+
+fn journal_version_create_outbound_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    record: &VersionRecord,
+    from_version_id: &str,
+) -> Result<(), DomainError> {
+    if !relay_enabled_in_tx(tx, &record.workspace_id)? {
+        return Ok(());
+    }
+    dohc_engine_sync::journal_version_create_in_tx(tx, record).map_err(outbound_domain)?;
+    dohc_engine_sync::journal_secret_version_fork_in_tx(
+        tx,
+        &record.workspace_id,
+        from_version_id,
+        &record.version_id,
+        record.created_at_ms,
+    )
+    .map_err(outbound_domain)
+}
+
 fn versioned_text_rename_on_store(
     store: &mut EngineStore,
     input: &RenameTextFile,
@@ -10024,6 +10178,12 @@ fn versioned_text_rename_on_store(
                 .map_err(search_domain)?;
             }
             enqueue_binary_rename(tx, result)?;
+            journal_moment_outbound_in_tx(
+                tx,
+                &input.workspace_id,
+                &result.moment.moment_id,
+                result.deduped,
+            )?;
             Ok(())
         })
         .map_err(RuntimeError::from)?;
@@ -10076,6 +10236,13 @@ fn versioned_text_delete_on_store(
             .map_err(RuntimeError::from)?;
             enqueue_binary_delete(tx, &result).map_err(RuntimeError::from)?;
         }
+        journal_moment_outbound_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.moment.moment_id,
+            result.deduped,
+        )
+        .map_err(RuntimeError::from)?;
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
@@ -10146,7 +10313,7 @@ fn versioned_text_rollback_on_store(
     let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
         input,
         faults,
-        |tx, object_id, restored_text| {
+        |tx, object_id, restored_text, compensating_moment_id| {
             delete_file_search_index(tx, &input.workspace_id, &input.version_id, object_id)
                 .map_err(search_domain)?;
             if let Some((path, text)) = restored_text {
@@ -10161,6 +10328,7 @@ fn versioned_text_rollback_on_store(
                 )
                 .map_err(search_domain)?;
             }
+            journal_moment_outbound_in_tx(tx, &input.workspace_id, compensating_moment_id, false)?;
             Ok(())
         },
     )?;
@@ -10463,27 +10631,20 @@ fn versioned_text_merge_on_store(
                 | MergeTextFileResult::Unchanged { .. }
                 | MergeTextFileResult::Conflict { .. } => {}
             }
+            let Some((moment_id, deduped)) = merge_moment_outbound_identity(result) else {
+                return Ok(());
+            };
+            journal_moment_outbound_in_tx(tx, &input.workspace_id, moment_id, deduped)?;
             Ok(())
         })
         .map_err(RuntimeError::from)?;
-    let (moment_id, deduped) = match &result {
-        MergeTextFileResult::Write { write, .. } => {
-            (write.moment.moment_id.as_str(), write.deduped)
-        }
-        MergeTextFileResult::BinaryWrite { write, .. } => {
-            (write.moment.moment_id.as_str(), write.deduped)
-        }
-        MergeTextFileResult::Delete { delete, .. } => {
-            (delete.moment.moment_id.as_str(), delete.deduped)
-        }
-        MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {
-            return Ok(MergeExecutionResult {
-                merge: result,
-                materialize_enqueued: false,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
-            });
-        }
+    let Some((moment_id, deduped)) = merge_moment_outbound_identity(&result) else {
+        return Ok(MergeExecutionResult {
+            merge: result,
+            materialize_enqueued: false,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
     };
     if !target_is_active {
         return Ok(MergeExecutionResult {
@@ -10555,6 +10716,21 @@ fn versioned_text_merge_on_store(
     })
 }
 
+fn merge_moment_outbound_identity(result: &MergeTextFileResult) -> Option<(&str, bool)> {
+    match result {
+        MergeTextFileResult::Write { write, .. } => {
+            Some((write.moment.moment_id.as_str(), write.deduped))
+        }
+        MergeTextFileResult::BinaryWrite { write, .. } => {
+            Some((write.moment.moment_id.as_str(), write.deduped))
+        }
+        MergeTextFileResult::Delete { delete, .. } => {
+            Some((delete.moment.moment_id.as_str(), delete.deduped))
+        }
+        MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => None,
+    }
+}
+
 fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
@@ -10591,6 +10767,13 @@ fn capture_ingest_on_store(
             )
             .map_err(RuntimeError::from)?;
         }
+        journal_moment_outbound_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.moment.moment_id,
+            result.deduped,
+        )
+        .map_err(RuntimeError::from)?;
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
@@ -10629,6 +10812,8 @@ fn capture_ingest_binary_on_store(
             )
             .map_err(RuntimeError::from)?;
         }
+        journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment_id, result.deduped)
+            .map_err(RuntimeError::from)?;
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
@@ -10658,7 +10843,9 @@ fn capture_secret_on_store(
         return Err(RuntimeError::Cancelled);
     }
     SecretFileStore::new(store, key)
-        .capture_secret(input, faults)
+        .capture_secret_with(input, faults, |tx, result| {
+            journal_secret_put_outbound_in_tx(tx, result)
+        })
         .map_err(RuntimeError::from)
 }
 
@@ -10681,7 +10868,8 @@ fn capture_secret_retire_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    capture_secret_retire(store, input, faults).map_err(RuntimeError::from)
+    capture_secret_retire_with(store, input, faults, journal_secret_delete_outbound_in_tx)
+        .map_err(RuntimeError::from)
 }
 
 fn capture_retire_on_store(
@@ -10713,6 +10901,15 @@ fn capture_retire_on_store(
                 &input.workspace_id,
                 &input.version_id,
                 &retired.object.object_id,
+            )
+            .map_err(RuntimeError::from)?;
+        }
+        if let Some(retired) = result.retired.as_ref() {
+            journal_moment_outbound_in_tx(
+                tx,
+                &input.workspace_id,
+                &retired.moment.moment_id,
+                result.deduped || retired.deduped,
             )
             .map_err(RuntimeError::from)?;
         }
@@ -10838,6 +11035,25 @@ fn conflict_resolve_on_store(
                     &write.snapshot.text,
                 )
                 .map_err(search_domain)?;
+            }
+            if let Some(delete) = result.delete.as_ref() {
+                journal_moment_outbound_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &delete.moment.moment_id,
+                    delete.deduped,
+                )?;
+            }
+            if let Some(write) = result.write.as_ref() {
+                journal_moment_outbound_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &write.moment.moment_id,
+                    write.deduped,
+                )?;
+            }
+            if let Some(write) = result.binary_write.as_ref() {
+                journal_moment_outbound_in_tx(tx, &input.workspace_id, &write.moment_id, false)?;
             }
             // A resolution onto BYTES needs no index work here. The write
             // reuses the object already aliased to the path, and the search

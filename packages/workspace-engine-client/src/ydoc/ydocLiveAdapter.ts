@@ -53,6 +53,7 @@ export type YdocAdapterErrorCode =
   | "invalid-update"
   | "response-mismatch"
   | "resync-needed"
+  | "seed-not-permitted"
   | "session-closed"
   | "session-quarantined";
 
@@ -461,6 +462,7 @@ function assertDocUtf16IsSafe(
   doc: Y.Doc,
   before: DocUtf16Snapshot,
   computeDeleted: () => ReadonlyMap<string, number>,
+  seedUpdate: boolean,
 ): void {
   const after = snapshotDocUtf16(doc);
   let hasReplacement = false;
@@ -475,6 +477,7 @@ function assertDocUtf16IsSafe(
   // Fast path: no U+FFFD anywhere post-edit ⇒ no split (masked or otherwise)
   // could have occurred, so skip the clone entirely (the common case).
   if (!hasReplacement) return;
+  if (seedUpdate) return;
 
   // A split surfaces as a NET-NEW U+FFFD once offsetting deletions are counted:
   // newFFFD = after − before + deleted. Reject any root with newFFFD > 0. This
@@ -536,6 +539,7 @@ interface LocalRecordCapture {
   readonly options: ApplyLocalUpdateOptions | undefined;
   readonly before: DocUtf16Snapshot;
   readonly beforeState: Uint8Array;
+  readonly seedUpdate: boolean;
   operation?: Promise<YdocRecordUpdateResult | undefined>;
   rejection?: Error;
 }
@@ -561,6 +565,7 @@ export class YdocAdapterSession {
 
   private readonly adapter: YdocLiveAdapter;
   private closed = false;
+  private seedReserved = false;
   private lastSettledSha: string | null = null;
   private recordChain: Promise<void> = Promise.resolve();
   private activeLocalRecordCapture: LocalRecordCapture | null = null;
@@ -619,6 +624,35 @@ export class YdocAdapterSession {
       () => Y.applyUpdate(this.doc, update, LOCAL_EDITOR_ORIGIN),
       options,
     );
+  }
+
+  applySeedUpdate(update: Uint8Array): Promise<YdocRecordUpdateResult | undefined> {
+    if (this.lineage !== "absent" || this.seedReserved) {
+      throw new YdocAdapterError(
+        "seed-not-permitted",
+        "The session already has existing lineage.",
+      );
+    }
+    this.seedReserved = true;
+    try {
+      return this.runLocalMutation(
+        () => Y.applyUpdate(this.doc, update, LOCAL_EDITOR_ORIGIN),
+        undefined,
+        true,
+      ).then(
+        (result) => {
+          this.lineage = "existing";
+          return result;
+        },
+        (error: unknown) => {
+          this.seedReserved = false;
+          throw error;
+        },
+      );
+    } catch (error) {
+      this.seedReserved = false;
+      throw error;
+    }
   }
 
   applyLocalEdit(
@@ -1077,6 +1111,7 @@ export class YdocAdapterSession {
           capture
             ? deletedReplacementCounts(capture.beforeState, update)
             : new Map<string, number>(),
+        capture?.seedUpdate ?? false,
       );
       const operation = this.enqueueRecordUpdate(update, capture?.options);
       if (capture !== null) capture.operation = operation;
@@ -1098,12 +1133,14 @@ export class YdocAdapterSession {
   private runLocalMutation(
     mutation: () => void,
     options?: ApplyLocalUpdateOptions,
+    seedUpdate = false,
   ): Promise<YdocRecordUpdateResult | undefined> {
     this.assertOpen();
     const capture: LocalRecordCapture = {
       options,
       before: snapshotDocUtf16(this.doc),
       beforeState: Y.encodeStateAsUpdate(this.doc),
+      seedUpdate,
     };
     this.activeLocalRecordCapture = capture;
     try {
@@ -1212,11 +1249,14 @@ export class YdocLiveAdapter {
       typeof rawResult.seedMarkdown === "string"
     ) {
       try {
+        if (!isWellFormedUtf16(rawResult.seedMarkdown)) {
+          throw new IllFormedUtf16EditError();
+        }
         const seedDoc =
           result.contentKind === "plaintext"
             ? createPlaintextSeedDoc(rawResult.seedMarkdown)
             : markdownToYDoc(rawResult.seedMarkdown);
-        await session.applyLocalUpdate(Y.encodeStateAsUpdate(seedDoc));
+        await session.applySeedUpdate(Y.encodeStateAsUpdate(seedDoc));
         // The exposed initial state must INCLUDE the seed: consumers (the
         // desktop bridge) forward session.initialUpdate to the renderer,
         // and the pre-seed encoding would render an empty document and

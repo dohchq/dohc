@@ -133,7 +133,7 @@ impl EngineEvents {
 /// or raw blob-chunk egress.
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
 const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
-const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
+const MAX_METADATA_FIELD_BYTES: usize = dohc_engine_domain::MAX_METADATA_FIELD_BYTES;
 
 /// Aggregate hydrated blob bytes allowed to wait for or flow through framed
 /// egress. A single stored blob may be this large, so exact-byte reservations
