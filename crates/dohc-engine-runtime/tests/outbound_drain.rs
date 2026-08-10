@@ -743,7 +743,7 @@ async fn lagging_peer_applies_prior_ops_then_a_chunked_fork_in_sequence() {
         copy_op_blobs(&source_store, &mut peer_store, op);
         apply_logged_op(&mut peer_store, workspace_id, op);
     }
-    for table in ["versions", "snapshots", "fork_base_snapshots"] {
+    for table in ["versions", "fork_base_snapshots"] {
         let order = if table == "versions" {
             "version_id"
         } else {
@@ -755,6 +755,25 @@ async fn lagging_peer_applies_prior_ops_then_a_chunked_fork_in_sequence() {
             "{table} differs"
         );
     }
+    let snapshot_rows_without_origin = |store: &EngineStore| {
+        workspace_table_rows(
+            store,
+            workspace_id,
+            "snapshots",
+            "version_id,path,object_id",
+        )
+        .into_iter()
+        .map(|mut row| {
+            row.remove(7);
+            row
+        })
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        snapshot_rows_without_origin(&peer_store),
+        snapshot_rows_without_origin(&source_store),
+        "snapshots differs apart from boundary-local origin"
+    );
 }
 
 async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root_dir: &Path) {
