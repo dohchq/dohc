@@ -299,6 +299,19 @@ impl<'a> SecretFileStore<'a> {
         input: &SecretWrite,
         faults: &dyn FaultInjector,
     ) -> Result<SecretWriteResult, DomainError> {
+        self.write_secret_file_with(input, faults, |_, _| Ok(()))
+    }
+
+    /// Write a secret with a caller-supplied same-transaction side effect.
+    pub fn write_secret_file_with<F>(
+        &mut self,
+        input: &SecretWrite,
+        faults: &dyn FaultInjector,
+        after: F,
+    ) -> Result<SecretWriteResult, DomainError>
+    where
+        F: FnOnce(&Transaction<'_>, &SecretWriteResult) -> Result<(), DomainError>,
+    {
         validate_identifier(&input.workspace_id, "workspace_id")?;
         validate_identifier(&input.version_id, "version_id")?;
         validate_identifier(&input.moment_id, "moment_id")?;
@@ -381,16 +394,18 @@ impl<'a> SecretFileStore<'a> {
                 }
             }
             journal(tx, &path, "secret.file.put", input.now_ms)?;
-            Ok::<SecretMomentRecord, DomainError>(SecretMomentRecord {
+            let moment = SecretMomentRecord {
                 moment_order,
                 ..moment.clone()
-            })
+            };
+            let result = SecretWriteResult {
+                changed: true,
+                moment: Some(moment),
+            };
+            after(tx, &result)?;
+            Ok::<SecretWriteResult, DomainError>(result)
         })?;
-        let moment = committed(outcome)?;
-        Ok(SecretWriteResult {
-            changed: true,
-            moment: Some(moment),
-        })
+        committed(outcome)
     }
 
     /// Delete a secret file: records a delete moment and removes the tip. A
@@ -418,6 +433,19 @@ impl<'a> SecretFileStore<'a> {
         input: &CaptureSecret,
         faults: &dyn FaultInjector,
     ) -> Result<SecretWriteResult, DomainError> {
+        self.capture_secret_with(input, faults, |_, _| Ok(()))
+    }
+
+    /// Capture a secret with a caller-supplied same-transaction side effect.
+    pub fn capture_secret_with<F>(
+        &mut self,
+        input: &CaptureSecret,
+        faults: &dyn FaultInjector,
+        after: F,
+    ) -> Result<SecretWriteResult, DomainError>
+    where
+        F: FnOnce(&Transaction<'_>, &SecretWriteResult) -> Result<(), DomainError>,
+    {
         validate_identifier(&input.workspace_id, "workspace_id")?;
         validate_identifier(&input.version_id, "version_id")?;
         let path = validate_secret_path(&input.path)?;
@@ -448,7 +476,7 @@ impl<'a> SecretFileStore<'a> {
             reserved,
         );
         let basename = path.rsplit('/').next().unwrap_or(path.as_str()).to_owned();
-        let result = self.write_secret_file(
+        let result = self.write_secret_file_with(
             &SecretWrite {
                 workspace_id: input.workspace_id.clone(),
                 version_id: input.version_id.clone(),
@@ -462,6 +490,7 @@ impl<'a> SecretFileStore<'a> {
                 disk_intent: SecretDiskIntent::AlreadyOnDisk,
             },
             faults,
+            after,
         )?;
         match &result.moment {
             Some(moment) => {
@@ -689,6 +718,29 @@ impl<'a> SecretFileStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<(), DomainError> {
+        self.fork_version_with(
+            workspace_id,
+            from_version_id,
+            to_version_id,
+            now_ms,
+            faults,
+            |_, _| Ok(()),
+        )
+    }
+
+    /// Fork secrets with a caller-supplied same-transaction side effect.
+    pub fn fork_version_with<F>(
+        &mut self,
+        workspace_id: &str,
+        from_version_id: &str,
+        to_version_id: &str,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+        after: F,
+    ) -> Result<(), DomainError>
+    where
+        F: FnOnce(&Transaction<'_>, &()) -> Result<(), DomainError>,
+    {
         validate_identifier(workspace_id, "workspace_id")?;
         if from_version_id == to_version_id {
             return Err(DomainError::InvalidInput {
@@ -702,9 +754,11 @@ impl<'a> SecretFileStore<'a> {
             require_version(conn, &ws, &from)?;
             require_version(conn, &ws, &to)
         })?;
-        let outcome = self
-            .store
-            .write_with(faults, |tx| fork_version_in_tx(tx, &ws, &from, &to, now_ms))?;
+        let outcome = self.store.write_with(faults, |tx| {
+            fork_version_in_tx(tx, &ws, &from, &to, now_ms)?;
+            after(tx, &())?;
+            Ok::<(), DomainError>(())
+        })?;
         committed(outcome)
     }
 
@@ -765,6 +819,30 @@ pub fn fork_version_keyless(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<(), DomainError> {
+    fork_version_keyless_with(
+        store,
+        workspace_id,
+        from_version_id,
+        to_version_id,
+        now_ms,
+        faults,
+        |_, _| Ok(()),
+    )
+}
+
+/// Fork secrets with a caller-supplied same-transaction side effect.
+pub fn fork_version_keyless_with<F>(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    from_version_id: &str,
+    to_version_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    after: F,
+) -> Result<(), DomainError>
+where
+    F: FnOnce(&Transaction<'_>, &()) -> Result<(), DomainError>,
+{
     validate_identifier(workspace_id, "workspace_id")?;
     if from_version_id == to_version_id {
         return Err(DomainError::InvalidInput {
@@ -776,7 +854,9 @@ pub fn fork_version_keyless(
         require_version(conn, workspace_id, to_version_id)
     })?;
     let outcome = store.write_with(faults, |tx| {
-        fork_version_in_tx(tx, workspace_id, from_version_id, to_version_id, now_ms)
+        fork_version_in_tx(tx, workspace_id, from_version_id, to_version_id, now_ms)?;
+        after(tx, &())?;
+        Ok::<(), DomainError>(())
     })?;
     committed(outcome)
 }
@@ -794,7 +874,26 @@ pub fn delete_secret_file_keyless(
     input: &SecretDelete,
     faults: &dyn FaultInjector,
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
-    delete_secret_file_inner(store, input, SecretDeleteDiskIntent::Materialize, faults)
+    delete_secret_file_keyless_with(store, input, faults, |_, _| Ok(()))
+}
+
+/// Delete a secret with a caller-supplied same-transaction side effect.
+pub fn delete_secret_file_keyless_with<F>(
+    store: &mut EngineStore,
+    input: &SecretDelete,
+    faults: &dyn FaultInjector,
+    after: F,
+) -> Result<Option<SecretMomentRecord>, DomainError>
+where
+    F: FnOnce(&Transaction<'_>, &SecretMomentRecord) -> Result<(), DomainError>,
+{
+    delete_secret_file_inner(
+        store,
+        input,
+        SecretDeleteDiskIntent::Materialize,
+        faults,
+        after,
+    )
 }
 
 /// Keyless secret-moment listing, newest first, optionally scoped to a
@@ -1377,6 +1476,7 @@ fn delete_secret_file_inner(
     input: &SecretDelete,
     disk_intent: SecretDeleteDiskIntent,
     faults: &dyn FaultInjector,
+    after: impl FnOnce(&Transaction<'_>, &SecretMomentRecord) -> Result<(), DomainError>,
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
     validate_identifier(&input.workspace_id, "workspace_id")?;
     validate_identifier(&input.version_id, "version_id")?;
@@ -1471,10 +1571,12 @@ fn delete_secret_file_inner(
         )
         .map_err(DomainError::sql_persist)?;
         journal(tx, &path, "secret.file.delete", input.now_ms)?;
-        Ok::<SecretMomentRecord, DomainError>(SecretMomentRecord {
+        let record = SecretMomentRecord {
             moment_order,
             ..record.clone()
-        })
+        };
+        after(tx, &record)?;
+        Ok::<SecretMomentRecord, DomainError>(record)
     })?;
     Ok(Some(committed(outcome)?))
 }
@@ -1488,6 +1590,19 @@ pub fn capture_secret_retire(
     input: &CaptureSecretRetire,
     faults: &dyn FaultInjector,
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
+    capture_secret_retire_with(store, input, faults, |_, _| Ok(()))
+}
+
+/// Retire a captured secret with a caller-supplied same-transaction side effect.
+pub fn capture_secret_retire_with<F>(
+    store: &mut EngineStore,
+    input: &CaptureSecretRetire,
+    faults: &dyn FaultInjector,
+    after: F,
+) -> Result<Option<SecretMomentRecord>, DomainError>
+where
+    F: FnOnce(&Transaction<'_>, &SecretMomentRecord) -> Result<(), DomainError>,
+{
     validate_identifier(&input.workspace_id, "workspace_id")?;
     validate_identifier(&input.version_id, "version_id")?;
     let path = validate_secret_path(&input.path)?;
@@ -1529,6 +1644,7 @@ pub fn capture_secret_retire(
         },
         SecretDeleteDiskIntent::AlreadyAbsent,
         faults,
+        after,
     )?;
     if let Some(moment) = &result
         && moment.moment_order != reserved

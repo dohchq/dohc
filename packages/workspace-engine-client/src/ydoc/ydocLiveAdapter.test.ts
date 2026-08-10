@@ -2421,6 +2421,37 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  it("opens a captured seed that contains a valid replacement character", async () => {
+    const engine = seedPlaintextEngine("before \uFFFD after");
+    const adapter = new YdocLiveAdapter(engine);
+
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    expect(session.doc.getText("plainText").toString()).toBe("before \uFFFD after");
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
+  it("still rejects a captured seed that contains a lone surrogate", async () => {
+    const engine = seedPlaintextEngine("bad \ud800 seed");
+    const adapter = new YdocLiveAdapter(engine);
+
+    await expect(
+      adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+      }),
+    ).rejects.toBeInstanceOf(IllFormedUtf16EditError);
+    adapter.dispose();
+  });
+
   it("round-trips the full provider lifecycle through typed R03 requests, responses, and events", async () => {
     const engine = seedPlaintextEngine("seed");
     const remoteUpdates: Uint8Array[] = [];
