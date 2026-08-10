@@ -51,6 +51,10 @@ const LEGACY_APPS_SEGMENT = ["", "apps"].join(".");
 const LEGACY_APP_MANIFEST = ["app", "json"].join(".");
 const legacyAppPath = (...segments: string[]) =>
   [LEGACY_APPS_SEGMENT, ...segments].join("/");
+const LARGE_READ_MODE_FILLER = Array.from(
+  { length: 96 },
+  (_, index) => `Paragraph ${index + 1}. ${"body ".repeat(160)}`,
+).join("\n\n");
 
 describe("lineSpanInText (search scroll-to-line, Phase E5.0)", () => {
   const text = "first\nsecond line\n\nfourth";
@@ -513,7 +517,7 @@ describe("markdown editor unmount flush", () => {
     // the optimistic title keeps showing while the write silently failed. A body
     // over the WYSIWYG threshold opens in read mode without being truncated
     // (truncated would make PageIdentity read-only and skip the save entirely).
-    const bigBody = `---\ntitle: Plan\n---\n\n${"# Section\n\nbody paragraph.\n\n".repeat(3000)}`;
+    const bigBody = `---\ntitle: Plan\n---\n\n${LARGE_READ_MODE_FILLER}`;
     expect(bigBody.length).toBeGreaterThan(64 * 1024);
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({ text: bigBody, truncated: false });
     bridgeMock.writeWorkspaceText.mockRejectedValueOnce(new Error("disk full"));
@@ -2399,8 +2403,6 @@ describe("engine markdown source view", () => {
   });
 
   it("re-applies a read-mode heading navigation when the version switches under it", async () => {
-    // The 2,500-heading chunked backfill runs real DOM work on a busy gate
-    // box; this bounds the OVERALL test, not just an inner waitFor's poll.
     const scrollIntoView = stubScrollSpy("scrollIntoView");
     const bigBody = [
       "# Hello",
@@ -2408,7 +2410,7 @@ describe("engine markdown source view", () => {
       "## Exact destination",
       "Body",
       "",
-      "# Filler\n\nbody paragraph.\n\n".repeat(2_500),
+      LARGE_READ_MODE_FILLER,
     ].join("\n");
     expect(bigBody.length).toBeGreaterThan(64 * 1024);
     const { bridgeMock } = makeEngineBridge(bigBody);
@@ -2450,8 +2452,6 @@ describe("engine markdown source view", () => {
       />,
     );
 
-    // The 2,500-heading chunked backfill can outrun the default waitFor
-    // budget under a busy gate box — a busy box must not red-herring this.
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2), {
       timeout: 10_000,
     });
@@ -2470,13 +2470,11 @@ describe("engine markdown source view", () => {
       await Promise.resolve();
     });
     expect(scrollIntoView).toHaveBeenCalledTimes(2);
-  }, 120_000);
+  });
 
   it("replays a read-mode heading against the version-switch reread", async () => {
-    // The 2,500-heading chunked backfill runs real DOM work on a busy gate
-    // box; this bounds the OVERALL test, not just an inner waitFor's poll.
     const scrollIntoView = stubScrollSpy("scrollIntoView");
-    const filler = "# Filler\n\nbody paragraph.\n\n".repeat(2_500);
+    const filler = LARGE_READ_MODE_FILLER;
     const firstBody = `# Hello\n\n## Exact destination\nBody\n\n${filler}`;
     const secondBody = [
       "# Hello",
@@ -2536,8 +2534,6 @@ describe("engine markdown source view", () => {
     );
 
     await waitFor(() => expect(reads).toBe(2));
-    // The 2,500-heading chunked backfill can outrun the default waitFor
-    // budget under a busy gate box — a busy box must not red-herring this.
     const secondDestination = await waitFor(
       () => {
         const heading = screen.getByRole("heading", {
@@ -2554,7 +2550,7 @@ describe("engine markdown source view", () => {
       timeout: 10_000,
     });
     expect(scrollIntoView.mock.instances[1]).toBe(secondDestination);
-  }, 120_000);
+  });
 
   it("retires a read-mode heading observer when a newer switch arm replaces it", async () => {
     const scrollIntoView = stubScrollSpy("scrollIntoView");
