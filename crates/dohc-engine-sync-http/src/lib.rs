@@ -881,7 +881,7 @@ struct WireLogPage {
 #[serde(rename_all = "camelCase")]
 struct WireLogRow {
     #[serde(rename = "relaySeq", default)]
-    _relay_seq: Option<i64>,
+    relay_seq: Option<i64>,
     workspace_id: Option<String>,
     origin_id: String,
     origin_seq: i64,
@@ -896,6 +896,7 @@ impl WireLogRow {
             workspace_id,
             origin_id: self.origin_id,
             origin_seq: self.origin_seq,
+            relay_seq: self.relay_seq,
             op_kind: self.op_kind,
             payload: self.payload,
             recorded_at_ms: self.recorded_at_ms,

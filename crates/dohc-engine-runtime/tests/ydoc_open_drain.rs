@@ -83,6 +83,7 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
             workspace_id: WS.to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
+            relay_seq: Some(1),
             op_kind: "ydoc.update".to_owned(),
             payload: serde_json::json!({
                 "versionId": "main",

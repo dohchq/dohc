@@ -183,6 +183,7 @@ pub(crate) struct OpenConflict<'a> {
     pub(crate) current: &'a ConflictSide,
     pub(crate) incoming: &'a ConflictSide,
     pub(crate) recorded_at_ms: i64,
+    pub(crate) metadata_origin: &'a str,
 }
 
 pub fn apply_moment_envelope(
@@ -597,6 +598,7 @@ fn apply_moment_append(
             current: &current,
             incoming: &incoming,
             recorded_at_ms: payload.recorded_at_ms,
+            metadata_origin: "sync",
         },
     )?;
 
@@ -628,6 +630,7 @@ fn apply_moment_append(
                 current: &occupancy_current,
                 incoming: &incoming,
                 recorded_at_ms: payload.recorded_at_ms,
+                metadata_origin: "sync",
             },
         )?;
     }
@@ -1411,7 +1414,7 @@ pub(crate) fn open_or_coalesce(
         } => tx
             .query_row(
                 "SELECT conflict_id FROM conflicts \
-                 WHERE workspace_id=?1 AND status='open' AND metadata_origin='sync' \
+                 WHERE workspace_id=?1 AND status='open' AND metadata_origin=?5 \
                    AND target_version_id=?2 AND incoming_object_id IS ?3 \
                    AND incoming_latest_moment_id IS ?4 \
                  ORDER BY (current_object_id IS ?3) DESC,created_at_ms,conflict_id LIMIT 1",
@@ -1419,7 +1422,8 @@ pub(crate) fn open_or_coalesce(
                     workspace_id,
                     conflict.version_id,
                     diverging_object_id,
-                    incoming_branch_base
+                    incoming_branch_base,
+                    conflict.metadata_origin
                 ],
                 |row| row.get::<_, String>(0),
             )
@@ -1431,7 +1435,7 @@ pub(crate) fn open_or_coalesce(
         } => tx
             .query_row(
                 "SELECT conflict_id FROM conflicts \
-                 WHERE workspace_id=?1 AND status='open' AND metadata_origin='sync' \
+                 WHERE workspace_id=?1 AND status='open' AND metadata_origin=?5 \
                    AND target_version_id=?2 AND current_object_id IS ?3 \
                    AND incoming_latest_moment_id IS ?4 \
                  ORDER BY created_at_ms,conflict_id LIMIT 1",
@@ -1439,7 +1443,8 @@ pub(crate) fn open_or_coalesce(
                     workspace_id,
                     conflict.version_id,
                     occupant_object_id,
-                    incoming_branch_base
+                    incoming_branch_base,
+                    conflict.metadata_origin
                 ],
                 |row| row.get::<_, String>(0),
             )
@@ -1540,7 +1545,7 @@ fn insert_conflict(
           incoming_metadata_summary,incoming_metadata_correlation_id,
           base_binary_sha256,current_binary_sha256,incoming_binary_sha256
         ) VALUES (
-          ?1,?2,?3,?4,?4,?5,?5,'open','current',NULL,'sync',NULL,NULL,
+          ?1,?2,?3,?4,?4,?5,?5,'open','current',NULL,?39,NULL,NULL,
           ?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
           ?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,
           ?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,
@@ -1596,6 +1601,7 @@ fn insert_conflict(
             b.binary_digest(),
             c.binary_digest(),
             i.binary_digest(),
+            conflict.metadata_origin,
         ],
     )
     .map_err(SyncError::persist)?;

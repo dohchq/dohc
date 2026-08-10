@@ -1904,6 +1904,27 @@ UPDATE versions SET name = 'Main'
 
 pub(crate) const MAIN_VERSION_NAME_MIGRATION_ID: &str = "v1-main-version-name";
 
+/// Ordinal 26. Relay order arbitrates independently originated Y.Doc bases.
+/// The original base digest remains durable after replicated-close compaction
+/// removes the seq-0 snapshot used by the earlier comparison.
+const V1_YDOC_BASE_RELAY_ORDER_DDL: &str = "\
+ALTER TABLE ydoc_docs ADD COLUMN base_relay_seq INTEGER
+    CHECK (base_relay_seq IS NULL OR base_relay_seq >= 0);
+ALTER TABLE ydoc_docs ADD COLUMN base_snapshot_sha256 TEXT;
+UPDATE ydoc_docs
+   SET base_snapshot_sha256 = (
+       SELECT snapshot_blob_sha256
+         FROM ydoc_snapshots
+        WHERE ydoc_snapshots.workspace_id = ydoc_docs.workspace_id
+          AND ydoc_snapshots.version_id = ydoc_docs.version_id
+          AND ydoc_snapshots.object_id = ydoc_docs.object_id
+          AND ydoc_snapshots.up_to_seq = 0
+   )
+ WHERE base_claimed = 1;
+";
+
+pub(crate) const YDOC_BASE_RELAY_ORDER_MIGRATION_ID: &str = "v1-ydoc-base-relay-order";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -2091,6 +2112,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: MAIN_VERSION_NAME_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_MAIN_VERSION_NAME_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 26,
+        id: YDOC_BASE_RELAY_ORDER_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_YDOC_BASE_RELAY_ORDER_DDL,
         sets_user_version: None,
     },
 ];
@@ -4304,6 +4332,71 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "migration-failed"
+        );
+    }
+
+    #[test]
+    fn ydoc_base_relay_order_migration_backfills_the_surviving_base_digest() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(2_600);
+        let mut conn = open_bare(&path);
+        let migration_index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == YDOC_BASE_RELAY_ORDER_MIGRATION_ID)
+            .expect("base relay-order migration");
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("migrate before relay-order columns");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+                 VALUES ('ws', 'object', 1);
+             INSERT INTO binary_blobs (sha256, byte_length, bytes)
+                 VALUES ('base-sha', 1, x'00'), ('sv-sha', 1, x'00');
+             INSERT INTO ydoc_docs (
+                 workspace_id, version_id, object_id, content_kind, regime,
+                 head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms
+             ) VALUES (
+                 'ws', 'main', 'object', 'plaintext', 'replicated', 0, 0, 1, 2
+             );
+             INSERT INTO ydoc_snapshots (
+                 workspace_id, version_id, object_id, up_to_seq,
+                 snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms
+             ) VALUES ('ws', 'main', 'object', 0, 'base-sha', 'sv-sha', 2);",
+        )
+        .expect("seed claimed base");
+
+        let outcome = run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("add relay-order columns");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        let row: (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT base_relay_seq, base_snapshot_sha256 FROM ydoc_docs
+                 WHERE workspace_id='ws' AND version_id='main' AND object_id='object'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("relay-order state");
+        assert_eq!(row, (None, Some("base-sha".to_owned())));
+        assert!(
+            conn.execute(
+                "UPDATE ydoc_docs SET base_relay_seq=-1
+                 WHERE workspace_id='ws' AND version_id='main' AND object_id='object'",
+                [],
+            )
+            .is_err(),
+            "negative relay positions must fail the schema check"
         );
     }
 

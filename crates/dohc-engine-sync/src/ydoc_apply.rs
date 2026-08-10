@@ -992,7 +992,7 @@ pub fn apply_ydoc_envelope(
         // envelope the sequence/divergence checks then reject (out-of-order
         // or divergent redelivery), leaving state for an unacked coordinate.
         let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind);
-        let sv_bytes = {
+        let incoming_base_doc = {
             let doc = dohc_engine_collab::Ydoc::wire();
             if doc.apply(&bytes).is_err() {
                 return refuse_ydoc(
@@ -1002,10 +1002,12 @@ pub fn apply_ydoc_envelope(
                     "ydoc.update base bytes fail validation",
                 );
             }
-            doc.encode_state_vector()
+            doc
         };
+        let sv_bytes = incoming_base_doc.encode_state_vector();
         let claim_key = key.clone();
         let claim_bytes = bytes.clone();
+        let incoming_base_sha = dohc_engine_storage::hex_sha256(&bytes);
         // The claim can PROMOTE a local-only lineage that already holds
         // update rows (a crash left them behind): the projection must be the
         // reconstructed lineage PLUS the base, or the visible snapshot would
@@ -1066,17 +1068,37 @@ pub fn apply_ydoc_envelope(
                 ],
             )
             .map_err(SyncError::persist)?;
-            dohc_engine_collab::claim_base_in_tx(
+            let relay_seq = op.relay_seq.ok_or(SyncError::InvalidInput {
+                reason: "pulled ydoc.update base has no relay sequence",
+            })?;
+            let claim_outcome = dohc_engine_collab::claim_base_in_tx(
                 tx,
                 &claim_key,
                 kind,
                 &claim_bytes,
                 &sv_bytes,
+                dohc_engine_collab::BaseClaimOrigin::RemoteApply { relay_seq },
                 op.recorded_at_ms,
             )
             .map_err(|error| {
                 map_collab_payload_error(error, "ydoc.update base could not be claimed")
             })?;
+            if matches!(claim_outcome, dohc_engine_collab::ClaimOutcome::AlreadyWon) {
+                return Ok(YdocApplyResult {
+                    deferred: false,
+                    reason: Some("ydoc-base-already-won"),
+                    conflicts_opened: 0,
+                });
+            }
+            let replaced = matches!(
+                claim_outcome,
+                dohc_engine_collab::ClaimOutcome::Replaced { .. }
+            );
+            let projected_base_doc = if replaced {
+                &incoming_base_doc
+            } else {
+                &base_doc
+            };
             // The FIRST base is not a CRDT merge: a local head that no shared
             // lineage ever merged (capture or an external editor wrote it, and
             // the receiver holds no durable Y.Doc rows to union with) must not
@@ -1117,15 +1139,17 @@ pub fn apply_ydoc_envelope(
                 .optional()
                 .map_err(SyncError::corrupt)?
                 .flatten();
-            let head_is_in_the_union = current.snapshot.as_ref().is_some_and(|snapshot| {
-                head_settled_by_this_lineage.as_deref() == Some(snapshot.blob_sha256.as_str())
-            });
+            let head_is_in_the_union = !replaced
+                && current.snapshot.as_ref().is_some_and(|snapshot| {
+                    head_settled_by_this_lineage.as_deref() == Some(snapshot.blob_sha256.as_str())
+                });
             if !head_is_in_the_union && let Some(snapshot) = current.snapshot.as_ref() {
-                let projection = base_doc
-                    .project(kind)
-                    .map_err(|_| SyncError::InvalidInput {
-                        reason: "ydoc projection exceeds materialization cap",
-                    })?;
+                let projection =
+                    projected_base_doc
+                        .project(kind)
+                        .map_err(|_| SyncError::InvalidInput {
+                            reason: "ydoc projection exceeds materialization cap",
+                        })?;
                 let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
                 if snapshot.blob_sha256 != projected_sha {
                     put_projection_text_blob(tx, &projection.markdown, &projected_sha)?;
@@ -1165,7 +1189,12 @@ pub fn apply_ydoc_envelope(
                         updated_at_ms: Some(op.recorded_at_ms),
                         latest_moment_id: Some(incoming_moment_id.clone()),
                         metadata: Some(crate::moment_apply::Metadata {
-                            origin: "sync".to_owned(),
+                            origin: if replaced {
+                                "sync-independent-origin"
+                            } else {
+                                "sync"
+                            }
+                            .to_owned(),
                             summary: None,
                             correlation_id: None,
                         }),
@@ -1185,6 +1214,11 @@ pub fn apply_ydoc_envelope(
                             current: &current_side,
                             incoming: &incoming_side,
                             recorded_at_ms: op.recorded_at_ms,
+                            metadata_origin: if replaced {
+                                "sync-independent-origin"
+                            } else {
+                                "sync"
+                            },
                         },
                     )?;
                     // Immutable per-envelope record of what THIS coordinate
@@ -1192,6 +1226,19 @@ pub fn apply_ydoc_envelope(
                     // rewrites its incoming anchor, so a crash-redelivery
                     // recount must not depend on the mutable conflict row.
                     record_ydoc_conflicts_opened(tx, op, conflicts_opened)?;
+                    if replaced {
+                        project_and_write_in_tx(
+                            tx,
+                            &claim_key,
+                            &base_path,
+                            &incoming_base_doc,
+                            kind,
+                            &op.origin_id,
+                            op.origin_seq,
+                            op.recorded_at_ms,
+                            search_policy.as_ref(),
+                        )?;
+                    }
                     return Ok(YdocApplyResult {
                         deferred: false,
                         reason: Some("ydoc-base-conflict"),
@@ -1204,7 +1251,7 @@ pub fn apply_ydoc_envelope(
                 tx,
                 &claim_key,
                 &base_path,
-                &base_doc,
+                projected_base_doc,
                 kind,
                 &op.origin_id,
                 op.origin_seq,
@@ -1217,6 +1264,26 @@ pub fn apply_ydoc_envelope(
                 conflicts_opened: 0,
             })
         })?;
+        if matches!(outcome, ApplyOutcome::Skipped) {
+            let relay_seq = envelope.relay_seq.ok_or(SyncError::InvalidInput {
+                reason: "pulled ydoc.update base has no relay sequence",
+            })?;
+            match dohc_engine_collab::confirm_base_relay_seq(
+                store,
+                &key,
+                &incoming_base_sha,
+                relay_seq,
+                faults,
+                envelope.recorded_at_ms,
+            )
+            .map_err(map_collab_hard_error)?
+            {
+                dohc_engine_storage::TxnOutcome::Committed(_) => {}
+                dohc_engine_storage::TxnOutcome::Crashed { .. } => {
+                    return Err(SyncError::FaultCrash);
+                }
+            }
+        }
         if matches!(outcome, ApplyOutcome::Applied(_) | ApplyOutcome::Skipped)
             && dohc_engine_collab::read_marker(store, &key)
                 .map_err(map_collab_hard_error)?
@@ -1425,6 +1492,9 @@ fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncErr
         | CollabError::ProjectionTooLarge { .. }
         | CollabError::ProjectionTooComplex { .. } => SyncError::InvalidInput { reason },
         CollabError::BaseStateDiverged => SyncError::CoordinateDiverged,
+        CollabError::BaseRelaySequencePending => SyncError::RetryableState {
+            reason: "the local Y.Doc base relay sequence is not known yet",
+        },
         hard => map_collab_hard_error(hard),
     }
 }

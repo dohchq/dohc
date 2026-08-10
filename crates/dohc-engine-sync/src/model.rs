@@ -20,6 +20,10 @@ pub struct ReplicationEnvelope {
     pub workspace_id: String,
     pub origin_id: String,
     pub origin_seq: i64,
+    /// The relay's global workspace-log position. Pull supplies it; locally
+    /// constructed push envelopes have no relay position yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_seq: Option<i64>,
     pub op_kind: String,
     pub payload: serde_json::Value,
     pub recorded_at_ms: i64,
@@ -35,6 +39,14 @@ impl ReplicationEnvelope {
         if self.origin_seq < 0 || self.origin_seq > MAX_WIRE_INTEGER {
             return Err(crate::SyncError::InvalidInput {
                 reason: "origin_seq is outside the wire integer range",
+            });
+        }
+        if self
+            .relay_seq
+            .is_some_and(|relay_seq| !(0..=MAX_WIRE_INTEGER).contains(&relay_seq))
+        {
+            return Err(crate::SyncError::InvalidInput {
+                reason: "relay_seq is outside the wire integer range",
             });
         }
         if self.op_kind.is_empty() || self.op_kind.len() > MAX_OP_KIND_BYTES {

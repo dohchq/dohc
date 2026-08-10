@@ -627,6 +627,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         }
         let mut cursor = current.map_or(0, |value| value.cursor);
+        let fetch_start_cursor = cursor;
         let mut fetched = 0_usize;
         let mut pages = 0_usize;
         let mut ops = Vec::new();
@@ -690,6 +691,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 )?,
             }
         }
+        let mut retained_retryable = Vec::new();
         while !retryable.is_empty() {
             let mut still_retryable = Vec::new();
             let mut made_progress = false;
@@ -718,9 +720,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 break;
             }
             if !made_progress {
-                return Err(RelayError::Local("retryable-state".to_owned()));
+                retained_retryable = still_retryable;
+                break;
             }
             retryable = still_retryable;
+        }
+        if !retained_retryable.is_empty() {
+            let first_unresolved = retained_retryable
+                .iter()
+                .map(|op| op.relay_seq.ok_or(RelayError::InvalidResponse))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .min()
+                .ok_or(RelayError::InvalidResponse)?;
+            cursor = first_unresolved
+                .checked_sub(1)
+                .ok_or(RelayError::InvalidResponse)?
+                .max(fetch_start_cursor);
         }
         // A drain refusal can commit before a later envelope fails hard, or
         // outside a pull during open/resync/close. Claim every relay-owned
@@ -736,6 +752,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
         let mut pulled_foreign_max = BTreeMap::<String, i64>::new();
         for op in &ordered {
+            if op.relay_seq.is_some_and(|relay_seq| relay_seq > cursor) {
+                continue;
+            }
             if op.origin_id != identity.origin_id {
                 pulled_foreign_max
                     .entry(op.origin_id.clone())
@@ -777,7 +796,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(SyncPassOutcome::Complete {
             pushed: 0,
             fetched,
-            has_more,
+            has_more: has_more && retained_retryable.is_empty(),
             applied,
             refused,
             skipped,
@@ -2057,6 +2076,7 @@ fn recompute_chat_projection_winners(
             workspace_id: workspace_id.to_owned(),
             origin_id,
             origin_seq,
+            relay_seq: None,
             op_kind,
             payload,
             recorded_at_ms,
@@ -2479,6 +2499,7 @@ fn share_envelope(
         workspace_id: workspace_id.to_owned(),
         origin_id: op.origin_id,
         origin_seq: op.origin_seq,
+        relay_seq: None,
         op_kind: op.op_kind,
         payload: op.payload,
         recorded_at_ms: op.recorded_at_ms,

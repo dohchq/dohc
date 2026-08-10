@@ -61,6 +61,16 @@ pub enum CollabError {
     #[error("incoming base state diverges from the claimed base")]
     BaseStateDiverged,
 
+    /// The local base exists, but its relay position has not returned through
+    /// pull yet. The caller must retain and retry the incoming base envelope.
+    #[error("the claimed base has no known relay position yet")]
+    BaseRelaySequencePending,
+
+    /// Two different base envelopes claimed one relay position. A relay
+    /// sequence is globally unique, so this state is corrupt.
+    #[error("different Y.Doc bases carry the same relay sequence {relay_seq}")]
+    BaseRelaySequenceCollision { relay_seq: i64 },
+
     /// A lease for this doc key is already held by another open session
     /// (single-writer per document).
     #[error("a lease for this document is already held")]
@@ -120,6 +130,8 @@ impl CollabError {
             CollabError::ContentKindMismatch => "content-kind-mismatch",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::BaseStateDiverged => "base-state-diverged",
+            CollabError::BaseRelaySequencePending => "base-relay-sequence-pending",
+            CollabError::BaseRelaySequenceCollision { .. } => "base-relay-sequence-collision",
             CollabError::LeaseHeld => "lease-held",
             CollabError::NoMarker => "no-marker",
             CollabError::MissingDependencies => "ydoc-missing-remote-dependencies",

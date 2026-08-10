@@ -9,8 +9,8 @@ use common::*;
 use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::{
     apply_remote_update, claim_base, close_session, ensure_marker, load_persisted, read_marker,
-    record_local_update, settle, ClaimOutcome, CloseOutcome, CollabError, DocKey, LeaseRegistry,
-    Regime, RemoteUpdate, ReplicationApplyOutcome, SettleOutcome, Ydoc,
+    record_local_update, settle, BaseClaimOrigin, ClaimOutcome, CloseOutcome, CollabError, DocKey,
+    LeaseRegistry, Regime, RemoteUpdate, ReplicationApplyOutcome, SettleOutcome, Ydoc,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 
@@ -774,6 +774,7 @@ fn replicated_close_never_prunes_the_lineage() {
             &key,
             ContentKind::Plaintext,
             &base,
+            BaseClaimOrigin::LocalOrigination,
             &NoFaults,
             1_000,
         )
@@ -839,6 +840,7 @@ fn local_to_shared_transition_keeps_the_base() {
             &key,
             ContentKind::Plaintext,
             &base,
+            BaseClaimOrigin::LocalOrigination,
             &NoFaults,
             1_100,
         )
@@ -933,6 +935,7 @@ fn base_is_claimed_exactly_once() {
             &key,
             ContentKind::Plaintext,
             &base,
+            BaseClaimOrigin::LocalOrigination,
             &NoFaults,
             1_000,
         )
@@ -941,6 +944,9 @@ fn base_is_claimed_exactly_once() {
     let first_sha = match first {
         ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
         ClaimOutcome::Resumed => panic!("first claim must mint the base"),
+        ClaimOutcome::Replaced { .. } | ClaimOutcome::AlreadyWon => {
+            panic!("a first local claim cannot arbitrate")
+        }
     };
     assert!(
         read_marker(&ts.store, &key)
@@ -961,6 +967,7 @@ fn base_is_claimed_exactly_once() {
             &key,
             ContentKind::Plaintext,
             &base,
+            BaseClaimOrigin::LocalOrigination,
             &NoFaults,
             1_400,
         )
@@ -983,6 +990,7 @@ fn base_is_claimed_exactly_once() {
         &key,
         ContentKind::Plaintext,
         &other_base,
+        BaseClaimOrigin::LocalOrigination,
         &NoFaults,
         1_500,
     )
@@ -1014,6 +1022,107 @@ fn base_is_claimed_exactly_once() {
     assert_eq!(base_sha_now, first_sha, "first base survives");
 }
 
+#[test]
+fn relay_order_arbitrates_divergent_bases_after_close_compaction() {
+    let mut ts = fresh_store("base-relay-order");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+
+    let local = Ydoc::wire();
+    local.plaintext_insert(0, "losing local base");
+    let local_base = local.encode_full_state();
+    committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &local_base,
+            BaseClaimOrigin::LocalOrigination,
+            &NoFaults,
+            1_000,
+        )
+        .expect("local base"),
+    );
+    let local_delta = local.plaintext_insert(0, "local delta plus ");
+    committed(
+        record_local_update(&mut ts.store, &key, &local_delta, &NoFaults, 1_100)
+            .expect("local delta"),
+    );
+    committed(
+        close_session(&mut ts.store, &key, false, &NoFaults, 1_200).expect("replicated close"),
+    );
+    assert_eq!(
+        count(&ts.store, "ydoc_snapshots", &key),
+        1,
+        "close compacts the lineage to one non-base snapshot"
+    );
+
+    let echo = committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &local_base,
+            BaseClaimOrigin::RemoteApply { relay_seq: 20 },
+            &NoFaults,
+            1_300,
+        )
+        .expect("own relay echo"),
+    );
+    assert!(matches!(echo, ClaimOutcome::Resumed));
+
+    let winner = Ydoc::wire();
+    winner.plaintext_insert(0, "winning remote base");
+    let winner_base = winner.encode_full_state();
+    let later = committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &winner_base,
+            BaseClaimOrigin::RemoteApply { relay_seq: 30 },
+            &NoFaults,
+            1_400,
+        )
+        .expect("later divergent base"),
+    );
+    assert!(matches!(later, ClaimOutcome::AlreadyWon));
+
+    let earlier = committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &winner_base,
+            BaseClaimOrigin::RemoteApply { relay_seq: 10 },
+            &NoFaults,
+            1_500,
+        )
+        .expect("earlier divergent base"),
+    );
+    assert!(matches!(earlier, ClaimOutcome::Replaced { .. }));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 0);
+    assert_eq!(count(&ts.store, "ydoc_snapshots", &key), 1);
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load winner")
+        .expect("winner marker");
+    assert_eq!(persisted.doc.plaintext_string(), "winning remote base");
+    let relay_seq: Option<i64> = ts
+        .store
+        .read_with(|connection| {
+            connection
+                .query_row(
+                    "SELECT base_relay_seq FROM ydoc_docs
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("relay sequence");
+    assert_eq!(relay_seq, Some(10));
+}
+
 // ---- replication: idempotent + echo-suppressed ------------------------------
 
 #[test]
@@ -1028,6 +1137,7 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
             &key,
             ContentKind::Plaintext,
             &base,
+            BaseClaimOrigin::LocalOrigination,
             &NoFaults,
             1_000,
         )
@@ -1099,6 +1209,7 @@ fn local_edit_on_replicated_lineage_requests_broadcast() {
             &key,
             ContentKind::Plaintext,
             &base,
+            BaseClaimOrigin::LocalOrigination,
             &NoFaults,
             1_000,
         )

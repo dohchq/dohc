@@ -68,6 +68,7 @@ fn seed_divergent_base(
         workspace_id: WS.to_owned(),
         origin_id: "winner-origin".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(1),
         op_kind: "ydoc.update".to_owned(),
         payload: serde_json::json!({
             "versionId": "main",
@@ -278,6 +279,7 @@ async fn resolving_keep_current_folds_the_choice_into_the_lineage() {
         workspace_id: WS.to_owned(),
         origin_id: "winner-origin".to_owned(),
         origin_seq: 1,
+        relay_seq: Some(2),
         op_kind: "ydoc.update".to_owned(),
         payload: serde_json::json!({
             "versionId": "main",
@@ -522,6 +524,7 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
                 workspace_id: WS.to_owned(),
                 origin_id: "winner-origin".to_owned(),
                 origin_seq: seq + 1,
+                relay_seq: Some(seq + 2),
                 op_kind: "ydoc.update".to_owned(),
                 payload: serde_json::json!({
                     "versionId": "main",

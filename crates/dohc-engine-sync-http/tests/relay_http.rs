@@ -674,17 +674,10 @@ fn pull_accepts_the_relays_integral_float_normalization() {
 }
 
 #[test]
-fn pull_deserializes_rows_without_the_discarded_relay_sequence() {
+fn pull_captures_the_relay_sequence() {
     let server = FakeServer::start(|_| {
         log_page(
-            vec![json!({
-                "workspaceId": "ws",
-                "originId": "peer",
-                "originSeq": 0,
-                "opKind": "workspace.init",
-                "payload": {},
-                "recordedAtMs": 1
-            })],
+            vec![remote_row("peer", 0, "workspace.init", json!({}))],
             1,
             false,
         )
@@ -697,8 +690,9 @@ fn pull_deserializes_rows_without_the_discarded_relay_sequence() {
             cursor: 0,
             limit: 1,
         })
-        .expect("relaySeq is not part of the client contract");
+        .expect("pull relay row");
     assert_eq!(response.ops.len(), 1);
+    assert_eq!(response.ops[0].relay_seq, Some(1));
 }
 
 #[test]
@@ -740,6 +734,7 @@ fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
                 workspace_id: "ws".to_owned(),
                 origin_id: "local".to_owned(),
                 origin_seq: 0,
+                relay_seq: None,
                 op_kind: "workspace.init".to_owned(),
                 payload,
                 recorded_at_ms: 1,
@@ -1094,6 +1089,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
                 workspace_id: "ws".to_owned(),
                 origin_id: "local".to_owned(),
                 origin_seq: 0,
+                relay_seq: None,
                 op_kind: "probe".to_owned(),
                 payload: json!({}),
                 recorded_at_ms: 1,

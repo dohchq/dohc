@@ -402,6 +402,7 @@ pub fn list_replication_ops(
                 workspace_id: workspace_id.to_owned(),
                 origin_id: origin_id.to_owned(),
                 origin_seq,
+                relay_seq: None,
                 op_kind,
                 payload,
                 recorded_at_ms,

@@ -27,6 +27,7 @@ fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> R
         workspace_id: "ws".to_owned(),
         origin_id: origin.to_owned(),
         origin_seq: seq,
+        relay_seq: Some(seq),
         op_kind: kind.to_owned(),
         payload,
         recorded_at_ms: 2_000 + seq,

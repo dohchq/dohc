@@ -209,6 +209,7 @@ fn replay_into_clean_peer(
             workspace_id: workspace_id.to_owned(),
             origin_id: op.origin_id.clone(),
             origin_seq: op.origin_seq - first_origin_seq,
+            relay_seq: Some(op.origin_seq - first_origin_seq),
             op_kind: op.op_kind.clone(),
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
@@ -588,6 +589,7 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
             workspace_id: WS.to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
+            relay_seq: Some(1),
             op_kind: "ydoc.update".to_owned(),
             payload: serde_json::json!({
                 "versionId": "main",
@@ -684,6 +686,7 @@ async fn redelivering_an_originated_base_is_idempotent() {
         workspace_id: WS.to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(1),
         op_kind: "ydoc.update".to_owned(),
         payload: serde_json::json!({
             "versionId": "main",

@@ -11536,7 +11536,10 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
 
 fn map_collab_code(error: CollabError) -> ErrorCode {
     match error {
-        CollabError::Corrupt { .. } | CollabError::Storage(_) => ErrorCode::Internal,
+        CollabError::Corrupt { .. }
+        | CollabError::Storage(_)
+        | CollabError::BaseRelaySequencePending
+        | CollabError::BaseRelaySequenceCollision { .. } => ErrorCode::Internal,
         CollabError::MalformedUpdate { .. }
         | CollabError::ReplayParityViolation { .. }
         | CollabError::EmptyUpdate

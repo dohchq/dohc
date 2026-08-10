@@ -29,6 +29,7 @@ fn envelope(origin: &str, seq: i64, workspace_id: &str, payload: Value) -> Repli
         workspace_id: workspace_id.to_owned(),
         origin_id: origin.to_owned(),
         origin_seq: seq,
+        relay_seq: Some(seq),
         op_kind: "moment.append".to_owned(),
         payload,
         recorded_at_ms: 2_000 + seq,
@@ -272,6 +273,7 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
         workspace_id: "ws".to_owned(),
         origin_id: "ydoc-origin".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(1),
         op_kind: "ydoc.update".to_owned(),
         payload: json!({
             "versionId": "main",
@@ -455,6 +457,7 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
         workspace_id: "ws".to_owned(),
         origin_id: "malformed-moment-peer".to_owned(),
         origin_seq: 1,
+        relay_seq: Some(2),
         op_kind: "chat.channel.create".to_owned(),
         payload: json!({
             "channelId": "after-malformed-moment",
@@ -1119,6 +1122,7 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
         workspace_id: "ws".to_owned(),
         origin_id: "version-peer".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(1),
         op_kind: "version.create".to_owned(),
         payload: json!({
             "versionId": "feature",
@@ -1550,6 +1554,7 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
         workspace_id: "ws".to_owned(),
         origin_id: "version-peer".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(1),
         op_kind: "version.create".to_owned(),
         payload: json!({
             "versionId": "missing",

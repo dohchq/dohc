@@ -117,6 +117,29 @@ pub enum ClaimOutcome {
     /// A base already existed: the caller resumes the winner and emits NO second
     /// base (base-once). The existing base is left byte-intact.
     Resumed,
+    /// A lower relay position replaced this machine's independently originated
+    /// base. The caller must preserve the losing head as a conflict.
+    Replaced { base_snapshot_sha: String },
+    /// This lineage's base owns an earlier relay position. The incoming base
+    /// has no local effect.
+    AlreadyWon,
+}
+
+/// The source of a base claim. Relay positions exist only after pull observes
+/// an envelope that the relay has committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseClaimOrigin {
+    LocalOrigination,
+    RemoteApply { relay_seq: i64 },
+}
+
+impl BaseClaimOrigin {
+    fn relay_seq(self) -> Option<i64> {
+        match self {
+            Self::LocalOrigination => None,
+            Self::RemoteApply { relay_seq } => Some(relay_seq),
+        }
+    }
 }
 
 /// The outcome of a settle.
@@ -729,6 +752,7 @@ pub fn claim_base(
     key: &DocKey,
     content_kind: ContentKind,
     base_bytes: &[u8],
+    origin: BaseClaimOrigin,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ClaimOutcome>, CollabError> {
@@ -741,7 +765,7 @@ pub fn claim_base(
     };
 
     store.write_with(faults, |tx| {
-        claim_base_in_tx(tx, key, content_kind, base_bytes, &sv_bytes, now_ms)
+        claim_base_in_tx(tx, key, content_kind, base_bytes, &sv_bytes, origin, now_ms)
     })
 }
 
@@ -755,6 +779,7 @@ pub fn claim_base_in_tx(
     content_kind: ContentKind,
     base_bytes: &[u8],
     sv_bytes: &[u8],
+    origin: BaseClaimOrigin,
     now_ms: i64,
 ) -> Result<ClaimOutcome, CollabError> {
     validate_update_bytes(base_bytes)?;
@@ -792,21 +817,65 @@ pub fn claim_base_in_tx(
         // that peer's later updates missing an unrecoverable dependency.
         let (_, _, base_claimed) = head_of(tx, key)?;
         if base_claimed {
-            let stored_sha: Option<String> = tx
+            let (stored_sha, stored_relay_seq): (Option<String>, Option<i64>) = tx
                 .query_row(
-                    "SELECT snapshot_blob_sha256 FROM ydoc_snapshots                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3                        AND up_to_seq = 0",
+                    "SELECT base_snapshot_sha256, base_relay_seq FROM ydoc_docs
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                     rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .optional()
                 .map_err(map_sql)?;
+            let incoming_sha = crate::hex_sha256(base_bytes);
             return match stored_sha {
-                Some(sha) if sha == crate::hex_sha256(base_bytes) => Ok(ClaimOutcome::Resumed),
-                Some(_) => Err(CollabError::BaseStateDiverged),
+                Some(sha) if sha == incoming_sha => {
+                    if stored_relay_seq.is_none() {
+                        if let Some(relay_seq) = origin.relay_seq() {
+                            tx.execute(
+                                "UPDATE ydoc_docs SET base_relay_seq=?4, updated_at_ms=?5
+                                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                                rusqlite::params![
+                                    key.workspace_id,
+                                    key.version_id,
+                                    key.object_id,
+                                    relay_seq,
+                                    now_ms
+                                ],
+                            )
+                            .map_err(map_sql)?;
+                        }
+                    }
+                    Ok(ClaimOutcome::Resumed)
+                }
+                Some(_) => {
+                    let Some(incoming_relay_seq) = origin.relay_seq() else {
+                        return Err(CollabError::BaseStateDiverged);
+                    };
+                    let Some(local_relay_seq) = stored_relay_seq else {
+                        return Err(CollabError::BaseRelaySequencePending);
+                    };
+                    if incoming_relay_seq == local_relay_seq {
+                        return Err(CollabError::BaseRelaySequenceCollision {
+                            relay_seq: incoming_relay_seq,
+                        });
+                    }
+                    if incoming_relay_seq > local_relay_seq {
+                        return Ok(ClaimOutcome::AlreadyWon);
+                    }
+                    let base_sha = replace_base_snapshot(
+                        tx,
+                        key,
+                        base_bytes,
+                        sv_bytes,
+                        incoming_relay_seq,
+                        now_ms,
+                    )?;
+                    Ok(ClaimOutcome::Replaced {
+                        base_snapshot_sha: base_sha,
+                    })
+                }
                 // Compaction legitimately folds the seq-0 base away once
-                // updates supersede it: divergence is no longer verifiable,
-                // base-once still holds, and refusing would wedge the relay
-                // cursor on a VALID replica. Resume.
+                // updates supersede it. Pre-migration rows can therefore lack
+                // a digest; keep the earlier fail-safe behavior for those rows.
                 None => Ok(ClaimOutcome::Resumed),
             };
         }
@@ -831,15 +900,120 @@ pub fn claim_base_in_tx(
         )
         .map_err(map_sql)?;
         tx.execute(
-            "UPDATE ydoc_docs SET base_claimed = 1, updated_at_ms = ?4 \
+            "UPDATE ydoc_docs SET base_claimed = 1, base_relay_seq=?4,
+               base_snapshot_sha256=?5, updated_at_ms = ?6 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-            rusqlite::params![key.workspace_id, key.version_id, key.object_id, now_ms],
+            rusqlite::params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                origin.relay_seq(),
+                base_sha,
+                now_ms
+            ],
         )
         .map_err(map_sql)?;
         Ok(ClaimOutcome::Claimed {
             base_snapshot_sha: base_sha,
         })
     })()
+}
+
+/// Record the relay position of a locally originated base when its own
+/// envelope returns through pull. Local envelopes already exist in the
+/// replication log, so admission skips their mutation callback.
+pub fn confirm_base_relay_seq(
+    store: &mut EngineStore,
+    key: &DocKey,
+    base_snapshot_sha: &str,
+    relay_seq: i64,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<bool>, CollabError> {
+    store.write_with(faults, |tx| {
+        let row: Option<(Option<String>, Option<i64>)> = tx
+            .query_row(
+                "SELECT base_snapshot_sha256, base_relay_seq FROM ydoc_docs
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+                   AND base_claimed=1",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(map_sql)?;
+        if !matches!(row, Some((Some(ref sha), None)) if sha == base_snapshot_sha) {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE ydoc_docs SET base_relay_seq=?4, updated_at_ms=?5
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+               AND base_relay_seq IS NULL",
+            rusqlite::params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                relay_seq,
+                now_ms
+            ],
+        )
+        .map_err(map_sql)?;
+        Ok(true)
+    })
+}
+
+fn replace_base_snapshot(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    base_bytes: &[u8],
+    sv_bytes: &[u8],
+    relay_seq: i64,
+    now_ms: i64,
+) -> Result<String, CollabError> {
+    let base_sha = put_binary_blob(tx, base_bytes)?;
+    let sv_sha = put_binary_blob(tx, sv_bytes)?;
+    tx.execute(
+        "DELETE FROM ydoc_updates
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "DELETE FROM ydoc_snapshots
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "INSERT INTO ydoc_snapshots
+         (workspace_id, version_id, object_id, up_to_seq,
+          snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms)
+         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            base_sha,
+            sv_sha,
+            now_ms
+        ],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "UPDATE ydoc_docs
+         SET head_update_seq=0, head_snapshot_seq=0, base_claimed=1,
+             base_relay_seq=?4, base_snapshot_sha256=?5, updated_at_ms=?6
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            relay_seq,
+            base_sha,
+            now_ms
+        ],
+    )
+    .map_err(map_sql)?;
+    Ok(base_sha)
 }
 
 /// Read a doc's marker inside the caller's transaction.

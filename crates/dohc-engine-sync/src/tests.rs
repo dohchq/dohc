@@ -44,6 +44,7 @@ fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> R
         workspace_id: "ws".to_owned(),
         origin_id: origin.to_owned(),
         origin_seq: seq,
+        relay_seq: Some(seq),
         op_kind: kind.to_owned(),
         payload,
         recorded_at_ms: 2_000,
@@ -344,6 +345,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                         workspace_id: "ws".to_owned(),
                         origin_id: row.get(0)?,
                         origin_seq: row.get(1)?,
+                        relay_seq: Some(row.get(1)?),
                         op_kind: row.get(2)?,
                         payload: serde_json::from_str(&payload_json).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
@@ -2873,6 +2875,7 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
                         workspace_id: "ws".to_owned(),
                         origin_id: row.get(0)?,
                         origin_seq: row.get(1)?,
+                        relay_seq: Some(row.get(1)?),
                         op_kind: "chat.thread.create".to_owned(),
                         payload: serde_json::from_str(&payload_json).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
@@ -3660,6 +3663,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                         workspace_id: "ws".to_owned(),
                         origin_id: row.get(0)?,
                         origin_seq: row.get(1)?,
+                        relay_seq: Some(row.get(1)?),
                         op_kind: row.get(2)?,
                         payload: serde_json::from_str(&payload_json).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
@@ -6209,6 +6213,7 @@ fn recover_local_origin(engine: &mut EngineStore, new_origin_id: &str) {
                 workspace_id: "ws".to_owned(),
                 origin_id: "local".to_owned(),
                 origin_seq: 0,
+                relay_seq: None,
                 op_kind: "probe.local".to_owned(),
                 payload: json!({}),
                 recorded_at_ms: 1_000,
@@ -6596,6 +6601,7 @@ fn pull_rejects_op_for_foreign_workspace() {
         workspace_id: "other".to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(0),
         op_kind: "chat.channel.create".to_owned(),
         payload: json!({"channelId":"c1","name":"X","slug":"x","kind":"channel","createdAtMs":1}),
         recorded_at_ms: 2_000,
@@ -6657,6 +6663,7 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
         workspace_id: "ws".to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: seq,
+        relay_seq: Some(seq),
         op_kind: "secret.file.put".to_owned(),
         payload: json!({
             "versionId":"v1","path":"app/.env","metadata":{"origin":"sync"},
@@ -6678,6 +6685,7 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
         workspace_id: "ws".to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 1,
+        relay_seq: Some(1),
         op_kind: "secret.file.delete".to_owned(),
         payload: json!({"versionId":"v1","path":"app/.env","metadata":{"origin":"sync"}}),
         recorded_at_ms: 20,
@@ -7574,6 +7582,7 @@ fn a_fold_that_cannot_reproduce_the_choice_refuses_instead_of_diverging() {
         &key,
         dohc_engine_collab::ContentKind::Richdoc,
         &doc.encode_full_state(),
+        dohc_engine_collab::BaseClaimOrigin::LocalOrigination,
         &NoFaults,
         1_500,
     )
@@ -7806,6 +7815,7 @@ fn a_fold_the_parser_can_reproduce_still_commits() {
         &key,
         dohc_engine_collab::ContentKind::Richdoc,
         &doc.encode_full_state(),
+        dohc_engine_collab::BaseClaimOrigin::LocalOrigination,
         &NoFaults,
         1_500,
     )
@@ -7866,6 +7876,7 @@ fn resolution_fold_names_the_cap_it_hits() {
         &key,
         dohc_engine_collab::ContentKind::Plaintext,
         &doc.encode_full_state(),
+        dohc_engine_collab::BaseClaimOrigin::LocalOrigination,
         &NoFaults,
         1_500,
     )
@@ -9249,7 +9260,7 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
 }
 
 #[test]
-fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
+fn later_divergent_ydoc_base_is_acked_without_changing_the_winner() {
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");
     let first_doc = dohc_engine_collab::Ydoc::wire();
@@ -9262,8 +9273,8 @@ fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
     let second_sha = engine
         .put_binary_blob(&second_doc.encode_full_state())
         .expect("second base");
-    let base = |origin: &str, sha: &str| {
-        envelope(
+    let base = |origin: &str, relay_seq: i64, sha: &str| {
+        let mut envelope = envelope(
             origin,
             0,
             "ydoc.update",
@@ -9275,12 +9286,14 @@ fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
                 "updateBlobSha256": sha,
                 "isBaseState": true
             }),
-        )
+        );
+        envelope.relay_seq = Some(relay_seq);
+        envelope
     };
     assert!(matches!(
         apply_ydoc_envelope(
             &mut engine,
-            &base("first-base-peer", &first_sha),
+            &base("first-base-peer", 1, &first_sha),
             &NoFaults,
             &NoLiveLeases
         ),
@@ -9289,15 +9302,15 @@ fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
 
     let second = apply_ydoc_envelope(
         &mut engine,
-        &base("second-base-peer", &second_sha),
+        &base("second-base-peer", 2, &second_sha),
         &NoFaults,
         &NoLiveLeases,
     );
-    assert!(matches!(second, Err(SyncError::CoordinateDiverged)));
+    assert!(matches!(second, Ok(ApplyOutcome::Applied(_))));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "second-base-peer").expect("second-base ack"),
-        -1,
-        "a divergent lineage must not advance the peer coordinate"
+        0,
+        "the losing base coordinate is handled without wedging its origin"
     );
     let journaled: i64 = engine
         .read_with(|conn| {
@@ -9310,8 +9323,8 @@ fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
         })
         .expect("divergent journal count");
     assert_eq!(
-        journaled, 0,
-        "MUTATION: mapping BaseStateDiverged to InvalidInput journals and ACKs the unusable lineage"
+        journaled, 1,
+        "the handled losing coordinate remains replay-safe"
     );
     let key =
         dohc_engine_collab::DocKey::new("ws", "main", "object-divergent-base").expect("doc key");
@@ -9321,7 +9334,98 @@ fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
     assert_eq!(
         persisted.doc.plaintext_string(),
         "first",
-        "the refusal savepoint must preserve the originally claimed base"
+        "a later relay position must preserve the winning base"
+    );
+}
+
+#[test]
+fn relay_pull_retains_a_divergent_base_until_the_local_base_has_a_relay_sequence() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws', 'object-pending-base-order', 1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("file object");
+
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-pending-base-order")
+        .expect("doc key");
+    let local_doc = dohc_engine_collab::Ydoc::wire();
+    local_doc.plaintext_insert(0, "local");
+    assert!(matches!(
+        dohc_engine_collab::claim_base(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &local_doc.encode_full_state(),
+            dohc_engine_collab::BaseClaimOrigin::LocalOrigination,
+            &NoFaults,
+            1,
+        ),
+        Ok(TxnOutcome::Committed(
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+        ))
+    ));
+
+    let remote_doc = dohc_engine_collab::Ydoc::wire();
+    remote_doc.plaintext_insert(0, "remote");
+    let remote_bytes = remote_doc.encode_full_state();
+    let remote_sha = dohc_engine_storage::hex_sha256(&remote_bytes);
+    let mut remote_base = envelope(
+        "remote-base-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-pending-base-order",
+            "path": "notes/pending-base-order.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": remote_sha,
+            "isBaseState": true
+        }),
+    );
+    remote_base.relay_seq = Some(7);
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![remote_base],
+            next_cursor: 7,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(remote_sha, remote_bytes);
+
+    let outcome = RelaySyncClient::new(relay)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("a pending base order must not fail the whole pull");
+    let SyncPassOutcome::Complete {
+        fetched,
+        applied,
+        skipped,
+        has_more,
+        pending_cursor: Some(pending_cursor),
+        ..
+    } = outcome
+    else {
+        panic!("the retryable coordinate must return a resumable prefix: {outcome:?}");
+    };
+    assert_eq!((fetched, applied, skipped), (1, 0, 0));
+    assert!(!has_more);
+    assert_eq!(
+        pending_cursor.cursor, 6,
+        "the durable cursor must stop immediately before the unresolved relay coordinate"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "remote-base-peer").expect("remote base ack"),
+        -1,
+        "the unresolved base must remain unacked for the next scheduled pull"
     );
 }
 
@@ -12273,6 +12377,7 @@ fn recover_origin_rebases_each_current_lww_projection_coordinate() {
                 workspace_id: "ws".to_owned(),
                 origin_id: "local".to_owned(),
                 origin_seq: 0,
+                relay_seq: None,
                 op_kind: "probe.local".to_owned(),
                 payload: json!({}),
                 recorded_at_ms: 1_000,
@@ -14226,6 +14331,7 @@ fn share_view_boundary_without_a_grant_admits_nothing() {
         workspace_id: "ws".to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(0),
         op_kind: "moment.append".to_owned(),
         payload: json!({"path": "docs/a.md", "operation": "write"}),
         recorded_at_ms: 10,

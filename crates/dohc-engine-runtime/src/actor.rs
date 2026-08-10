@@ -590,6 +590,7 @@ mod deferred_relay_tests {
                     workspace_id: "workspace".to_owned(),
                     origin_id: "origin".to_owned(),
                     origin_seq: i64::try_from(origin_seq).expect("sequence"),
+                    relay_seq: None,
                     op_kind: "probe".to_owned(),
                     payload: serde_json::json!({"body": "retained until consumed"}),
                     recorded_at_ms: 1_000,
@@ -9263,6 +9264,7 @@ fn ydoc_originate_base_in_tx(
         marker.content_kind,
         &encoded.base,
         &encoded.state_vector,
+        dohc_engine_collab::BaseClaimOrigin::LocalOrigination,
         now_ms,
     )? {
         dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha } => {
@@ -9272,6 +9274,10 @@ fn ydoc_originate_base_in_tx(
         // no other writer can interleave. Harmless if it ever is — the lineage
         // has its base, and base-once forbids a second.
         dohc_engine_collab::ClaimOutcome::Resumed => Ok(BaseOrigination::NothingToDo),
+        dohc_engine_collab::ClaimOutcome::Replaced { .. }
+        | dohc_engine_collab::ClaimOutcome::AlreadyWon => {
+            unreachable!("a fresh local base claim cannot arbitrate")
+        }
     }
 }
 
