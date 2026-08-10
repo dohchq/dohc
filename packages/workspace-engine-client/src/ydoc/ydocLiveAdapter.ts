@@ -53,6 +53,7 @@ export type YdocAdapterErrorCode =
   | "invalid-update"
   | "response-mismatch"
   | "resync-needed"
+  | "seed-not-permitted"
   | "session-closed"
   | "session-quarantined";
 
@@ -625,6 +626,12 @@ export class YdocAdapterSession {
   }
 
   applySeedUpdate(update: Uint8Array): Promise<YdocRecordUpdateResult | undefined> {
+    if (this.lineage !== "absent") {
+      throw new YdocAdapterError(
+        "seed-not-permitted",
+        "The session already has existing lineage.",
+      );
+    }
     return this.runLocalMutation(
       () => Y.applyUpdate(this.doc, update, LOCAL_EDITOR_ORIGIN),
       undefined,

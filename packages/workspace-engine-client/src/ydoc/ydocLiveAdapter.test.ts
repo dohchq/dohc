@@ -162,6 +162,33 @@ describe("YdocLiveAdapter", () => {
     expect(YDOC_METHOD.resync).toBe("ydoc.resync");
   });
 
+  it("rejects direct seed updates after the session has existing lineage", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    session.lineage = "existing";
+    const seedDoc = new Y.Doc();
+    seedDoc.getText("plainText").insert(0, "\ud800");
+
+    await expect(
+      Promise.resolve().then(() =>
+        session.applySeedUpdate(Y.encodeStateAsUpdate(seedDoc)),
+      ),
+    ).rejects.toMatchObject({
+      name: "YdocAdapterError",
+      code: "seed-not-permitted",
+      message: "The session already has existing lineage.",
+    });
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
   it("rejects and quarantines an opaque ill-formed edit without wedging Yjs", async () => {
     const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);
