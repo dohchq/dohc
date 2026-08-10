@@ -12,6 +12,7 @@
 mod apply;
 mod conflict_apply;
 mod cursor;
+mod enrolment;
 mod error;
 mod file_search;
 mod hydration;

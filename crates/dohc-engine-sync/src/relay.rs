@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 
 use crate::apply::apply_chat_lww_projection_tx;
 use crate::cursor::{
-    RelayCursor, commit_relay_cursor, read_pushed_seq, rewind_pushed_seq, write_pushed_seq,
+    RelayCursor, commit_relay_cursor, has_relay_position, read_pushed_seq, rewind_pushed_seq,
+    write_pushed_seq,
 };
 use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
@@ -489,8 +490,38 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
-        let origins = list_workspace_origins(store, workspace_id).map_err(local)?;
+        let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
+
+        if origins.is_empty() && !has_relay_position(store, workspace_id).map_err(local)? {
+            let response = self.transport.push(PushRequest {
+                workspace_id: workspace_id.to_owned(),
+                replication_epoch: identity.replication_epoch.clone(),
+                stream_identity: identity.stream_identity.clone(),
+                origin_id: identity.origin_id.clone(),
+                after_seq: -1,
+                ops: Vec::new(),
+            })?;
+            validate_probe_response(&response)?;
+            if response.current_max_origin_seq != -1 {
+                return Err(RelayError::OriginDiverged);
+            }
+            match write_pushed_seq(
+                store,
+                workspace_id,
+                &identity.origin_id,
+                response.current_max_origin_seq,
+                faults,
+            )
+            .map_err(local)?
+            {
+                TxnOutcome::Committed(()) => {}
+                TxnOutcome::Crashed { .. } => {
+                    return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
+                }
+            }
+            origins = list_workspace_origins(store, workspace_id).map_err(local)?;
+        }
 
         for origin_id in origins {
             let local_max = local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;

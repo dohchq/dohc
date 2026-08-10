@@ -4,6 +4,13 @@ use rusqlite::{OptionalExtension, params};
 use crate::SyncError;
 use crate::model::bounded;
 
+fn current_time_ms() -> Result<i64, SyncError> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(SyncError::corrupt)?;
+    i64::try_from(elapsed.as_millis()).map_err(SyncError::corrupt)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorKind {
     RelayFetch,
@@ -89,6 +96,8 @@ pub fn commit_relay_cursor(
     )?;
     store
         .write_with(faults, |tx| {
+            let was_enrolled =
+                crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(
                 "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) \
                  VALUES (?1,?2,?3,?4) ON CONFLICT(workspace_id) DO UPDATE SET \
@@ -104,6 +113,13 @@ pub fn commit_relay_cursor(
                 ],
             )
             .map_err(SyncError::persist)?;
+            if !was_enrolled {
+                crate::enrolment::backfill_enrolment_window_in_tx(
+                    tx,
+                    workspace_id,
+                    current_time_ms()?,
+                )?;
+            }
             // A committed cursor means the stream never replays coordinates
             // at or before this pull, so persisted pending-resolve decisions
             // kept for retry reconstruction are dead.
@@ -157,6 +173,21 @@ pub fn read_pushed_seq(
     })
 }
 
+pub(crate) fn has_relay_position(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<bool, SyncError> {
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id=?1) OR \
+                    EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id=?1)",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)
+    })
+}
+
 pub(crate) fn write_pushed_seq(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -171,12 +202,21 @@ pub(crate) fn write_pushed_seq(
     }
     store
         .write_with(faults, |tx| {
+            let was_enrolled =
+                crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(
                 "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES (?1,?2,?3) \
                  ON CONFLICT(workspace_id,origin_id) DO UPDATE SET pushed_seq=MAX(pushed_seq,excluded.pushed_seq)",
                 params![workspace_id, origin_id, pushed_seq],
             )
             .map_err(SyncError::persist)?;
+            if !was_enrolled {
+                crate::enrolment::backfill_enrolment_window_in_tx(
+                    tx,
+                    workspace_id,
+                    current_time_ms()?,
+                )?;
+            }
             Ok::<(), SyncError>(())
         })
 }
