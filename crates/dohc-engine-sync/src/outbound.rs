@@ -382,20 +382,33 @@ pub fn journal_secret_version_fork_in_tx(
     Ok(())
 }
 
+/// How far below the payload cap the packer stops.
+///
+/// The relay re-measures every pushed payload with its own serializer
+/// (`stableJsonStringify`, `services/sync-relay/src/server.ts`), so two
+/// implementations decide one byte count. The headroom absorbs any drift
+/// between them — a dependency upgrade or an escaping edge case — which would
+/// otherwise refuse an op the engine had already journaled and wedge the
+/// outbound queue. `journal_local_op_in_tx` remains the single enforced limit;
+/// this only decides where a split lands, and packing smaller never refuses
+/// valid work.
+const FORK_CHUNK_HEADROOM_BYTES: usize = 4096;
+const FORK_CHUNK_TARGET_BYTES: usize = crate::MAX_PAYLOAD_JSON_BYTES - FORK_CHUNK_HEADROOM_BYTES;
+
 /// Split fork rows into payload-sized groups, measuring the header once and
 /// each row once.
 ///
-/// Every group this returns serializes at or below `MAX_PAYLOAD_JSON_BYTES`, so
-/// a larger fork costs more operations and is never refused. The packer only
+/// Every group this returns serializes at or below `FORK_CHUNK_TARGET_BYTES`,
+/// so a larger fork costs more operations and is never refused. The packer only
 /// splits: `journal_local_op_in_tx` stays the single owner of the payload cap,
 /// and refuses the one row a split cannot help — a row wider than a whole
 /// payload.
 ///
 /// `worst_case_fork_snapshot_row_fits` measures that no capped row reaches the
-/// cap. A row at every field's ceiling — 512-byte ids and paths
+/// target. A row at every field's ceiling — 512-byte ids and paths
 /// (`MAX_IDENTIFIER_BYTES`) and two 16 KiB metadata fields
 /// (`MAX_METADATA_FIELD_BYTES`), each byte escaped at its worst — makes a
-/// 203,572-byte payload against the 262,144-byte cap.
+/// 203,572-byte payload against the 258,048-byte target, 54,476 bytes clear.
 fn pack_fork_rows(
     empty_payload: &serde_json::Value,
     rows: Vec<serde_json::Value>,
@@ -408,7 +421,7 @@ fn pack_fork_rows(
         let row_len = measured_json_len(&row)?;
         // The header already carries the empty `[]`, so a row costs its own
         // length plus the one comma that follows the row before it.
-        if !chunk.is_empty() && chunk_len + 1 + row_len > crate::MAX_PAYLOAD_JSON_BYTES {
+        if !chunk.is_empty() && chunk_len + 1 + row_len > FORK_CHUNK_TARGET_BYTES {
             chunks.push(std::mem::take(&mut chunk));
             chunk_len = header_len;
         }
@@ -492,7 +505,11 @@ mod tests {
             + row_len;
         assert_eq!(row_len, 199_968);
         assert_eq!(payload_len, 203_572);
-        assert!(payload_len <= crate::MAX_PAYLOAD_JSON_BYTES);
+        // Measured against the packing target, not the cap: the target is the
+        // bound a row has to clear for a fork to split instead of refuse.
+        assert_eq!(FORK_CHUNK_TARGET_BYTES, 258_048);
+        assert!(payload_len <= FORK_CHUNK_TARGET_BYTES);
+        assert_eq!(FORK_CHUNK_TARGET_BYTES - payload_len, 54_476);
         assert_eq!(
             pack_fork_rows(&header, vec![row]).expect("pack row").len(),
             1
