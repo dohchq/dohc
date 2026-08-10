@@ -1,6 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type {
+  DohcDesktopBridge,
+  SyncStatusResult,
+} from "../src/ipc/bridgeContract";
 import { RelayFilePeer } from "../src/testing/relayFilePeer";
 import { claimRelayWorkspace, relayServesWorkspace } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -40,19 +44,15 @@ import {
 // see the note below where it used to live.
 
 const TOKEN = "test:e2e-user";
+type SyncStatusBridge = Pick<DohcDesktopBridge, "getSyncStatus">;
 
 async function readSyncStatus(
   page: Page,
   workspaceId: string,
-): Promise<{ lastSyncedAtMs: number | null }> {
+): Promise<Pick<SyncStatusResult, "lastSyncedAtMs">> {
   return await page.evaluate(async (id) => {
-    const api = (window as unknown as {
-      dohcDesktop?: {
-        getSyncStatus(payload: { workspaceId: string }): Promise<{
-          lastSyncedAtMs: number | null;
-        }>;
-      };
-    }).dohcDesktop;
+    const api = (window as unknown as { dohcDesktop?: SyncStatusBridge })
+      .dohcDesktop;
     if (!api) throw new Error("desktop bridge is unavailable");
     return await api.getSyncStatus({ workspaceId: id });
   }, workspaceId);
@@ -61,22 +61,16 @@ async function readSyncStatus(
 async function waitForLaterSync(
   page: Page,
   workspaceId: string,
-  previousSyncAtMs: number | null,
+  previousSyncAtMs: number,
 ): Promise<void> {
   await page.waitForFunction(
     async ({ id, previousSyncAtMs }) => {
-      const api = (window as unknown as {
-        dohcDesktop?: {
-          getSyncStatus(payload: { workspaceId: string }): Promise<{
-            lastSyncedAtMs: number | null;
-          }>;
-        };
-      }).dohcDesktop;
+      const api = (window as unknown as { dohcDesktop?: SyncStatusBridge })
+        .dohcDesktop;
       if (!api) return false;
       const status = await api.getSyncStatus({ workspaceId: id });
       return (
         status.lastSyncedAtMs !== null &&
-        previousSyncAtMs !== null &&
         status.lastSyncedAtMs > previousSyncAtMs
       );
     },
@@ -187,6 +181,9 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     // completed before the relay log is scanned.
     const syncBeforeLocalChange = await readSyncStatus(page, workspaceId);
     expect(syncBeforeLocalChange.lastSyncedAtMs).not.toBeNull();
+    if (syncBeforeLocalChange.lastSyncedAtMs === null) {
+      throw new Error("completed bootstrap sync has no timestamp");
+    }
     await writeWorkspaceFiles(temp, [
       { path: "notes/join-local-sync-probe.md", contents: "local sync probe\n" },
     ]);
@@ -408,6 +405,9 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
 
     const syncedBeforeWrite = await readSyncStatus(page, workspaceId);
     expect(syncedBeforeWrite.lastSyncedAtMs).not.toBeNull();
+    if (syncedBeforeWrite.lastSyncedAtMs === null) {
+      throw new Error("enabled workspace sync has no timestamp");
+    }
 
     const outboundPath = "notes/after-enable.md";
     const outboundContents = "captured after sync was enabled\n";
