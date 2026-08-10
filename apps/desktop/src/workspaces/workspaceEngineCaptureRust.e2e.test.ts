@@ -19,37 +19,13 @@ import { createWorkspaceActivity } from "./workspaceActivity";
 import { YdocReleasedWithSettleFailureError } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createTestScratch } from "./testTemp";
+import { waitForPathMoments } from "./waitForPathMoments";
 
 // This suite looked only under the repo root, so it SKIPPED everywhere from the
 // day it was written and its coverage came and went with whoever last ran
 // `cargo build` (#390). The shared gate also checks apps/desktop/target/debug,
 // which is where the app under test and the staged-binary harnesses put it.
 const engine = requireEngineBinaryOrSkip();
-async function waitForPathMoments(
-  capture: ReturnType<typeof createWorkspaceEngineCapture>,
-  path: string,
-  count: number,
-) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    try {
-      await capture.flush();
-    } catch (error) {
-      if (
-        !(error instanceof Error) ||
-        !error.message.endsWith(" did not settle.")
-      ) {
-        throw error;
-      }
-      await delay(25);
-      continue;
-    }
-    const page = await capture.listMoments({ limit: 100 });
-    const matching = page.moments.filter((moment) => moment.path === path);
-    if (matching.length >= count) return matching;
-    await delay(25);
-  }
-  throw new Error(`Timed out waiting for ${count} captured moments for ${path}.`);
-}
 
 it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",

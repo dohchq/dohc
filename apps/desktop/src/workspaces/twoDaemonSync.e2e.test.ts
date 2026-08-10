@@ -1,26 +1,16 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { expect, it } from "vitest";
-import {
-  EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
-} from "@dohc/workspace-engine-client/daemon";
+import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { relayAdoptedIdentity, spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import {
-  EngineRelayClient,
-  RelayConfiguredDaemonClientSource,
-  RelayTransportRouteGuard,
-} from "./engineRelayClient";
-import {
-  createLiveLinkedChatStore,
-  type DesktopLinkedChatStore,
-} from "./liveLinkedChatStore";
+import type { EngineRelayWorkspaceClient } from "./engineRelayClient";
+import type { DesktopLinkedChatStore } from "./liveLinkedChatStore";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
+import { waitForPathMoments } from "./waitForPathMoments";
 import { createTestScratch } from "./testTemp";
 
 const engine = requireEngineBinaryOrSkip();
@@ -28,59 +18,32 @@ const engine = requireEngineBinaryOrSkip();
 interface LiveDaemonCapture {
   capture: WorkspaceEngineCapture;
   chats: DesktopLinkedChatStore;
-  relay: EngineRelayClient;
+  relay: EngineRelayWorkspaceClient;
   close(): Promise<void>;
-}
-
-async function waitForPathMoment(
-  capture: WorkspaceEngineCapture,
-  path: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    await capture.flush();
-    const moments = await capture.listMoments({ limit: 100 });
-    if (moments.moments.some((moment) => moment.path === path)) return;
-    await delay(25);
-  }
-  throw new Error(`Timed out waiting for a captured moment for ${path}.`);
 }
 
 async function openLiveDaemonCapture(input: {
   workspaceId: string;
   rootPath: string;
+  relay: { baseUrl: string; token: string };
 }): Promise<LiveDaemonCapture> {
-  const lifecycle = new EngineDaemonLifecycle({
-    command: engine.require(),
-    maxRestarts: 0,
-  });
-  await lifecycle.start();
-  const routes = new RelayTransportRouteGuard();
-  const source = new RelayConfiguredDaemonClientSource(lifecycle, routes);
-  const sessions = new EngineWorkspaceSessions(source);
-  const relay = new EngineRelayClient({
-    sessions,
-    routes,
-    allowInsecureLoopbackForTests: true,
-  });
+  const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0 });
   const capture = createWorkspaceEngineCapture({
-    ...input,
-    rustEngineSessions: sessions,
+    workspaceId: input.workspaceId,
+    rootPath: input.rootPath,
+    rustEngineSessions: workspace.sessions,
     daemonOwnsCapture: true,
   });
-  let closed = false;
+  const relay = workspace.relay.bind(input);
   return {
     capture,
-    chats: createLiveLinkedChatStore(input, sessions),
+    chats: workspace.chats,
     relay,
     close: async () => {
-      if (closed) return;
-      closed = true;
       try {
         await capture.stop();
-        await relay.closeAll();
-        await sessions.closeAll();
       } finally {
-        await lifecycle.stop();
+        await workspace.close();
       }
     },
   };
@@ -93,6 +56,12 @@ async function expectTwoDaemonFileSync(input: {
   contentKind?: "text" | "binary";
 }): Promise<void> {
   const token = `test:${input.workspaceId}`;
+  // Both roots are opened exclusively through EngineWorkspaceSessions (via
+  // openLiveDaemonWorkspace/openLiveDaemonCapture), which writes each root's
+  // `.dohc/engine/SHADOW_CLONE` marker itself before the first RPC touches it
+  // (engineWorkspaceSessions.ts's `prepareWorkspace`). Unlike suites that talk
+  // to the engine outside that path, this harness never needs to seed the
+  // marker by hand.
   const rootA = await createTestScratch("dohc-two-daemon-a-");
   const rootB = await createTestScratch("dohc-two-daemon-b-");
   const relayRoot = await createTestScratch("dohc-two-daemon-relay-");
@@ -103,15 +72,10 @@ async function expectTwoDaemonFileSync(input: {
     daemonA = await openLiveDaemonCapture({
       workspaceId: input.workspaceId,
       rootPath: rootA,
-    });
-    const relayA = daemonA.relay.bind({
-      workspaceId: input.workspaceId,
-      rootPath: rootA,
       relay: { baseUrl: relay.baseUrl, token },
     });
-    await relayA.claim();
+    await daemonA.relay.claim();
     const identity = relayAdoptedIdentity(relay.dbPath, input.workspaceId);
-    expect(identity).not.toBeNull();
     if (identity === null) {
       throw new Error("The relay did not adopt daemon A's replication identity.");
     }
@@ -120,27 +84,27 @@ async function expectTwoDaemonFileSync(input: {
     // Chat creation always journals, so it can establish that position before
     // the first file initializes the versioned workspace.
     await daemonA.chats.ensureGeneralChannel({ workspaceId: input.workspaceId });
-    const bootstrapPush = await relayA.push();
+    const bootstrapPush = await daemonA.relay.push();
     expect(bootstrapPush.pushed).toBeGreaterThan(0);
 
     const absoluteA = join(rootA, input.path);
     await mkdir(dirname(absoluteA), { recursive: true });
     await writeFile(absoluteA, input.text, "utf8");
+    // Registry maintenance, not the moment's source: under daemonOwnsCapture
+    // the real capture write comes from the daemon's own filesystem watcher,
+    // proven by removing this call and watching the moment still arrive.
     daemonA.capture.captureBatch([{ path: input.path, operation: "update" }]);
-    await waitForPathMoment(daemonA.capture, input.path);
+    await waitForPathMoments(daemonA.capture, input.path, 1);
 
-    const push = await relayA.push();
+    const push = await daemonA.relay.push();
     expect(push.pushed).toBeGreaterThan(0);
 
     daemonB = await openLiveDaemonCapture({
       workspaceId: input.workspaceId,
       rootPath: rootB,
-    });
-    const relayB = daemonB.relay.bind({
-      workspaceId: input.workspaceId,
-      rootPath: rootB,
       relay: { baseUrl: relay.baseUrl, token },
     });
+    const relayB = daemonB.relay;
     // A join normally creates its empty main version before the first pull.
     await daemonB.capture.listVersions();
     await relayB.bootstrapJoinIdentity(identity);
