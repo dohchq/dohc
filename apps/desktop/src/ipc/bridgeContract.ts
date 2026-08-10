@@ -417,6 +417,10 @@ export const ReadWorkspaceTextPayload = z.object({
 });
 export type ReadWorkspaceTextPayload = z.infer<typeof ReadWorkspaceTextPayload>;
 
+const WORKSPACE_TEXT_CONTENT_HASH = z
+  .string()
+  .regex(/^[a-f0-9]{64}$/, "content hash must be a lowercase SHA-256 digest");
+
 export const OpenFileExternallyPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
@@ -430,6 +434,9 @@ export const WriteWorkspaceTextPayload = z.object({
   relativePath: PATH_STRING,
   // Editor saves are bounded like reads (2MB); the handler re-checks bytes.
   text: z.string().max(2 * 1024 * 1024),
+  // SHA-256 of the exact bytes returned by the last complete read. Main uses
+  // it for optimistic conflict detection immediately before replacement.
+  expectedContentHash: WORKSPACE_TEXT_CONTENT_HASH,
 });
 export type WriteWorkspaceTextPayload = z.infer<typeof WriteWorkspaceTextPayload>;
 
@@ -498,13 +505,33 @@ export const PickImageFilesResult = z.object({
 });
 export type PickImageFilesResult = z.infer<typeof PickImageFilesResult>;
 
-export const ReadWorkspaceTextResult = z.object({
+export const ReadWorkspaceTextResult = z.discriminatedUnion("truncated", [
+  z.object({
+    text: z.string(),
+    truncated: z.literal(false),
+    contentHash: WORKSPACE_TEXT_CONTENT_HASH,
+  }),
   // Capped: text views are for human-scale files; very large files fall back
   // to a download affordance rather than streaming megabytes through IPC.
-  text: z.string(),
-  truncated: z.boolean(),
-});
+  z.object({
+    text: z.string(),
+    truncated: z.literal(true),
+    contentHash: z.null(),
+  }),
+]);
 export type ReadWorkspaceTextResult = z.infer<typeof ReadWorkspaceTextResult>;
+
+export const WriteWorkspaceTextResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("written"),
+    contentHash: WORKSPACE_TEXT_CONTENT_HASH,
+  }),
+  z.object({
+    status: z.literal("conflict"),
+    currentContentHash: WORKSPACE_TEXT_CONTENT_HASH.nullable(),
+  }),
+]);
+export type WriteWorkspaceTextResult = z.infer<typeof WriteWorkspaceTextResult>;
 
 const WorkspaceGraphNodeBase = z.object({
   path: PATH_STRING,
@@ -3290,7 +3317,9 @@ export interface DohcDesktopBridge {
   readWorkspaceText(
     payload: ReadWorkspaceTextPayload,
   ): Promise<ReadWorkspaceTextResult>;
-  writeWorkspaceText(payload: WriteWorkspaceTextPayload): Promise<void>;
+  writeWorkspaceText(
+    payload: WriteWorkspaceTextPayload,
+  ): Promise<WriteWorkspaceTextResult>;
   writeWorkspaceAsset(payload: WriteWorkspaceAssetPayload): Promise<void>;
   // `/image`: a MAIN-process open dialog rooted at the workspace directory,
   // returning the chosen files' bytes (see PickImageFilesPayload).

@@ -214,6 +214,7 @@ import {
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
+  WriteWorkspaceTextResult,
   WriteWorkspaceAssetPayload,
   MAX_PICKED_IMAGES,
   PickImageFilesPayload,
@@ -537,6 +538,8 @@ import {
   readWorkspaceAsset,
   readWorkspaceText,
   resolveWorkspaceFile,
+  withExclusiveWorkspaceOperation,
+  withStaleSensitiveWorkspaceOperation,
   writeWorkspaceAsset,
   writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
@@ -3547,8 +3550,10 @@ function registerIpcHandlers(
     const input = CreateWorkspaceFilePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    const path = await createFile(workspace.rootPath, input.relativePath);
-    return CreateWorkspaceFileResult.parse({ path });
+    return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
+      const path = await createFile(workspace.rootPath, input.relativePath);
+      return CreateWorkspaceFileResult.parse({ path });
+    });
   });
 
   ipcMain.handle(CHANNELS.createWorkspaceFolder, async (event, payload) => {
@@ -3556,8 +3561,10 @@ function registerIpcHandlers(
     const input = CreateWorkspaceFolderPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    const path = await createFolder(workspace.rootPath, input.relativePath);
-    return CreateWorkspaceFileResult.parse({ path });
+    return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
+      const path = await createFolder(workspace.rootPath, input.relativePath);
+      return CreateWorkspaceFileResult.parse({ path });
+    });
   });
 
   ipcMain.handle(CHANNELS.moveWorkspacePath, async (event, payload) => {
@@ -3565,22 +3572,32 @@ function registerIpcHandlers(
     const input = MoveWorkspacePathPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    // Flagged workspaces coordinate single-file renames through the engine
-    // FIRST so the file keeps its stable object id (linked Chats survive the
-    // rename). Anything the engine declines — folders, binary, untracked —
-    // returns a no-op finisher and is captured as delete+write as before.
-    const capture = activity.engineCaptureFor(workspace.workspaceId);
-    const finishRename = capture
-      ? await capture.beginFileRename(input.fromPath, input.toPath)
-      : null;
-    try {
-      const path = await movePath(workspace.rootPath, input.fromPath, input.toPath);
-      await finishRename?.(true);
-      return CreateWorkspaceFileResult.parse({ path });
-    } catch (error) {
-      await finishRename?.(false);
-      throw error;
-    }
+    return withExclusiveWorkspaceOperation(
+      workspace.rootPath,
+      async (markWorkspaceChanged) => {
+        // Flagged workspaces coordinate single-file renames through the engine
+        // FIRST so the file keeps its stable object id (linked Chats survive the
+        // rename). Anything the engine declines — folders, binary, untracked —
+        // returns a no-op finisher and is captured as delete+write as before.
+        const capture = activity.engineCaptureFor(workspace.workspaceId);
+        const finishRename = capture
+          ? await capture.beginFileRename(input.fromPath, input.toPath)
+          : null;
+        try {
+          const path = await movePath(
+            workspace.rootPath,
+            input.fromPath,
+            input.toPath,
+          );
+          markWorkspaceChanged();
+          await finishRename?.(true);
+          return CreateWorkspaceFileResult.parse({ path });
+        } catch (error) {
+          await finishRename?.(false);
+          throw error;
+        }
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.deleteWorkspacePath, async (event, payload) => {
@@ -3588,43 +3605,51 @@ function registerIpcHandlers(
     const input = DeleteWorkspacePathPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    // WS-G2-C-2 (gate fix 3): a live Y.Doc session over the path being removed
-    // would, on a later settle, resurrect the file / orphan the object. Flush +
-    // release it (and any session under a deleted folder) BEFORE the disk delete
-    // so no stale settle can write the old path afterward.
-    const finishDebts = await activity
-      .engineCaptureFor(workspace.workspaceId)
-      ?.settleAndCloseLiveSessionsForPath(input.relativePath);
-    // shell.trashItem first (recoverable on every platform); deletePath
-    // falls back to the workspace's .dohc/trash where the OS rejects
-    // (cross-filesystem mounts) — never a hard delete either way.
-    //
-    // The finisher takes the OUTCOME (#595): a pending locked write is
-    // cancelled only once the path is provably gone. The same no-share
-    // handle that blocks the write can block the trash and the fallback
-    // move, and a failed delete leaves a file that still owes its write.
-    try {
-      const result = await deletePath(workspace.rootPath, input.relativePath, (p) =>
-        shell.trashItem(p),
-      );
-      // `deletePath` matches its own disk target against the CANONICAL form
-      // `validateUserWritePath` normalizes to (a trailing slash stripped, for
-      // example) — but the schema for this payload does not enforce that
-      // normalization, so a raw "notes/" would otherwise widen its own
-      // prefix match to "notes//" and miss every live session under it.
-      const validatedDeletePath = validateUserWritePath(input.relativePath);
-      notifyEngineYDocSessionsDeleted(
-        workspace.workspaceId,
-        validatedDeletePath.ok
-          ? validatedDeletePath.normalized
-          : input.relativePath,
-      );
-      finishDebts?.(true);
-      return DeleteWorkspacePathResult.parse(result);
-    } catch (error) {
-      finishDebts?.(false);
-      throw error;
-    }
+    return withExclusiveWorkspaceOperation(
+      workspace.rootPath,
+      async (markWorkspaceChanged) => {
+        // WS-G2-C-2 (gate fix 3): a live Y.Doc session over the path being removed
+        // would, on a later settle, resurrect the file / orphan the object. Flush +
+        // release it (and any session under a deleted folder) BEFORE the disk delete
+        // so no stale settle can write the old path afterward.
+        const finishDebts = await activity
+          .engineCaptureFor(workspace.workspaceId)
+          ?.settleAndCloseLiveSessionsForPath(input.relativePath);
+        // shell.trashItem first (recoverable on every platform); deletePath
+        // falls back to the workspace's .dohc/trash where the OS rejects
+        // (cross-filesystem mounts) — never a hard delete either way.
+        //
+        // The finisher takes the OUTCOME (#595): a pending locked write is
+        // cancelled only once the path is provably gone. The same no-share
+        // handle that blocks the write can block the trash and the fallback
+        // move, and a failed delete leaves a file that still owes its write.
+        try {
+          const result = await deletePath(
+            workspace.rootPath,
+            input.relativePath,
+            (p) => shell.trashItem(p),
+          );
+          markWorkspaceChanged();
+          // `deletePath` matches its own disk target against the CANONICAL form
+          // `validateUserWritePath` normalizes to (a trailing slash stripped, for
+          // example) — but the schema for this payload does not enforce that
+          // normalization, so a raw "notes/" would otherwise widen its own
+          // prefix match to "notes//" and miss every live session under it.
+          const validatedDeletePath = validateUserWritePath(input.relativePath);
+          notifyEngineYDocSessionsDeleted(
+            workspace.workspaceId,
+            validatedDeletePath.ok
+              ? validatedDeletePath.normalized
+              : input.relativePath,
+          );
+          finishDebts?.(true);
+          return DeleteWorkspacePathResult.parse(result);
+        } catch (error) {
+          finishDebts?.(false);
+          throw error;
+        }
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.exportWorkspaceZip, async (event, payload) => {
@@ -3926,12 +3951,17 @@ function registerIpcHandlers(
     // files only, never any registered workspace's .dohc metadata. The
     // renderer-supplied targetDir is re-validated inside the import path
     // (resolveImportDestination) before any copy.
-    if (input.droppedPaths !== undefined) {
-      const outcome = await importDroppedPaths(
+    const droppedPaths = input.droppedPaths;
+    if (droppedPaths !== undefined) {
+      const outcome = await withStaleSensitiveWorkspaceOperation(
         workspace.rootPath,
-        input.droppedPaths,
-        listWorkspaces().map((ws) => ws.rootPath),
-        input.targetDir,
+        () =>
+          importDroppedPaths(
+            workspace.rootPath,
+            droppedPaths,
+            listWorkspaces().map((ws) => ws.rootPath),
+            input.targetDir,
+          ),
       );
       return ImportWorkspaceFilesResult.parse(outcome);
     }
@@ -3943,9 +3973,13 @@ function registerIpcHandlers(
             title: "Import files into workspace",
           })
         : { canceled: false, filePaths: picked };
-    const outcome = result.canceled
-      ? { imported: [], skipped: 0 }
-      : await copyIntoWorkspace(workspace.rootPath, result.filePaths, input.targetDir);
+    if (result.canceled) {
+      return ImportWorkspaceFilesResult.parse({ imported: [], skipped: 0 });
+    }
+    const outcome = await withStaleSensitiveWorkspaceOperation(
+      workspace.rootPath,
+      () => copyIntoWorkspace(workspace.rootPath, result.filePaths, input.targetDir),
+    );
     return ImportWorkspaceFilesResult.parse(outcome);
   });
 
@@ -3965,7 +3999,14 @@ function registerIpcHandlers(
     const input = WriteWorkspaceTextPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    await writeWorkspaceText(workspace.rootPath, input.relativePath, input.text);
+    return WriteWorkspaceTextResult.parse(
+      await writeWorkspaceText(
+        workspace.rootPath,
+        input.relativePath,
+        input.text,
+        input.expectedContentHash,
+      ),
+    );
   });
 
   ipcMain.handle(CHANNELS.writeWorkspaceAsset, async (event, payload) => {

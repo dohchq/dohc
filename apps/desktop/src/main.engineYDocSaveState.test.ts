@@ -21,6 +21,68 @@ function handlerSource(channel: string): string {
 }
 
 describe("engine Y.Doc save-state reporting in main", () => {
+  it("keeps each move and delete capture lifecycle inside one exclusive workspace operation", () => {
+    for (const channel of ["moveWorkspacePath", "deleteWorkspacePath"]) {
+      const handler = handlerSource(channel);
+      const exclusiveAt = handler.indexOf("withExclusiveWorkspaceOperation(");
+      const callbackAt = handler.indexOf("async (markWorkspaceChanged)", exclusiveAt);
+      const captureAt =
+        channel === "moveWorkspacePath"
+          ? handler.indexOf("capture.beginFileRename(")
+          : handler.indexOf("settleAndCloseLiveSessionsForPath(");
+      const mutationAt =
+        channel === "moveWorkspacePath"
+          ? handler.indexOf("await movePath(")
+          : handler.indexOf("await deletePath(");
+      const successAt =
+        channel === "moveWorkspacePath"
+          ? handler.indexOf("finishRename?.(true)")
+          : handler.indexOf("finishDebts?.(true)");
+      const changedAt = handler.indexOf("markWorkspaceChanged()", mutationAt);
+      const failureAt =
+        channel === "moveWorkspacePath"
+          ? handler.indexOf("finishRename?.(false)")
+          : handler.indexOf("finishDebts?.(false)");
+      expect(exclusiveAt).toBeGreaterThan(-1);
+      expect(callbackAt).toBeGreaterThan(exclusiveAt);
+      expect(captureAt).toBeGreaterThan(callbackAt);
+      expect(mutationAt).toBeGreaterThan(captureAt);
+      expect(changedAt).toBeGreaterThan(mutationAt);
+      expect(changedAt).toBeLessThan(successAt);
+      expect(successAt).toBeGreaterThan(mutationAt);
+      expect(failureAt).toBeGreaterThan(successAt);
+    }
+  });
+
+  it("admits unconditional file and folder creation through stale-sensitive workspace scheduling", () => {
+    for (const [channel, mutation] of [
+      ["createWorkspaceFile", "await createFile("],
+      ["createWorkspaceFolder", "await createFolder("],
+    ] as const) {
+      const handler = handlerSource(channel);
+      const scheduledAt = handler.indexOf("withStaleSensitiveWorkspaceOperation(");
+      expect(scheduledAt).toBeGreaterThan(-1);
+      expect(handler.indexOf(mutation)).toBeGreaterThan(scheduledAt);
+    }
+  });
+
+  it("admits imports through stale-sensitive scheduling without holding the native dialog", () => {
+    const handler = handlerSource("importWorkspaceFiles");
+    const droppedAt = handler.indexOf("importDroppedPaths(");
+    const firstScheduleAt = handler.indexOf("withStaleSensitiveWorkspaceOperation(");
+    const dialogAt = handler.indexOf("await dialog.showOpenDialog(");
+    const secondScheduleAt = handler.indexOf(
+      "withStaleSensitiveWorkspaceOperation(",
+      firstScheduleAt + 1,
+    );
+    const copyAt = handler.indexOf("copyIntoWorkspace(");
+    expect(firstScheduleAt).toBeGreaterThan(-1);
+    expect(droppedAt).toBeGreaterThan(firstScheduleAt);
+    expect(dialogAt).toBeGreaterThan(droppedAt);
+    expect(secondScheduleAt).toBeGreaterThan(dialogAt);
+    expect(copyAt).toBeGreaterThan(secondScheduleAt);
+  });
+
   it("notifies live renderer sessions only after the disk delete succeeds", () => {
     const handler = handlerSource("deleteWorkspacePath");
     const deleteAt = handler.indexOf("await deletePath(");

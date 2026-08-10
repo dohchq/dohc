@@ -9,6 +9,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // 32 of the 39 tests here await a lazily-imported CodeMirror via findBy*, so the
@@ -34,6 +35,7 @@ import {
 } from "./editor/import-export";
 import {
   classifyForView,
+  type DraftFlush,
   FileInspector,
   lineSpanInText,
   markdownEditorBody,
@@ -43,6 +45,7 @@ import {
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import * as orphanedDraftsModule from "./orphanedDrafts";
+import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
@@ -55,6 +58,7 @@ const LARGE_READ_MODE_FILLER = Array.from(
   { length: 96 },
   (_, index) => `Paragraph ${index + 1}. ${"body ".repeat(160)}`,
 ).join("\n\n");
+const TEST_CONTENT_HASH = "a".repeat(64);
 
 describe("lineSpanInText (search scroll-to-line, Phase E5.0)", () => {
   const text = "first\nsecond line\n\nfourth";
@@ -368,13 +372,13 @@ async function toggleSourceOnce(read: () => (() => void) | null): Promise<void> 
 // cleanup must fire the pending draft through writeWorkspaceText.
 describe("markdown editor unmount flush", () => {
   const bridgeMock = {
-    readWorkspaceText: vi.fn(async () => ({ text: "# Hello\n", truncated: false })),
-    writeWorkspaceText: vi.fn(
-      async (_payload: {
-        workspaceId: string;
-        relativePath: string;
-        text: string;
-      }) => ({ path: "a.md", recorded: true }),
+    readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
+      text: "# Hello\n",
+      truncated: false as const,
+      contentHash: TEST_CONTENT_HASH,
+    })),
+    writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
+      async () => ({ status: "written", contentHash: TEST_CONTENT_HASH }),
     ),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
@@ -386,11 +390,13 @@ describe("markdown editor unmount flush", () => {
 
   beforeEach(() => {
     stubEditorGlobals();
+    resetOrphanedDrafts();
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
   afterEach(() => {
     cleanup();
+    resetOrphanedDrafts();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
@@ -414,6 +420,7 @@ describe("markdown editor unmount flush", () => {
       workspaceId: "ws-1",
       relativePath: "a.md",
       text: "# Hello\nDraft!",
+      expectedContentHash: TEST_CONTENT_HASH,
     });
   });
 
@@ -457,7 +464,46 @@ describe("markdown editor unmount flush", () => {
         workspaceId: "ws-1",
         relativePath: "a.md",
         text: "# Hello\nRaw!",
+        expectedContentHash: TEST_CONTENT_HASH,
       }),
+    );
+  });
+
+  it("settles a successful legacy save while mounted in StrictMode", async () => {
+    let releaseWrite!: () => void;
+    const heldWrite = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        releaseWrite = () =>
+          resolve({ status: "written", contentHash: TEST_CONTENT_HASH });
+      },
+    );
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
+    const user = userEvent.setup();
+    render(
+      <StrictMode>
+        <FileInspector workspaceId="ws-1" path="a.md" />
+      </StrictMode>,
+    );
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe("saving");
+
+    await act(async () => {
+      releaseWrite();
+      await heldWrite;
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+      ).toBe("saved"),
     );
   });
 
@@ -468,6 +514,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Big\n",
       truncated: true,
+      contentHash: null,
     });
     let registered: (() => void) | null = null;
     render(
@@ -493,6 +540,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
@@ -508,6 +556,7 @@ describe("markdown editor unmount flush", () => {
       workspaceId: "ws-1",
       relativePath: "a.md",
       text: "---\nid: note-1\ntitle: Plan\nstatus: ready\n---\n\n# Plan\n",
+      expectedContentHash: TEST_CONTENT_HASH,
     });
   });
 
@@ -519,7 +568,11 @@ describe("markdown editor unmount flush", () => {
     // (truncated would make PageIdentity read-only and skip the save entirely).
     const bigBody = `---\ntitle: Plan\n---\n\n${LARGE_READ_MODE_FILLER}`;
     expect(bigBody.length).toBeGreaterThan(64 * 1024);
-    bridgeMock.readWorkspaceText.mockResolvedValueOnce({ text: bigBody, truncated: false });
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: bigBody,
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
     bridgeMock.writeWorkspaceText.mockRejectedValueOnce(new Error("disk full"));
 
     const user = userEvent.setup();
@@ -560,6 +613,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n",
       truncated: true,
+      contentHash: null,
     });
     const view = render(<FileInspector workspaceId="ws-1" path="large.md" />);
 
@@ -580,6 +634,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Hello\n\n## Exact destination\nBody\n",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     const view = render(
       <FileInspector workspaceId="ws-1" path="a.md" readOnly />,
@@ -616,6 +671,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\ntitle: Plan\n---\n\n# Hello\n\nParagraph\n\n## Exact destination\nBody\n",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     let toggleSource: (() => void) | null = null;
     const view = render(
@@ -655,6 +711,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Foo\nfirst\n# Foo-1\nliteral\n# Foo\nthird\n",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     let toggleSource: (() => void) | null = null;
     const view = render(
@@ -711,6 +768,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
@@ -733,21 +791,78 @@ describe("markdown editor unmount flush", () => {
     expect(lastWrite?.text).not.toBe("");
   });
 
+  it("does not expose a retained same-path body or hash after switching workspaces", async () => {
+    const firstHash = "1".repeat(64);
+    const secondHash = "2".repeat(64);
+    let resolveSecondRead!: () => void;
+    const heldSecondRead = new Promise<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>((resolve) => {
+      resolveSecondRead = () =>
+        resolve({
+          text: "Workspace B",
+          truncated: false,
+          contentHash: secondHash,
+        });
+    });
+    bridgeMock.readWorkspaceText.mockImplementation((payload) =>
+      payload.workspaceId === "ws-1"
+        ? Promise.resolve({
+            text: "Workspace A",
+            truncated: false,
+            contentHash: firstHash,
+          })
+        : heldSecondRead,
+    );
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="notes/plain.txt" />,
+    );
+    const firstEditor = await screen.findByTestId("view-text-editor");
+    expect(firstEditor.textContent).toContain("Workspace A");
+
+    view.rerender(
+      <FileInspector workspaceId="ws-2" path="notes/plain.txt" />,
+    );
+    expect(screen.queryByTestId("view-text-editor")).toBeNull();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSecondRead();
+      await heldSecondRead;
+    });
+    const secondEditor = await screen.findByTestId("view-text-editor");
+    const content = secondEditor.querySelector(".cm-content") as HTMLElement;
+    expect(content.textContent).toContain("Workspace B");
+    await user.click(content);
+    await user.keyboard("{End} edit");
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-2",
+      relativePath: "notes/plain.txt",
+      text: "Workspace B edit",
+      expectedContentHash: secondHash,
+    });
+  });
+
   it("serializes overlapping plain-text autosaves and writes the newest draft last", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     let releaseFirst!: () => void;
-    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseFirst = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     let releaseSecond!: () => void;
-    const heldSecond = new Promise<{ path: string; recorded: boolean }>(
+    const heldSecond = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseSecond = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseSecond = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     let writes = 0;
@@ -786,6 +901,7 @@ describe("markdown editor unmount flush", () => {
         workspaceId: "ws-1",
         relativePath: "notes/plain.txt",
         text: "OneTwo",
+        expectedContentHash: TEST_CONTENT_HASH,
       },
     ]);
     expect(content.textContent).toContain("OneTwo");
@@ -796,15 +912,580 @@ describe("markdown editor unmount flush", () => {
     view.unmount();
   });
 
+  it("sets aside the newest plain-text draft when the file changes during its write", async () => {
+    const initialHash = "4".repeat(64);
+    const externalHash = "5".repeat(64);
+    const freshHash = "6".repeat(64);
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "Base",
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockResolvedValue({
+        text: "External",
+        truncated: false,
+        contentHash: externalHash,
+      });
+    let resolveConflict!: () => void;
+    const heldConflict = new Promise<{
+      status: "conflict";
+      currentContentHash: string;
+    }>((resolve) => {
+      resolveConflict = () =>
+        resolve({ status: "conflict", currentContentHash: externalHash });
+    });
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldConflict)
+      .mockResolvedValue({ status: "written", contentHash: freshHash });
+    let flush: (() => Promise<void>) | null = null;
+    const registerFlush = (next: (() => Promise<void>) | null) => {
+      flush = next;
+    };
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        refreshKey={1}
+        registerDraftFlush={registerFlush}
+      />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} One");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "notes/plain.txt",
+      text: "Base One",
+      expectedContentHash: initialHash,
+    });
+
+    await user.keyboard(" Two");
+    expect(content.textContent).toContain("Base One Two");
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        refreshKey={2}
+        registerDraftFlush={registerFlush}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    expect(content.textContent).toContain("Base One Two");
+
+    await waitFor(() => expect(flush).not.toBeNull());
+    const flushPromise = flush!();
+    const flushResult = flushPromise.then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+    await act(async () => {
+      resolveConflict();
+      await heldConflict;
+    });
+    expect(await flushResult).toBe("rejected");
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(content.textContent).toBe("External"));
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Base One Two"),
+    );
+    expect(
+      screen.getByTestId("view-text-save-state").getAttribute("data-state"),
+    ).toBe("error");
+
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    await user.click(content);
+    await user.keyboard("{End} Fresh");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "notes/plain.txt",
+      text: "External Fresh",
+      expectedContentHash: externalHash,
+    });
+    await expect(flush!()).rejects.toThrow(
+      "The file changed on disk while dohc saved it.",
+    );
+    expect(screen.queryByTestId("orphaned-draft-notice")).not.toBeNull();
+
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
+    await expect(flush!()).resolves.toBeUndefined();
+    expect(
+      screen.getByTestId("view-text-save-state").getAttribute("data-state"),
+    ).toBe("saved");
+    view.unmount();
+  });
+
+  it("rereads plain text after a write overlaps a newer content request", async () => {
+    const initialHash = "7".repeat(64);
+    const localHash = "8".repeat(64);
+    const externalHash = "9".repeat(64);
+    let resolveSecondRead!: () => void;
+    const heldSecondRead = new Promise<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>((resolve) => {
+      resolveSecondRead = () =>
+        resolve({ text: "External", truncated: false, contentHash: externalHash });
+    });
+    let resolveThirdRead!: () => void;
+    const heldThirdRead = new Promise<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>((resolve) => {
+      resolveThirdRead = () =>
+        resolve({ text: "External", truncated: false, contentHash: externalHash });
+    });
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "Base",
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockImplementationOnce(() => heldSecondRead)
+      .mockImplementationOnce(() => heldThirdRead);
+    let resolveWrite!: () => void;
+    const heldWrite = new Promise<{
+      status: "written";
+      contentHash: string;
+    }>((resolve) => {
+      resolveWrite = () => resolve({ status: "written", contentHash: localHash });
+    });
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        refreshKey={1}
+      />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} Local");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        refreshKey={2}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    await act(async () => {
+      resolveSecondRead();
+      await heldSecondRead;
+    });
+    expect(content.textContent).toBe("Base Local");
+
+    await act(async () => {
+      resolveWrite();
+      await heldWrite;
+    });
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3),
+    );
+    expect(
+      screen.getByTestId("view-text-save-state").getAttribute("data-state"),
+    ).not.toBe("saved");
+    expect(content.textContent).toBe("Base Local");
+
+    await act(async () => {
+      resolveThirdRead();
+      await heldThirdRead;
+    });
+    await waitFor(() => expect(content.textContent).toBe("External"));
+    expect(
+      screen.getByTestId("view-text-save-state").getAttribute("data-state"),
+    ).toBe("saved");
+    view.unmount();
+  });
+
+  it("captures the same plain-text conflict again after its first recovery is dismissed", async () => {
+    const initialHash = "c".repeat(64);
+    const externalHash = "d".repeat(64);
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "Base",
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockResolvedValue({
+        text: "Base",
+        truncated: false,
+        contentHash: externalHash,
+      });
+    bridgeMock.writeWorkspaceText.mockResolvedValue({
+      status: "conflict",
+      currentContentHash: externalHash,
+    });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+
+    await user.click(content);
+    await user.keyboard("{End} Draft");
+    await screen.findByTestId("orphaned-draft-notice", {}, { timeout: 5_000 });
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
+    await waitFor(() => expect(content.textContent).toBe("Base"));
+
+    await user.click(content);
+    await user.keyboard("{End} Draft");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Base Draft"),
+    );
+  });
+
+  it("recovers a queued plain-text unmount draft when its I/O write rejects", async () => {
+    const initialHash = "e".repeat(64);
+    const firstHash = "f".repeat(64);
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "Base",
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockResolvedValue({
+        text: "Base One",
+        truncated: false,
+        contentHash: firstHash,
+      });
+    let resolveFirst!: () => void;
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        resolveFirst = () => resolve({ status: "written", contentHash: firstHash });
+      },
+    );
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockRejectedValueOnce(new Error("disk unavailable"));
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="notes/plain.txt" />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} One");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    await user.keyboard(" Two");
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFirst();
+      await heldFirst;
+    });
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Base One Two"),
+    );
+  });
+
+  it("recovers an in-flight plain-text autosave that rejects after unmount", async () => {
+    const initialHash = "3".repeat(64);
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "Base",
+      truncated: false,
+      contentHash: initialHash,
+    });
+    let rejectWrite!: (error: Error) => void;
+    const heldWrite = new Promise<never>((_resolve, reject) => {
+      rejectWrite = reject;
+    });
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="notes/plain.txt" />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} Draft");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    view.unmount();
+
+    await act(async () => {
+      rejectWrite(new Error("disk unavailable"));
+      await heldWrite.catch(() => undefined);
+    });
+    render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Base Draft"),
+    );
+  });
+
+  it.each([
+    { retry: "succeeds", retryFails: false, expectedRecoveries: 0 },
+    { retry: "fails", retryFails: true, expectedRecoveries: 1 },
+  ])(
+    "lets an operation-owned plain-text retry settle before recovery when it $retry",
+    async ({ retryFails, expectedRecoveries }) => {
+      const initialHash = "3".repeat(64);
+      const retryHash = "4".repeat(64);
+      bridgeMock.readWorkspaceText.mockResolvedValue({
+        text: "Base",
+        truncated: false,
+        contentHash: initialHash,
+      });
+      let rejectIssued!: (error: Error) => void;
+      const issuedWrite = new Promise<never>((_resolve, reject) => {
+        rejectIssued = reject;
+      });
+      let resolveRetry!: () => void;
+      let rejectRetry!: (error: Error) => void;
+      const retryWrite = new Promise<{
+        status: "written";
+        contentHash: string;
+      }>((resolve, reject) => {
+        resolveRetry = () => resolve({ status: "written", contentHash: retryHash });
+        rejectRetry = reject;
+      });
+      let writes = 0;
+      bridgeMock.writeWorkspaceText.mockImplementation(() => {
+        writes += 1;
+        return writes === 1 ? issuedWrite : retryWrite;
+      });
+      let flush: DraftFlush | null = null;
+      const recoverySpy = vi.spyOn(
+        orphanedDraftsModule,
+        "captureOrphanedDraft",
+      );
+      try {
+        const user = userEvent.setup();
+        const view = render(
+          <FileInspector
+            workspaceId="ws-1"
+            path="notes/plain.txt"
+            registerDraftFlush={(next) => {
+              flush = next;
+            }}
+          />,
+        );
+        const content = (
+          await screen.findByTestId("view-text-editor")
+        ).querySelector(".cm-content") as HTMLElement;
+        await user.click(content);
+        await user.keyboard("{End} Draft");
+        await waitFor(
+          () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+          { timeout: 5_000 },
+        );
+        await waitFor(() => expect(flush).not.toBeNull());
+        const operationResult = flush!({ captureOnFailure: true }).then(
+          () => "resolved" as const,
+          () => "rejected" as const,
+        );
+        view.unmount();
+
+        await act(async () => {
+          rejectIssued(new Error("issued write failed"));
+          await issuedWrite.catch(() => undefined);
+        });
+        await waitFor(() =>
+          expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+        );
+        // MUTATION (recovery ownership): if the unmount observer captures
+        // before the operation retry settles, success is spurious and failure
+        // creates two recoveries.
+        expect(recoverySpy).not.toHaveBeenCalled();
+
+        await act(async () => {
+          if (retryFails) rejectRetry(new Error("retry failed"));
+          else resolveRetry();
+          await retryWrite.catch(() => undefined);
+        });
+        expect(await operationResult).toBe(
+          retryFails ? "rejected" : "resolved",
+        );
+        expect(recoverySpy).toHaveBeenCalledTimes(expectedRecoveries);
+      } finally {
+        recoverySpy.mockRestore();
+      }
+    },
+  );
+
+  it("keeps a plain-text unmount conflict recoverable without another write", async () => {
+    const initialHash = "7".repeat(64);
+    const externalHash = "8".repeat(64);
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "Base",
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockResolvedValue({
+        text: "External",
+        truncated: false,
+        contentHash: externalHash,
+      });
+    let resolveConflict!: () => void;
+    const heldConflict = new Promise<{
+      status: "conflict";
+      currentContentHash: string;
+    }>((resolve) => {
+      resolveConflict = () =>
+        resolve({ status: "conflict", currentContentHash: externalHash });
+    });
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldConflict);
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="notes/plain.txt" />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} Draft");
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "notes/plain.txt",
+      text: "Base Draft",
+      expectedContentHash: initialHash,
+    });
+
+    await act(async () => {
+      resolveConflict();
+      await heldConflict;
+    });
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Base Draft"),
+    );
+    const recovered = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await waitFor(() => expect(recovered.textContent).toBe("External"));
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a stale path read from pairing its body with the next file's hash", async () => {
+    const firstHash = "9".repeat(64);
+    const secondHash = "b".repeat(64);
+    let resolveFirst!: () => void;
+    const heldFirst = new Promise<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>((resolve) => {
+      resolveFirst = () =>
+        resolve({ text: "First", truncated: false, contentHash: firstHash });
+    });
+    bridgeMock.readWorkspaceText.mockImplementation(({ relativePath }) =>
+      relativePath === "notes/first.txt"
+        ? heldFirst
+        : Promise.resolve({
+            text: "Second",
+            truncated: false as const,
+            contentHash: secondHash,
+          }),
+    );
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="notes/first.txt" />,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "notes/first.txt",
+      }),
+    );
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="notes/second.txt" />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await waitFor(() => expect(content.textContent).toBe("Second"));
+
+    await act(async () => {
+      resolveFirst();
+      await heldFirst;
+    });
+    expect(content.textContent).toBe("Second");
+    await user.click(content);
+    await user.keyboard("{End} edit");
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "notes/second.txt",
+      text: "Second edit",
+      expectedContentHash: secondHash,
+    });
+  });
+
   it("holds a plain-text shell flush until the in-flight autosave lands", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     let releaseWrite!: () => void;
-    const heldWrite = new Promise<{ path: string; recorded: boolean }>(
+    const heldWrite = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseWrite = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseWrite = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     bridgeMock.writeWorkspaceText.mockImplementation(() => heldWrite);
@@ -851,17 +1532,18 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     let releaseFirst!: () => void;
-    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseFirst = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     let releaseSecond!: () => void;
-    const heldSecond = new Promise<{ path: string; recorded: boolean }>(
+    const heldSecond = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseSecond = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseSecond = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     bridgeMock.writeWorkspaceText
@@ -906,6 +1588,7 @@ describe("markdown editor unmount flush", () => {
         workspaceId: "ws-1",
         relativePath: "notes/plain.txt",
         text: "OneTwo",
+        expectedContentHash: TEST_CONTENT_HASH,
       },
     ]);
     await act(async () => {
@@ -921,17 +1604,18 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     let releaseFirst!: () => void;
-    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseFirst = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     let releaseSecond!: () => void;
-    const heldSecond = new Promise<{ path: string; recorded: boolean }>(
+    const heldSecond = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseSecond = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseSecond = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     bridgeMock.writeWorkspaceText
@@ -976,6 +1660,7 @@ describe("markdown editor unmount flush", () => {
       workspaceId: "ws-1",
       relativePath: "notes/plain.txt",
       text: "OneTwo",
+      expectedContentHash: TEST_CONTENT_HASH,
     });
 
     await act(async () => {
@@ -991,23 +1676,24 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     let releaseFirst!: () => void;
-    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseFirst = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     let releaseSecond!: () => void;
-    const heldSecond = new Promise<{ path: string; recorded: boolean }>(
+    const heldSecond = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseSecond = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseSecond = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     let releaseThird!: () => void;
-    const heldThird = new Promise<{ path: string; recorded: boolean }>(
+    const heldThird = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseThird = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseThird = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     bridgeMock.writeWorkspaceText
@@ -1074,6 +1760,7 @@ describe("markdown editor unmount flush", () => {
       workspaceId: "ws-1",
       relativePath: "notes/plain.txt",
       text: "OneTwoThree",
+      expectedContentHash: TEST_CONTENT_HASH,
     });
 
     await act(async () => {
@@ -1093,17 +1780,18 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     let releaseFirst!: () => void;
-    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseFirst = () => resolve({ path: "notes/plain.txt", recorded: true });
+        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     bridgeMock.writeWorkspaceText
       .mockImplementationOnce(() => heldFirst)
       .mockRejectedValueOnce(new Error("deferred write failed"))
-      .mockResolvedValue({ path: "notes/plain.txt", recorded: true });
+      .mockResolvedValue({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
     let flush: (() => Promise<void>) | null = null;
     const user = userEvent.setup();
     const view = render(
@@ -1153,14 +1841,23 @@ describe("markdown editor unmount flush", () => {
       workspaceId: "ws-1",
       relativePath: "notes/plain.txt",
       text: "OneTwo",
+      expectedContentHash: TEST_CONTENT_HASH,
     });
     view.unmount();
   });
 
   it("applies a refreshed plain-text body to CodeMirror", async () => {
     bridgeMock.readWorkspaceText
-      .mockResolvedValueOnce({ text: "before", truncated: false })
-      .mockResolvedValueOnce({ text: "after external edit", truncated: false });
+      .mockResolvedValueOnce({
+        text: "before",
+        truncated: false,
+        contentHash: TEST_CONTENT_HASH,
+      })
+      .mockResolvedValueOnce({
+        text: "after external edit",
+        truncated: false,
+        contentHash: "e".repeat(64),
+      });
     const view = render(
       <FileInspector workspaceId="ws-1" path="notes/plain.txt" refreshKey={1} />,
     );
@@ -1181,6 +1878,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "before\n",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     const onPendingUndoConsumed = vi.fn();
     const user = userEvent.setup();
@@ -1207,6 +1905,7 @@ describe("markdown editor unmount flush", () => {
       workspaceId: "ws-1",
       relativePath: "notes/plain.txt",
       text: "after\n",
+      expectedContentHash: TEST_CONTENT_HASH,
     });
   });
 
@@ -1214,6 +1913,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "date,amount\n2026-06-10,42",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
@@ -1228,6 +1928,7 @@ describe("markdown editor unmount flush", () => {
       workspaceId: "ws-1",
       relativePath: "data/table.csv",
       text: "date,amount\n2026-06-10,43",
+      expectedContentHash: TEST_CONTENT_HASH,
     });
   });
 
@@ -1240,6 +1941,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValue({
       text: "date,amount\n2026-06-10,42",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     const user = userEvent.setup();
     const view = render(
@@ -1293,11 +1995,14 @@ describe("markdown editor unmount flush", () => {
   // when the reread lands and repaints — so it arms as normal, the write seams
   // refuse it, and the capture takes it when the refusal lifts.
   it("refuses a CSV write typed while the switch reread is in flight, and sets it aside", async () => {
-    let releaseReread!: (value: { text: string; truncated: boolean }) => void;
+    let releaseReread!: (
+      value: Awaited<ReturnType<DohcDesktopBridge["readWorkspaceText"]>>,
+    ) => void;
     bridgeMock.readWorkspaceText
       .mockResolvedValueOnce({
         text: "date,amount\n2026-06-10,42",
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       })
       .mockReturnValueOnce(
         new Promise((resolve) => {
@@ -1338,7 +2043,11 @@ describe("markdown editor unmount flush", () => {
     // condition. The keystroke is then silently repainted away by the sync
     // effect with nothing set aside.
     await act(async () => {
-      releaseReread({ text: "date,amount\n2026-06-10,42", truncated: false });
+      releaseReread({
+        text: "date,amount\n2026-06-10,42",
+        truncated: false,
+        contentHash: TEST_CONTENT_HASH,
+      });
       await Promise.resolve();
     });
     const notices = await screen.findAllByTestId("orphaned-draft-copy");
@@ -1360,6 +2069,7 @@ describe("markdown editor unmount flush", () => {
       .mockResolvedValueOnce({
         text: "date,amount\n2026-06-10,42",
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       })
       .mockReturnValueOnce(
         new Promise((_resolve, reject) => {
@@ -1413,6 +2123,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="data/empty.csv" />);
@@ -1425,6 +2136,7 @@ describe("markdown editor unmount flush", () => {
       workspaceId: "ws-1",
       relativePath: "data/empty.csv",
       text: 'column\n""',
+      expectedContentHash: TEST_CONTENT_HASH,
     });
   });
 
@@ -1448,6 +2160,7 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n",
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     });
     const user = userEvent.setup();
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
@@ -1475,10 +2188,12 @@ describe("markdown editor unmount flush", () => {
       .mockResolvedValueOnce({
         text: largeBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       })
       .mockResolvedValueOnce({
         text: externalBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       });
     const user = userEvent.setup();
     const view = render(
@@ -1500,6 +2215,7 @@ describe("markdown editor unmount flush", () => {
       workspaceId: "ws-1",
       relativePath: "large.md",
       text: largeBody.replace("status: draft", "status: ready"),
+      expectedContentHash: TEST_CONTENT_HASH,
     });
   });
 });
@@ -1557,8 +2273,16 @@ describe("engine markdown source view", () => {
     >();
     let sessionId = "";
     const bridgeMock = {
-      readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false })),
-      writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+      readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
+        async () => ({
+          text: markdown,
+          truncated: false,
+          contentHash: TEST_CONTENT_HASH,
+        }),
+      ),
+      writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
+        async () => ({ status: "written", contentHash: TEST_CONTENT_HASH }),
+      ),
       listWorkspaceFiles: vi.fn(async () => ({
         files: [{ path: "a.md", kind: "file" }],
         folders: [],
@@ -1987,7 +2711,7 @@ describe("engine markdown source view", () => {
         ...bridgeMock,
         writeWorkspaceText: vi.fn(async () => {
           order.push("write");
-          return { path: "a.md", recorded: true };
+          return { status: "written" as const, contentHash: TEST_CONTENT_HASH };
         }),
         openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
           opens += 1;
@@ -2405,6 +3129,7 @@ describe("engine markdown source view", () => {
         return {
           text: reads === 1 ? SEARCH_DOC : `${SEARCH_DOC}\nFourth paragraph.\n`,
           truncated: false,
+          contentHash: TEST_CONTENT_HASH,
         };
       }),
     });
@@ -2939,6 +3664,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -3022,6 +3748,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -3123,6 +3850,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -3346,6 +4074,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -3437,6 +4166,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -3539,6 +4269,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -3616,7 +4347,11 @@ describe("engine markdown source view", () => {
     bridgeMock.readWorkspaceText.mockImplementation(async () => {
       reads += 1;
       if (reads === 1) {
-        return { text: firstBody, truncated: false };
+        return {
+          text: firstBody,
+          truncated: false,
+          contentHash: TEST_CONTENT_HASH,
+        };
       }
       return await new Promise<never>((_resolve, reject) => {
         rejectSecondRead = reject;
@@ -3691,9 +4426,19 @@ describe("engine markdown source view", () => {
     let reads = 0;
     bridgeMock.readWorkspaceText.mockImplementation(async () => {
       reads += 1;
-      if (reads === 1) return { text: firstBody, truncated: false };
+      if (reads === 1) {
+        return {
+          text: firstBody,
+          truncated: false,
+          contentHash: TEST_CONTENT_HASH,
+        };
+      }
       if (reads === 2) throw new Error("read failed");
-      return { text: thirdBody, truncated: false };
+      return {
+        text: thirdBody,
+        truncated: false,
+        contentHash: TEST_CONTENT_HASH,
+      };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
       available: false,
@@ -3757,6 +4502,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -3854,6 +4600,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -3951,6 +4698,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -4013,6 +4761,7 @@ describe("engine markdown source view", () => {
           workspaceId: "ws-1",
           relativePath: "a.md",
           text: freshBody,
+          expectedContentHash: TEST_CONTENT_HASH,
         }),
       { timeout: 5_000 },
     );
@@ -4020,6 +4769,7 @@ describe("engine markdown source view", () => {
       workspaceId: "ws-1",
       relativePath: "a.md",
       text: typedBody,
+      expectedContentHash: TEST_CONTENT_HASH,
     });
   });
 
@@ -4041,6 +4791,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -4125,6 +4876,7 @@ describe("engine markdown source view", () => {
       return {
         text: reads === 1 ? firstBody : secondBody,
         truncated: false,
+        contentHash: TEST_CONTENT_HASH,
       };
     });
     bridgeMock.openEngineYDocSession.mockResolvedValue({
@@ -4222,6 +4974,7 @@ describe("engine markdown source view", () => {
         return {
           text: reads === 1 ? SEARCH_DOC : `${SEARCH_DOC}\nFourth paragraph.\n`,
           truncated: false,
+          contentHash: TEST_CONTENT_HASH,
         };
       }),
     });
@@ -4311,14 +5064,16 @@ describe("engine markdown source view", () => {
       let opens = 0;
       vi.stubGlobal("dohcDesktop", {
         ...bridgeMock,
-        readWorkspaceText: vi.fn(async () => {
-          reads += 1;
-          // Read 1 succeeds, so the plain editor mounts and takes a draft.
-          // The refresh's read FAILS, which hands the surface to the
-          // loading/error branch and unmounts that editor.
-          if (reads === 1) return await bridgeMock.readWorkspaceText();
-          throw new Error("read failed");
-        }),
+        readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
+          async (payload) => {
+            reads += 1;
+            // Read 1 succeeds, so the plain editor mounts and takes a draft.
+            // The refresh's read FAILS, which hands the surface to the
+            // loading/error branch and unmounts that editor.
+            if (reads === 1) return await bridgeMock.readWorkspaceText(payload);
+            throw new Error("read failed");
+          },
+        ),
         openEngineYDocSession: vi.fn(async () => {
           opens += 1;
           // Open 1: not engine-backed, so the plain editor is writable.
@@ -4379,11 +5134,13 @@ describe("engine markdown source view", () => {
       let opens = 0;
       vi.stubGlobal("dohcDesktop", {
         ...bridgeMock,
-        readWorkspaceText: vi.fn(async () => {
-          reads += 1;
-          if (reads === 1) return await bridgeMock.readWorkspaceText();
-          throw new Error("read failed");
-        }),
+        readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
+          async (payload) => {
+            reads += 1;
+            if (reads === 1) return await bridgeMock.readWorkspaceText(payload);
+            throw new Error("read failed");
+          },
+        ),
         openEngineYDocSession: vi.fn(async () => {
           opens += 1;
           // Open 1: not engine-backed, so the plain editor is writable.
@@ -4492,12 +5249,20 @@ describe("engine markdown source view", () => {
   it("shows the version-specific notice when the reread fails before the open refuses", async () => {
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
     let reads = 0;
-    bridgeMock.readWorkspaceText = vi.fn(async () => {
-      reads += 1;
-      if (reads === 1) return { text: DOC_MARKDOWN, truncated: false };
-      // The version switch removed it. The reread answers FIRST.
-      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-    });
+    bridgeMock.readWorkspaceText = vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
+      async () => {
+        reads += 1;
+        if (reads === 1) {
+          return {
+            text: DOC_MARKDOWN,
+            truncated: false,
+            contentHash: TEST_CONTENT_HASH,
+          };
+        }
+        // The version switch removed it. The reread answers FIRST.
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+    );
     let refuse!: () => void;
     let opens = 0;
     const refused = new Promise<{ available: boolean; notInVersion?: boolean }>(
@@ -4695,11 +5460,16 @@ describe("markdown document opening state", () => {
     const serverDoc = markdownToYDoc(DOC_MARKDOWN);
     let settle: ((available: boolean) => void) | null = null;
     const bridgeMock = {
-      readWorkspaceText: vi.fn(async () => ({
-        text: DOC_MARKDOWN,
-        truncated: false,
-      })),
-      writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+      readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
+        async () => ({
+          text: DOC_MARKDOWN,
+          truncated: false,
+          contentHash: TEST_CONTENT_HASH,
+        }),
+      ),
+      writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
+        async () => ({ status: "written", contentHash: TEST_CONTENT_HASH }),
+      ),
       listWorkspaceFiles: vi.fn(async () => ({
         files: [{ path: "a.md", kind: "file" }],
         folders: [],
@@ -4735,6 +5505,34 @@ describe("markdown document opening state", () => {
       bind: () => act(() => settle?.(true)),
       answerNotEngineBacked: () => act(() => settle?.(false)),
     };
+  }
+
+  async function renderLegacyMarkdown(
+    bridge: ReturnType<typeof makeHeldOpenBridge>,
+    registerDraftFlush?: (flush: DraftFlush | null) => void,
+  ) {
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        registerDraftFlush={registerDraftFlush}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    return view;
+  }
+
+  async function enterLegacySourceMode(): Promise<HTMLTextAreaElement> {
+    fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
+    return (await screen.findByTestId("markdown-editor")) as HTMLTextAreaElement;
   }
 
   beforeEach(() => {
@@ -4914,6 +5712,7 @@ describe("markdown document opening state", () => {
           workspaceId: "ws-1",
           relativePath: "a.md",
           text: "# Plan\n\nBase paragraph.\nDraft!",
+          expectedContentHash: TEST_CONTENT_HASH,
         }),
       { timeout: 5_000 },
     );
@@ -5045,6 +5844,7 @@ describe("markdown document opening state", () => {
           workspaceId: "ws-1",
           relativePath: "a.md",
           text: "# Plan\n\nBase paragraph.\nNew!",
+          expectedContentHash: TEST_CONTENT_HASH,
         }),
       { timeout: 5_000 },
     );
@@ -5183,6 +5983,881 @@ describe("markdown document opening state", () => {
     expect(states.at(-1)).toBe("saved");
   });
 
+  it("shares concurrent legacy Markdown flushes until their held write lands", async () => {
+    const bridge = makeHeldOpenBridge();
+    let releaseWrite!: () => void;
+    const heldWrite = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        releaseWrite = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+      },
+    );
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => heldWrite);
+    let flush: (() => Promise<void>) | null = null;
+    await renderLegacyMarkdown(bridge, (next) => {
+      flush = next;
+    });
+    const source = await enterLegacySourceMode();
+    fireEvent.change(source, { target: { value: `${source.value}One` } });
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    let firstSettled = false;
+    let secondSettled = false;
+    const firstFlush = flush!();
+    const secondFlush = flush!();
+    void firstFlush.then(() => {
+      firstSettled = true;
+    });
+    void secondFlush.then(() => {
+      secondSettled = true;
+    });
+    await waitFor(() =>
+      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const settledBeforeWrite = firstSettled || secondSettled;
+
+    await act(async () => {
+      releaseWrite();
+      await heldWrite;
+      await Promise.all([firstFlush, secondFlush]);
+    });
+
+    expect(firstFlush).toBe(secondFlush);
+    expect(settledBeforeWrite).toBe(false);
+    expect(firstSettled).toBe(true);
+    expect(secondSettled).toBe(true);
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
+  it("drains a source edit made during a held flush before close can strand it", async () => {
+    const bridge = makeHeldOpenBridge();
+    let releaseFirst!: () => void;
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+      },
+    );
+    let releaseSecond!: () => void;
+    const heldSecond = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        releaseSecond = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+      },
+    );
+    let secondStarted!: () => void;
+    const secondWriteStarted = new Promise<void>((resolve) => {
+      secondStarted = resolve;
+    });
+    bridge.bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockImplementationOnce(() => {
+        secondStarted();
+        return heldSecond;
+      });
+    let flush: (() => Promise<void>) | null = null;
+    const view = await renderLegacyMarkdown(bridge, (next) => {
+      flush = next;
+    });
+    const source = await enterLegacySourceMode();
+    fireEvent.change(source, { target: { value: `${source.value}One` } });
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    const flushPromise = flush!();
+    await waitFor(() =>
+      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+    const newestSource = `${source.value}Two`;
+    fireEvent.change(source, { target: { value: newestSource } });
+    expect(source.value).toBe(newestSource);
+
+    await act(async () => {
+      releaseFirst();
+      await heldFirst;
+    });
+    const firstToFinish = await Promise.race([
+      secondWriteStarted.then(() => "second-write" as const),
+      flushPromise.then(() => "flush" as const),
+    ]);
+    expect(firstToFinish).toBe("second-write");
+    expect((screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value).toBe(
+      newestSource,
+    );
+
+    await act(async () => {
+      releaseSecond();
+      await heldSecond;
+      await flushPromise;
+    });
+    view.unmount();
+
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "a.md",
+      text: newestSource,
+      expectedContentHash: TEST_CONTENT_HASH,
+    });
+  });
+
+  it("does not repaint a newer frontmatter title when an older write completes", async () => {
+    const bridge = makeHeldOpenBridge();
+    let releaseFirst!: () => void;
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+      },
+    );
+    let releaseSecond!: () => void;
+    const heldSecond = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        releaseSecond = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+      },
+    );
+    bridge.bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockImplementationOnce(() => heldSecond);
+    await renderLegacyMarkdown(bridge);
+    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    fireEvent.focus(title);
+    fireEvent.change(title, { target: { value: "First title" } });
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    fireEvent.change(title, { target: { value: "Second title" } });
+    fireEvent.blur(title);
+    expect(title.value).toBe("Second title");
+    await act(async () => {
+      releaseFirst();
+      await heldFirst;
+    });
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe("saving");
+    expect(title.value).toBe("Second title");
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[1]?.[0].text).toContain(
+      "title: Second title",
+    );
+    await act(async () => {
+      releaseSecond();
+      await heldSecond;
+    });
+    expect(title.value).toBe("Second title");
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+      ).toBe("saved"),
+    );
+  });
+
+  it("sets aside the newest read-mode draft when the file changes during its write", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    const initialBody = `---\ntitle: Plan\n---\n\n${"body\n".repeat(14_000)}`;
+    const newestLocalBody = initialBody.replace(
+      "title: Plan",
+      "title: Newest local title",
+    );
+    const externalBody = initialBody.replace(
+      "title: Plan",
+      "title: External title",
+    );
+    const initialHash = "1".repeat(64);
+    const externalHash = "2".repeat(64);
+    const freshHash = "3".repeat(64);
+    bridge.bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: initialBody,
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockResolvedValue({
+        text: externalBody,
+        truncated: false,
+        contentHash: externalHash,
+      });
+    let resolveConflict!: () => void;
+    const heldConflict = new Promise<{
+      status: "conflict";
+      currentContentHash: string;
+    }>(
+      (resolve) => {
+        resolveConflict = () =>
+          resolve({ status: "conflict", currentContentHash: externalHash });
+      },
+    );
+    bridge.bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldConflict)
+      .mockResolvedValue({ status: "written", contentHash: freshHash });
+    let flush: (() => Promise<void>) | null = null;
+    const registerFlush = (next: (() => Promise<void>) | null) => {
+      flush = next;
+    };
+    const view = await renderLegacyMarkdown(bridge, registerFlush);
+    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    fireEvent.focus(title);
+    fireEvent.change(title, { target: { value: "Local title" } });
+    fireEvent.blur(title);
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "a.md",
+      text: initialBody.replace("title: Plan", "title: Local title"),
+      expectedContentHash: initialHash,
+    });
+
+    fireEvent.focus(title);
+    fireEvent.change(title, { target: { value: "Newest local title" } });
+    fireEvent.blur(title);
+    expect(title.value).toBe("Newest local title");
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerDraftFlush={registerFlush}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    expect(title.value).toBe("Newest local title");
+
+    await waitFor(() => expect(flush).not.toBeNull());
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    const flushResult = flushPromise.then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+    await act(async () => {
+      resolveConflict();
+      await heldConflict;
+    });
+    expect(await flushResult).toBe("rejected");
+    expect(flushSettled).toBe(false);
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+        "External title",
+      ),
+    );
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(newestLocalBody),
+    );
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).not.toBe("saved");
+
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    const recoveredTitle = screen.getByTestId("page-title") as HTMLInputElement;
+    fireEvent.focus(recoveredTitle);
+    fireEvent.change(recoveredTitle, { target: { value: "Fresh title" } });
+    fireEvent.blur(recoveredTitle);
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "a.md",
+      text: externalBody.replace("title: External title", "title: Fresh title"),
+      expectedContentHash: externalHash,
+    });
+    await expect(flush!()).rejects.toThrow(
+      "The file changed on disk while dohc saved it.",
+    );
+    expect(screen.queryByTestId("orphaned-draft-notice")).not.toBeNull();
+
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
+    await expect(flush!()).resolves.toBeUndefined();
+    expect(screen.queryByTestId("markdown-save-state")).toBeNull();
+  });
+
+  it("sets aside the live WYSIWYG draft when an older in-flight save conflicts", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    const initialHash = "4".repeat(64);
+    const externalHash = "5".repeat(64);
+    const externalBody = "# External\n\nChanged elsewhere.\n";
+    bridge.bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: DOC_MARKDOWN,
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockResolvedValue({
+        text: externalBody,
+        truncated: false,
+        contentHash: externalHash,
+      });
+    let resolveConflict!: () => void;
+    const heldConflict = new Promise<{
+      status: "conflict";
+      currentContentHash: string;
+    }>((resolve) => {
+      resolveConflict = () =>
+        resolve({ status: "conflict", currentContentHash: externalHash });
+    });
+    bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(
+      () => heldConflict,
+    );
+    await renderLegacyMarkdown(bridge);
+    const editor = await screen.findByTestId("markdown-editor");
+    expect(editor).not.toBeInstanceOf(HTMLTextAreaElement);
+
+    await user.type(editor, "L1");
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    const firstIssuedBody = bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]
+      .text;
+    expect(firstIssuedBody).toContain("L1");
+
+    await user.type(editor, "L2");
+    expect(editor.textContent).toBe("L1PlanBase paragraph.L2");
+    const newestLocalBody = firstIssuedBody.replace(
+      "Base paragraph.",
+      "Base paragraph.L2",
+    );
+    await act(async () => {
+      resolveConflict();
+      await heldConflict;
+    });
+
+    await screen.findByText("Changed elsewhere.");
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(newestLocalBody),
+    );
+    expect(
+      (await screen.findByTestId("markdown-editor")).textContent,
+    ).not.toContain("L2");
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a legacy Markdown unmount conflict recoverable without another write", async () => {
+    const bridge = makeHeldOpenBridge();
+    const initialHash = "c".repeat(64);
+    const externalHash = "d".repeat(64);
+    const externalBody = "# External\n\nChanged elsewhere.\n";
+    bridge.bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: DOC_MARKDOWN,
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockResolvedValue({
+        text: externalBody,
+        truncated: false,
+        contentHash: externalHash,
+      });
+    let resolveConflict!: () => void;
+    const heldConflict = new Promise<{
+      status: "conflict";
+      currentContentHash: string;
+    }>((resolve) => {
+      resolveConflict = () =>
+        resolve({ status: "conflict", currentContentHash: externalHash });
+    });
+    bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(
+      () => heldConflict,
+    );
+    const view = await renderLegacyMarkdown(bridge);
+    const source = await enterLegacySourceMode();
+    const localBody = `${source.value}Draft`;
+    fireEvent.change(source, { target: { value: localBody } });
+    view.unmount();
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "a.md",
+      text: localBody,
+      expectedContentHash: initialHash,
+    });
+
+    await act(async () => {
+      resolveConflict();
+      await heldConflict;
+    });
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    const remountBridge = makeHeldOpenBridge();
+    remountBridge.bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: externalBody,
+      truncated: false,
+      contentHash: externalHash,
+    });
+    await renderLegacyMarkdown(remountBridge);
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(localBody),
+    );
+    await screen.findByText("Changed elsewhere.");
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(remountBridge.bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("queues a legacy Markdown unmount draft behind the hash from its in-flight write", async () => {
+    const bridge = makeHeldOpenBridge();
+    const initialHash = "e".repeat(64);
+    const firstHash = "f".repeat(64);
+    const secondHash = "0".repeat(64);
+    bridge.bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: DOC_MARKDOWN,
+      truncated: false,
+      contentHash: initialHash,
+    });
+    let resolveFirst!: () => void;
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        resolveFirst = () => resolve({ status: "written", contentHash: firstHash });
+      },
+    );
+    let resolveSecond!: () => void;
+    const heldSecond = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        resolveSecond = () => resolve({ status: "written", contentHash: secondHash });
+      },
+    );
+    bridge.bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockImplementationOnce(() => heldSecond);
+    const view = await renderLegacyMarkdown(bridge);
+    const source = await enterLegacySourceMode();
+    fireEvent.change(source, { target: { value: `${source.value}First` } });
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    const newestBody = `${source.value}Second`;
+    fireEvent.change(source, { target: { value: newestBody } });
+    view.unmount();
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFirst();
+      await heldFirst;
+    });
+    await waitFor(() =>
+      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "a.md",
+      text: newestBody,
+      expectedContentHash: firstHash,
+    });
+    await act(async () => {
+      resolveSecond();
+      await heldSecond;
+    });
+
+    const remountBridge = makeHeldOpenBridge();
+    remountBridge.bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: newestBody,
+      truncated: false,
+      contentHash: secondHash,
+    });
+    await renderLegacyMarkdown(remountBridge);
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    expect(remountBridge.bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("rereads legacy Markdown after a write overlaps a newer content request", async () => {
+    const bridge = makeHeldOpenBridge();
+    const initialBody = `---\ntitle: Base\n---\n\n${"Body\n".repeat(14_000)}`;
+    const externalBody = initialBody.replace("title: Base", "title: External");
+    const initialHash = "3".repeat(64);
+    const localHash = "4".repeat(64);
+    const externalHash = "5".repeat(64);
+    let resolveSecondRead!: () => void;
+    const heldSecondRead = new Promise<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>((resolve) => {
+      resolveSecondRead = () =>
+        resolve({ text: externalBody, truncated: false, contentHash: externalHash });
+    });
+    let resolveThirdRead!: () => void;
+    const heldThirdRead = new Promise<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>((resolve) => {
+      resolveThirdRead = () =>
+        resolve({ text: externalBody, truncated: false, contentHash: externalHash });
+    });
+    bridge.bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: initialBody,
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockImplementationOnce(() => heldSecondRead)
+      .mockImplementationOnce(() => heldThirdRead);
+    let resolveWrite!: () => void;
+    const heldWrite = new Promise<{
+      status: "written";
+      contentHash: string;
+    }>((resolve) => {
+      resolveWrite = () => resolve({ status: "written", contentHash: localHash });
+    });
+    bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
+    const view = await renderLegacyMarkdown(bridge);
+    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    fireEvent.focus(title);
+    fireEvent.change(title, { target: { value: "Local" } });
+    fireEvent.blur(title);
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        refreshKey={2}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    await act(async () => {
+      resolveSecondRead();
+      await heldSecondRead;
+    });
+    expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      "Local",
+    );
+
+    await act(async () => {
+      resolveWrite();
+      await heldWrite;
+    });
+    await waitFor(() =>
+      expect(bridge.bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3),
+    );
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).not.toBe("saved");
+    expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      "Local",
+    );
+
+    await act(async () => {
+      resolveThirdRead();
+      await heldThirdRead;
+    });
+    await waitFor(() =>
+      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+        "External",
+      ),
+    );
+    expect(screen.queryByTestId("markdown-save-state")).toBeNull();
+  });
+
+  it("settles a WYSIWYG verification reread that differs from its completed write", async () => {
+    const bridge = makeHeldOpenBridge();
+    const initialBody = "---\ntitle: Base\n---\n\nBody\n";
+    const externalBody = initialBody.replace("title: Base", "title: External");
+    const initialHash = "6".repeat(64);
+    const localHash = "7".repeat(64);
+    const externalHash = "8".repeat(64);
+    let resolveSecondRead!: () => void;
+    const heldSecondRead = new Promise<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>((resolve) => {
+      resolveSecondRead = () =>
+        resolve({ text: externalBody, truncated: false, contentHash: externalHash });
+    });
+    let resolveThirdRead!: () => void;
+    const heldThirdRead = new Promise<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>((resolve) => {
+      resolveThirdRead = () =>
+        resolve({ text: externalBody, truncated: false, contentHash: externalHash });
+    });
+    bridge.bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: initialBody,
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockImplementationOnce(() => heldSecondRead)
+      .mockImplementationOnce(() => heldThirdRead);
+    let resolveWrite!: () => void;
+    const heldWrite = new Promise<{
+      status: "written";
+      contentHash: string;
+    }>((resolve) => {
+      resolveWrite = () => resolve({ status: "written", contentHash: localHash });
+    });
+    bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
+    const view = await renderLegacyMarkdown(bridge);
+    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    fireEvent.focus(title);
+    fireEvent.change(title, { target: { value: "Local" } });
+    fireEvent.blur(title);
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    const issuedLocalBody = bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]
+      .text;
+    expect(issuedLocalBody).toContain("title: Local");
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        refreshKey={2}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    await act(async () => {
+      resolveSecondRead();
+      await heldSecondRead;
+      resolveWrite();
+      await heldWrite;
+    });
+    await waitFor(() =>
+      expect(bridge.bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3),
+    );
+    await act(async () => {
+      resolveThirdRead();
+      await heldThirdRead;
+    });
+    await waitFor(() =>
+      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+        "External",
+      ),
+    );
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(issuedLocalBody),
+    );
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe("error");
+  });
+
+  it("captures the same legacy conflict again after its first recovery is dismissed", async () => {
+    const bridge = makeHeldOpenBridge();
+    const initialBody = `---\ntitle: Base\n---\n\n${"Body\n".repeat(14_000)}`;
+    const initialHash = "9".repeat(64);
+    const externalHash = "b".repeat(64);
+    bridge.bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: initialBody,
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockResolvedValue({
+        text: initialBody,
+        truncated: false,
+        contentHash: externalHash,
+      });
+    bridge.bridgeMock.writeWorkspaceText.mockResolvedValue({
+      status: "conflict",
+      currentContentHash: externalHash,
+    });
+    const user = userEvent.setup();
+    await renderLegacyMarkdown(bridge);
+
+    const editTitle = async () => {
+      const title = screen.getByTestId("page-title") as HTMLInputElement;
+      fireEvent.focus(title);
+      fireEvent.change(title, { target: { value: "Local" } });
+      fireEvent.blur(title);
+    };
+    await editTitle();
+    await screen.findByTestId("orphaned-draft-notice", {}, { timeout: 5_000 });
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
+    await waitFor(() =>
+      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+        "Base",
+      ),
+    );
+
+    await editTitle();
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    await screen.findByTestId("orphaned-draft-notice");
+  });
+
+  it("recovers a queued legacy unmount draft when its I/O write rejects", async () => {
+    const bridge = makeHeldOpenBridge();
+    const initialHash = "c".repeat(64);
+    const firstHash = "d".repeat(64);
+    bridge.bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: DOC_MARKDOWN,
+      truncated: false,
+      contentHash: initialHash,
+    });
+    let resolveFirst!: () => void;
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        resolveFirst = () => resolve({ status: "written", contentHash: firstHash });
+      },
+    );
+    bridge.bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockRejectedValueOnce(new Error("disk unavailable"));
+    const view = await renderLegacyMarkdown(bridge);
+    const source = await enterLegacySourceMode();
+    fireEvent.change(source, { target: { value: `${source.value}First` } });
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    const newestBody = `${source.value}Second`;
+    fireEvent.change(source, { target: { value: newestBody } });
+    view.unmount();
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFirst();
+      await heldFirst;
+    });
+    await waitFor(() =>
+      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    const remountBridge = makeHeldOpenBridge();
+    remountBridge.bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: `${DOC_MARKDOWN}First`,
+      truncated: false,
+      contentHash: firstHash,
+    });
+    await renderLegacyMarkdown(remountBridge);
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(newestBody),
+    );
+  });
+
+  it("recovers an in-flight legacy autosave that rejects after unmount", async () => {
+    const bridge = makeHeldOpenBridge();
+    const initialHash = "e".repeat(64);
+    bridge.bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: DOC_MARKDOWN,
+      truncated: false,
+      contentHash: initialHash,
+    });
+    let rejectWrite!: (error: Error) => void;
+    const heldWrite = new Promise<never>((_resolve, reject) => {
+      rejectWrite = reject;
+    });
+    bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
+    const view = await renderLegacyMarkdown(bridge);
+    const source = await enterLegacySourceMode();
+    const localBody = `${source.value}Draft`;
+    fireEvent.change(source, { target: { value: localBody } });
+    await waitFor(
+      () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    view.unmount();
+
+    await act(async () => {
+      rejectWrite(new Error("disk unavailable"));
+      await heldWrite.catch(() => undefined);
+    });
+    const remountBridge = makeHeldOpenBridge();
+    await renderLegacyMarkdown(remountBridge);
+    await screen.findByTestId("orphaned-draft-notice");
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(localBody),
+    );
+  });
+
+  it("settles a held raw-source save after switching to lossy WYSIWYG without repainting or retrying", async () => {
+    const bridge = makeHeldOpenBridge();
+    let releaseWrite!: () => void;
+    const heldWrite = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        releaseWrite = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+      },
+    );
+    bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
+    await renderLegacyMarkdown(bridge);
+    const source = await enterLegacySourceMode();
+    const rawSource = `${source.value}\n<!-- keep raw -->`;
+    fireEvent.change(source, { target: { value: rawSource } });
+
+    fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
+    await waitFor(() =>
+      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+    const wysiwyg = await waitFor(() => {
+      const editor = screen.getByTestId("markdown-editor");
+      if (editor instanceof HTMLTextAreaElement) {
+        throw new Error("The WYSIWYG editor has not replaced source yet.");
+      }
+      return editor;
+    });
+    const renderedBeforeWriteLands = wysiwyg.innerHTML;
+    expect(wysiwyg.textContent).not.toContain("keep raw");
+    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text).toBe(
+      rawSource,
+    );
+
+    await act(async () => {
+      releaseWrite();
+      await heldWrite;
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+      ).toBe("saved"),
+    );
+    expect(screen.getByTestId("markdown-save-state").textContent).toBe("Saved");
+    expect(screen.getByTestId("markdown-editor")).toBe(wysiwyg);
+    expect(wysiwyg.innerHTML).toBe(renderedBeforeWriteLands);
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
   // #579 review r3, the last unguarded interleaving: an autosave that already
   // passed the guards and is AWAITING its IPC write. `unsavedDraft` clears at
   // issue time, so a flush that only reads it would return at once, the
@@ -5192,9 +6867,9 @@ describe("markdown document opening state", () => {
     const user = userEvent.setup();
     const bridge = makeHeldOpenBridge();
     let releaseWrite!: () => void;
-    const heldWrite = new Promise<{ path: string; recorded: boolean }>(
+    const heldWrite = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseWrite = () => resolve({ path: "a.md", recorded: true });
+        releaseWrite = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => heldWrite);
@@ -5259,6 +6934,7 @@ describe("markdown document opening state", () => {
           workspaceId: "ws-1",
           relativePath: "a.md",
           text: "# Plan\n\nBase paragraph.\nDraft!",
+          expectedContentHash: TEST_CONTENT_HASH,
         },
       ],
     ]);
@@ -5287,9 +6963,9 @@ describe("markdown document opening state", () => {
     const user = userEvent.setup();
     const bridge = makeHeldOpenBridge();
     let releaseFirst!: () => void;
-    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseFirst = () => resolve({ path: "a.md", recorded: true });
+        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     let writes = 0;
@@ -5297,7 +6973,7 @@ describe("markdown document opening state", () => {
       writes += 1;
       return writes === 1
         ? heldFirst
-        : Promise.resolve({ path: "a.md", recorded: true });
+        : Promise.resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
     });
     vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />);
@@ -5343,6 +7019,7 @@ describe("markdown document opening state", () => {
         workspaceId: "ws-1",
         relativePath: "a.md",
         text: "# Plan\n\nBase paragraph.\nOneTwo",
+        expectedContentHash: TEST_CONTENT_HASH,
       },
     ]);
   });
@@ -5384,15 +7061,15 @@ describe("markdown document opening state", () => {
     const user = userEvent.setup();
     const bridge = makeHeldOpenBridge();
     let releaseA!: () => void;
-    const heldA = new Promise<{ path: string; recorded: boolean }>(
+    const heldA = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseA = () => resolve({ path: "a.md", recorded: true });
+        releaseA = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     let releaseB!: () => void;
-    const heldB = new Promise<{ path: string; recorded: boolean }>(
+    const heldB = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseB = () => resolve({ path: "a.md", recorded: true });
+        releaseB = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     let writes = 0;
@@ -5464,20 +7141,153 @@ describe("markdown document opening state", () => {
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
   });
 
+  it("captures a failed flush when a path settlement joins its existing promise", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    let rejectWrite!: (error: Error) => void;
+    const heldWrite = new Promise<never>((_resolve, reject) => {
+      rejectWrite = reject;
+    });
+    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => heldWrite);
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    let flush: DraftFlush | null = null;
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    const editor = await screen.findByTestId(
+      "markdown-editor",
+      {},
+      { timeout: 5_000 },
+    );
+    await user.type(editor, " Late draft");
+    const exactDraft = (editor as HTMLTextAreaElement).value;
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    const originalFlush = flush!().catch((error: unknown) => error);
+    await waitFor(() =>
+      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+    const settlementFlush = flush!({ captureOnFailure: true }).catch(
+      (error: unknown) => error,
+    );
+    await act(async () => {
+      rejectWrite(new Error("disk unavailable"));
+      await heldWrite.catch(() => undefined);
+      await Promise.all([originalFlush, settlementFlush]);
+    });
+
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(exactDraft),
+    );
+  });
+
+  it.each([
+    { retry: "succeeds", retryFails: false, expectedRecoveries: 0 },
+    { retry: "fails", retryFails: true, expectedRecoveries: 1 },
+  ])(
+    "lets an operation-owned legacy Markdown retry settle before recovery when it $retry",
+    async ({ retryFails, expectedRecoveries }) => {
+      const user = userEvent.setup();
+      const bridge = makeHeldOpenBridge();
+      let rejectIssued!: (error: Error) => void;
+      const issuedWrite = new Promise<never>((_resolve, reject) => {
+        rejectIssued = reject;
+      });
+      let resolveRetry!: () => void;
+      let rejectRetry!: (error: Error) => void;
+      const retryWrite = new Promise<{
+        status: "written";
+        contentHash: string;
+      }>((resolve, reject) => {
+        resolveRetry = () =>
+          resolve({ status: "written", contentHash: TEST_CONTENT_HASH });
+        rejectRetry = reject;
+      });
+      let writes = 0;
+      bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => {
+        writes += 1;
+        return writes === 1 ? issuedWrite : retryWrite;
+      });
+      let flush: DraftFlush | null = null;
+      const recoverySpy = vi.spyOn(
+        orphanedDraftsModule,
+        "captureOrphanedDraft",
+      );
+      try {
+        const view = await renderLegacyMarkdown(bridge, (next) => {
+          flush = next;
+        });
+        const editor = await enterLegacySourceMode();
+        await user.type(editor, " Late draft");
+        await waitFor(
+          () =>
+            expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+          { timeout: 5_000 },
+        );
+        await waitFor(() => expect(flush).not.toBeNull());
+        const operationResult = flush!({ captureOnFailure: true }).then(
+          () => "resolved" as const,
+          () => "rejected" as const,
+        );
+        view.unmount();
+
+        await act(async () => {
+          rejectIssued(new Error("issued write failed"));
+          await issuedWrite.catch(() => undefined);
+        });
+        await waitFor(() =>
+          expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+        );
+        // The unmount observer watches the issued write. The operation flush
+        // owns its retry, so the observer must not capture between them.
+        expect(recoverySpy).not.toHaveBeenCalled();
+
+        await act(async () => {
+          if (retryFails) rejectRetry(new Error("retry failed"));
+          else resolveRetry();
+          await retryWrite.catch(() => undefined);
+        });
+        expect(await operationResult).toBe(
+          retryFails ? "rejected" : "resolved",
+        );
+        expect(recoverySpy).toHaveBeenCalledTimes(expectedRecoveries);
+      } finally {
+        recoverySpy.mockRestore();
+      }
+    },
+  );
+
   // #579 review r15, the exact reported interleaving: the flush registers on
   // the in-flight write BEFORE a later Ctrl+S registers on the same promise.
   // Ctrl+S saves unconditionally, so `unsavedDraft` is already false — the
   // old seam therefore returned the moment the slot cleared, and the queued
   // writer landed the previous version's text after the switch. Membership
-  // now starts at ENTRY and the barrier refuses anything arriving after the
-  // seam began, so there is no writer left to resume.
-  it("refuses a Ctrl+S that arrives after the flush began, with no draft pending", async () => {
+  // now starts at ENTRY. The barrier leaves later save work for the flush
+  // loop, which has nothing to write when no draft is pending.
+  it("does not enqueue a Ctrl+S that arrives after the flush began with no draft pending", async () => {
     const user = userEvent.setup();
     const bridge = makeHeldOpenBridge();
     let releaseA!: () => void;
-    const heldA = new Promise<{ path: string; recorded: boolean }>(
+    const heldA = new Promise<{ status: "written"; contentHash: string }>(
       (resolve) => {
-        releaseA = () => resolve({ path: "a.md", recorded: true });
+        releaseA = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
       },
     );
     bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => heldA);
@@ -5525,8 +7335,8 @@ describe("markdown document opening state", () => {
     await user.keyboard("{Control>}s{/Control}");
 
     // MUTATION (barrier): drop the flushBarrier check from writeDraftNow.
-    // Ctrl+S joins the queue behind A, the seam's captured tail does not
-    // include it, and it lands the previous version's text after the switch.
+    // Ctrl+S then joins the queue behind A. The seam's captured tail does not
+    // include it, so it lands the previous version's text after the switch.
     await act(async () => {
       releaseA();
       await heldA;
@@ -5536,92 +7346,6 @@ describe("markdown document opening state", () => {
     });
     expect(flushSettled).toBe(true);
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
-  });
-
-  // #579 review r9 + r15: a writer can arrive DURING the flush's own final
-  // write — typing (or Ctrl+S) mid-flush. Draining it was the wrong answer:
-  // its text is from the version the caller is about to leave, so landing it
-  // before the switch races the flush and landing it after IS the clobber.
-  // The barrier refuses it outright, and the draft stays unsaved for the
-  // reopen's capture to set aside.
-  it("refuses a writer that arrives during the flush instead of landing its stale text", async () => {
-    const user = userEvent.setup();
-    const bridge = makeHeldOpenBridge();
-    let releaseF!: () => void;
-    const heldF = new Promise<{ path: string; recorded: boolean }>(
-      (resolve) => {
-        releaseF = () => resolve({ path: "a.md", recorded: true });
-      },
-    );
-    let releaseB!: () => void;
-    const heldB = new Promise<{ path: string; recorded: boolean }>(
-      (resolve) => {
-        releaseB = () => resolve({ path: "a.md", recorded: true });
-      },
-    );
-    let writes = 0;
-    bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => {
-      writes += 1;
-      return writes === 1 ? heldF : heldB;
-    });
-    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
-    let flush: (() => Promise<void>) | null = null;
-    const registerDraftFlush = (next: (() => Promise<void>) | null) => {
-      flush = next;
-    };
-    render(
-      <FileInspector
-        workspaceId="ws-1"
-        path="a.md"
-        engineVersionKey={1}
-        registerDraftFlush={registerDraftFlush}
-      />,
-    );
-    await waitFor(() =>
-      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
-    );
-    bridge.answerNotEngineBacked();
-    await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
-    );
-    await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(
-      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
-      "One",
-    );
-    await waitFor(() => expect(flush).not.toBeNull());
-
-    // The flush itself issues the final write (the armed timer is cleared).
-    let flushSettled = false;
-    const flushPromise = flush!().then(() => {
-      flushSettled = true;
-    });
-    await waitFor(() =>
-      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-    );
-
-    // Mid-flush, the user types more: a new autosave arms and fires while the
-    // barrier is up.
-    await user.type(screen.getByTestId("markdown-editor"), "Two");
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
-
-    // The flush's write lands. Nothing is queued behind it, so the seam
-    // returns with an EMPTY queue — the invariant the barrier exists for.
-    // MUTATION (barrier): drop the flushBarrier check from writeDraftNow.
-    // The mid-flush writer joins the queue, issues a second write, and lands
-    // the previous version's text.
-    await act(async () => {
-      releaseF();
-      await heldF;
-    });
-    await act(async () => {
-      await flushPromise;
-    });
-    expect(flushSettled).toBe(true);
-    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
-    void releaseB;
-    void heldB;
   });
 
   // #579 review r7: READ mode (a large, non-truncated document) edits title
@@ -5637,6 +7361,7 @@ describe("markdown document opening state", () => {
     bridge.bridgeMock.readWorkspaceText.mockImplementation(async () => ({
       text: bigBody,
       truncated: false,
+      contentHash: TEST_CONTENT_HASH,
     }));
     vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
     const view = render(

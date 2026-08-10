@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { RelayFilePeer } from "../src/testing/relayFilePeer";
 import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -33,6 +34,7 @@ import {
 //   revoke → refresh surfaces "this share was ended" honestly.
 
 const GRANTER_TOKEN = "test:e2e-granter";
+const UNUSED_CONTENT_HASH = "0".repeat(64);
 const RECIPIENT_TOKEN = "test:e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
 
@@ -233,16 +235,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     // just in the UI.
     const writeAttempt = await page.evaluate(async () => {
       const api = (window as unknown as {
-        dohcDesktop: {
-          getWorkspaceRegistry(): Promise<{
-            workspaces: Array<{ workspaceId: string }>;
-          }>;
-          writeWorkspaceText(payload: {
-            workspaceId: string;
-            relativePath: string;
-            text: string;
-          }): Promise<void>;
-        };
+        dohcDesktop: Pick<
+          DohcDesktopBridge,
+          "getWorkspaceRegistry" | "writeWorkspaceText"
+        >;
       }).dohcDesktop;
       const registry = await api.getWorkspaceRegistry();
       try {
@@ -250,6 +246,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
           workspaceId: registry.workspaces[0]!.workspaceId,
           relativePath: "docs/shared.md",
           text: "defaced",
+          expectedContentHash: UNUSED_CONTENT_HASH,
         });
         return "wrote";
       } catch (error) {
@@ -453,19 +450,10 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
     // re-sharing mounted content is refused with the honest copy.
     const boundaryChecks = await page.evaluate(async () => {
       const api = (window as unknown as {
-        dohcDesktop: {
-          getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
-          writeWorkspaceText(payload: {
-            workspaceId: string;
-            relativePath: string;
-            text: string;
-          }): Promise<void>;
-          createRelayShare(payload: {
-            workspaceId: string;
-            recipientEmail: string;
-            paths: string[];
-          }): Promise<unknown>;
-        };
+        dohcDesktop: Pick<
+          DohcDesktopBridge,
+          "getWorkspaceRegistry" | "writeWorkspaceText" | "createRelayShare"
+        >;
       }).dohcDesktop;
       const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
       const capture = async (run: () => Promise<unknown>) => {
@@ -482,6 +470,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
             workspaceId,
             relativePath: "shared-with-me/e2e-granter/docs/brief.md",
             text: "defaced",
+            expectedContentHash: UNUSED_CONTENT_HASH,
           }),
         ),
         reshare: await capture(() =>

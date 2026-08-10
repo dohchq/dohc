@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { engineMomentsOrEmpty, ydocUpdateCount } from "./helpers/engineDb";
 import {
@@ -135,24 +137,26 @@ test("collab-style materializations (bridge text writes) on an engine-flagged wo
     // that the engine captures it. Engine history of a live-session doc is the
     // history of settle points, not keystrokes — documented, not a bug.
     const materialized = "# Shared doc\n\nBase text.\n\nSettled from a live CRDT session.\n";
+    const expectedContentHash = createHash("sha256")
+      .update(await readFile(join(temp.rootPath, "notes/shared-doc.md")))
+      .digest("hex");
     await page.evaluate(
       async (input) => {
         const api = (window as unknown as {
-          dohcDesktop: {
-            writeWorkspaceText(payload: {
-              workspaceId: string;
-              relativePath: string;
-              text: string;
-            }): Promise<unknown>;
-          };
+          dohcDesktop: Pick<DohcDesktopBridge, "writeWorkspaceText">;
         }).dohcDesktop;
         await api.writeWorkspaceText({
           workspaceId: input.workspaceId,
           relativePath: "notes/shared-doc.md",
           text: input.text,
+          expectedContentHash: input.expectedContentHash,
         });
       },
-      { workspaceId: workspace.workspaceId, text: materialized },
+      {
+        workspaceId: workspace.workspaceId,
+        text: materialized,
+        expectedContentHash,
+      },
     );
 
     await expect

@@ -58,6 +58,8 @@ import {
   classifyForView,
   FileInspector,
   preloadMarkdownEditor,
+  type DraftFlush,
+  type DraftFlushOptions,
   type FileSaveState,
   type HeadingTarget,
   type ScrollTarget,
@@ -1259,6 +1261,7 @@ export function DesktopWorkspaceShell(props: {
     id: number;
   } | null>(null);
   const [wb, setWb] = useState<WorkbenchState>(defaultWorkbenchState);
+  const wbRef = useRef(wb);
 
   // Runtime-only dirty flag for the ACTIVE tab (the one mounted inspector
   // reports its markdown save state) — never persisted.
@@ -1303,21 +1306,98 @@ export function DesktopWorkspaceShell(props: {
     };
   }, [props.workspace.workspaceId, settingsSection]);
 
-  // Imperative flush for the active editor's unsaved draft (registered by
-  // the mounted MarkdownView). Explorer ops await it BEFORE their disk ops:
-  // a rename of the open file otherwise remounts the keyed inspector after
-  // the path moved, and its unmount flush writes to the renamed-away OLD
-  // path — ENOENT, swallowed, keystrokes inside the autosave window lost.
-  const draftFlushRef = useRef<(() => Promise<void>) | null>(null);
+  // The active editor owns the current closure. An Explorer operation also
+  // retains every closure that is current while its disk mutation is active.
+  // This keeps late drafts tied to the path and editor that created them.
+  const draftFlushRef = useRef<DraftFlush | null>(null);
+  const draftOperationScopesRef = useRef(
+    new Set<{ flushes: Set<DraftFlush> }>(),
+  );
   const registerDraftFlush = useCallback(
-    (flush: (() => Promise<void>) | null) => {
+    (flush: DraftFlush | null) => {
       draftFlushRef.current = flush;
+      if (flush) {
+        for (const scope of draftOperationScopesRef.current) {
+          scope.flushes.add(flush);
+        }
+      }
     },
     [],
   );
-  const flushActiveDraft = useCallback(async () => {
-    await draftFlushRef.current?.();
-  }, []);
+  const flushStableActiveDraft = useCallback(
+    async (
+      shouldFlush: (
+        activeTab: WorkbenchState["tabs"][number] | undefined,
+      ) => boolean = () => true,
+    ) => {
+      while (true) {
+        const current = wbRef.current;
+        const activeTab = current.tabs.find(
+          (tab) => tab.path === current.activeTab,
+        );
+        if (!shouldFlush(activeTab)) return;
+        const flush = draftFlushRef.current;
+        await flush?.();
+        const live = wbRef.current;
+        if (
+          live.tabs.find((tab) => tab.path === live.activeTab) === activeTab &&
+          draftFlushRef.current === flush
+        ) {
+          return;
+        }
+      }
+    },
+    [],
+  );
+  const flushActiveDraft = useCallback(
+    () => flushStableActiveDraft(),
+    [flushStableActiveDraft],
+  );
+  const beginDraftOperation = useCallback(async (): Promise<DraftFlush> => {
+    const scope = { flushes: new Set<DraftFlush>() };
+    if (draftFlushRef.current) scope.flushes.add(draftFlushRef.current);
+    draftOperationScopesRef.current.add(scope);
+
+    try {
+      await flushStableActiveDraft();
+    } catch (error) {
+      draftOperationScopesRef.current.delete(scope);
+      throw error;
+    }
+
+    let settlement: Promise<void> | null = null;
+    return (options?: DraftFlushOptions) => {
+      if (settlement) return settlement;
+      settlement = (async () => {
+        const drained = new Set<DraftFlush>();
+        let firstError: unknown;
+        let failed = false;
+        try {
+          while (true) {
+            const batch = [...scope.flushes].filter(
+              (flush) => !drained.has(flush),
+            );
+            if (batch.length === 0) break;
+            for (const flush of batch) {
+              drained.add(flush);
+              try {
+                await flush(options);
+              } catch (error) {
+                if (!failed) {
+                  failed = true;
+                  firstError = error;
+                }
+              }
+            }
+          }
+        } finally {
+          draftOperationScopesRef.current.delete(scope);
+        }
+        if (failed) throw firstError;
+      })();
+      return settlement;
+    };
+  }, [flushStableActiveDraft]);
   const activeUndoRef = useRef<ActiveUndoHandler | null>(null);
   const registerActiveUndo = useCallback((handler: ActiveUndoHandler | null) => {
     activeUndoRef.current = handler;
@@ -1521,7 +1601,6 @@ export function DesktopWorkspaceShell(props: {
   // the stored one.
   const uiStateLoaded = useRef(false);
   const userTouchedWb = useRef(false);
-  const wbRef = useRef(wb);
   // The tab paths the stored state restored — the only ones a file listing is
   // allowed to close. Empty until the load applies, and empty forever when the
   // user acted first and the stored tabs were discarded. STATE, not a ref: the
@@ -2728,15 +2807,42 @@ export function DesktopWorkspaceShell(props: {
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
   // re-render the whole strip on every shell render, incl. each 800ms dirty
-  // flip while typing). Closing the ACTIVE tab activates its neighbor, which
-  // remounts the keyed inspector — that is an OPEN, so re-mark
-  // file-open-start or the view's mount measure would bracket the stale mark
-  // the last explicit open left (garbage open-latency telemetry). Like
-  // openFile, the transition is read from wbRef and marked before setState.
-  const closeFileTab = useCallback(
-    (path: string) => {
+  // flip while typing). Capture the requested tab objects before the flush:
+  // closing and reopening the same path creates a later tab that must stay.
+  const closeTabsAfterFlush = useCallback(
+    async (tabs: readonly WorkbenchState["tabs"][number][]) => {
+      const requested = new Set(tabs);
+      if (requested.size === 0) return;
+
+      // The active tab can change while a flush waits. If the new active tab
+      // object was also in the original close request, flush its own mounted
+      // editor before closing it. A reopened tab has a new object identity.
+      const shouldFlush = (
+        activeTab: WorkbenchState["tabs"][number] | undefined,
+      ) => activeTab !== undefined && requested.has(activeTab);
+      const currentActiveTab = wbRef.current.tabs.find(
+        (tab) => tab.path === wbRef.current.activeTab,
+      );
+      if (shouldFlush(currentActiveTab)) {
+        try {
+          await flushStableActiveDraft(shouldFlush);
+        } catch (error) {
+          reportShellError(
+            "Could not save the active draft, so the tab stays open.",
+            error,
+          );
+          return;
+        }
+      }
+
+      // Closing the active tab activates its neighbor, which remounts the
+      // keyed inspector. Mark that real open before committing the state.
       const current = wbRef.current;
-      const next = closeTab(current, path);
+      const currentTabs = current.tabs.filter((tab) => requested.has(tab));
+      const next = currentTabs.reduce(
+        (state, tab) => closeTab(state, tab.path),
+        current,
+      );
       if (
         next.activeTab !== current.activeTab &&
         next.activeTab !== null &&
@@ -2744,43 +2850,42 @@ export function DesktopWorkspaceShell(props: {
       ) {
         rendererMarks.mark("file-open-start");
       }
-      mutateWb((state) => closeTab(state, path));
+      mutateWb((state) => {
+        const tabsToClose = state.tabs.filter((tab) => requested.has(tab));
+        return tabsToClose.reduce(
+          (nextState, tab) => closeTab(nextState, tab.path),
+          state,
+        );
+      });
     },
-    [mutateWb],
+    [flushStableActiveDraft, mutateWb, reportShellError],
+  );
+
+  const closeFileTab = useCallback(
+    (path: string) => {
+      const tab = wbRef.current.tabs.find((candidate) => candidate.path === path);
+      if (tab) void closeTabsAfterFlush([tab]);
+    },
+    [closeTabsAfterFlush],
   );
 
   const closeActiveTab = useCallback(() => {
     const current = wbRef.current;
-    if (!current.activeTab) return;
-    const next = closeTab(current, current.activeTab);
-    if (next.activeTab !== null && !isVirtualTabPath(next.activeTab)) {
-      rendererMarks.mark("file-open-start");
-    }
-    mutateWb((state) => (state.activeTab ? closeTab(state, state.activeTab) : state));
-  }, [mutateWb]);
+    const tab = current.tabs.find((candidate) => candidate.path === current.activeTab);
+    if (tab) void closeTabsAfterFlush([tab]);
+  }, [closeTabsAfterFlush]);
 
   const closeAllTabs = useCallback(() => {
-    mutateWb((state) =>
-      state.tabs.length === 0 && state.activeTab === null
-        ? state
-        : { ...state, tabs: [], activeTab: null },
-    );
-  }, [mutateWb]);
+    void closeTabsAfterFlush(wbRef.current.tabs);
+  }, [closeTabsAfterFlush]);
 
   const closeOtherTabs = useCallback(
     (path: string) => {
       const current = wbRef.current;
       if (!current.tabs.some((tab) => tab.path === path)) return;
-      if (current.activeTab !== path && !isVirtualTabPath(path)) {
-        rendererMarks.mark("file-open-start");
-      }
-      mutateWb((state) => {
-        if (!state.tabs.some((tab) => tab.path === path)) return state;
-        if (state.tabs.length === 1 && state.activeTab === path) return state;
-        return { ...state, tabs: [{ path }], activeTab: path };
-      });
+      void closeTabsAfterFlush(current.tabs.filter((tab) => tab.path !== path));
     },
-    [mutateWb],
+    [closeTabsAfterFlush],
   );
 
   const moveFileTab = useCallback(
@@ -3556,7 +3661,7 @@ export function DesktopWorkspaceShell(props: {
         onSetFolderExpanded={setExplorerFolderExpanded}
         onToggleFolder={toggleExplorerFolder}
         onTogglePin={toggleExplorerPin}
-        onBeforeChanges={flushActiveDraft}
+        onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={(droppedPaths, targetDir) =>
           void importFiles(droppedPaths, targetDir)
