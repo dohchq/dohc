@@ -178,6 +178,15 @@ fn workspace_table_rows(
         .expect("read workspace table")
 }
 
+fn without_snapshot_origin(rows: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    rows.into_iter()
+        .map(|mut row| {
+            row.remove(7);
+            row
+        })
+        .collect()
+}
+
 fn version_rows(store: &EngineStore, workspace_id: &str, table: &str) -> Vec<Vec<String>> {
     workspace_table_rows(store, workspace_id, table, "version_id,path,object_id")
 }
@@ -469,13 +478,36 @@ async fn named_fork_splits_an_oversized_snapshot_payload_into_bounded_ops() {
         copy_op_blobs(&source_store, &mut peer_store, op);
         apply_logged_op(&mut peer_store, workspace_id, op);
     }
-    for table in ["snapshots", "fork_base_snapshots"] {
-        assert_eq!(
-            one_version_rows(&peer_store, workspace_id, "version-chunked", table),
-            one_version_rows(&source_store, workspace_id, "version-chunked", table),
-            "{table} differs"
-        );
-    }
+    assert_eq!(
+        without_snapshot_origin(one_version_rows(
+            &peer_store,
+            workspace_id,
+            "version-chunked",
+            "snapshots",
+        )),
+        without_snapshot_origin(one_version_rows(
+            &source_store,
+            workspace_id,
+            "version-chunked",
+            "snapshots",
+        )),
+        "snapshots differs apart from boundary-local origin"
+    );
+    assert_eq!(
+        one_version_rows(
+            &peer_store,
+            workspace_id,
+            "version-chunked",
+            "fork_base_snapshots",
+        ),
+        one_version_rows(
+            &source_store,
+            workspace_id,
+            "version-chunked",
+            "fork_base_snapshots",
+        ),
+        "fork_base_snapshots differs"
+    );
 }
 
 #[tokio::test]
@@ -756,18 +788,12 @@ async fn lagging_peer_applies_prior_ops_then_a_chunked_fork_in_sequence() {
         );
     }
     let snapshot_rows_without_origin = |store: &EngineStore| {
-        workspace_table_rows(
+        without_snapshot_origin(workspace_table_rows(
             store,
             workspace_id,
             "snapshots",
             "version_id,path,object_id",
-        )
-        .into_iter()
-        .map(|mut row| {
-            row.remove(7);
-            row
-        })
-        .collect::<Vec<_>>()
+        ))
     };
     assert_eq!(
         snapshot_rows_without_origin(&peer_store),
