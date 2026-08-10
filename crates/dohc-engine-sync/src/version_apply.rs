@@ -272,7 +272,7 @@ fn insert_shipped_snapshot(
     };
     for table in ["snapshots", "fork_base_snapshots"] {
         let sql = format!(
-            "INSERT INTO {table} \
+            "INSERT OR IGNORE INTO {table} \
              (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"
         );
@@ -296,7 +296,7 @@ fn insert_shipped_snapshot(
         .map_err(SyncError::persist)?;
     }
     tx.execute(
-        "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
+        "INSERT OR IGNORE INTO path_aliases (workspace_id,version_id,path,object_id) \
          VALUES (?1,?2,?3,?4)",
         params![
             op.workspace_id,

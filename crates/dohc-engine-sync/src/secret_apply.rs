@@ -56,7 +56,6 @@ struct SecretForkRow {
     ciphertext_sha256: String,
     byte_length: i64,
     updated_at_ms: i64,
-    latest_moment_id: String,
 }
 
 pub fn apply_secret_envelope(
@@ -238,11 +237,9 @@ fn validate_fork_rows(rows: &[SecretForkRow], total_rows: usize) -> Result<(), S
             reason: "secret fork chunk claims more rows than its declared total",
         });
     }
-    for row in rows {
-        validate_fork_row(row)?;
-    }
     let mut seen = HashSet::with_capacity(rows.len());
     for row in rows {
+        validate_fork_row(row)?;
         if !seen.insert(row.path.as_str()) {
             return Err(SyncError::InvalidInput {
                 reason: "secret fork contains duplicate paths",
@@ -332,7 +329,6 @@ fn validate_fork_row(row: &SecretForkRow) -> Result<(), SyncError> {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         || !is_secret_byte_length(row.byte_length)
-        || row.latest_moment_id.is_empty()
     {
         return Err(SyncError::InvalidInput {
             reason: "secret fork row is malformed",

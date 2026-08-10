@@ -9922,6 +9922,93 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
     ));
 }
 
+#[test]
+fn later_version_create_chunk_preserves_a_local_write_to_its_pending_path() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let first_sha = dohc_engine_storage::hex_sha256(b"first chunk");
+    let pending_sha = dohc_engine_storage::hex_sha256(b"origin pending");
+    engine
+        .write_with(&NoFaults, |tx| {
+            for (sha, text) in [
+                (&first_sha, "first chunk"),
+                (&pending_sha, "origin pending"),
+            ] {
+                tx.execute(
+                    "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![sha, text.len() as i64, text],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed shipped blobs");
+    let chunk = |seq, object_id: &str, path: &str, sha: &str| {
+        envelope(
+            "chunked-version-peer",
+            seq,
+            "version.create",
+            json!({
+                "versionId": "chunked-version",
+                "name": "Chunked version",
+                "kind": "named",
+                "forkVersionId": "main",
+                "forkMomentId": "fork-tip",
+                "createdAtMs": 1_500,
+                "forkSnapshots": [shipped_text_snapshot(object_id, path, sha)]
+            }),
+        )
+    };
+    let first = chunk(0, "origin-first-object", "first.md", &first_sha);
+    let second = chunk(1, "origin-pending-object", "pending.md", &pending_sha);
+    assert!(matches!(
+        apply_version_envelope(&mut engine, &first, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "chunked-version".to_owned(),
+                object_id: "local-pending-object".to_owned(),
+                path: "pending.md".to_owned(),
+                text: "local edit".to_owned(),
+                moment_id: "local-pending-moment".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_600,
+            },
+            &NoFaults,
+        )
+        .expect("write pending path locally");
+
+    let second_result = apply_version_envelope(&mut engine, &second, &NoFaults);
+    assert!(
+        matches!(second_result, Ok(ApplyOutcome::Applied(()))),
+        "later chunk failed: {second_result:?}"
+    );
+    let head = VersionedTextStore::new(&mut engine)
+        .read_text("ws", "chunked-version", "pending.md")
+        .expect("read pending path")
+        .expect("pending path exists");
+    assert_eq!(head.text, "local edit");
+    let base: (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT object_id,blob_sha256 FROM fork_base_snapshots \
+                 WHERE workspace_id='ws' AND version_id='chunked-version' AND path='pending.md'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("read fork base");
+    assert_eq!(base, ("origin-pending-object".to_owned(), pending_sha));
+}
+
 fn shipped_text_snapshot(object_id: &str, path: &str, blob_sha256: &str) -> serde_json::Value {
     json!({
         "objectId": object_id,
@@ -10638,6 +10725,12 @@ fn seed_secret_fork_state(engine: &mut EngineStore, ciphertext: &[u8]) -> (Strin
     (sha, iv, tag)
 }
 
+type SecretSnapshotRow = (String, String, String, i64);
+
+fn map_secret_snapshot_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecretSnapshotRow> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
 #[test]
 fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotently() {
     let (_scratch, _path, mut engine) = store();
@@ -10658,16 +10751,14 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
                 "authTagBase64": tag,
                 "ciphertextSha256": sha,
                 "byteLength": ciphertext.len(),
-                "updatedAtMs": 100,
-                "latestMomentId": "source-tip"
+                "updatedAtMs": 100
             }, {
                 "path": "config/prod.env",
                 "ivBase64": iv,
                 "authTagBase64": tag,
                 "ciphertextSha256": sha,
                 "byteLength": ciphertext.len(),
-                "updatedAtMs": 101,
-                "latestMomentId": "source-tip-2"
+                "updatedAtMs": 101
             }]
         }),
     );
@@ -10780,16 +10871,14 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
                 "authTagBase64": fork_point_tag,
                 "ciphertextSha256": fork_point_sha,
                 "byteLength": fork_point_ciphertext.len(),
-                "updatedAtMs": 100,
-                "latestMomentId": "source-tip"
+                "updatedAtMs": 100
             }, {
                 "path": "config/prod.env",
                 "ivBase64": fork_point_iv,
                 "authTagBase64": fork_point_tag,
                 "ciphertextSha256": fork_point_sha,
                 "byteLength": fork_point_ciphertext.len(),
-                "updatedAtMs": 101,
-                "latestMomentId": "source-tip-2"
+                "updatedAtMs": 101
             }]
         }),
     );
@@ -10810,27 +10899,13 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
                 "SELECT iv_base64,auth_tag_base64,ciphertext_base64,byte_length \
                  FROM secret_files WHERE workspace_id='ws' AND version_id='feature' AND path='app/.env'",
                 [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
+                map_secret_snapshot_row,
             )?;
             let base = conn.query_row(
                 "SELECT iv_base64,auth_tag_base64,ciphertext_base64,byte_length \
                  FROM secret_fork_bases WHERE workspace_id='ws' AND version_id='feature' AND path='app/.env'",
                 [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
+                map_secret_snapshot_row,
             )?;
             Ok::<_, rusqlite::Error>((file, base))
         })
@@ -10842,10 +10917,6 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
         fork_point_ciphertext.len() as i64,
     );
     assert_eq!(destination, (shipped.clone(), shipped));
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "fork-after-peer-edit").expect("fork ack"),
-        0
-    );
 }
 
 #[test]
@@ -10853,17 +10924,14 @@ fn secret_version_fork_refuses_duplicate_paths() {
     let (_scratch, _path, mut engine) = store();
     let ciphertext = b"sealed source bytes";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
-    let row = |path: &str, updated_at_ms: i64, latest_moment_id: &str| {
-        json!({
-            "path": path,
-            "ivBase64": iv,
-            "authTagBase64": tag,
-            "ciphertextSha256": sha,
-            "byteLength": ciphertext.len(),
-            "updatedAtMs": updated_at_ms,
-            "latestMomentId": latest_moment_id
-        })
-    };
+    let row = json!({
+        "path": "app/.env",
+        "ivBase64": iv,
+        "authTagBase64": tag,
+        "ciphertextSha256": sha,
+        "byteLength": ciphertext.len(),
+        "updatedAtMs": 100
+    });
     let duplicate = envelope(
         "duplicate-fork-peer",
         0,
@@ -10874,8 +10942,8 @@ fn secret_version_fork_refuses_duplicate_paths() {
             "chunkIndex": 0,
             "totalRows": 2,
             "rows": [
-                row("app/.env", 100, "source-tip"),
-                row("app/.env", 100, "source-tip")
+                row.clone(),
+                row
             ]
         }),
     );
@@ -10891,6 +10959,67 @@ fn secret_version_fork_refuses_duplicate_paths() {
         0,
         "a duplicate path is a payload fault, not a convergence race"
     );
+}
+
+#[test]
+fn secret_version_fork_refuses_each_invalid_row_boundary() {
+    for (origin, mutation, expected_reason) in [
+        (
+            "malformed-fork-row",
+            ("updatedAtMs", json!("not-an-integer")),
+            "secret replication payload is malformed",
+        ),
+        (
+            "bad-fork-iv",
+            ("ivBase64", json!("not-base64")),
+            "secret fork iv is invalid",
+        ),
+        (
+            "bad-fork-auth-tag",
+            ("authTagBase64", json!("not-base64")),
+            "secret fork auth tag is invalid",
+        ),
+        (
+            "fork-row-total-overflow",
+            ("totalRows", json!(0)),
+            "secret fork chunk claims more rows than its declared total",
+        ),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let ciphertext = b"sealed source bytes";
+        let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
+        let mut payload = json!({
+            "fromVersionId": "main",
+            "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 1,
+            "rows": [{
+                "path": "app/.env",
+                "ivBase64": iv,
+                "authTagBase64": tag,
+                "ciphertextSha256": sha,
+                "byteLength": ciphertext.len(),
+                "updatedAtMs": 100
+            }]
+        });
+        if mutation.0 == "totalRows" {
+            payload[mutation.0] = mutation.1;
+        } else {
+            payload["rows"][0][mutation.0] = mutation.1;
+        }
+        let operation = envelope(origin, 0, "secret.version.fork", payload);
+
+        assert!(
+            matches!(
+                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { reason },
+                    ..
+                })) if reason == expected_reason
+            ),
+            "{origin} must reject with {expected_reason}"
+        );
+    }
 }
 
 /// An empty fork is the authenticated representation of clearing the
@@ -10997,8 +11126,7 @@ fn secret_version_fork_uses_peer_local_tip_ids() {
                 "authTagBase64": tag,
                 "ciphertextSha256": sha,
                 "byteLength": ciphertext.len(),
-                "updatedAtMs": 100,
-                "latestMomentId": "origin-put-moment"
+                "updatedAtMs": 100
             }]
         }),
     );

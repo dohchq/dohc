@@ -10307,7 +10307,7 @@ fn versioned_text_rollback_on_store(
     let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
         input,
         faults,
-        |tx, object_id, restored_text| {
+        |tx, object_id, restored_text, compensating_moment_id| {
             delete_file_search_index(tx, &input.workspace_id, &input.version_id, object_id)
                 .map_err(search_domain)?;
             if let Some((path, text)) = restored_text {
@@ -10322,6 +10322,7 @@ fn versioned_text_rollback_on_store(
                 )
                 .map_err(search_domain)?;
             }
+            journal_moment_outbound_in_tx(tx, &input.workspace_id, compensating_moment_id, false)?;
             Ok(())
         },
     )?;
@@ -10614,44 +10615,20 @@ fn versioned_text_merge_on_store(
                 | MergeTextFileResult::Unchanged { .. }
                 | MergeTextFileResult::Conflict { .. } => {}
             }
-            let Some((moment_id, deduped)) = (match result {
-                MergeTextFileResult::Write { write, .. } => {
-                    Some((write.moment.moment_id.as_str(), write.deduped))
-                }
-                MergeTextFileResult::BinaryWrite { write, .. } => {
-                    Some((write.moment.moment_id.as_str(), write.deduped))
-                }
-                MergeTextFileResult::Delete { delete, .. } => {
-                    Some((delete.moment.moment_id.as_str(), delete.deduped))
-                }
-                MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {
-                    None
-                }
-            }) else {
+            let Some((moment_id, deduped)) = merge_moment_outbound_identity(result) else {
                 return Ok(());
             };
             journal_moment_outbound_in_tx(tx, &input.workspace_id, moment_id, deduped)?;
             Ok(())
         })
         .map_err(RuntimeError::from)?;
-    let (moment_id, deduped) = match &result {
-        MergeTextFileResult::Write { write, .. } => {
-            (write.moment.moment_id.as_str(), write.deduped)
-        }
-        MergeTextFileResult::BinaryWrite { write, .. } => {
-            (write.moment.moment_id.as_str(), write.deduped)
-        }
-        MergeTextFileResult::Delete { delete, .. } => {
-            (delete.moment.moment_id.as_str(), delete.deduped)
-        }
-        MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {
-            return Ok(MergeExecutionResult {
-                merge: result,
-                materialize_enqueued: false,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
-            });
-        }
+    let Some((moment_id, deduped)) = merge_moment_outbound_identity(&result) else {
+        return Ok(MergeExecutionResult {
+            merge: result,
+            materialize_enqueued: false,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
     };
     if !target_is_active {
         return Ok(MergeExecutionResult {
@@ -10721,6 +10698,21 @@ fn versioned_text_merge_on_store(
         materialized,
         materialize_outcome,
     })
+}
+
+fn merge_moment_outbound_identity(result: &MergeTextFileResult) -> Option<(&str, bool)> {
+    match result {
+        MergeTextFileResult::Write { write, .. } => {
+            Some((write.moment.moment_id.as_str(), write.deduped))
+        }
+        MergeTextFileResult::BinaryWrite { write, .. } => {
+            Some((write.moment.moment_id.as_str(), write.deduped))
+        }
+        MergeTextFileResult::Delete { delete, .. } => {
+            Some((delete.moment.moment_id.as_str(), delete.deduped))
+        }
+        MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => None,
+    }
 }
 
 fn capture_ingest_on_store(
@@ -11027,6 +11019,25 @@ fn conflict_resolve_on_store(
                     &write.snapshot.text,
                 )
                 .map_err(search_domain)?;
+            }
+            if let Some(delete) = result.delete.as_ref() {
+                journal_moment_outbound_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &delete.moment.moment_id,
+                    delete.deduped,
+                )?;
+            }
+            if let Some(write) = result.write.as_ref() {
+                journal_moment_outbound_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &write.moment.moment_id,
+                    write.deduped,
+                )?;
+            }
+            if let Some(write) = result.binary_write.as_ref() {
+                journal_moment_outbound_in_tx(tx, &input.workspace_id, &write.moment_id, false)?;
             }
             // A resolution onto BYTES needs no index work here. The write
             // reuses the object already aliased to the path, and the search

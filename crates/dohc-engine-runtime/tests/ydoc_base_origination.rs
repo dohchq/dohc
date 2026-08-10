@@ -192,6 +192,15 @@ fn replay_into_clean_peer(
         .expect("peer main version");
 
     // This focused replay omits unrelated ops before the first Y.Doc coordinate.
+    let origins = ops
+        .iter()
+        .map(|op| op.origin_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        origins.len(),
+        1,
+        "sequence rebasing requires one originating stream"
+    );
     let first_origin_seq = ops.first().map_or(0, |op| op.origin_seq);
     for op in ops {
         let bytes = blob_bytes(source_db, &op.blob_sha());

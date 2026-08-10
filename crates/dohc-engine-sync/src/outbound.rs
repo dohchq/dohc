@@ -217,16 +217,12 @@ pub fn journal_version_create_in_tx(
         "forkSnapshots": [],
     });
     // One op per packed group: a bigger fork costs more ops, never a refusal.
+    // A pull boundary can expose the version before its later groups arrive.
+    // Local writes in that window win path collisions; the shipped fork base
+    // still records the origin's fork-time content for later merges.
     for fork_snapshots in pack_fork_rows(&header, fork_snapshots)? {
-        let payload = serde_json::json!({
-            "versionId": record.version_id,
-            "name": record.name,
-            "kind": record.kind.as_str(),
-            "forkVersionId": record.fork_version_id,
-            "forkMomentId": record.fork_moment_id,
-            "createdAtMs": record.created_at_ms,
-            "forkSnapshots": fork_snapshots,
-        });
+        let mut payload = header.clone();
+        payload["forkSnapshots"] = serde_json::json!(fork_snapshots);
         journal_local_op_in_tx(
             tx,
             &record.workspace_id,
@@ -309,7 +305,7 @@ pub fn journal_secret_version_fork_in_tx(
     let mut statement = tx
         .prepare(
             "SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length, \
-                    updated_at_ms, latest_moment_id FROM secret_files \
+                    updated_at_ms FROM secret_files \
              WHERE workspace_id=?1 AND version_id=?2 ORDER BY path",
         )
         .map_err(SyncError::corrupt)?;
@@ -322,7 +318,6 @@ pub fn journal_secret_version_fork_in_tx(
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
-                row.get::<_, String>(6)?,
             ))
         })
         .map_err(SyncError::corrupt)?
@@ -331,15 +326,7 @@ pub fn journal_secret_version_fork_in_tx(
     let rows = stored
         .into_iter()
         .map(
-            |(
-                path,
-                iv_base64,
-                auth_tag_base64,
-                ciphertext_base64,
-                byte_length,
-                updated_at_ms,
-                latest_moment_id,
-            )| {
+            |(path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length, updated_at_ms)| {
                 let ciphertext = decode_stored_ciphertext(&ciphertext_base64)?;
                 Ok(serde_json::json!({
                     "path": path,
@@ -348,7 +335,6 @@ pub fn journal_secret_version_fork_in_tx(
                     "ciphertextSha256": hex_sha256(&ciphertext),
                     "byteLength": byte_length,
                     "updatedAtMs": updated_at_ms,
-                    "latestMomentId": latest_moment_id,
                 }))
             },
         )
@@ -367,13 +353,9 @@ pub fn journal_secret_version_fork_in_tx(
         .into_iter()
         .enumerate()
     {
-        let payload = serde_json::json!({
-            "toVersionId": to_version_id,
-            "fromVersionId": from_version_id,
-            "chunkIndex": chunk_index,
-            "totalRows": total_rows,
-            "rows": rows,
-        });
+        let mut payload = packing_header.clone();
+        payload["chunkIndex"] = serde_json::json!(chunk_index);
+        payload["rows"] = serde_json::json!(rows);
         journal_local_op_in_tx(
             tx,
             workspace_id,
@@ -523,11 +505,11 @@ mod tests {
 
     #[test]
     fn worst_case_moment_metadata_fits_after_shedding_before_metadata() {
-        const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
         let identifier = "\"".repeat(crate::model::MAX_IDENTIFIER_BYTES);
         let path = format!("{}.md", "\"".repeat(crate::model::MAX_IDENTIFIER_BYTES - 3));
         let blob_sha = "f".repeat(64);
-        let metadata = "\0".repeat(MAX_METADATA_FIELD_BYTES);
+        let metadata = "\0".repeat(dohc_engine_domain::MAX_METADATA_FIELD_BYTES);
+        let author_field = "\0".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES);
         let mut payload = serde_json::json!({
             "momentId": &identifier,
             "versionId": &identifier,
@@ -549,7 +531,12 @@ mod tests {
                 "summary": &metadata,
                 "correlationId": &metadata,
             },
-            "author": null,
+            "author": {
+                "kind": "agent",
+                "agentId": &author_field,
+                "onBehalfOf": &author_field,
+                "agentRunId": &author_field,
+            },
             "beforePresent": "present",
             "beforeObjectId": &identifier,
             "beforeVersionId": &identifier,
@@ -571,13 +558,13 @@ mod tests {
         let without_before_metadata = measured_json_len(&payload).expect("measure trimmed payload");
         assert_eq!(PAYLOAD_PACKING_HEADROOM_BYTES, 4_096);
         assert_eq!(PAYLOAD_PACKING_TARGET_BYTES, 258_048);
-        assert_eq!(with_before_metadata, 404_314);
-        assert_eq!(without_before_metadata, 207_662);
+        assert_eq!(with_before_metadata, 413_587);
+        assert_eq!(without_before_metadata, 216_935);
         assert!(with_before_metadata > PAYLOAD_PACKING_TARGET_BYTES);
         assert!(without_before_metadata < PAYLOAD_PACKING_TARGET_BYTES);
         assert_eq!(
             PAYLOAD_PACKING_TARGET_BYTES - without_before_metadata,
-            50_386
+            41_113
         );
     }
 }

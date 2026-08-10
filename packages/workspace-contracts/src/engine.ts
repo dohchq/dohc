@@ -405,10 +405,6 @@ export interface SecretVersionForkPayload {
     ciphertextSha256: string;
     byteLength: number;
     updatedAtMs: number;
-    // Provenance string copied verbatim from the origin's secret_files row.
-    // Secret moment ids are machine-local, so this may not resolve through
-    // getSecretMoment on replicas; secret_files intentionally has no FK here.
-    latestMomentId: string;
   }>;
 }
 

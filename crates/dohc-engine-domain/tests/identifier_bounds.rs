@@ -16,7 +16,8 @@
 //! assumed, and the bound sits past it.
 
 use dohc_engine_domain::{
-    DomainError, NoFaults, VersionedTextStore, WriteText, derive_capture_object_id,
+    DomainError, MAX_AUTHOR_FIELD_BYTES, MAX_METADATA_FIELD_BYTES, NoFaults, VersionedTextStore,
+    WriteText, derive_capture_object_id,
 };
 use dohc_engine_storage::{EngineStore, MAX_IDENTIFIER_BYTES};
 use dohc_engine_testkit::ScratchDir;
@@ -164,4 +165,56 @@ fn an_identifier_exactly_at_the_bound_is_accepted() {
     VersionedTextStore::new(&mut store)
         .write_text(&write(&at_cap, &at_cap), &NO_FAULTS)
         .expect("an identifier at the bound is inside it");
+}
+
+#[test]
+fn moment_metadata_bounds_clear_measured_agent_identifiers_and_report_overruns() {
+    let healthy = [
+        ("agentId", "dohc-chat-runner-self-test"),
+        ("onBehalfOf", "local"),
+        ("agentRunId", "run_6f1c7f6e-1f2b-4a9a-9a4e-2f9c0b7d5e13"),
+    ];
+    let widest = healthy
+        .iter()
+        .max_by_key(|(_, value)| value.len())
+        .expect("healthy author fields");
+    assert_eq!(widest.1.len(), 40);
+    assert!(MAX_AUTHOR_FIELD_BYTES > widest.1.len() * 4);
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open(&scratch);
+    let mut input = write("object-metadata", "moment-metadata");
+    input.metadata_summary = Some("s".repeat(MAX_METADATA_FIELD_BYTES + 1));
+    let error = VersionedTextStore::new(&mut store)
+        .write_text(&input, &NO_FAULTS)
+        .expect_err("over-long metadata is refused");
+    assert!(matches!(
+        error,
+        DomainError::PayloadTooLarge {
+            constraint: "MAX_METADATA_FIELD_BYTES",
+            limit_bytes: MAX_METADATA_FIELD_BYTES,
+            observed_bytes,
+        } if observed_bytes == MAX_METADATA_FIELD_BYTES + 1
+    ));
+
+    input.metadata_summary = None;
+    input.author_json = Some(
+        serde_json::json!({
+            "kind": "agent",
+            "agentId": "a".repeat(MAX_AUTHOR_FIELD_BYTES + 1),
+            "onBehalfOf": "local",
+        })
+        .to_string(),
+    );
+    let error = VersionedTextStore::new(&mut store)
+        .write_text(&input, &NO_FAULTS)
+        .expect_err("over-long author field is refused");
+    assert!(matches!(
+        error,
+        DomainError::PayloadTooLarge {
+            constraint: "MAX_AUTHOR_FIELD_BYTES",
+            limit_bytes: MAX_AUTHOR_FIELD_BYTES,
+            observed_bytes,
+        } if observed_bytes == MAX_AUTHOR_FIELD_BYTES + 1
+    ));
 }

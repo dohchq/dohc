@@ -344,7 +344,7 @@ fn rollback_first_binary_write_removes_file_and_object() {
         "M1: no file may be resurrected onto disk after rolling back a binary write"
     );
 
-    let (snap_count, obj_count): (i64, i64) = store
+    let (snap_count, obj_count, compensation_count): (i64, i64, i64) = store
         .read_with(|conn| {
             let s: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM snapshots WHERE workspace_id = ?1 AND path = 'doc.md'",
@@ -356,11 +356,24 @@ fn rollback_first_binary_write_removes_file_and_object() {
                 [],
                 |r| r.get(0),
             )?;
-            Ok::<_, rusqlite::Error>((s, o))
+            let c: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM moments \
+                 WHERE workspace_id = ?1 AND object_id = 'obj-doc' AND operation = 'delete'",
+                [WS],
+                |r| r.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((s, o, c))
         })
         .expect("counts");
     assert_eq!(snap_count, 0, "the binary snapshot must be gone");
-    assert_eq!(obj_count, 0, "the object must be garbage-collected");
+    assert_eq!(
+        obj_count, 1,
+        "the compensating delete moment keeps its historical object"
+    );
+    assert_eq!(
+        compensation_count, 1,
+        "rollback must append one compensating delete moment"
+    );
 
     let view = VersionedTextStore::new(&mut store)
         .read_text(WS, "main", "doc.md")

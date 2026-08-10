@@ -303,6 +303,16 @@ impl<'a> SecretFileStore<'a> {
         self.write_secret_file_with(input, faults, |_, _| Ok(()))
     }
 
+    /// Callback contract for secret `_with` mutations:
+    ///
+    /// - `write_secret_file_with` and `capture_secret_with` skip the callback
+    ///   when content equality makes the write a no-op.
+    /// - `fork_version_keyless_with` and `apply_secret_file_from_version_with`
+    ///   always call it; apply reports a no-op through `result.changed`.
+    /// - `delete_secret_file_keyless_with` and `capture_secret_retire_with`
+    ///   call it only when they produce a delete moment.
+    ///
+    /// Each invoked callback runs in the mutation transaction.
     /// Write a secret with a caller-supplied same-transaction side effect.
     pub fn write_secret_file_with<F>(
         &mut self,

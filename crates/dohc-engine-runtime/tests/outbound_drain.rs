@@ -1,8 +1,10 @@
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
     CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret, CaptureSecretRetire,
-    CreateNamedVersion, DeleteTextFile, MergeTextFileFromVersion, RenameTextFile, SecretDelete,
-    SecretDiskIntent, SecretWrite, VersionedTextStore, WriteBinary, WriteText,
+    ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, CreateNamedVersion,
+    DeleteTextFile, MergeTextFileFromVersion, RenameTextFile, ResolveConflictKind,
+    ResolveTextConflict, RollbackTextFileMutation, SecretDelete, SecretDiskIntent, SecretWrite,
+    TextConflict, TextSnapshot, VersionedTextStore, WriteBinary, WriteText,
 };
 use dohc_engine_runtime::{
     ActorHandle, CancellationToken, NoFaults, SelfWriteRecorder, WorkspaceSupervisor,
@@ -229,43 +231,54 @@ fn secret_file_content_rows(
 
 fn copy_op_blobs(source: &EngineStore, peer: &mut EngineStore, op: &LoggedOp) {
     let shas = if op.op_kind == "moment.append" {
-        vec![
+        vec![(
             op.payload["payloadAfterBlobSha256"]
                 .as_str()
                 .expect("moment blob sha"),
-        ]
+            op.payload["payloadAfterContentKind"].as_str() == Some("binary"),
+        )]
     } else if op.op_kind == "version.create" {
         op.payload["forkSnapshots"]
             .as_array()
             .expect("version snapshot rows")
             .iter()
-            .map(|row| row["blobSha256"].as_str().expect("snapshot blob sha"))
+            .map(|row| {
+                (
+                    row["blobSha256"].as_str().expect("snapshot blob sha"),
+                    row["contentKind"].as_str() == Some("binary"),
+                )
+            })
             .collect()
     } else if op.op_kind == "secret.file.put" {
-        vec![
+        vec![(
             op.payload["ciphertextSha256"]
                 .as_str()
                 .expect("ciphertext sha"),
-        ]
+            true,
+        )]
     } else if op.op_kind == "secret.version.fork" {
         op.payload["rows"]
             .as_array()
             .expect("secret fork rows")
             .iter()
             .map(|row| {
-                row["ciphertextSha256"]
-                    .as_str()
-                    .expect("fork ciphertext sha")
+                (
+                    row["ciphertextSha256"]
+                        .as_str()
+                        .expect("fork ciphertext sha"),
+                    true,
+                )
             })
             .collect()
     } else {
         Vec::new()
     };
-    for sha in shas {
-        if let Some(bytes) = source
-            .get_binary_blob(sha)
-            .expect("read source binary blob")
-        {
+    for (sha, binary) in shas {
+        if binary {
+            let bytes = source
+                .get_binary_blob(sha)
+                .expect("read source binary blob")
+                .expect("source binary blob exists");
             peer.put_binary_blob(&bytes).expect("copy binary blob");
             continue;
         }
@@ -292,14 +305,26 @@ fn apply_logged_op(peer: &mut EngineStore, workspace_id: &str, op: &LoggedOp) {
     let envelope = op.envelope(workspace_id);
     match op.op_kind.as_str() {
         "moment.append" => {
-            apply_moment_envelope_detailed(peer, &envelope, &NoFaults)
-                .expect("apply moment envelope");
+            let outcome = apply_moment_envelope_detailed(peer, &envelope, &NoFaults)
+                .unwrap_or_else(|error| {
+                    panic!("apply moment envelope {error:?}: {:?}", op.payload)
+                });
+            let ApplyOutcome::Applied(result) = outcome else {
+                panic!("originated moment outcome {outcome:?}: {:?}", op.payload);
+            };
+            assert_eq!(result.conflicts_opened, 0, "{:?}", op.payload);
         }
         "version.create" => {
-            apply_version_envelope(peer, &envelope, &NoFaults).expect("apply version envelope");
+            assert!(matches!(
+                apply_version_envelope(peer, &envelope, &NoFaults).expect("apply version envelope"),
+                ApplyOutcome::Applied(())
+            ));
         }
         kind if kind.starts_with("secret.") => {
-            apply_secret_envelope(peer, &envelope, &NoFaults).expect("apply secret envelope");
+            assert!(matches!(
+                apply_secret_envelope(peer, &envelope, &NoFaults).expect("apply secret envelope"),
+                ApplyOutcome::Applied(())
+            ));
         }
         other => panic!("unexpected op kind {other}"),
     }
@@ -470,18 +495,11 @@ async fn moment_append_sheds_oversized_before_metadata_without_truncating_the_wr
         actor
             .versioned_text_write_indexed(
                 WriteText {
-                    workspace_id: workspace_id.to_owned(),
-                    version_id: "main".to_owned(),
                     object_id: "object-metadata".to_owned(),
                     path: "notes/metadata.md".to_owned(),
-                    text: text.to_owned(),
-                    moment_id: moment_id.to_owned(),
-                    metadata_origin: "api".to_owned(),
                     metadata_summary: Some(metadata.clone()),
                     metadata_correlation_id: Some(metadata.clone()),
-                    author_json: None,
-                    now_ms,
-                    request_id: None,
+                    ..write_input(workspace_id, moment_id, text, now_ms)
                 },
                 source.path().to_path_buf(),
                 Arc::new(NoFaults),
@@ -534,13 +552,14 @@ async fn moment_append_sheds_oversized_before_metadata_without_truncating_the_wr
 
 #[tokio::test]
 async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
+    const SECRET_ROWS: usize = 400;
     let source = ScratchDir::new().expect("source scratch");
     let source_db = source.engine_db_path().expect("source db");
     let workspace_id = "ws-secret-fork-chunks";
     initialize_workspace(&source_db, workspace_id, true);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
-    for index in 0..280 {
+    for index in 0..SECRET_ROWS {
         actor
             .write_secret_file(
                 SecretWrite {
@@ -574,7 +593,6 @@ async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
                 "ciphertextSha256": op.payload["ciphertextSha256"],
                 "byteLength": op.payload["byteLength"],
                 "updatedAtMs": 10 + index as i64,
-                "latestMomentId": capped_identifier(&format!("secret-{index}-"), 'm'),
             })
         })
         .collect::<Vec<_>>();
@@ -612,7 +630,7 @@ async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
     assert!(fork_ops.len() > 1);
     assert!(fork_ops.iter().enumerate().all(|(chunk_index, op)| {
         assert_eq!(op.payload["chunkIndex"], chunk_index);
-        assert_eq!(op.payload["totalRows"], 280);
+        assert_eq!(op.payload["totalRows"], SECRET_ROWS);
         serde_json::to_vec(&op.payload)
             .expect("serialize drained payload")
             .len()
@@ -1243,6 +1261,176 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
 }
 
 #[tokio::test]
+async fn conflict_resolution_moment_replays_to_the_resolved_text_on_a_clean_peer() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-resolve-outbound";
+    initialize_workspace(&source_db, workspace_id, true);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
+    actor
+        .versioned_text_write_indexed(
+            write_input(workspace_id, "moment-current", "current\n", 10),
+            source.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write current text");
+    let current =
+        VersionedTextStore::new(&mut EngineStore::open(&source_db, 3).expect("open read"))
+            .read_text(workspace_id, "main", "notes/plan.md")
+            .expect("read current")
+            .expect("current exists");
+    let incoming_text = "incoming\n";
+    let incoming = TextSnapshot {
+        workspace_id: workspace_id.to_owned(),
+        version_id: "source-version".to_owned(),
+        object_id: "incoming-object".to_owned(),
+        path: "notes/plan.md".to_owned(),
+        text: incoming_text.to_owned(),
+        blob_sha256: hex_sha256(incoming_text.as_bytes()),
+        updated_at_ms: 20,
+        latest_moment_id: "incoming-moment".to_owned(),
+        metadata_origin: "api".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+    };
+    actor
+        .conflict_open(
+            Box::new(TextConflict {
+                conflict_id: "conflict-resolve-outbound".to_owned(),
+                workspace_id: workspace_id.to_owned(),
+                path: "notes/plan.md".to_owned(),
+                target_version_id: "main".to_owned(),
+                source_version_id: "source-version".to_owned(),
+                created_at_ms: 20,
+                updated_at_ms: 20,
+                status: ConflictStatus::Open,
+                chosen_from: ConflictChoice::Current,
+                resolution: None,
+                metadata: ConflictMetadata::origin("api"),
+                base: ConflictFileState::text("notes/plan.md", None),
+                current: ConflictFileState::text("notes/plan.md", Some(current)),
+                incoming: ConflictFileState::text("notes/plan.md", Some(incoming)),
+            }),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open conflict");
+    actor
+        .conflict_resolve_indexed(
+            ResolveTextConflict {
+                workspace_id: workspace_id.to_owned(),
+                conflict_id: "conflict-resolve-outbound".to_owned(),
+                resolution: ResolveConflictKind::ApplyIncoming,
+                object_id: "resolved-object".to_owned(),
+                write_moment_id: "moment-resolved".to_owned(),
+                delete_moment_id: "moment-resolved-delete".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 30,
+                request_id: None,
+                conflict_answer_budget_bytes: usize::MAX,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            source.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("resolve conflict");
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ops(&source_db);
+    assert_eq!(
+        ops.iter().map(|op| op.op_kind.as_str()).collect::<Vec<_>>(),
+        ["moment.append", "moment.append"]
+    );
+    let peer = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer.engine_db_path().expect("peer db");
+    initialize_workspace(&peer_db, workspace_id, false);
+    let source_store = EngineStore::open(&source_db, 4).expect("open source store");
+    let mut peer_store = EngineStore::open(&peer_db, 5).expect("open peer store");
+    for op in &ops {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    let peer_text = VersionedTextStore::new(&mut peer_store)
+        .read_text(workspace_id, "main", "notes/plan.md")
+        .expect("read peer")
+        .expect("peer text exists");
+    assert_eq!(peer_text.text, incoming_text);
+}
+
+#[tokio::test]
+async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-rollback-outbound";
+    initialize_workspace(&source_db, workspace_id, true);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
+    for (moment_id, text, now_ms) in [
+        ("moment-before-rollback", "before rollback\n", 10),
+        ("moment-rolled-back", "rolled back\n", 20),
+    ] {
+        actor
+            .versioned_text_write_indexed(
+                write_input(workspace_id, moment_id, text, now_ms),
+                source.path().to_path_buf(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("write rollback fixture");
+    }
+    actor
+        .versioned_text_rollback(
+            RollbackTextFileMutation {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                path: "notes/plan.md".to_owned(),
+                mutation_moment_id: "moment-rolled-back".to_owned(),
+                request_id: None,
+                legacy_before_text: None,
+                metadata_origin: "api".to_owned(),
+                author_json: None,
+            },
+            source.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rollback latest write");
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ops(&source_db);
+    assert_eq!(
+        ops.iter().map(|op| op.op_kind.as_str()).collect::<Vec<_>>(),
+        ["moment.append", "moment.append", "moment.append"]
+    );
+    let peer = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer.engine_db_path().expect("peer db");
+    initialize_workspace(&peer_db, workspace_id, false);
+    let source_store = EngineStore::open(&source_db, 3).expect("open source store");
+    let mut peer_store = EngineStore::open(&peer_db, 4).expect("open peer store");
+    for op in &ops {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    let peer_text = VersionedTextStore::new(&mut peer_store)
+        .read_text(workspace_id, "main", "notes/plan.md")
+        .expect("read peer")
+        .expect("peer text exists");
+    assert_eq!(peer_text.text, "before rollback\n");
+}
+
+#[tokio::test]
 async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
     let source = ScratchDir::new().expect("source scratch");
     let source_db = source.engine_db_path().expect("source db");
@@ -1304,127 +1492,19 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
 
     let source_store = EngineStore::open(&source_db, 101).expect("open source store");
     for op in &ops {
-        if op.op_kind == "moment.append" {
-            let sha = op.payload["payloadAfterBlobSha256"]
-                .as_str()
-                .expect("moment blob sha");
-            if op.payload["payloadAfterContentKind"].as_str() == Some("binary") {
-                let bytes = source_store
-                    .get_binary_blob(sha)
-                    .expect("read binary moment blob")
-                    .expect("binary moment blob exists");
-                peer_store
-                    .put_binary_blob(&bytes)
-                    .expect("copy binary moment blob");
-            } else {
-                let text = source_store
-                    .read_with(|conn| {
-                        conn.query_row("SELECT text FROM blobs WHERE sha256=?1", [sha], |row| {
-                            row.get::<_, String>(0)
-                        })
-                    })
-                    .expect("read source text blob");
-                peer_store
-                    .write_with(&NoFaults, |tx| {
-                        tx.execute(
-                            "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-                            params![sha, text.len() as i64, text],
-                        )
-                        .map_err(StorageError::persist_public)?;
-                        Ok::<_, StorageError>(())
-                    })
-                    .expect("copy text blob");
-            }
-            let outcome = apply_moment_envelope_detailed(
-                &mut peer_store,
-                &op.envelope(workspace_id),
-                &NoFaults,
-            )
-            .expect("apply originated moment");
-            let ApplyOutcome::Applied(result) = outcome else {
-                panic!("originated moment was refused: {:?}", op.payload);
-            };
-            assert_eq!(result.conflicts_opened, 0, "{:?}", op.payload);
-        } else if op.op_kind == "version.create" {
-            for snapshot in op.payload["forkSnapshots"]
-                .as_array()
-                .expect("version snapshot rows")
-            {
-                let sha = snapshot["blobSha256"].as_str().expect("snapshot blob sha");
-                if snapshot["contentKind"].as_str() == Some("binary") {
-                    let bytes = source_store
-                        .get_binary_blob(sha)
-                        .expect("read version binary blob")
-                        .expect("version binary blob exists");
-                    peer_store
-                        .put_binary_blob(&bytes)
-                        .expect("copy version binary blob");
-                } else {
-                    let text = source_store
-                        .read_with(|conn| {
-                            conn.query_row("SELECT text FROM blobs WHERE sha256=?1", [sha], |row| {
-                                row.get::<_, String>(0)
-                            })
-                        })
-                        .expect("read version text blob");
-                    peer_store
-                        .write_with(&NoFaults, |tx| {
-                            tx.execute(
-                                "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-                                params![sha, text.len() as i64, text],
-                            )
-                            .map_err(StorageError::persist_public)?;
-                            Ok::<_, StorageError>(())
-                        })
-                        .expect("copy version text blob");
-                }
-            }
-            apply_version_envelope(&mut peer_store, &op.envelope(workspace_id), &NoFaults)
-                .expect("apply originated version");
-        } else if op.op_kind.starts_with("secret.") {
-            let shas = if op.op_kind == "secret.file.put" {
-                vec![
-                    op.payload["ciphertextSha256"]
-                        .as_str()
-                        .expect("ciphertext sha"),
-                ]
-            } else if op.op_kind == "secret.version.fork" {
-                op.payload["rows"]
-                    .as_array()
-                    .expect("secret fork rows")
-                    .iter()
-                    .map(|row| {
-                        row["ciphertextSha256"]
-                            .as_str()
-                            .expect("fork ciphertext sha")
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            for sha in shas {
-                let bytes = source_store
-                    .get_binary_blob(sha)
-                    .expect("read ciphertext blob")
-                    .expect("ciphertext blob exists");
-                peer_store
-                    .put_binary_blob(&bytes)
-                    .expect("copy ciphertext blob");
-            }
-            apply_secret_envelope(&mut peer_store, &op.envelope(workspace_id), &NoFaults)
-                .expect("apply originated secret");
-        }
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
     }
 
-    assert!(
-        version_rows(&peer_store, workspace_id, "fork_base_snapshots")
-            == version_rows(&source_store, workspace_id, "fork_base_snapshots"),
-        "fork_base_snapshots differ"
+    assert_eq!(
+        version_rows(&peer_store, workspace_id, "fork_base_snapshots"),
+        version_rows(&source_store, workspace_id, "fork_base_snapshots"),
+        "fork_base_snapshots differ",
     );
-    assert!(
-        secret_rows(&peer_store, workspace_id, "secret_fork_bases")
-            == secret_rows(&source_store, workspace_id, "secret_fork_bases"),
-        "secret_fork_bases differ"
+    assert_eq!(
+        secret_rows(&peer_store, workspace_id, "secret_fork_bases"),
+        secret_rows(&source_store, workspace_id, "secret_fork_bases"),
+        "secret_fork_bases differ",
     );
 
     let snapshot_heads = |store: &EngineStore| {

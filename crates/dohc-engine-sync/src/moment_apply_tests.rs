@@ -1,5 +1,6 @@
 use dohc_engine_domain::{
-    CreateNamedVersion, ListMomentsQuery, RollbackTextFileMutation, VersionedTextStore, WriteText,
+    CreateNamedVersion, ListMomentsQuery, MomentOp, RollbackTextFileMutation, VersionedTextStore,
+    WriteText,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256, put_binary_blob};
 use dohc_engine_testkit::ScratchDir;
@@ -1121,22 +1122,26 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
             &NoFaults,
         )
         .expect("rollback after reopen");
-    let restored = VersionedTextStore::new(&mut reopened)
+    let versioned = VersionedTextStore::new(&mut reopened);
+    let restored = versioned
         .read_text("ws", "feature", "shipped.md")
         .expect("read restored head")
         .expect("restored head");
     assert_eq!(restored.text, "shipped");
-    assert_eq!(restored.latest_moment_id, "shipped-head");
+    assert!(restored.latest_moment_id.starts_with("rollback-"));
+    let compensation = versioned
+        .get_moment("ws", &restored.latest_moment_id)
+        .expect("read compensating moment")
+        .expect("compensating moment");
+    assert_eq!(compensation.operation, MomentOp::Write);
+    assert_eq!(
+        compensation.before_latest_moment_id.as_deref(),
+        Some("remote-after-shipped")
+    );
     assert_eq!(restored.updated_at_ms, 1_200);
-    assert_eq!(restored.metadata_origin, "sync");
-    assert_eq!(
-        restored.metadata_summary.as_deref(),
-        Some("shipped summary")
-    );
-    assert_eq!(
-        restored.metadata_correlation_id.as_deref(),
-        Some("shipped correlation")
-    );
+    assert_eq!(restored.metadata_origin, "restore");
+    assert_eq!(restored.metadata_summary, None);
+    assert_eq!(restored.metadata_correlation_id, None);
 }
 
 #[test]
