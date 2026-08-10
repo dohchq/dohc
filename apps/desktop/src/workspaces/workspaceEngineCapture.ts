@@ -3774,6 +3774,32 @@ export function createWorkspaceEngineCapture(
             `locked-write retry stopped: the engine committed the settle but did not write ${input.path}. dohc does not write through symlinks, and either the file or a folder above it is one. The edits stay in the document's history. Replace the linked file with a real file, or the linked folder with a real folder. Then open ${input.path} to write it again.`,
           );
 
+        // A RETRY's own removal check (#746). `scheduleDetachedLockedSettle`
+        // (below) is the debt-REGISTRATION door and asks this once, but two
+        // ladders re-run a settle without ever passing back through it: this
+        // debt's own payment retry (`settleForProof`) once armed, and the
+        // separate close-retry ladder (`scheduleTransientCloseRetry`) that
+        // owns the unreplicated shape and never registers a debt at all. A
+        // delete landing after registration but before one of those retries
+        // used to reach neither fence. Both ask HERE, at the last point
+        // before their own write. `writeCancelled` makes the stand-down
+        // sticky: once one retry stands down, every later retry short-circuits
+        // without re-consuming or re-announcing the same tombstone.
+        const suppressSettleForRemoval = (): boolean => {
+          if (writeCancelled) return true;
+          const tombstone = consumeRecentExternalDeleteWithNoDebt(
+            input.path,
+            sessionOpenedAtMs,
+          );
+          if (tombstone === null) return false;
+          standDownFromWrite(
+            tombstone.expected
+              ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
+              : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`,
+          );
+          return true;
+        };
+
         const payDetachedLockedDebt = async (): Promise<void> => {
           // Another edge may have paid, transferred, or CANCELLED this debt
           // after the timer's own check — a destructive vacate cancels
@@ -3829,10 +3855,13 @@ export function createWorkspaceEngineCapture(
             // awaited RPC — the version read, the open, the reconnect ladder.
             // Settling on that stale yes writes the path the user just removed
             // or moved away, which is the recreation every fence above exists
-            // to prevent.
+            // to prevent. `suppressSettleForRemoval` covers the same window
+            // for a delete that landed AFTER registration passed with no
+            // tombstone yet on record (#746).
             if (
               writeCancelled ||
-              detachedLockedDebts.get(input.path)?.pay !== payDetachedLockedDebt
+              detachedLockedDebts.get(input.path)?.pay !== payDetachedLockedDebt ||
+              suppressSettleForRemoval()
             ) {
               throw new DetachedPaymentCancelledError(input.path);
             }
@@ -4162,7 +4191,19 @@ export function createWorkspaceEngineCapture(
           transientCloseRetryTimer = setTimeout(() => {
             transientCloseRetryTimer = null;
             if (stopped || liveYDocSessions.get(input.path) !== entry) return;
-            void closeEntry(opts).catch((retryError: unknown) => {
+            // THIS retry's own removal check (#746). No debt is ever
+            // registered for this ladder, so nothing else asks whether the
+            // file this retry is about to write was deleted since the last
+            // attempt. Ask here, at the last point before the retry's own
+            // settle — the FIRST attempt (above, not this timer) keeps
+            // asking nothing, exactly as before, so a settle refusal it
+            // meets still produces the same failure the registration door
+            // downstream depends on.
+            const retryOpts: WorkspaceEngineYDocCloseOptions | undefined =
+              opts?.settle !== false && suppressSettleForRemoval()
+                ? { ...opts, settle: false, settleOnRefusal: false }
+                : opts;
+            void closeEntry(retryOpts).catch((retryError: unknown) => {
               if (isTransientEngineCause(retryError)) {
                 scheduleTransientCloseRetry(retryError, opts);
                 return;
