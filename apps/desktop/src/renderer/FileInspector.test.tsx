@@ -733,6 +733,450 @@ describe("markdown editor unmount flush", () => {
     expect(lastWrite?.text).not.toBe("");
   });
 
+  it("serializes overlapping plain-text autosaves and writes the newest draft last", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "",
+      truncated: false,
+    });
+    let releaseFirst!: () => void;
+    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseFirst = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    let releaseSecond!: () => void;
+    const heldSecond = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseSecond = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    let writes = 0;
+    bridgeMock.writeWorkspaceText.mockImplementation(() => {
+      writes += 1;
+      return writes === 1 ? heldFirst : heldSecond;
+    });
+    const user = userEvent.setup({ delay: 5 });
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="notes/plain.txt" />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("One");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    await user.keyboard("Two");
+    await waitFor(() => expect(content.textContent).toContain("OneTwo"));
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseFirst();
+      await heldFirst;
+    });
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    expect(bridgeMock.writeWorkspaceText.mock.calls[1]).toEqual([
+      {
+        workspaceId: "ws-1",
+        relativePath: "notes/plain.txt",
+        text: "OneTwo",
+      },
+    ]);
+    expect(content.textContent).toContain("OneTwo");
+    await act(async () => {
+      releaseSecond();
+      await heldSecond;
+    });
+    view.unmount();
+  });
+
+  it("holds a plain-text shell flush until the in-flight autosave lands", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "",
+      truncated: false,
+    });
+    let releaseWrite!: () => void;
+    const heldWrite = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseWrite = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    bridgeMock.writeWorkspaceText.mockImplementation(() => heldWrite);
+    let flush: (() => Promise<void>) | null = null;
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("Draft");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(flushSettled).toBe(false);
+
+    await act(async () => {
+      releaseWrite();
+      await heldWrite;
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    view.unmount();
+  });
+
+  it("rearms autosave when a debounce expires behind a shell flush", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "",
+      truncated: false,
+    });
+    let releaseFirst!: () => void;
+    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseFirst = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    let releaseSecond!: () => void;
+    const heldSecond = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseSecond = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockImplementationOnce(() => heldSecond);
+    let flush: (() => Promise<void>) | null = null;
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("One");
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
+    await user.keyboard("Two");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseFirst();
+      await heldFirst;
+    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(flushSettled).toBe(false);
+    expect(bridgeMock.writeWorkspaceText.mock.calls[1]).toEqual([
+      {
+        workspaceId: "ws-1",
+        relativePath: "notes/plain.txt",
+        text: "OneTwo",
+      },
+    ]);
+    await act(async () => {
+      releaseSecond();
+      await heldSecond;
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    view.unmount();
+  });
+
+  it("drains a flush-time edit before its debounce expires", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "",
+      truncated: false,
+    });
+    let releaseFirst!: () => void;
+    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseFirst = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    let releaseSecond!: () => void;
+    const heldSecond = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseSecond = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockImplementationOnce(() => heldSecond);
+    let flush: (() => Promise<void>) | null = null;
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("One");
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1), {
+      timeout: 5_000,
+    });
+    await user.keyboard("Two");
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseFirst();
+      await heldFirst;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
+    expect(flushSettled).toBe(false);
+    expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "notes/plain.txt",
+      text: "OneTwo",
+    });
+
+    await act(async () => {
+      releaseSecond();
+      await heldSecond;
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    view.unmount();
+  });
+
+  it("shares concurrent flushes through edits made during deferred writes", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "",
+      truncated: false,
+    });
+    let releaseFirst!: () => void;
+    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseFirst = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    let releaseSecond!: () => void;
+    const heldSecond = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseSecond = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    let releaseThird!: () => void;
+    const heldThird = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseThird = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockImplementationOnce(() => heldSecond)
+      .mockImplementationOnce(() => heldThird);
+    let flush: (() => Promise<void>) | null = null;
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("One");
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    let firstSettled = false;
+    let secondSettled = false;
+    const firstFlush = flush!();
+    const secondFlush = flush!();
+    const sharedPromise = firstFlush === secondFlush;
+    void firstFlush.then(() => {
+      firstSettled = true;
+    });
+    void secondFlush.then(() => {
+      secondSettled = true;
+    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1), {
+      timeout: 5_000,
+    });
+
+    await user.keyboard("Two");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    await act(async () => {
+      releaseFirst();
+      await heldFirst;
+    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2), {
+      timeout: 5_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const secondSettledEarly = secondSettled;
+
+    await user.keyboard("Three");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    await act(async () => {
+      releaseSecond();
+      await heldSecond;
+    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(3), {
+      timeout: 5_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const settledBeforeDrain = firstSettled || secondSettled;
+    expect(bridgeMock.writeWorkspaceText.mock.calls[2]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "notes/plain.txt",
+      text: "OneTwoThree",
+    });
+
+    await act(async () => {
+      releaseThird();
+      await heldThird;
+      await Promise.all([firstFlush, secondFlush]);
+    });
+    expect(sharedPromise).toBe(true);
+    expect(secondSettledEarly).toBe(false);
+    expect(settledBeforeDrain).toBe(false);
+    expect(firstSettled).toBe(true);
+    expect(secondSettled).toBe(true);
+    view.unmount();
+  });
+
+  it("rejects a flush when its deferred write fails and keeps the draft retryable", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "",
+      truncated: false,
+    });
+    let releaseFirst!: () => void;
+    const heldFirst = new Promise<{ path: string; recorded: boolean }>(
+      (resolve) => {
+        releaseFirst = () => resolve({ path: "notes/plain.txt", recorded: true });
+      },
+    );
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockRejectedValueOnce(new Error("deferred write failed"))
+      .mockResolvedValue({ path: "notes/plain.txt", recorded: true });
+    let flush: (() => Promise<void>) | null = null;
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("One");
+    await waitFor(() => expect(flush).not.toBeNull());
+
+    const firstFlush = flush!();
+    const secondFlush = flush!();
+    const sharedPromise = firstFlush === secondFlush;
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1), {
+      timeout: 5_000,
+    });
+    await user.keyboard("Two");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    releaseFirst();
+
+    const failedFlushes = await Promise.allSettled([firstFlush, secondFlush]);
+    expect(sharedPromise).toBe(true);
+    expect(failedFlushes).toEqual([
+      expect.objectContaining({ status: "rejected" }),
+      expect.objectContaining({ status: "rejected" }),
+    ]);
+    expect(
+      failedFlushes.every(
+        (result) =>
+          result.status === "rejected" &&
+          result.reason instanceof Error &&
+          result.reason.message === "deferred write failed",
+      ),
+    ).toBe(true);
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
+    await expect(flush!()).resolves.toBeUndefined();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(3);
+    expect(bridgeMock.writeWorkspaceText.mock.calls[2]?.[0]).toEqual({
+      workspaceId: "ws-1",
+      relativePath: "notes/plain.txt",
+      text: "OneTwo",
+    });
+    view.unmount();
+  });
+
+  it("applies a refreshed plain-text body to CodeMirror", async () => {
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({ text: "before", truncated: false })
+      .mockResolvedValueOnce({ text: "after external edit", truncated: false });
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="notes/plain.txt" refreshKey={1} />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await waitFor(() => expect(content.textContent).toBe("before"));
+
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="notes/plain.txt" refreshKey={2} />,
+    );
+
+    await waitFor(() => expect(content.textContent).toBe("after external edit"));
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
   it("lets Ctrl+Z undo a pending history revert in CodeMirror text files", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "before\n",
