@@ -6,6 +6,7 @@ import {
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  type CommitRelayCursorResult,
   type PendingConflictResolve,
   type ProbeRelayWorkspaceResult,
   type RelayWorkspaceBootstrapResult,
@@ -521,7 +522,9 @@ function translateRelayError(method: string, error: unknown): never {
 export interface EngineRelayWorkspaceClient {
   push(): Promise<PushWorkspaceToRelayResult>;
   pull(): Promise<PullWorkspaceFromRelayResult>;
-  commitCursor(cursor: Record<string, JsonValue | undefined>): Promise<void>;
+  commitCursor(
+    cursor: Record<string, JsonValue | undefined>,
+  ): Promise<CommitRelayCursorResult>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
   bootstrapJoinIdentity(identity: RelayWorkspaceIdentity | null): Promise<void>;
@@ -646,7 +649,7 @@ export class EngineRelayClient {
 
     const commitCursor = async (
       cursor: Record<string, JsonValue | undefined>,
-    ): Promise<void> => {
+    ): Promise<CommitRelayCursorResult> => {
       const result = resultRecord(
         await request("sync.commitCursor", {
           workspaceId: workspace.workspaceId,
@@ -657,6 +660,20 @@ export class EngineRelayClient {
       if (!booleanField(result, "committed", "sync.commitCursor")) {
         throw new Error("Rust engine sync.commitCursor did not commit.");
       }
+      return {
+        sharingDeclined: sharingDeclined(
+          result.sharingDeclined,
+          "sync.commitCursor",
+        ),
+      };
+    };
+
+    const appendDeclines = (
+      target: SharingDeclined[],
+      source: readonly SharingDeclined[],
+    ): void => {
+      const remaining = MAX_REPORTED_REFUSALS - target.length;
+      if (remaining > 0) target.push(...source.slice(0, remaining));
     };
 
     const claimWith = async (
@@ -702,6 +719,10 @@ export class EngineRelayClient {
           // The daemon owns all origin selection; desktop callers only consume
           // the count, so no origin identifiers cross the process boundary.
           originsPushed: [],
+          sharingDeclined: sharingDeclined(
+            result.sharingDeclined,
+            "sync.push",
+          ),
         };
       },
       pull: async () => {
@@ -747,7 +768,10 @@ export class EngineRelayClient {
             "sync.pull",
           );
           resolves.push(...pendingResolves(result.pendingResolves));
-          declines.push(...sharingDeclined(result.sharingDeclined, "sync.pull"));
+          appendDeclines(
+            declines,
+            sharingDeclined(result.sharingDeclined, "sync.pull"),
+          );
           for (const path of changedPaths(result.changedPaths, "sync.pull")) {
             changed.set(path.path, path);
           }
@@ -755,7 +779,7 @@ export class EngineRelayClient {
             finalCursor = cursor;
             break;
           }
-          await commitCursor(cursor);
+          appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);
         }
         if (!finalCursor) {
           throw new Error("Rust engine sync.pull returned no final cursor.");
@@ -770,7 +794,12 @@ export class EngineRelayClient {
           sharingDeclined: declines,
           fastForwardedPaths: [...changed.values()],
           nextCursor,
-          commitFetchCursor: async () => await commitCursor(finalCursor),
+          commitFetchCursor: async () => {
+            appendDeclines(
+              declines,
+              (await commitCursor(finalCursor)).sharingDeclined,
+            );
+          },
         };
       },
       commitCursor,
@@ -1007,7 +1036,12 @@ export class EngineRelayClient {
           refusalCount,
           changedPaths: [...changed.values()],
           nextCursor,
-          commitCursor: async () => await commitCursor(finalCursor),
+          // Share-view pulls do not surface `sharingDeclined` (out of scope
+          // for share views) — discard the richer relay-cursor result the
+          // shared `commitCursor` closure now returns.
+          commitCursor: async () => {
+            await commitCursor(finalCursor);
+          },
         };
       },
     };

@@ -75,6 +75,7 @@ class MockDaemon implements EngineDaemonClient {
             pendingCursor: null,
             changedPaths: [],
             pendingResolves: [],
+            sharingDeclined: [],
           };
         case "sync.pull":
           return {
@@ -105,7 +106,7 @@ class MockDaemon implements EngineDaemonClient {
             sharingDeclined: [],
           };
         case "sync.commitCursor":
-          return { committed: true };
+          return { committed: true, sharingDeclined: [] };
         case "sync.recoverOrigin":
           return {
             oldOriginId: "origin-old",
@@ -214,6 +215,7 @@ describe("EngineRelayClient", () => {
     await expect(client.push()).resolves.toEqual({
       pushed: 3,
       originsPushed: [],
+      sharingDeclined: [],
     });
     const pull = await client.pull();
     expect(pull).toMatchObject({
@@ -323,7 +325,7 @@ describe("EngineRelayClient", () => {
     const pull = await client.pull();
 
     expect(
-      (pull as unknown as { sharingDeclined: unknown }).sharingDeclined,
+      pull.sharingDeclined,
       "the desktop client must not discard the engine's actionable declines",
     ).toEqual([
       {
@@ -331,6 +333,84 @@ describe("EngineRelayClient", () => {
         limitBytes: 20,
         observedBytes: 21,
       },
+      {
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 22,
+      },
+    ]);
+    await sessions.closeAll();
+  });
+
+  it("carries an empty-probe push enrollment decline", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.push") return undefined;
+      return {
+        status: "complete",
+        pushed: 0,
+        sharingDeclined: [
+          {
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limitBytes: 20,
+            observedBytes: 21,
+          },
+        ],
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    await expect(client.push()).resolves.toEqual({
+      pushed: 0,
+      originsPushed: [],
+      sharingDeclined: [
+        {
+          constraint: "MAX_YDOC_UPDATE_BYTES",
+          limitBytes: 20,
+          observedBytes: 21,
+        },
+      ],
+    });
+    await sessions.closeAll();
+  });
+
+  it("adds a cursor-commit enrollment decline to the completed pull", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.pull") {
+        return {
+          status: "complete",
+          pushed: 0,
+          fetched: 0,
+          applied: 0,
+          skipped: 0,
+          conflictsOpened: 0,
+          hasMore: false,
+          nextCursor: 0,
+          pendingCursor: { kind: "relay", token: "cursor-enrollment" },
+          changedPaths: [],
+          pendingResolves: [],
+          sharingDeclined: [],
+        };
+      }
+      if (request.method === "sync.commitCursor") {
+        return {
+          committed: true,
+          sharingDeclined: [
+            {
+              constraint: "MAX_YDOC_UPDATE_BYTES",
+              limitBytes: 20,
+              observedBytes: 22,
+            },
+          ],
+        };
+      }
+      return undefined;
+    });
+    const { sessions, client } = await harness(daemon);
+
+    const pull = await client.pull();
+    await pull.commitFetchCursor();
+
+    expect(pull.sharingDeclined).toEqual([
       {
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,

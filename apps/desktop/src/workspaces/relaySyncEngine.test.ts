@@ -109,7 +109,11 @@ beforeEach(() => {
   pushMock.mockReset();
   pullMock.mockReset();
   recoverMock.mockReset();
-  pushMock.mockImplementation(async () => ({ pushed: 0, originsPushed: [] }));
+  pushMock.mockImplementation(async () => ({
+    pushed: 0,
+    originsPushed: [],
+    sharingDeclined: [],
+  }));
   pullMock.mockImplementation(async () => pullResult());
   recoverMock.mockImplementation(async () => ({
     oldOriginId: "origin_old",
@@ -126,7 +130,11 @@ afterEach(() => {
 describe("relaySyncEngine", () => {
   it("never invokes legacy TypeScript relay operations for a rooted daemon operation set", async () => {
     const operations: RelaySyncOperations = {
-      push: vi.fn(async () => ({ pushed: 1, originsPushed: [] })),
+      push: vi.fn(async () => ({
+        pushed: 1,
+        originsPushed: [],
+        sharingDeclined: [],
+      })),
       pull: vi.fn(async () => pullResult()),
       recoverOrigin: vi.fn(async () => ({
         oldOriginId: "old",
@@ -152,7 +160,11 @@ describe("relaySyncEngine", () => {
       push: vi
         .fn()
         .mockRejectedValueOnce(new RelayOriginDivergedError())
-        .mockResolvedValue({ pushed: 1, originsPushed: [] }),
+        .mockResolvedValue({
+          pushed: 1,
+          originsPushed: [],
+          sharingDeclined: [],
+        }),
       pull: vi.fn(async () => pullResult()),
       recoverOrigin: vi.fn(async () => ({
         oldOriginId: "old",
@@ -321,7 +333,11 @@ describe("relaySyncEngine", () => {
     const cap = capture();
     pushMock
       .mockRejectedValueOnce(new RelayOriginDivergedError())
-      .mockResolvedValue({ pushed: 1, originsPushed: ["origin_new"] });
+      .mockResolvedValue({
+        pushed: 1,
+        originsPushed: ["origin_new"],
+        sharingDeclined: [],
+      });
     const sync = engine({ capture: cap });
     await sync.start();
 

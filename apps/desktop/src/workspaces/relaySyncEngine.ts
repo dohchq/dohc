@@ -171,12 +171,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   async function doPass(): Promise<void> {
     const beforePending = pendingChangeCount;
     const bootstrapPass = bootstrapPullPending;
+    const sharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(async () => {
       // A join-bootstrap engine is pull-only until its first pull succeeds:
       // a fresh join must never append ops before it has the remote state.
       if (!bootstrapPass) {
         try {
-          await operations.push();
+          sharingDeclined.push(...(await operations.push()).sharingDeclined);
         } catch (error) {
           if (!(error instanceof RelayOriginDivergedError)) throw error;
           // The local engine.db was restored-from-older or cloned, so its
@@ -184,7 +185,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           // onto a fresh origin — preserving local-only work as conflicts where
           // it clashes, never dropping it — then push under the fresh origin.
           await operations.recoverOrigin();
-          await operations.push();
+          sharingDeclined.push(...(await operations.push()).sharingDeclined);
         }
       }
       try {
@@ -195,7 +196,9 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         // own relay echo. Re-baseline that origin, preserve its local suffix,
         // and retry the pass instead of backing off against the same page.
         await operations.recoverOrigin();
-        if (!bootstrapPass) await operations.push();
+        if (!bootstrapPass) {
+          sharingDeclined.push(...(await operations.push()).sharingDeclined);
+        }
         return operations.pull();
       }
     });
@@ -230,7 +233,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         console.error(`[desktop] shared channel sync failed for ${options.rootDir}:`, error);
       }
     }
-    for (const declined of pullResult.sharingDeclined) {
+    sharingDeclined.push(...(pullResult.sharingDeclined ?? []));
+    for (const declined of sharingDeclined) {
       console.warn(
         `[desktop] document sharing declined for ${options.rootDir}: ${declined.constraint} allows ${declined.limitBytes} bytes; observed ${declined.observedBytes} bytes.`,
       );

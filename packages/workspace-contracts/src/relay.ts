@@ -49,6 +49,11 @@ export interface PullWorkspaceFromRelayResult {
 export interface PushWorkspaceToRelayResult {
   pushed: number;
   originsPushed: string[];
+  sharingDeclined: SharingDeclined[];
+}
+
+export interface CommitRelayCursorResult {
+  sharingDeclined: SharingDeclined[];
 }
 
 export class RelayUnauthorizedError extends Error {
