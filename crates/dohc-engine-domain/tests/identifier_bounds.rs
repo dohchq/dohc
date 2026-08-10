@@ -16,8 +16,8 @@
 //! assumed, and the bound sits past it.
 
 use dohc_engine_domain::{
-    DomainError, MAX_AUTHOR_FIELD_BYTES, MAX_METADATA_FIELD_BYTES, NoFaults, VersionedTextStore,
-    WriteText, derive_capture_object_id,
+    DomainError, MAX_AUTHOR_FIELD_BYTES, MAX_AUTHOR_JSON_BYTES, MAX_METADATA_FIELD_BYTES, NoFaults,
+    VersionedTextStore, WriteText, derive_capture_object_id,
 };
 use dohc_engine_storage::{EngineStore, MAX_IDENTIFIER_BYTES};
 use dohc_engine_testkit::ScratchDir;
@@ -216,5 +216,69 @@ fn moment_metadata_bounds_clear_measured_agent_identifiers_and_report_overruns()
             limit_bytes: MAX_AUTHOR_FIELD_BYTES,
             observed_bytes,
         } if observed_bytes == MAX_AUTHOR_FIELD_BYTES + 1
+    ));
+}
+
+#[test]
+fn an_over_long_metadata_origin_is_refused_with_its_measurements() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open(&scratch);
+    let mut input = write("object-origin", "moment-origin");
+    input.metadata_origin = "o".repeat(MAX_METADATA_FIELD_BYTES + 1);
+
+    let error = match VersionedTextStore::new(&mut store).write_text(&input, &NO_FAULTS) {
+        Err(error) => error,
+        Ok(_) => panic!("over-long metadata origin was accepted"),
+    };
+    assert!(matches!(
+        error,
+        DomainError::PayloadTooLarge {
+            constraint: "MAX_METADATA_FIELD_BYTES",
+            limit_bytes: MAX_METADATA_FIELD_BYTES,
+            observed_bytes,
+        } if observed_bytes == MAX_METADATA_FIELD_BYTES + 1
+    ));
+}
+
+#[test]
+fn an_over_large_author_json_is_refused_with_its_measurements() {
+    let mut author = serde_json::Map::new();
+    for (field, value) in [
+        ("kind", "agent"),
+        ("agentId", "agent-1"),
+        ("onBehalfOf", "local"),
+        ("agentRunId", "run-1"),
+    ] {
+        author.insert(field.to_owned(), serde_json::json!(value));
+    }
+    for index in 0..400 {
+        author.insert(
+            format!("padding-{index}"),
+            serde_json::json!("x".repeat(32)),
+        );
+    }
+    assert!(author.values().all(|value| {
+        value
+            .as_str()
+            .is_some_and(|field| field.len() < MAX_AUTHOR_FIELD_BYTES)
+    }));
+    let author_json = serde_json::Value::Object(author).to_string();
+    assert!(author_json.len() > MAX_AUTHOR_JSON_BYTES);
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open(&scratch);
+    let mut input = write("object-author", "moment-author");
+    input.author_json = Some(author_json.clone());
+    let error = match VersionedTextStore::new(&mut store).write_text(&input, &NO_FAULTS) {
+        Err(error) => error,
+        Ok(_) => panic!("over-large author JSON was accepted"),
+    };
+    assert!(matches!(
+        error,
+        DomainError::PayloadTooLarge {
+            constraint: "MAX_AUTHOR_JSON_BYTES",
+            limit_bytes: MAX_AUTHOR_JSON_BYTES,
+            observed_bytes,
+        } if observed_bytes == author_json.len()
     ));
 }

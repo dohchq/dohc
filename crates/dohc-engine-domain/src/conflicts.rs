@@ -1189,6 +1189,7 @@ pub fn write_binary_file_in_tx(
     input: &WriteBinaryFile,
 ) -> Result<(), DomainError> {
     validate_moment_metadata(
+        input.metadata_origin.as_str(),
         input.metadata_summary.as_deref(),
         input.metadata_correlation_id.as_deref(),
         input.author_json.as_deref(),

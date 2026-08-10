@@ -41,7 +41,7 @@ use std::collections::{HashMap, HashSet};
 pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
-const MAX_AUTHOR_JSON_BYTES: usize = 10 * 1024;
+pub const MAX_AUTHOR_JSON_BYTES: usize = 10 * 1024;
 
 /// The in-band content cap every capped read binds into its SQL and every
 /// RPC references — ONE definition, so the query guard and the wire
@@ -267,6 +267,7 @@ impl<'a> VersionedTextStore<'a> {
         validate_identifier(&input.version_id, "version_id")?;
         validate_moment_id(&input.moment_id)?;
         validate_moment_metadata(
+            input.metadata_origin.as_str(),
             input.metadata_summary.as_deref(),
             input.metadata_correlation_id.as_deref(),
             input.author_json.as_deref(),
@@ -459,7 +460,12 @@ impl<'a> VersionedTextStore<'a> {
         validate_identifier(&input.workspace_id, "workspace_id")?;
         validate_identifier(&input.version_id, "version_id")?;
         validate_identifier(&input.mutation_moment_id, "moment_id")?;
-        validate_moment_metadata(None, None, input.author_json.as_deref())?;
+        validate_moment_metadata(
+            input.metadata_origin.as_str(),
+            None,
+            None,
+            input.author_json.as_deref(),
+        )?;
         let mut normalized_input = input.clone();
         normalized_input.path = validate_addressable_plaintext_path(&input.path)?;
         let input = &normalized_input;
@@ -2067,6 +2073,7 @@ fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
     bounded_identifier(&input.object_id, "object_id")?;
     validate_moment_id(&input.moment_id)?;
     validate_moment_metadata(
+        input.metadata_origin.as_str(),
         input.metadata_summary.as_deref(),
         input.metadata_correlation_id.as_deref(),
         input.author_json.as_deref(),
@@ -2101,6 +2108,7 @@ fn normalized_delete_input(input: &DeleteTextFile) -> Result<DeleteTextFile, Dom
     validate_identifier(&input.version_id, "version_id")?;
     validate_moment_id(&input.moment_id)?;
     validate_moment_metadata(
+        input.metadata_origin.as_str(),
         input.metadata_summary.as_deref(),
         input.metadata_correlation_id.as_deref(),
         input.author_json.as_deref(),
@@ -2119,6 +2127,7 @@ fn normalized_capture_ingest(input: &CaptureIngest) -> Result<CaptureIngest, Dom
     validate_identifier(&input.workspace_id, "workspace_id")?;
     validate_identifier(&input.version_id, "version_id")?;
     validate_moment_metadata(
+        input.metadata_origin.as_str(),
         input.metadata_summary.as_deref(),
         input.metadata_correlation_id.as_deref(),
         input.author_json.as_deref(),
@@ -2133,6 +2142,7 @@ fn normalized_capture_retire(input: &CaptureRetire) -> Result<CaptureRetire, Dom
     validate_identifier(&input.workspace_id, "workspace_id")?;
     validate_identifier(&input.version_id, "version_id")?;
     validate_moment_metadata(
+        CAPTURE_ORIGIN,
         input.metadata_summary.as_deref(),
         input.metadata_correlation_id.as_deref(),
         None,
@@ -3911,11 +3921,15 @@ pub(crate) fn validate_moment_id(value: &str) -> Result<(), DomainError> {
 }
 
 pub(crate) fn validate_moment_metadata(
+    metadata_origin: &str,
     summary: Option<&str>,
     correlation_id: Option<&str>,
     author_json: Option<&str>,
 ) -> Result<(), DomainError> {
-    for field in [summary, correlation_id].into_iter().flatten() {
+    for field in [Some(metadata_origin), summary, correlation_id]
+        .into_iter()
+        .flatten()
+    {
         if field.len() > MAX_METADATA_FIELD_BYTES {
             return Err(DomainError::PayloadTooLarge {
                 constraint: "MAX_METADATA_FIELD_BYTES",
