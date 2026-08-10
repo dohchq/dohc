@@ -60,6 +60,7 @@ import {
   makeLinkMenuExtension,
   makeLinkMenuPlugin,
   type LinkMenuState,
+  type WorkspaceLinkTarget,
 } from "./linkMenu";
 import {
   makeWikilinkPlugin,
@@ -164,6 +165,7 @@ export type MarkdownEditorProps = {
   path: string;
   knownFiles: ReadonlyArray<WikilinkFile>;
   onOpenWikilink?: (path: string) => void;
+  onOpenWorkspaceLink?: (target: WorkspaceLinkTarget) => void;
   headingTarget?: HeadingNavigationTarget;
   blockTarget?: BlockNavigationTarget;
   onBlockTargetConsumed?: (nonce: number) => void;
@@ -360,6 +362,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       onDirty,
       knownFiles,
       onOpenWikilink,
+      onOpenWorkspaceLink,
       headingTarget,
       blockTarget,
       onBlockTargetConsumed,
@@ -409,6 +412,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const onOpenWikilinkRef = useRef<((target: string) => void) | null>(
       onOpenWikilink ?? null,
     );
+    const onOpenWorkspaceLinkRef = useRef<
+      ((target: WorkspaceLinkTarget) => void) | null
+    >(onOpenWorkspaceLink ?? null);
 
     // ProseMirror invokes menu handlers outside React's render cycle. Keep the
     // imperative ref current in the same tick as the visual state so rapid
@@ -503,6 +509,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       onOpenWikilinkRef.current = onOpenWikilink ?? null;
     }, [onOpenWikilink]);
 
+    useEffect(() => {
+      onOpenWorkspaceLinkRef.current = onOpenWorkspaceLink ?? null;
+    }, [onOpenWorkspaceLink]);
+
     const dohcPlugins = useMemo(
       () =>
         Extension.create({
@@ -546,7 +556,12 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeEmojiPlugin((state) => setEmojiState(state)),
               wikilinkClickPlugin,
               makeHeadingFlashPlugin(),
-              makeLinkMenuPlugin({ stateRef: linkMenuStateRef, setState: setLinkMenuState }),
+              makeLinkMenuPlugin({
+                stateRef: linkMenuStateRef,
+                setState: setLinkMenuState,
+                openWorkspaceLink: (target) =>
+                  onOpenWorkspaceLinkRef.current?.(target),
+              }),
               makeCodeBlockChromePlugin(),
               // After the slash-command plugin (menu keeps ArrowDown while
               // open), before code-block continuation (nested code escapes

@@ -55,13 +55,15 @@ export function normalizeLinkUrl(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed || /\s/.test(trimmed)) return null;
 
-  const candidate = HOST_PORT_RE.test(trimmed)
-    ? `https://${trimmed}`
-    : EXPLICIT_SCHEME_RE.test(trimmed)
-      ? trimmed
-      : EMAIL_RE.test(trimmed)
-        ? `mailto:${trimmed}`
-        : `https://${trimmed}`;
+  const candidate = trimmed.startsWith("//")
+    ? `https:${trimmed}`
+    : HOST_PORT_RE.test(trimmed)
+      ? `https://${trimmed}`
+      : EXPLICIT_SCHEME_RE.test(trimmed)
+        ? trimmed
+        : EMAIL_RE.test(trimmed)
+          ? `mailto:${trimmed}`
+          : `https://${trimmed}`;
 
   try {
     const url = new URL(candidate);
@@ -73,12 +75,15 @@ export function normalizeLinkUrl(raw: string): string | null {
 
 /** Opens a URL through the app's audited external-open pathway
  *  (desktop:open-external-url → shell.openExternal, gated to http(s)/mailto
- *  by isSafeExternalUrl). Silently no-ops on an invalid URL — callers
- *  should already be validating for UI feedback. */
+ *  by isSafeExternalUrl). Invalid URLs and OS open failures are contained. */
 export async function openLinkExternally(rawUrl: string): Promise<void> {
   const normalized = normalizeLinkUrl(rawUrl);
   if (!normalized) return;
-  await bridge().openExternalUrl({ url: normalized });
+  try {
+    await bridge().openExternalUrl({ url: normalized });
+  } catch (error) {
+    console.warn("[dohc] could not open external link:", error);
+  }
 }
 
 // ── popover state ────────────────────────────────────────────────────────
@@ -106,6 +111,145 @@ function isEditableEditor(editor: Editor | null | undefined): boolean {
   if (!editor) return false;
   if ((editor as { isEditable?: boolean }).isEditable === false) return false;
   if ((editor.view as { editable?: boolean }).editable === false) return false;
+  return true;
+}
+
+function isViewEditable(view: EditorView): boolean {
+  return (view as { editable?: boolean }).editable !== false;
+}
+
+function percentByteAt(value: string, index: number): number | null {
+  const escape = value.slice(index, index + 3);
+  return /^%[\da-f]{2}$/iu.test(escape)
+    ? Number.parseInt(escape.slice(1), 16)
+    : null;
+}
+
+function decodeHrefComponent(value: string): string {
+  let decoded = "";
+  for (let index = 0; index < value.length;) {
+    const firstByte = percentByteAt(value, index);
+    if (firstByte === null) {
+      decoded += value[index];
+      index += 1;
+      continue;
+    }
+    if (firstByte < 0x80) {
+      decoded += String.fromCharCode(firstByte);
+      index += 3;
+      continue;
+    }
+
+    const width =
+      firstByte >= 0xc2 && firstByte <= 0xdf
+        ? 2
+        : firstByte >= 0xe0 && firstByte <= 0xef
+          ? 3
+          : firstByte >= 0xf0 && firstByte <= 0xf4
+            ? 4
+            : 0;
+    if (width === 0) {
+      decoded += value.slice(index, index + 3);
+      index += 3;
+      continue;
+    }
+
+    let end = index + 3;
+    let continuationCount = 0;
+    while (continuationCount < width - 1) {
+      const byte = percentByteAt(value, end);
+      if (byte === null || byte < 0x80 || byte > 0xbf) break;
+      continuationCount += 1;
+      end += 3;
+    }
+    const encoded = value.slice(index, end);
+    if (continuationCount !== width - 1) {
+      decoded += encoded;
+      index = end;
+      continue;
+    }
+    try {
+      decoded += decodeURIComponent(encoded);
+    } catch {
+      decoded += encoded;
+    }
+    index = end;
+  }
+  return decoded;
+}
+
+export type WorkspaceLinkTarget = {
+  path: string;
+  rawFragment?: string;
+};
+
+type ReadOnlyLinkTarget =
+  | { kind: "blocked" }
+  | { kind: "external"; href: string }
+  | { kind: "workspace"; target: WorkspaceLinkTarget };
+
+function parseReadOnlyLinkHref(href: string): ReadOnlyLinkTarget {
+  const trimmed = href.trim();
+  if (!trimmed) return { kind: "blocked" };
+  if (EXPLICIT_SCHEME_RE.test(trimmed) || trimmed.startsWith("//")) {
+    return { kind: "external", href: trimmed };
+  }
+
+  const fragmentIndex = trimmed.indexOf("#");
+  const beforeFragment =
+    fragmentIndex === -1 ? trimmed : trimmed.slice(0, fragmentIndex);
+  const queryIndex = beforeFragment.indexOf("?");
+  const pathEnd = queryIndex === -1 ? beforeFragment.length : queryIndex;
+  const rawPath = beforeFragment.slice(0, pathEnd);
+  const rawFragment =
+    fragmentIndex === -1 ? null : trimmed.slice(fragmentIndex + 1);
+  const decodedPath = decodeHrefComponent(rawPath);
+
+  // URL parsers ignore these controls inside a scheme. Check the same
+  // collapsed spelling before the value can reach workspace navigation.
+  const schemeCandidate = decodedPath.replace(/[\t\n\r]/g, "");
+  if (EXPLICIT_SCHEME_RE.test(schemeCandidate)) return { kind: "blocked" };
+
+  if (decodedPath.startsWith("//")) {
+    return {
+      kind: "external",
+      href: `${decodedPath}${trimmed.slice(pathEnd)}`,
+    };
+  }
+
+  if (!rawPath && rawFragment === null) return { kind: "blocked" };
+  const explicitlyRelative =
+    decodedPath.startsWith("./") ||
+    decodedPath.startsWith("../") ||
+    decodedPath.startsWith("/");
+  const path = rawPath && !explicitlyRelative ? `./${decodedPath}` : decodedPath;
+  return {
+    kind: "workspace",
+    target: {
+      path,
+      ...(rawFragment === null
+        ? {}
+        : { rawFragment }),
+    },
+  };
+}
+
+type ReadOnlyLinkEvent = {
+  readonly detail: number;
+  readonly repeat?: boolean;
+  preventDefault(): void;
+};
+
+export function activateReadOnlyLinkHref(
+  href: string,
+  event: ReadOnlyLinkEvent,
+  openWorkspaceLink?: (target: WorkspaceLinkTarget) => void,
+): boolean {
+  event.preventDefault();
+  if (event.detail > 1 || event.repeat) return true;
+  const target = parseReadOnlyLinkHref(href);
+  if (target.kind === "external") void openLinkExternally(target.href);
+  if (target.kind === "workspace") openWorkspaceLink?.(target.target);
   return true;
 }
 
@@ -257,15 +401,30 @@ export function makeLinkMenuExtension({
 export function makeLinkMenuPlugin({
   stateRef,
   setState,
+  openWorkspaceLink,
 }: {
   stateRef: RefObject<LinkMenuState>;
   setState: Dispatch<SetStateAction<LinkMenuState>>;
+  openWorkspaceLink?: (target: WorkspaceLinkTarget) => void;
 }) {
+  function activateReadOnlyLink(event: MouseEvent | KeyboardEvent): boolean {
+    const target = event.target as HTMLElement | null;
+    const anchor = target?.closest("a[href]") as HTMLAnchorElement | null;
+    if (!anchor) return false;
+
+    // A read-only document must keep links useful without allowing renderer
+    // navigation. Consume every anchor first. Route known external protocols
+    // through the audited bridge and relative paths through the workspace
+    // resolver.
+    const href = (anchor.getAttribute("href") ?? "").trim();
+    return activateReadOnlyLinkHref(href, event, openWorkspaceLink);
+  }
+
   return new Plugin({
     key: new PluginKey("dohc-link-menu"),
     props: {
       handleClick(view, pos, event) {
-        if ((view as { editable?: boolean }).editable === false) return false;
+        if (!isViewEditable(view)) return false;
         const target = event.target as HTMLElement | null;
         const anchor = target?.closest("a[href]") as HTMLAnchorElement | null;
         if (!anchor) {
@@ -288,7 +447,7 @@ export function makeLinkMenuPlugin({
         return true;
       },
       handlePaste(view, event) {
-        if ((view as { editable?: boolean }).editable === false) return false;
+        if (!isViewEditable(view)) return false;
         const { state } = view;
         if (state.selection.empty) return false;
         const linkType = state.schema.marks.link;
@@ -304,6 +463,21 @@ export function makeLinkMenuPlugin({
         event.preventDefault();
         setState(CLOSED_LINK_MENU_STATE);
         return true;
+      },
+      handleDOMEvents: {
+        click(view, event) {
+          if (isViewEditable(view)) return false;
+          return activateReadOnlyLink(event);
+        },
+        auxclick(view, event) {
+          if (isViewEditable(view) || event.button !== 1) return false;
+          return activateReadOnlyLink(event);
+        },
+        keydown(view, event) {
+          if (isViewEditable(view)) return false;
+          if (event.key !== "Enter") return false;
+          return activateReadOnlyLink(event);
+        },
       },
     },
   });

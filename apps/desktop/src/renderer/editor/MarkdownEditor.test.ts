@@ -1066,3 +1066,106 @@ describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
     }
   });
 });
+
+describe("MarkdownEditor read-only links", () => {
+  it("keeps workspace links focusable and opens them without enabling edits or default navigation", async () => {
+    const user = userEvent.setup();
+    const onDirty = vi.fn();
+    const onOpenWorkspaceLink = vi.fn();
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: "[Launch plan](../plans/launch.md#a%2520b) [Top](#)",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/status.md",
+        knownFiles: [],
+        onOpenWorkspaceLink,
+        readOnly: true,
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      expect(editor.getAttribute("contenteditable")).toBe("false");
+      const anchor = editor.querySelector("a[href]") as HTMLAnchorElement | null;
+      expect(anchor).not.toBeNull();
+      if (!anchor) throw new Error("expected rendered Markdown link");
+
+      anchor.focus();
+      expect(document.activeElement).toBe(anchor);
+
+      let clickDefaultPrevented = false;
+      const observeClick = (event: MouseEvent) => {
+        clickDefaultPrevented = event.defaultPrevented;
+      };
+      window.addEventListener("click", observeClick);
+      await user.click(anchor);
+      window.removeEventListener("click", observeClick);
+      expect(clickDefaultPrevented).toBe(true);
+      expect(onOpenWorkspaceLink).toHaveBeenCalledWith({
+        path: "../plans/launch.md",
+        rawFragment: "a%2520b",
+      });
+
+      onOpenWorkspaceLink.mockClear();
+      const middleClick = new MouseEvent("auxclick", {
+        button: 1,
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(anchor.dispatchEvent(middleClick)).toBe(false);
+      expect(middleClick.defaultPrevented).toBe(true);
+      expect(onOpenWorkspaceLink).toHaveBeenCalledWith({
+        path: "../plans/launch.md",
+        rawFragment: "a%2520b",
+      });
+      expect(onOpenWorkspaceLink).toHaveBeenCalledOnce();
+
+      onOpenWorkspaceLink.mockClear();
+      await user.dblClick(anchor);
+      expect(onOpenWorkspaceLink).toHaveBeenCalledOnce();
+
+      onOpenWorkspaceLink.mockClear();
+      await user.tripleClick(anchor);
+      expect(onOpenWorkspaceLink).toHaveBeenCalledOnce();
+
+      onOpenWorkspaceLink.mockClear();
+      const enter = new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(anchor.dispatchEvent(enter)).toBe(false);
+      expect(enter.defaultPrevented).toBe(true);
+      const repeatedEnter = new KeyboardEvent("keydown", {
+        key: "Enter",
+        repeat: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(anchor.dispatchEvent(repeatedEnter)).toBe(false);
+      expect(repeatedEnter.defaultPrevented).toBe(true);
+      expect(onOpenWorkspaceLink).toHaveBeenCalledWith({
+        path: "../plans/launch.md",
+        rawFragment: "a%2520b",
+      });
+      expect(onOpenWorkspaceLink).toHaveBeenCalledOnce();
+
+      onOpenWorkspaceLink.mockClear();
+      const topAnchor = [...editor.querySelectorAll("a[href]")].find(
+        (candidate) => candidate.textContent === "Top",
+      );
+      expect(topAnchor).toBeDefined();
+      if (!topAnchor) throw new Error("expected empty-fragment Markdown link");
+      await user.click(topAnchor);
+      expect(onOpenWorkspaceLink).toHaveBeenCalledWith({
+        path: "",
+        rawFragment: "",
+      });
+      expect(onOpenWorkspaceLink).toHaveBeenCalledOnce();
+      expect(onDirty).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+    }
+  });
+});
