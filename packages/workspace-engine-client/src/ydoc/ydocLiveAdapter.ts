@@ -636,7 +636,10 @@ export class YdocAdapterSession {
       () => Y.applyUpdate(this.doc, update, LOCAL_EDITOR_ORIGIN),
       undefined,
       true,
-    );
+    ).then((result) => {
+      this.lineage = "existing";
+      return result;
+    });
   }
 
   applyLocalEdit(

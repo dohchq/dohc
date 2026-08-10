@@ -189,6 +189,46 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  it("permits one captured seed, rejects a second seed, and keeps normal edits working", async () => {
+    const engine = seedPlaintextEngine("captured seed");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    expect(engine.recordedUpdates).toHaveLength(1);
+    expect(session.doc.getText("plainText").toString()).toBe("captured seed");
+
+    const secondSeed = new Y.Doc();
+    secondSeed.getText("plainText").insert(0, "second seed");
+    await expect(
+      Promise.resolve().then(() =>
+        session.applySeedUpdate(Y.encodeStateAsUpdate(secondSeed)),
+      ),
+    ).rejects.toMatchObject({
+      name: "YdocAdapterError",
+      code: "seed-not-permitted",
+      message: "The session already has existing lineage.",
+    });
+    expect(session.lineage).toBe("existing");
+
+    await expect(
+      session.applyLocalUpdate(
+        plaintextUpdate(session.initialUpdate, (text) => {
+          text.insert(text.length, " and normal edit");
+        }),
+      ),
+    ).resolves.toMatchObject({ seq: 2 });
+    expect(session.doc.getText("plainText").toString()).toBe(
+      "captured seed and normal edit",
+    );
+
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
   it("rejects and quarantines an opaque ill-formed edit without wedging Yjs", async () => {
     const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);
@@ -2881,8 +2921,8 @@ describe("the ydoc.open deadline (#616)", () => {
     await first.evict();
 
     // MUTATION: delete the lineage in `evict` too -> this open seeds "on disk"
-    // and reports lineage "absent", and the desktop's #665 convergence test
-    // would be passing against a fake that cannot lose the document.
+    // instead of resurrecting the edited document, and the desktop's #665
+    // convergence test would pass against a fake that can lose the document.
     const resurrected = await open();
     expect(resurrected.lineage).toBe("existing");
     expect(resurrected.doc.getText("plainText").toString()).toBe(
@@ -2893,7 +2933,7 @@ describe("the ydoc.open deadline (#616)", () => {
     // CLOSE prunes those rows, so the next open reseeds from the file.
     await resurrected.close({ settle: false });
     const reseeded = await open();
-    expect(reseeded.lineage).toBe("absent");
+    expect(reseeded.lineage).toBe("existing");
     expect(reseeded.doc.getText("plainText").toString()).toBe("on disk");
     await reseeded.close({ settle: false });
   });
@@ -3083,13 +3123,12 @@ describe("the ydoc.open deadline (#616)", () => {
       path: OLD_PATH,
       contentKind: "plaintext",
     });
-    expect(reusedPath.lineage).toBe("absent");
+    expect(reusedPath.lineage).toBe("existing");
     expect(reusedPath.doc.getText("plainText").toString()).toBe(
       "a completely different file",
     );
-    // settle:false, not true: this session never recorded an update, so an
-    // explicit settle would hit the daemon's NoMarker guard
-    // (ydoc_settle_on_store) instead of materializing anything.
+    // The captured head already covers this recorded seed, so a non-settling
+    // close can prune the local-only lineage without materializing anything.
     await reusedPath.close({ settle: false });
 
     // The SAME object, renamed to a NEW path. MUTATION: key the lineage by
@@ -3297,12 +3336,9 @@ describe("the ydoc.open deadline (#616)", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    // Pruned: the implicit settle covered the content, so the local-only
-    // close went on to prune the lineage exactly as an explicit
-    // settle:true close would.
-    expect(reopened.lineage).toBe("absent");
-    // settle:false, not true: this reopened session never recorded an
-    // update either, so an explicit settle would hit the NoMarker guard.
+    // The implicit settle pruned the old lineage. Reopening records a new
+    // captured-file seed, so the session immediately has existing lineage.
+    expect(reopened.lineage).toBe("existing");
     await reopened.close({ settle: false });
     adapter.dispose();
   });
@@ -3331,7 +3367,7 @@ describe("the ydoc.open deadline (#616)", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    expect(session.lineage).toBe("absent");
+    expect(session.lineage).toBe("existing");
 
     // Two edits that net back to EXACTLY the seeded object's own bytes, so
     // the lineage exists (an update was recorded) but nothing settled it.
@@ -3426,12 +3462,12 @@ describe("the ydoc.open deadline (#616)", () => {
       contentKind: "plaintext",
     });
     expect(recaptured.objectId).not.toBe(aObjectId);
-    expect(recaptured.lineage).toBe("absent");
+    expect(recaptured.lineage).toBe("existing");
     expect(recaptured.doc.getText("plainText").toString()).toBe(
       "a completely unrelated new file",
     );
-    // settle:false, not true: this session never recorded an update, so an
-    // explicit settle would hit the NoMarker guard.
+    // The captured head covers the newly recorded seed, so a non-settling
+    // close can prune it without materializing anything.
     await recaptured.close({ settle: false });
 
     // A's own lineage, at its new path, is untouched.
@@ -3768,7 +3804,7 @@ describe("the ydoc.open deadline (#616)", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    expect(session.lineage).toBe("absent");
+    expect(session.lineage).toBe("existing");
     expect(session.doc.getText("plainText").toString()).toBe(
       "captured content",
     );
