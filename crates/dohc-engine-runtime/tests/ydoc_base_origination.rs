@@ -16,7 +16,9 @@ use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
 use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_runtime::{CancellationToken, CaptureIngest, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, StorageError};
-use dohc_engine_sync::{NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_sync::{
+    LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
+};
 use dohc_engine_testkit::ScratchDir;
 use std::path::Path;
 use std::sync::Arc;
@@ -340,6 +342,112 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
         replay_into_clean_peer(&db, &ops, WS, PATH),
         "hello world",
         "a peer with no file and no prior state reconstructs the document"
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AlwaysLiveLease;
+
+impl LeaseProbe for AlwaysLiveLease {
+    fn is_live(&self, _key: &DocKey) -> bool {
+        true
+    }
+}
+
+/// A dependent local update cannot originate until its missing predecessor
+/// arrives. When that predecessor arrives through the deferred-drain path, the
+/// drain must retry origination without waiting for another local edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn draining_a_late_predecessor_retries_origination() {
+    const WS: &str = "ws-originate-after-drain";
+    const PATH: &str = "notes/deferred.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+
+    let doc = Ydoc::wire();
+    let predecessor = doc.plaintext_insert(0, "dep base");
+    let dependent = doc.plaintext_insert(0, "more ");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::Replicated,
+            dependent,
+            None,
+            false,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record dependent update");
+    supervisor.close(&db).expect("close actor");
+
+    assert_eq!(
+        marker_state(&db, &key),
+        (Regime::Replicated, false),
+        "the unresolved dependency leaves the base unclaimed"
+    );
+    assert!(
+        local_ydoc_ops(&db).is_empty(),
+        "an incomplete state cannot be journaled as a base"
+    );
+
+    let mut store = EngineStore::open(&db, 9_500).expect("open store");
+    let predecessor_sha = store
+        .put_binary_blob(&predecessor)
+        .expect("store predecessor blob");
+    let envelope = ReplicationEnvelope {
+        workspace_id: WS.to_owned(),
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "ydoc.update".to_owned(),
+        payload: serde_json::json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": PATH,
+            "contentKind": "plaintext",
+            "updateBlobSha256": predecessor_sha,
+            "isBaseState": false
+        }),
+        recorded_at_ms: 300,
+    };
+    let parked = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLiveLease)
+        .expect("park predecessor behind the live lease");
+    assert!(
+        matches!(
+            parked,
+            dohc_engine_sync::ApplyOutcome::Applied(ref result) if result.deferred
+        ),
+        "the predecessor is deferred"
+    );
+
+    let drained =
+        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults).expect("drain predecessor");
+    assert_eq!(drained.drained, 1);
+    drop(store);
+
+    assert_eq!(
+        marker_state(&db, &key),
+        (Regime::Replicated, true),
+        "the drain retries and claims the base"
+    );
+    let ops = local_ydoc_ops(&db);
+    assert_eq!(ops.len(), 1, "the drain journals one originated base");
+    assert!(ops[0].is_base());
+    assert_eq!(base_ops_in_log(&db), 1);
+    assert_eq!(
+        replay_into_clean_peer(&db, &ops, WS, PATH),
+        "more dep base",
+        "the originated base carries the resolved dependent state"
     );
 }
 
