@@ -12,8 +12,9 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::{
-    ApplyOutcome, RefusalReason, ReplicationEnvelope, ReplicationRefusal, SyncError,
-    apply_moment_envelope, apply_replication_envelope, read_replication_acked_seq,
+    ApplyOutcome, NoLiveLeases, RefusalReason, ReplicationEnvelope, ReplicationRefusal, SyncError,
+    apply_moment_envelope, apply_replication_envelope, apply_ydoc_envelope,
+    read_replication_acked_seq,
 };
 
 fn test_store() -> (ScratchDir, EngineStore) {
@@ -312,6 +313,107 @@ fn replicated_capture_moment_cannot_cover_a_local_only_close() {
         close_session(&mut store, &key, false, &NoFaults, 1_300),
         Err(CollabError::UnsettledClose)
     ));
+}
+
+#[test]
+fn moment_after_equivalent_ydoc_projection_fast_forwards() {
+    let (_origin_scratch, mut origin) = test_store();
+    let (_peer_scratch, mut peer) = test_store();
+    let local_settle_id = format!("moment-ydoc-{}", "a".repeat(64));
+    VersionedTextStore::new(&mut origin)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "ydoc-settle-object".to_owned(),
+                path: "notes/settled.md".to_owned(),
+                text: "settled text".to_owned(),
+                moment_id: local_settle_id.clone(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_500,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("local Y.Doc settle head");
+
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "settled text");
+    let base_sha = peer
+        .put_binary_blob(&doc.encode_full_state())
+        .expect("Y.Doc base blob");
+    let base = ReplicationEnvelope {
+        workspace_id: "ws".to_owned(),
+        origin_id: "ydoc-origin".to_owned(),
+        origin_seq: 0,
+        op_kind: "ydoc.update".to_owned(),
+        payload: json!({
+            "versionId": "main",
+            "objectId": "ydoc-settle-object",
+            "path": "notes/settled.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+        recorded_at_ms: 1_500,
+    };
+    apply_ydoc_envelope(&mut peer, &base, &NoFaults, &NoLiveLeases).expect("peer Y.Doc projection");
+    let peer_head: String = peer
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT latest_moment_id FROM snapshots \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='ydoc-settle-object'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("peer projected head");
+    assert!(peer_head.starts_with("moment-ydoc-apply-"));
+    assert_ne!(peer_head, local_settle_id);
+
+    hydrate_texts(&mut peer, &["next edit"]);
+    let next = envelope(
+        "moment-origin",
+        0,
+        "ws",
+        present_text_payload(
+            "moment-after-settle",
+            "ydoc-settle-object",
+            "write",
+            "notes/settled.md",
+            "notes/settled.md",
+            "settled text",
+            &local_settle_id,
+            "next edit",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut peer, &next, &NoFaults).expect("next moment"),
+        ApplyOutcome::Applied(0)
+    );
+    let (latest_moment_id, conflicts): (String, i64) = peer
+        .read_with(|conn| {
+            let latest = conn.query_row(
+                "SELECT latest_moment_id FROM snapshots \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='ydoc-settle-object'",
+                [],
+                |row| row.get(0),
+            )?;
+            let conflicts = conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((latest, conflicts))
+        })
+        .expect("peer result");
+    assert_eq!(latest_moment_id, "moment-after-settle");
+    assert_eq!(conflicts, 0);
 }
 
 #[allow(clippy::too_many_arguments)]
