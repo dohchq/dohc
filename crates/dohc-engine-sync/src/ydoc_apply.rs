@@ -361,7 +361,9 @@ pub fn drain_deferred_ydoc_for_key(
                 drain_seq,
                 payload_recorded_at,
                 search_policy.as_ref(),
-            )
+            )?;
+            let _ = crate::originate_ydoc_base_in_tx(tx, key, &payload.path, payload_recorded_at)?;
+            Ok(())
         });
         match projected {
             Ok(TxnOutcome::Committed(())) => {}

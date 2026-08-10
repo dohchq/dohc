@@ -1,0 +1,98 @@
+use dohc_engine_collab::{ClaimOutcome, DocKey};
+use rusqlite::Transaction;
+
+use crate::{SyncError, journal_local_op_in_tx, workspace_replicates_with_relay_in_tx};
+
+/// Why a lineage that could otherwise share does not: it is too large to
+/// encode as a base. Names the constraint, the configured limit, the unit and
+/// the observed size, because the caller cannot act on "it did not happen".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharingDeclined {
+    pub constraint: &'static str,
+    pub limit_bytes: usize,
+    pub observed_bytes: usize,
+}
+
+impl std::fmt::Display for SharingDeclined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "document too large to share: {} allows {} bytes, observed {} bytes of encoded base \
+             state. The edit is saved and markdown stays this document's artifact.",
+            self.constraint, self.limit_bytes, self.observed_bytes
+        )
+    }
+}
+
+/// What an origination attempt decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseOrigination {
+    /// The lineage originated and its base was journaled.
+    Originated { base_snapshot_sha: String },
+    /// Nothing to originate, and nothing to report: no marker, a base already
+    /// claimed, a workspace that does not replicate, or an unresolved dependency.
+    NothingToDo,
+    /// The lineage could have originated and did not. The edit still commits.
+    Declined(SharingDeclined),
+}
+
+/// Claim and journal the base that originates `key`'s replicated lineage.
+pub fn originate_ydoc_base_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    now_ms: i64,
+) -> Result<BaseOrigination, SyncError> {
+    let Some(marker) =
+        dohc_engine_collab::read_marker_in_tx(tx, key).map_err(SyncError::corrupt)?
+    else {
+        return Ok(BaseOrigination::NothingToDo);
+    };
+    if marker.base_claimed {
+        return Ok(BaseOrigination::NothingToDo);
+    }
+    if !workspace_replicates_with_relay_in_tx(tx, &key.workspace_id)? {
+        return Ok(BaseOrigination::NothingToDo);
+    }
+    let Some(encoded) =
+        dohc_engine_collab::encode_origination_base_in_tx(tx, key).map_err(SyncError::corrupt)?
+    else {
+        return Ok(BaseOrigination::NothingToDo);
+    };
+    if encoded.base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
+        return Ok(BaseOrigination::Declined(SharingDeclined {
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
+            observed_bytes: encoded.base.len(),
+        }));
+    }
+    match dohc_engine_collab::claim_base_in_tx(
+        tx,
+        key,
+        marker.content_kind,
+        &encoded.base,
+        &encoded.state_vector,
+        now_ms,
+    )
+    .map_err(SyncError::corrupt)?
+    {
+        ClaimOutcome::Claimed { base_snapshot_sha } => {
+            journal_local_op_in_tx(
+                tx,
+                &key.workspace_id,
+                "ydoc.update",
+                &serde_json::json!({
+                    "versionId": key.version_id,
+                    "objectId": key.object_id,
+                    "path": path,
+                    "contentKind": marker.content_kind.as_str(),
+                    "updateBlobSha256": base_snapshot_sha,
+                    "isBaseState": true,
+                }),
+                now_ms,
+            )?;
+            Ok(BaseOrigination::Originated { base_snapshot_sha })
+        }
+        ClaimOutcome::Resumed => Ok(BaseOrigination::NothingToDo),
+    }
+}

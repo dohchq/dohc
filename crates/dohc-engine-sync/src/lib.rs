@@ -26,6 +26,7 @@ mod secret_apply;
 mod share;
 mod version_apply;
 mod ydoc_apply;
+mod ydoc_origination;
 
 pub use apply::{
     ApplyOutcome, RefusalReason, ReplicationRefusal, apply_chat_envelope, apply_envelope_with,
@@ -84,6 +85,7 @@ pub use ydoc_apply::{
     drain_deferred_ydoc_for_key, fold_resolution_into_ydoc_in_tx, open_sync_conflict_for_object,
     project_and_write_in_tx, retire_ydoc_lineage_in_tx,
 };
+pub use ydoc_origination::{BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx};
 
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};
 
