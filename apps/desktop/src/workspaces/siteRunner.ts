@@ -20,6 +20,7 @@ export interface SiteProcessHandle {
   args: string[];
   cwd: string;
   logs(): SiteLogEntry[];
+  onExit(listener: () => void): void;
   stop(): Promise<void>;
 }
 
@@ -453,6 +454,13 @@ export async function startSiteDevServer(input: {
         args,
         cwd,
         logs: () => [...logs],
+        onExit: (listener) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            queueMicrotask(listener);
+          } else {
+            child.once("exit", listener);
+          }
+        },
         stop: () => stopChild(child, () => {
           stopped = true;
         }),
