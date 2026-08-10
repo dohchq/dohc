@@ -519,7 +519,7 @@ fn apply_resolve(
     };
     let mut choice = parse_choice(&payload.chosen_from)?;
     let mut resolution = parse_resolution(&payload.resolution)?;
-    if target.metadata_origin == "sync" {
+    if is_sync_conflict_origin(&target.metadata_origin) {
         match resolve_orientation(&payload, &target) {
             // Same-oriented: the sender's label already names the side this
             // replica holds in that slot. Mirroring would invert the review.
@@ -569,7 +569,7 @@ fn apply_resolve(
     // any other verbatim resolve (mirroring the oracle's `else if (local)`
     // arm), NOT falsely defer `BinaryUnhydrated`. Only the sync-mirror path
     // below applies recorded content in-transaction.
-    if target.metadata_origin == "sync" {
+    if is_sync_conflict_origin(&target.metadata_origin) {
         match apply_mirrored_content(tx, envelope, &target.conflict_id, resolution, search_policy)?
         {
             MirroredOutcome::Applied => {}
@@ -601,6 +601,10 @@ fn apply_resolve(
         matched: changed,
         pending_resolve: None,
     })
+}
+
+fn is_sync_conflict_origin(origin: &str) -> bool {
+    matches!(origin, "sync" | "sync-independent-origin")
 }
 
 fn pending_resolve(
@@ -1308,6 +1312,13 @@ mod tests {
             }),
             SyncError::Storage(dohc_engine_storage::StorageError::StateCorrupt { .. })
         ));
+    }
+
+    #[test]
+    fn independent_origin_conflicts_keep_sync_resolution_semantics() {
+        assert!(is_sync_conflict_origin("sync"));
+        assert!(is_sync_conflict_origin("sync-independent-origin"));
+        assert!(!is_sync_conflict_origin("merge"));
     }
 
     fn envelope(

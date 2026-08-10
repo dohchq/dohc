@@ -8,9 +8,10 @@ mod common;
 use common::*;
 use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::{
-    apply_remote_update, claim_base, close_session, ensure_marker, load_persisted, read_marker,
-    record_local_update, settle, BaseClaimOrigin, ClaimOutcome, CloseOutcome, CollabError, DocKey,
-    LeaseRegistry, Regime, RemoteUpdate, ReplicationApplyOutcome, SettleOutcome, Ydoc,
+    apply_remote_update, claim_base, close_session, confirm_base_relay_seq, ensure_marker,
+    load_persisted, read_marker, record_local_update, settle, BaseClaimOrigin, ClaimOutcome,
+    CloseOutcome, CollabError, DocKey, LeaseRegistry, Regime, RemoteUpdate,
+    ReplicationApplyOutcome, SettleOutcome, Ydoc,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 
@@ -944,7 +945,7 @@ fn base_is_claimed_exactly_once() {
     let first_sha = match first {
         ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
         ClaimOutcome::Resumed => panic!("first claim must mint the base"),
-        ClaimOutcome::Replaced { .. } | ClaimOutcome::AlreadyWon => {
+        ClaimOutcome::Replaced | ClaimOutcome::AlreadyWon => {
             panic!("a first local claim cannot arbitrate")
         }
     };
@@ -1057,23 +1058,30 @@ fn relay_order_arbitrates_divergent_bases_after_close_compaction() {
         "close compacts the lineage to one non-base snapshot"
     );
 
-    let echo = committed(
-        claim_base(
-            &mut ts.store,
-            &key,
-            ContentKind::Plaintext,
-            &local_base,
-            BaseClaimOrigin::RemoteApply { relay_seq: 20 },
-            &NoFaults,
-            1_300,
-        )
-        .expect("own relay echo"),
+    let local_base_sha = dohc_engine_storage::hex_sha256(&local_base);
+    let confirmed = committed(
+        confirm_base_relay_seq(&mut ts.store, &key, &local_base_sha, 20, &NoFaults, 1_300)
+            .expect("own relay echo"),
     );
-    assert!(matches!(echo, ClaimOutcome::Resumed));
+    assert!(confirmed);
 
     let winner = Ydoc::wire();
     winner.plaintext_insert(0, "winning remote base");
     let winner_base = winner.encode_full_state();
+    let collision = claim_base(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        &winner_base,
+        BaseClaimOrigin::RemoteApply { relay_seq: 20 },
+        &NoFaults,
+        1_350,
+    )
+    .expect_err("different bases cannot share one relay coordinate");
+    assert!(matches!(
+        collision,
+        CollabError::BaseRelaySequenceCollision { relay_seq: 20 }
+    ));
     let later = committed(
         claim_base(
             &mut ts.store,
@@ -1100,7 +1108,7 @@ fn relay_order_arbitrates_divergent_bases_after_close_compaction() {
         )
         .expect("earlier divergent base"),
     );
-    assert!(matches!(earlier, ClaimOutcome::Replaced { .. }));
+    assert!(matches!(earlier, ClaimOutcome::Replaced));
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 0);
     assert_eq!(count(&ts.store, "ydoc_snapshots", &key), 1);
     let persisted = load_persisted(&ts.store, &key)

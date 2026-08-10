@@ -1008,6 +1008,12 @@ pub fn apply_ydoc_envelope(
         let claim_key = key.clone();
         let claim_bytes = bytes.clone();
         let incoming_base_sha = dohc_engine_storage::hex_sha256(&bytes);
+        // A base can only be arbitrated by a relay-assigned coordinate. Check
+        // before admission so a malformed pull is a hard, unacked failure
+        // instead of a refusable error that journals and consumes the base.
+        let relay_seq = envelope.relay_seq.ok_or(SyncError::InvalidInput {
+            reason: "pulled ydoc.update base has no relay sequence",
+        })?;
         // The claim can PROMOTE a local-only lineage that already holds
         // update rows (a crash left them behind): the projection must be the
         // reconstructed lineage PLUS the base, or the visible snapshot would
@@ -1068,9 +1074,6 @@ pub fn apply_ydoc_envelope(
                 ],
             )
             .map_err(SyncError::persist)?;
-            let relay_seq = op.relay_seq.ok_or(SyncError::InvalidInput {
-                reason: "pulled ydoc.update base has no relay sequence",
-            })?;
             let claim_outcome = dohc_engine_collab::claim_base_in_tx(
                 tx,
                 &claim_key,
@@ -1090,10 +1093,7 @@ pub fn apply_ydoc_envelope(
                     conflicts_opened: 0,
                 });
             }
-            let replaced = matches!(
-                claim_outcome,
-                dohc_engine_collab::ClaimOutcome::Replaced { .. }
-            );
+            let replaced = matches!(claim_outcome, dohc_engine_collab::ClaimOutcome::Replaced);
             let projected_base_doc = if replaced {
                 &incoming_base_doc
             } else {
@@ -1143,6 +1143,7 @@ pub fn apply_ydoc_envelope(
                 && current.snapshot.as_ref().is_some_and(|snapshot| {
                     head_settled_by_this_lineage.as_deref() == Some(snapshot.blob_sha256.as_str())
                 });
+            let mut base_conflicts_opened = 0;
             if !head_is_in_the_union && let Some(snapshot) = current.snapshot.as_ref() {
                 let projection =
                     projected_base_doc
@@ -1199,7 +1200,7 @@ pub fn apply_ydoc_envelope(
                             correlation_id: None,
                         }),
                     };
-                    let conflicts_opened = crate::moment_apply::open_or_coalesce(
+                    base_conflicts_opened = crate::moment_apply::open_or_coalesce(
                         tx,
                         &claim_key.workspace_id,
                         crate::moment_apply::OpenConflict {
@@ -1225,25 +1226,14 @@ pub fn apply_ydoc_envelope(
                     // opened: a later delta coalesces the conflict and
                     // rewrites its incoming anchor, so a crash-redelivery
                     // recount must not depend on the mutable conflict row.
-                    record_ydoc_conflicts_opened(tx, op, conflicts_opened)?;
-                    if replaced {
-                        project_and_write_in_tx(
-                            tx,
-                            &claim_key,
-                            &base_path,
-                            &incoming_base_doc,
-                            kind,
-                            &op.origin_id,
-                            op.origin_seq,
-                            op.recorded_at_ms,
-                            search_policy.as_ref(),
-                        )?;
+                    record_ydoc_conflicts_opened(tx, op, base_conflicts_opened)?;
+                    if !replaced {
+                        return Ok(YdocApplyResult {
+                            deferred: false,
+                            reason: Some("ydoc-base-conflict"),
+                            conflicts_opened: base_conflicts_opened,
+                        });
                     }
-                    return Ok(YdocApplyResult {
-                        deferred: false,
-                        reason: Some("ydoc-base-conflict"),
-                        conflicts_opened,
-                    });
                 }
             }
             // A fresh base-only replica gets its FILE, not just CRDT rows.
@@ -1260,14 +1250,11 @@ pub fn apply_ydoc_envelope(
             )?;
             Ok(YdocApplyResult {
                 deferred: false,
-                reason: None,
-                conflicts_opened: 0,
+                reason: (base_conflicts_opened > 0).then_some("ydoc-base-conflict"),
+                conflicts_opened: base_conflicts_opened,
             })
         })?;
         if matches!(outcome, ApplyOutcome::Skipped) {
-            let relay_seq = envelope.relay_seq.ok_or(SyncError::InvalidInput {
-                reason: "pulled ydoc.update base has no relay sequence",
-            })?;
             match dohc_engine_collab::confirm_base_relay_seq(
                 store,
                 &key,

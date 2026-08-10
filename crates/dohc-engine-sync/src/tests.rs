@@ -9339,6 +9339,53 @@ fn later_divergent_ydoc_base_is_acked_without_changing_the_winner() {
 }
 
 #[test]
+fn a_pulled_ydoc_base_without_a_relay_sequence_is_hard_and_unacked() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "missing relay order");
+    let sha = engine
+        .put_binary_blob(&doc.encode_full_state())
+        .expect("base blob");
+    let mut base = envelope(
+        "missing-relay-seq-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-missing-relay-seq",
+            "path": "notes/missing-relay-seq.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": sha,
+            "isBaseState": true
+        }),
+    );
+    base.relay_seq = None;
+
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        Err(SyncError::InvalidInput {
+            reason: "pulled ydoc.update base has no relay sequence"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "missing-relay-seq-peer").expect("base ack"),
+        -1
+    );
+    let journaled: i64 = engine
+        .read_with(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM replication_log
+                 WHERE workspace_id='ws' AND origin_id='missing-relay-seq-peer'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("journal count");
+    assert_eq!(journaled, 0);
+}
+
+#[test]
 fn relay_pull_retains_a_divergent_base_until_the_local_base_has_a_relay_sequence() {
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
@@ -9359,12 +9406,14 @@ fn relay_pull_retains_a_divergent_base_until_the_local_base_has_a_relay_sequence
         .expect("doc key");
     let local_doc = dohc_engine_collab::Ydoc::wire();
     local_doc.plaintext_insert(0, "local");
+    let local_bytes = local_doc.encode_full_state();
+    let local_sha = dohc_engine_storage::hex_sha256(&local_bytes);
     assert!(matches!(
         dohc_engine_collab::claim_base(
             &mut engine,
             &key,
             dohc_engine_collab::ContentKind::Plaintext,
-            &local_doc.encode_full_state(),
+            &local_bytes,
             dohc_engine_collab::BaseClaimOrigin::LocalOrigination,
             &NoFaults,
             1,
@@ -9402,7 +9451,8 @@ fn relay_pull_retains_a_divergent_base_until_the_local_base_has_a_relay_sequence
     )]);
     relay.blobs.insert(remote_sha, remote_bytes);
 
-    let outcome = RelaySyncClient::new(relay)
+    let client = RelaySyncClient::new(relay);
+    let outcome = client
         .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
         .expect("a pending base order must not fail the whole pull");
     let SyncPassOutcome::Complete {
@@ -9427,6 +9477,31 @@ fn relay_pull_retains_a_divergent_base_until_the_local_base_has_a_relay_sequence
         -1,
         "the unresolved base must remain unacked for the next scheduled pull"
     );
+
+    assert!(matches!(
+        dohc_engine_collab::confirm_base_relay_seq(&mut engine, &key, &local_sha, 10, &NoFaults, 2,),
+        Ok(TxnOutcome::Committed(true))
+    ));
+    let resumed = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("the retained base applies after the local order is confirmed");
+    assert!(matches!(
+        resumed,
+        SyncPassOutcome::Complete {
+            fetched: 1,
+            applied: 1,
+            pending_cursor: Some(cursor),
+            ..
+        } if cursor.cursor == 7
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "remote-base-peer").expect("remote base ack"),
+        0
+    );
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load winner")
+        .expect("winning lineage");
+    assert_eq!(persisted.doc.plaintext_string(), "remote");
 }
 
 #[test]

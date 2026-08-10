@@ -119,7 +119,7 @@ pub enum ClaimOutcome {
     Resumed,
     /// A lower relay position replaced this machine's independently originated
     /// base. The caller must preserve the losing head as a conflict.
-    Replaced { base_snapshot_sha: String },
+    Replaced,
     /// This lineage's base owns an earlier relay position. The incoming base
     /// has no local effect.
     AlreadyWon,
@@ -827,25 +827,7 @@ pub fn claim_base_in_tx(
                 .map_err(map_sql)?;
             let incoming_sha = crate::hex_sha256(base_bytes);
             return match stored_sha {
-                Some(sha) if sha == incoming_sha => {
-                    if stored_relay_seq.is_none() {
-                        if let Some(relay_seq) = origin.relay_seq() {
-                            tx.execute(
-                                "UPDATE ydoc_docs SET base_relay_seq=?4, updated_at_ms=?5
-                                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                                rusqlite::params![
-                                    key.workspace_id,
-                                    key.version_id,
-                                    key.object_id,
-                                    relay_seq,
-                                    now_ms
-                                ],
-                            )
-                            .map_err(map_sql)?;
-                        }
-                    }
-                    Ok(ClaimOutcome::Resumed)
-                }
+                Some(sha) if sha == incoming_sha => Ok(ClaimOutcome::Resumed),
                 Some(_) => {
                     let Some(incoming_relay_seq) = origin.relay_seq() else {
                         return Err(CollabError::BaseStateDiverged);
@@ -861,7 +843,7 @@ pub fn claim_base_in_tx(
                     if incoming_relay_seq > local_relay_seq {
                         return Ok(ClaimOutcome::AlreadyWon);
                     }
-                    let base_sha = replace_base_snapshot(
+                    replace_base_snapshot(
                         tx,
                         key,
                         base_bytes,
@@ -869,9 +851,7 @@ pub fn claim_base_in_tx(
                         incoming_relay_seq,
                         now_ms,
                     )?;
-                    Ok(ClaimOutcome::Replaced {
-                        base_snapshot_sha: base_sha,
-                    })
+                    Ok(ClaimOutcome::Replaced)
                 }
                 // Compaction legitimately folds the seq-0 base away once
                 // updates supersede it. Pre-migration rows can therefore lack
@@ -968,7 +948,7 @@ fn replace_base_snapshot(
     sv_bytes: &[u8],
     relay_seq: i64,
     now_ms: i64,
-) -> Result<String, CollabError> {
+) -> Result<(), CollabError> {
     let base_sha = put_binary_blob(tx, base_bytes)?;
     let sv_sha = put_binary_blob(tx, sv_bytes)?;
     tx.execute(
@@ -1013,7 +993,7 @@ fn replace_base_snapshot(
         ],
     )
     .map_err(map_sql)?;
-    Ok(base_sha)
+    Ok(())
 }
 
 /// Read a doc's marker inside the caller's transaction.

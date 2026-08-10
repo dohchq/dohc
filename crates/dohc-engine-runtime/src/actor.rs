@@ -9274,7 +9274,7 @@ fn ydoc_originate_base_in_tx(
         // no other writer can interleave. Harmless if it ever is — the lineage
         // has its base, and base-once forbids a second.
         dohc_engine_collab::ClaimOutcome::Resumed => Ok(BaseOrigination::NothingToDo),
-        dohc_engine_collab::ClaimOutcome::Replaced { .. }
+        dohc_engine_collab::ClaimOutcome::Replaced
         | dohc_engine_collab::ClaimOutcome::AlreadyWon => {
             unreachable!("a fresh local base claim cannot arbitrate")
         }
