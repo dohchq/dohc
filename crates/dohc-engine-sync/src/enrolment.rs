@@ -5,6 +5,14 @@
 //! creation freezes those rows from the same source as `snapshots` in the same
 //! transaction, so the live caller gets identical bytes and delayed backfill
 //! keeps the fork-time state.
+//!
+//! Capture moments exclude rows labeled `sync` or `ydoc`, and exclude every
+//! object with a Y.Doc lineage. Once `ydoc_docs` exists, its base supersedes
+//! the capture lane's older representation whether or not the base is claimed.
+//!
+//! Secret-version payloads always read `secret_fork_bases`, including the
+//! source tip's frozen last-edit timestamp. Receivers store `updatedAtMs` in
+//! `secret_files`, so exact replay preserves both ciphertext and row metadata.
 
 use dohc_engine_collab::DocKey;
 use dohc_engine_domain::{SecretMomentRecord, SecretOp, VersionKind, VersionRecord};
@@ -62,9 +70,12 @@ fn backfill_ydoc_bases(
 fn backfill_moments(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), SyncError> {
     let moment_ids = collect_ids(
         tx,
-        "SELECT moment_id FROM moments \
-         WHERE workspace_id=?1 AND metadata_origin='capture' \
-         ORDER BY moment_order",
+        "SELECT m.moment_id FROM moments m \
+         WHERE m.workspace_id=?1 AND m.metadata_origin='capture' \
+           AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
+             WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
+               AND d.object_id=m.object_id) \
+         ORDER BY m.moment_order",
         workspace_id,
     )?;
     for moment_id in moment_ids {
@@ -151,9 +162,15 @@ fn backfill_secret_moments(tx: &Transaction<'_>, workspace_id: &str) -> Result<(
                 operation, metadata_origin, metadata_summary, metadata_correlation_id, \
                 after_iv_base64, after_auth_tag_base64, after_ciphertext_base64, \
                 after_byte_length \
-         FROM secret_moments \
-         WHERE workspace_id=?1 AND moment_id NOT LIKE 'secret-sync-%' \
-         ORDER BY moment_order",
+         FROM secret_moments sm \
+         WHERE sm.workspace_id=?1 \
+           AND NOT EXISTS (SELECT 1 FROM replication_log r \
+             WHERE r.workspace_id=?1 AND r.imported=1 \
+               AND r.op_kind IN ('secret.file.put','secret.file.delete') \
+               AND r.recorded_at_ms=sm.recorded_at_ms \
+               AND json_extract(r.payload_json,'$.versionId')=sm.version_id \
+               AND json_extract(r.payload_json,'$.path')=sm.path) \
+         ORDER BY sm.moment_order",
         workspace_id,
         |row| {
             Ok((
@@ -253,7 +270,11 @@ mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
     use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
-    use dohc_engine_domain::{CreateNamedVersion, VersionedTextStore, WriteText};
+    use dohc_engine_crypto::{SECRET_KEY_BYTES, SecretDataKey};
+    use dohc_engine_domain::{
+        CreateNamedVersion, SecretDelete, SecretDiskIntent, SecretFileStore, SecretWrite,
+        VersionedTextStore, WriteText,
+    };
     use dohc_engine_storage::{EngineStore, NoFaults};
     use dohc_engine_testkit::ScratchDir;
     use rusqlite::params;
@@ -373,6 +394,37 @@ mod tests {
             .expect("local ops")
     }
 
+    fn secret_key() -> SecretDataKey {
+        SecretDataKey::from_bytes(&[7_u8; SECRET_KEY_BYTES]).expect("test secret key")
+    }
+
+    fn write_secret(
+        store: &mut EngineStore,
+        key: &SecretDataKey,
+        version_id: &str,
+        moment_id: &str,
+        text: &str,
+        now_ms: i64,
+    ) {
+        SecretFileStore::new(store, key)
+            .write_secret_file(
+                &SecretWrite {
+                    workspace_id: "ws".to_owned(),
+                    version_id: version_id.to_owned(),
+                    path: ".env".to_owned(),
+                    text: text.to_owned(),
+                    moment_id: moment_id.to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms,
+                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                &NoFaults,
+            )
+            .expect("write secret");
+    }
+
     #[test]
     fn pull_imported_moments_are_not_echoed_by_enrolment() {
         let (_scratch, mut store) = store();
@@ -490,6 +542,122 @@ mod tests {
     }
 
     #[test]
+    fn capture_history_is_superseded_when_the_same_object_gains_a_ydoc_lineage() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        write_text(
+            &mut store,
+            "main",
+            "live-object",
+            "moment-before-live",
+            "captured before live editing",
+            "capture",
+            10,
+        );
+        let key = DocKey::new("ws", "main", "live-object").expect("key");
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "edited in the live session");
+        dohc_engine_collab::record_local_update_creating_marker(
+            &mut store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &update,
+            None,
+            &NoFaults,
+            11,
+        )
+        .expect("record live edit");
+        write_text(
+            &mut store,
+            "main",
+            "live-object",
+            "moment-live-settle",
+            "edited in the live session",
+            "ydoc",
+            12,
+        );
+
+        enroll(&mut store).expect("enroll after settle");
+
+        let ops = local_ops(&store);
+        let (_peer_scratch, mut peer) = self::store();
+        seed_main(&mut peer);
+        for (origin_seq, (kind, payload)) in ops.iter().enumerate() {
+            if kind == "ydoc.update" {
+                let sha = payload["updateBlobSha256"]
+                    .as_str()
+                    .expect("Y.Doc blob sha");
+                let bytes = store
+                    .get_binary_blob(sha)
+                    .expect("read Y.Doc blob")
+                    .expect("Y.Doc blob exists");
+                assert_eq!(peer.put_binary_blob(&bytes).expect("copy Y.Doc blob"), sha);
+            } else if kind == "moment.append" {
+                let sha = payload["payloadAfterBlobSha256"]
+                    .as_str()
+                    .expect("moment blob sha");
+                let (byte_length, text): (i64, String) = store
+                    .read_with(|conn| {
+                        conn.query_row(
+                            "SELECT byte_length,text FROM blobs WHERE sha256=?1",
+                            [sha],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                    })
+                    .expect("read moment blob");
+                peer.write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                        params![sha, byte_length, text],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .expect("copy moment blob");
+            }
+            crate::apply_replication_envelope(
+                &mut peer,
+                &crate::ReplicationEnvelope {
+                    workspace_id: "ws".to_owned(),
+                    origin_id: "source".to_owned(),
+                    origin_seq: origin_seq as i64,
+                    op_kind: kind.clone(),
+                    payload: payload.clone(),
+                    recorded_at_ms: 20 + origin_seq as i64,
+                },
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .expect("clean peer replays backfilled op");
+        }
+        let peer_text: String = peer
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                     WHERE s.workspace_id='ws' AND s.version_id='main' \
+                       AND s.object_id='live-object'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("clean peer head");
+        assert_eq!(peer_text, "edited in the live session");
+        assert_eq!(
+            ops.iter().filter(|(kind, _)| kind == "ydoc.update").count(),
+            1,
+            "the live lineage must backfill exactly one canonical representation"
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|(kind, _)| kind == "moment.append")
+                .count(),
+            0,
+            "the older capture history must not compete with its Y.Doc lineage"
+        );
+    }
+
+    #[test]
     fn secret_backfill_uses_each_moments_retained_ciphertext() {
         let (_scratch, mut store) = store();
         seed_main(&mut store);
@@ -551,6 +719,38 @@ mod tests {
                 dohc_engine_storage::hex_sha256(latest),
             ]
         );
+    }
+
+    #[test]
+    fn secret_write_then_delete_backfills_without_delete_ciphertext() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        let key = secret_key();
+        write_secret(&mut store, &key, "main", "moment-secret-put", "token", 10);
+        SecretFileStore::new(&mut store, &key)
+            .delete_secret_file(
+                &SecretDelete {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: ".env".to_owned(),
+                    moment_id: "moment-secret-delete".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 11,
+                },
+                &NoFaults,
+            )
+            .expect("delete secret")
+            .expect("delete moment");
+
+        enroll(&mut store).expect("enroll");
+
+        let kinds = local_ops(&store)
+            .into_iter()
+            .filter_map(|(kind, _)| kind.starts_with("secret.file.").then_some(kind))
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["secret.file.put", "secret.file.delete"]);
     }
 
     #[test]
@@ -689,6 +889,69 @@ mod tests {
     }
 
     #[test]
+    fn delayed_secret_fork_backfill_uses_the_frozen_fork_base() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        let key = secret_key();
+        write_secret(&mut store, &key, "main", "moment-secret-base", "base", 10);
+        VersionedTextStore::new(&mut store)
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: "ws".to_owned(),
+                    from_version_id: "main".to_owned(),
+                    new_version_id: "named".to_owned(),
+                    name: "Named".to_owned(),
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("named version");
+        let frozen_ciphertext: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT ciphertext_base64 FROM secret_fork_bases \
+                     WHERE workspace_id='ws' AND version_id='named' AND path='.env'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("frozen secret base");
+        let frozen_sha = dohc_engine_storage::hex_sha256(
+            &STANDARD
+                .decode(frozen_ciphertext)
+                .expect("frozen ciphertext is base64"),
+        );
+        write_secret(
+            &mut store,
+            &key,
+            "named",
+            "moment-secret-edit",
+            "edited",
+            30,
+        );
+
+        enroll(&mut store).expect("enroll");
+
+        let fork_payload = local_ops(&store)
+            .into_iter()
+            .find(|(kind, payload)| {
+                kind == "secret.version.fork" && payload["toVersionId"] == "named"
+            })
+            .expect("secret fork op")
+            .1;
+        let fork_sha = fork_payload["rows"][0]["ciphertextSha256"]
+            .as_str()
+            .expect("fork ciphertext sha")
+            .to_owned();
+        assert_eq!(
+            fork_sha, frozen_sha,
+            "the delayed secret fork must ship the fork-time ciphertext"
+        );
+        assert_eq!(fork_payload["rows"][0]["updatedAtMs"], 10);
+    }
+
+    #[test]
     fn main_version_is_never_backfilled_as_a_named_fork() {
         let (_scratch, mut store) = store();
         seed_main(&mut store);
@@ -760,18 +1023,22 @@ mod tests {
     fn imported_secret_moments_are_not_echoed_by_enrolment() {
         let (_scratch, mut store) = store();
         seed_main(&mut store);
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute(
-                    "INSERT INTO secret_moments \
-                     (workspace_id,moment_order,moment_id,version_id,path,recorded_at_ms,operation,metadata_origin,after_present) \
-                     VALUES ('ws',1,'secret-sync-peer-0','main','.env',10,'delete','sync',0)",
-                    [],
-                )
-                .map_err(SyncError::persist)?;
-                Ok::<_, SyncError>(())
-            })
-            .expect("seed imported secret moment");
+        let imported = crate::ReplicationEnvelope {
+            workspace_id: "ws".to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 0,
+            op_kind: "secret.file.delete".to_owned(),
+            payload: serde_json::json!({
+                "versionId": "main",
+                "path": ".env",
+                "metadata": {"origin": "sync"}
+            }),
+            recorded_at_ms: 10,
+        };
+        assert!(matches!(
+            crate::apply_secret_envelope(&mut store, &imported, &NoFaults),
+            Ok(crate::ApplyOutcome::Applied(()))
+        ));
 
         enroll(&mut store).expect("enroll");
 
@@ -779,6 +1046,32 @@ mod tests {
             local_ops(&store)
                 .iter()
                 .all(|(kind, _)| kind != "secret.file.delete")
+        );
+    }
+
+    #[test]
+    fn caller_chosen_secret_sync_prefix_does_not_hide_a_local_secret_write() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        let key = secret_key();
+        write_secret(
+            &mut store,
+            &key,
+            "main",
+            "secret-sync-caller-chosen",
+            "local secret",
+            10,
+        );
+
+        enroll(&mut store).expect("enroll");
+
+        assert_eq!(
+            local_ops(&store)
+                .iter()
+                .filter(|(kind, _)| kind == "secret.file.put")
+                .count(),
+            1,
+            "caller-controlled text must not forge imported provenance"
         );
     }
 

@@ -466,6 +466,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "dohc-engine-collab",
+ "dohc-engine-crypto",
  "dohc-engine-domain",
  "dohc-engine-files",
  "dohc-engine-storage",

@@ -324,7 +324,8 @@ pub fn journal_secret_version_fork_in_tx(
     let mut statement = tx
         .prepare(
             "SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length, \
-                    updated_at_ms FROM secret_files \
+                    updated_at_ms \
+                    FROM secret_fork_bases \
              WHERE workspace_id=?1 AND version_id=?2 ORDER BY path",
         )
         .map_err(SyncError::corrupt)?;

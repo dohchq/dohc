@@ -772,9 +772,10 @@ pub(crate) fn fork_version_in_tx(
     .map_err(DomainError::sql_persist)?;
     tx.execute(
         "INSERT INTO secret_fork_bases (workspace_id, version_id, path, iv_base64, \
-         auth_tag_base64, ciphertext_base64, byte_length) \
+         auth_tag_base64, ciphertext_base64, byte_length, updated_at_ms) \
          SELECT workspace_id, ?2, path, iv_base64, auth_tag_base64, ciphertext_base64, \
-         byte_length FROM secret_files WHERE workspace_id = ?1 AND version_id = ?3",
+         byte_length, updated_at_ms FROM secret_files \
+         WHERE workspace_id = ?1 AND version_id = ?3",
         params![workspace_id, to_version_id, from_version_id],
     )
     .map_err(DomainError::sql_persist)?;

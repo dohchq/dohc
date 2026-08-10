@@ -278,8 +278,8 @@ fn insert_fork_rows(
         .map_err(SyncError::persist)?;
         tx.execute(
             "INSERT OR IGNORE INTO secret_fork_bases \
-             (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+             (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 op.workspace_id,
                 to_version_id,
@@ -287,7 +287,8 @@ fn insert_fork_rows(
                 row.iv_base64,
                 row.auth_tag_base64,
                 ciphertext_base64,
-                row.byte_length
+                row.byte_length,
+                row.updated_at_ms
             ],
         )
         .map_err(SyncError::persist)?;

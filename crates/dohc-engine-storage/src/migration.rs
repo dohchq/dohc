@@ -1904,6 +1904,16 @@ UPDATE versions SET name = 'Main'
 
 pub(crate) const MAIN_VERSION_NAME_MIGRATION_ID: &str = "v1-main-version-name";
 
+/// Preserve the source tip's last-edit time with the ciphertext frozen for a
+/// secret version fork. Older rows cannot recover that time exactly, so the
+/// append migration uses zero for pre-MVP stores; every new fork writes it.
+const V1_SECRET_FORK_BASE_TIMESTAMP_DDL: &str = "\
+ALTER TABLE secret_fork_bases
+    ADD COLUMN updated_at_ms INTEGER NOT NULL DEFAULT 0;
+";
+
+pub(crate) const SECRET_FORK_BASE_TIMESTAMP_MIGRATION_ID: &str = "v1-secret-fork-base-timestamp";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -2091,6 +2101,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: MAIN_VERSION_NAME_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_MAIN_VERSION_NAME_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 26,
+        id: SECRET_FORK_BASE_TIMESTAMP_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SECRET_FORK_BASE_TIMESTAMP_DDL,
         sets_user_version: None,
     },
 ];
