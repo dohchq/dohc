@@ -18,16 +18,14 @@ type IdleScheduler = (cb: () => void) => () => void;
 
 // requestIdleCallback in the Electron renderer; setTimeout under test DOM
 // environments that lack it. Returns a canceller.
-const scheduleIdle: IdleScheduler =
-  typeof requestIdleCallback === "function"
-    ? (cb) => {
-        const id = requestIdleCallback(() => cb(), { timeout: 50 });
-        return () => cancelIdleCallback(id);
-      }
-    : (cb) => {
-        const id = setTimeout(cb, 0);
-        return () => clearTimeout(id);
-      };
+const scheduleIdle: IdleScheduler = (cb) => {
+  if (typeof globalThis.requestIdleCallback === "function") {
+    const id = globalThis.requestIdleCallback(() => cb(), { timeout: 50 });
+    return () => globalThis.cancelIdleCallback(id);
+  }
+  const id = setTimeout(cb, 0);
+  return () => clearTimeout(id);
+};
 
 const MarkdownChunk = memo(function MarkdownChunk(props: {
   source: string;
@@ -51,19 +49,34 @@ export function IncrementalMarkdownDocument(props: {
     () => initialChunkCount(chunks, FIRST_WINDOW_BYTES),
     [chunks],
   );
-  const [visibleCount, setVisibleCount] = useState(firstWindow);
+  const [renderWindow, setRenderWindow] = useState(() => ({
+    chunks,
+    visibleCount: firstWindow,
+  }));
 
-  // New document: reset to its opening window (state initializer only runs on
-  // mount; the same component instance survives a path switch).
-  useEffect(() => {
-    setVisibleCount(firstWindow);
-  }, [chunks, firstWindow]);
+  // Reset before React commits a replacement document. An effect is too late:
+  // it commits the new body with the previous body's expanded window first.
+  if (renderWindow.chunks !== chunks) {
+    setRenderWindow({ chunks, visibleCount: firstWindow });
+  }
+  const visibleCount =
+    renderWindow.chunks === chunks ? renderWindow.visibleCount : firstWindow;
 
   // Idle backfill: append chunks until the whole document is committed.
   useEffect(() => {
     if (visibleCount >= chunks.length) return;
     return scheduleIdle(() => {
-      setVisibleCount((count) => Math.min(count + 16, chunks.length));
+      setRenderWindow((current) =>
+        current.chunks === chunks
+          ? {
+              chunks,
+              visibleCount: Math.min(
+                current.visibleCount + 16,
+                chunks.length,
+              ),
+            }
+          : current,
+      );
     });
   }, [visibleCount, chunks]);
 
