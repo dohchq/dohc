@@ -12,6 +12,13 @@ use crate::file_search::{
 };
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
 
+/// The stored origin for every replicated snapshot head.
+///
+/// Wire origins describe the originating peer's provenance. Local capture and
+/// close guards treat `snapshots.metadata_origin` as proof of local disk state,
+/// so replicated heads must carry the established replication origin instead.
+const REPLICATED_SNAPSHOT_ORIGIN: &str = "sync";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MomentAppendPayload {
@@ -1217,7 +1224,7 @@ fn upsert_snapshot(
             text_sha,
             payload.recorded_at_ms,
             payload.moment_id,
-            payload.metadata.origin,
+            REPLICATED_SNAPSHOT_ORIGIN,
             payload.metadata.summary,
             payload.metadata.correlation_id,
             kind.as_str(),

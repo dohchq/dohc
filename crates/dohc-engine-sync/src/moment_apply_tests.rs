@@ -227,6 +227,35 @@ fn absent_text_payload(moment_id: &str, object_id: &str, path: &str, text: &str)
     })
 }
 
+#[test]
+fn replicated_moment_snapshot_origin_is_sync() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["peer capture"]);
+    let mut payload = absent_text_payload(
+        "peer-capture-moment",
+        "peer-capture-object",
+        "notes/peer.md",
+        "peer capture",
+    );
+    payload["metadata"]["origin"] = json!("local-file");
+
+    apply_moment_envelope(&mut store, &envelope("peer", 0, "ws", payload), &NoFaults)
+        .expect("replicated moment");
+
+    let origin: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT metadata_origin FROM snapshots \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='peer-capture-object'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("snapshot origin");
+    assert_eq!(origin, "sync");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn present_text_payload(
     moment_id: &str,
