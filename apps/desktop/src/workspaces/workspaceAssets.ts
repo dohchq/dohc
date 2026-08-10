@@ -3,9 +3,18 @@ import {
   validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
-import { mkdir, open, readFile, realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, relative, sep } from "node:path";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
@@ -115,6 +124,90 @@ export async function readWorkspaceAsset(
 // download affordance in the renderer.
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 
+function siblingTempPath(target: string, now: number, uniqueId: string): string {
+  return join(
+    dirname(target),
+    `.dohc-write-${process.pid}-${now}-${uniqueId}.tmp`,
+  );
+}
+
+export function createAtomicTextWriter(deps: {
+  now: () => number;
+  uniqueId: () => string;
+  writeFile: (temp: string, text: string) => Promise<void>;
+  rename: (temp: string, target: string) => Promise<void>;
+  remove: (temp: string) => Promise<void>;
+}) {
+  return async (target: string, text: string): Promise<void> => {
+    const temp = siblingTempPath(target, deps.now(), deps.uniqueId());
+    let committed = false;
+    try {
+      await deps.writeFile(temp, text);
+      await deps.rename(temp, target);
+      committed = true;
+    } finally {
+      if (!committed) await deps.remove(temp).catch(() => undefined);
+    }
+  };
+}
+
+async function enqueueOrdered(
+  tails: Map<string, Promise<void>>,
+  key: string,
+  run: () => Promise<void>,
+): Promise<void> {
+  const previous = tails.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(run);
+  const tail = current.then(
+    () => undefined,
+    () => undefined,
+  );
+  tails.set(key, tail);
+  try {
+    await current;
+  } finally {
+    if (tails.get(key) === tail) tails.delete(key);
+  }
+}
+
+export function createOrderedWorkspaceTextWriter(deps: {
+  resolveTarget: (rootPath: string, relativePath: string) => Promise<string>;
+  writeTarget: (target: string, text: string) => Promise<void>;
+}) {
+  const rootTails = new Map<string, Promise<void>>();
+  const targetTails = new Map<string, Promise<void>>();
+  const pathKey = (value: string) =>
+    process.platform === "win32" ? value.toLowerCase() : value;
+
+  return async (rootPath: string, relativePath: string, text: string): Promise<void> => {
+    // Different relative spellings can resolve to one file. Queue before
+    // resolution at workspace scope, then admit the resolved write in that
+    // order. The target queue owns the write so other files can proceed.
+    let admittedWrite!: Promise<void>;
+    await enqueueOrdered(rootTails, pathKey(rootPath), async () => {
+      const target = await deps.resolveTarget(rootPath, relativePath);
+      admittedWrite = enqueueOrdered(targetTails, pathKey(target), () =>
+        deps.writeTarget(target, text),
+      );
+    });
+    await admittedWrite;
+  };
+}
+
+const atomicTextWriter = createAtomicTextWriter({
+  now: Date.now,
+  uniqueId: randomUUID,
+  writeFile: async (temp, text) => writeFile(temp, text, "utf8"),
+  rename,
+  remove: async (temp) => rm(temp, { force: true }),
+});
+
+const orderedWorkspaceTextWriter = createOrderedWorkspaceTextWriter({
+  resolveTarget: async (rootPath, relativePath) =>
+    (await resolveWorkspaceFile(rootPath, relativePath)).realTarget,
+  writeTarget: atomicTextWriter,
+});
+
 // The editor's save path: same validation + real-path containment as reads,
 // atomic temp+rename so the watcher (and any reader) never sees a torn file,
 // and the same byte bound as reads — the editor can never write a file it
@@ -127,13 +220,7 @@ export async function writeWorkspaceText(
   if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
   }
-  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath);
-  const { writeFile, rename } = await import("node:fs/promises");
-  // .tmp.<suffix> matches the watcher's editor-noise filter, so autosave
-  // staging files never pollute history.
-  const temp = `${realTarget}.tmp.${process.pid}-${Date.now()}`;
-  await writeFile(temp, text, "utf8");
-  await rename(temp, realTarget);
+  await orderedWorkspaceTextWriter(rootPath, relativePath, text);
 }
 
 // Binary sibling of restoreWorkspaceText: writes image (or other asset) bytes
@@ -197,7 +284,6 @@ async function writeContainedFile(
   assertWriteNotAborted(signal);
   if (exclusive) {
     const handle = await open(absolute, "wx");
-    let completed = false;
     try {
       assertWriteNotAborted(signal);
       if (typeof data === "string") {
@@ -206,19 +292,15 @@ async function writeContainedFile(
         await handle.writeFile(data);
       }
       assertWriteNotAborted(signal);
-      completed = true;
-    } finally {
-      await handle.close();
-      if (!completed) {
-        const { rm } = await import("node:fs/promises");
-        await rm(absolute, { force: true });
-      }
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      await rm(absolute, { force: true }).catch(() => undefined);
+      throw error;
     }
+    await handle.close();
     return;
   }
-  const { rename, rm, writeFile } = await import("node:fs/promises");
-  const temp = `${absolute}.tmp.${process.pid}-${Date.now()}`;
-  let committed = false;
+  const temp = siblingTempPath(absolute, Date.now(), randomUUID());
   try {
     assertWriteNotAborted(signal);
     if (typeof data === "string") {
@@ -228,9 +310,9 @@ async function writeContainedFile(
     }
     assertWriteNotAborted(signal);
     await rename(temp, absolute);
-    committed = true;
-  } finally {
-    if (!committed) await rm(temp, { force: true });
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => undefined);
+    throw error;
   }
 }
 
