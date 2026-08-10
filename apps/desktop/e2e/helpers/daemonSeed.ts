@@ -34,13 +34,18 @@ export interface DaemonSeedStores {
 export interface LiveDaemonWorkspace {
   chats: DesktopLinkedChatStore;
   relay: EngineRelayClient;
+  sessions: EngineWorkspaceSessions;
   close(): Promise<void>;
 }
 
 export async function openLiveDaemonWorkspace(
   workspace: { workspaceId: string; rootPath: string },
+  options: { maxRestarts?: number } = {},
 ): Promise<LiveDaemonWorkspace> {
-  const lifecycle = new EngineDaemonLifecycle({ command: resolveEngineBinary() });
+  const lifecycle = new EngineDaemonLifecycle({
+    command: resolveEngineBinary(),
+    ...(options.maxRestarts !== undefined ? { maxRestarts: options.maxRestarts } : {}),
+  });
   await lifecycle.start();
   const routes = new RelayTransportRouteGuard();
   const source = new RelayConfiguredDaemonClientSource(lifecycle, routes);
@@ -54,6 +59,7 @@ export async function openLiveDaemonWorkspace(
   return {
     chats: createLiveLinkedChatStore(workspace, sessions),
     relay,
+    sessions,
     close: async () => {
       if (closed) return;
       closed = true;
