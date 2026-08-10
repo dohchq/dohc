@@ -97,7 +97,7 @@ function escapeMarkdownLineBreaks(value: string): string {
     .replaceAll('\r', '\\r')
 }
 
-function sanitizeImageSrc(src: string): string {
+export function sanitizeImageSrc(src: string): string {
   const trimmed = src.trim()
   if (trimmed.length === 0) return ''
   // Strip control chars/whitespace before sniffing so obfuscated schemes

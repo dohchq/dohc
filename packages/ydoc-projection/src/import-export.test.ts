@@ -217,6 +217,580 @@ describe('Y.Doc markdown import/export', () => {
     )
   })
 
+  it('decodes numeric block entities once without changing code', () => {
+    expectStableMarkdownRoundTrip(
+      'literal &amp;#35; and `&#35;`',
+      ['literal &amp;#35; and `&#35;`'],
+    )
+  })
+
+  it('decodes encoded ampersands once without changing code content', () => {
+    for (const encoded of ['&#38;#35;', '&AMP;#35;']) {
+      const doc = markdownToYDoc(`literal ${encoded}`)
+      expect(yDocBodyJSON(doc).content?.[0]?.content?.[0]?.text)
+        .toBe('literal &#35;')
+      expect(yDocToMarkdown(doc)).toBe('literal &amp;#35;')
+    }
+
+    expectStableMarkdownRoundTrip(
+      '`&#38;#35;` and `&AMP;#35;`',
+      ['`&#38;#35;` and `&AMP;#35;`'],
+    )
+    expectStableMarkdownRoundTrip(
+      '```txt\n&#38;#35;\n&AMP;#35;\n&#35;\n```',
+      ['&#38;#35;', '&AMP;#35;', '&#35;'],
+    )
+  })
+
+  it('leaves Markdown-escaped entity ampersands for the parser', () => {
+    for (const [markdown, tail] of [
+      [String.raw`\&#35;`, '#35;'],
+      [String.raw`\&amp;#35;`, 'amp;#35;'],
+    ]) {
+      const doc = markdownToYDoc(markdown)
+      expect(yDocBodyJSON(doc).content?.[0]?.content).toMatchObject([
+        { type: 'escapedPunctuation', attrs: { value: '&' } },
+        { type: 'text', text: tail },
+      ])
+      expect(yDocToMarkdown(doc)).toBe(markdown)
+      expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+    }
+
+    expect(yDocToMarkdown(markdownToYDoc(String.raw`\\&#35;`)))
+      .toBe(String.raw`\\#`)
+    expect(yDocToMarkdown(markdownToYDoc(String.raw`\\&amp;#35;`)))
+      .toBe(String.raw`\\&amp;#35;`)
+  })
+
+  it('matches the locked parser numeric-reference digit limits', () => {
+    for (const encoded of ['&#0000038;#35;', '&#x000026;#35;']) {
+      const doc = markdownToYDoc(`literal ${encoded}`)
+      expect(yDocBodyJSON(doc).content?.[0]?.content?.[0]?.text)
+        .toBe('literal &#35;')
+    }
+
+    for (const encoded of ['&#00000038;#35;', '&#x0000026;#35;']) {
+      const doc = markdownToYDoc(`literal ${encoded}`)
+      expect(yDocBodyJSON(doc).content?.[0]?.content?.[0]?.text)
+        .toBe(`literal ${encoded}`)
+    }
+  })
+
+  it('does not reuse a sentinel produced by a numeric reference', () => {
+    const doc = markdownToYDoc('protected &#35; literal &#57346;')
+
+    expect(yDocBodyJSON(doc).content?.[0]?.content?.[0]?.text)
+      .toBe('protected # literal &#57346;')
+  })
+
+  it('preserves protected entities inside angle autolinks', () => {
+    const url = 'https://example.test/a&#35;b'
+    const body = yDocBodyJSON(markdownToYDoc(`<${url}>`))
+    const text = body.content?.[0]?.content?.[0]
+
+    expect(text?.text).toBe(url)
+    expect(text?.marks?.find(mark => mark.type === 'link')?.attrs?.href).toBe(url)
+    expect(yDocToMarkdown(markdownToYDoc(`<${url}>`))).toContain('&#35;')
+  })
+
+  it('decodes protected entities outside actual angle autolinks', () => {
+    const encodedUrl = 'https://example.test/a&#35;b'
+    const decodedUrl = 'https://example.test/a#b'
+    const link = yDocBodyJSON(markdownToYDoc(`[label](<${encodedUrl}>)`))
+    expect(link.content?.[0]?.content?.[0]?.marks?.[0]?.attrs?.href)
+      .toBe(decodedUrl)
+
+    const image = yDocBodyJSON(markdownToYDoc(`![alt](<${encodedUrl}>)`))
+    expect(image.content?.find(node => node.type === 'image')?.attrs?.src)
+      .toBe(decodedUrl)
+
+    const title = yDocBodyJSON(markdownToYDoc(
+      `[label](https://example.test "<${encodedUrl}>")`,
+    ))
+    expect(title.content?.[0]?.content?.[0]?.marks?.[0]?.attrs?.title)
+      .toBe(`<${decodedUrl}>`)
+
+    const identicalLabel = yDocBodyJSON(markdownToYDoc(
+      `[${encodedUrl}](${encodedUrl})`,
+    ))
+    const identicalText = identicalLabel.content?.[0]?.content?.[0]
+    expect(identicalText?.text).toBe(decodedUrl)
+    expect(identicalText?.marks?.[0]?.attrs?.href).toBe(decodedUrl)
+
+    const equalTextAndHref = yDocBodyJSON(markdownToYDoc(
+      '[https://example.test](https://example.test "title &#35;")',
+    ))
+    expect(equalTextAndHref.content?.[0]?.content?.[0]?.marks?.[0]?.attrs?.title)
+      .toBe('title #')
+
+    const escaped = yDocBodyJSON(markdownToYDoc(`\\<${encodedUrl}>`))
+    expect(JSON.stringify(escaped)).toContain(encodedUrl)
+  })
+
+  it('preserves protected entities in bare GFM autolinks', () => {
+    const url = 'www.example.test/a&#35;b'
+    const body = yDocBodyJSON(markdownToYDoc(url))
+    const text = body.content?.[0]?.content?.[0]
+
+    expect(text?.text).toBe(url)
+    expect(text?.marks?.[0]?.attrs?.href).toBe(`http://${url}`)
+  })
+
+  it('reserves an entity sentinel when the source uses every BMP private-use character', () => {
+    const privateUse = Array.from(
+      { length: 0xF8FF - 0xE002 + 1 },
+      (_, index) => String.fromCodePoint(0xE002 + index),
+    ).join('')
+    const body = yDocBodyJSON(markdownToYDoc(`${privateUse}&#35;`))
+
+    expect(body.content?.[0]?.content?.map(node => node.text ?? '').join(''))
+      .toBe(`${privateUse}#`)
+
+    const sourceToken = '\uE000DOHC_PARSE_0\uE001'
+    const collision = yDocBodyJSON(markdownToYDoc(`${sourceToken}&#35;`))
+    expect(collision.content?.[0]?.content?.map(node => node.text ?? '').join(''))
+      .toBe(`${sourceToken}#`)
+  })
+
+  it('serializes protected characters when the Y.Doc uses every BMP private-use character', () => {
+    const privateUse = Array.from(
+      { length: 0xF8FF - 0xE002 + 1 },
+      (_, index) => String.fromCodePoint(0xE002 + index),
+    ).join('')
+    const markdown = yDocToMarkdown(yDocFromBody([{
+      type: 'paragraph',
+      content: [{ type: 'text', text: `${privateUse}*` }],
+    }]))
+
+    expect(markdown).toContain(privateUse)
+    expect(markdown).not.toContain('DOHCCHARACTER')
+  })
+
+  it('keeps leading-whitespace entities literal inside code', () => {
+    const inline = markdownToYDoc('`before\n&#32;space\n&#9;tab`')
+    expect(yDocBodyJSON(inline).content?.[0]?.content?.[0]?.text)
+      .toContain('&#32;space')
+    expect(yDocBodyJSON(inline).content?.[0]?.content?.[0]?.text)
+      .toContain('&#9;tab')
+
+    const fenced = markdownToYDoc(
+      '```txt\n&#32;space\n&#9;tab\n```',
+    )
+    expect(yDocBodyJSON(fenced).content?.[0]?.content?.[0]?.text)
+      .toBe('&#32;space\n&#9;tab')
+    expectStableMarkdownRoundTrip(
+      '```txt\n&#32;space\n&#9;tab\n```',
+      ['&#32;space', '&#9;tab'],
+    )
+  })
+
+  it('restores parse sentinels in node and mark attributes', () => {
+    const doc = markdownToYDoc([
+      '[link](https://example.com/a&#35;b "title &#38;#35;")',
+      '',
+      '![image](assets/a&#35;b.png "image &AMP;#35;")',
+      '',
+      'inline $x=&#35;1$ and $y=&#38;#35;2$',
+      '',
+      '$$x=&#35;1$$',
+      '',
+      '$$y=&#38;#35;2$$',
+      '',
+      '```lang&#35;',
+      'raw entity',
+      '```',
+      '',
+      '```lang&#38;#35;',
+      'encoded ampersand',
+      '```',
+    ].join('\n'))
+    const body = yDocBodyJSON(doc)
+    const link = body.content?.[0]?.content?.[0]?.marks
+      ?.find(mark => mark.type === 'link')
+    expect(link?.attrs).toMatchObject({
+      href: 'https://example.com/a#b',
+      title: 'title &#35;',
+    })
+    const image = body.content?.find(node => node.type === 'image')
+    expect(image?.attrs).toMatchObject({
+      src: 'assets/a#b.png',
+      title: 'image &#35;',
+    })
+    const inlineMath = body.content?.[2]?.content
+      ?.filter(node => node.type === 'mathInline')
+    expect(inlineMath?.map(node => node.attrs?.tex)).toEqual([
+      'x=&#35;1',
+      'y=&#38;#35;2',
+    ])
+    const blockMath = body.content?.filter(node => node.type === 'mathBlock')
+    expect(blockMath?.map(node => node.attrs?.tex)).toEqual([
+      'x=&#35;1',
+      'y=&#38;#35;2',
+    ])
+    const codeBlocks = body.content?.filter(node => node.type === 'codeBlock')
+    expect(codeBlocks?.map(node => node.attrs?.language)).toEqual([
+      'lang&#35;',
+      'lang&#38;#35;',
+    ])
+    expect(yDocToMarkdown(doc)).toContain('```lang&#35;\nraw entity\n```')
+    expect(yDocToMarkdown(doc)).toContain('```lang&#38;#35;\nencoded ampersand\n```')
+    expect(JSON.stringify(body)).not.toMatch(/[\uE002-\uF8FF]/u)
+  })
+
+  it('keeps block-escape entities literal in raw custom-node attributes', () => {
+    const markdown = [
+      '[[foo&#35;bar|label &#38;#35;]]',
+      '',
+      '{{atom:one&#35;two mode=&#38;#35;}}',
+      '',
+      '> [!note&#35;kind] Title &#38;#35;',
+      '> body',
+    ].join('\n')
+    const body = yDocBodyJSON(markdownToYDoc(markdown))
+
+    expect(body.content?.[0]?.content?.[0]).toMatchObject({
+      type: 'wikilink',
+      attrs: {
+        target: 'foo&#35;bar',
+        label: 'label &#38;#35;',
+      },
+    })
+    expect(body.content?.[1]?.content?.[0]).toMatchObject({
+      type: 'inlineAtom',
+      attrs: {
+        atomId: 'one&#35;two',
+        params: 'mode=&#38;#35;',
+        source: 'atom:one&#35;two mode=&#38;#35;',
+      },
+    })
+    expect(body.content?.[2]).toMatchObject({
+      type: 'callout',
+      attrs: {
+        calloutType: 'note&#35;kind',
+        title: 'Title &#38;#35;',
+      },
+    })
+    expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+  })
+
+  it('sanitizes image schemes after restoring attribute entities', () => {
+    for (const source of [
+      'dohc&#45;file://workspace/secret.png',
+      'custom&#46;scheme:secret.png',
+      'custom&#43;scheme:secret.png',
+    ]) {
+      const doc = markdownToYDoc(`![image](${source})`)
+      const image = yDocBodyJSON(doc).content
+        ?.find(node => node.type === 'image')
+      expect(image?.attrs?.src).toBe('')
+      expect(yDocToMarkdown(doc)).toBe('![image]()')
+    }
+  })
+
+  it('keeps literal block openers as paragraph text after a rich-document reopen', () => {
+    const openers = [
+      ['- not a bullet', '\\- not a bullet'],
+      ['   - indented literal bullet', '   \\- indented literal bullet'],
+      ['    four-space literal paragraph', '&#32;   four-space literal paragraph'],
+      ['\tleading tab literal paragraph', '&#9;leading tab literal paragraph'],
+      ['+ not a bullet', '\\+ not a bullet'],
+      ['# not a heading', '\\# not a heading'],
+      ['> not a quote', '&gt; not a quote'],
+      ['1. not an ordered item', '1\\. not an ordered item'],
+      ['1) not an ordered item', '1\\) not an ordered item'],
+      ['123456789) still literal', '123456789\\) still literal'],
+      ['---', '\\---'],
+      ['***', '\\***'],
+      ['* * *', '\\* * *'],
+      ['_ _ _', '\\_ _ _'],
+      ['___', '\\___'],
+      ['```ts', '\\```ts'],
+      ['~~~ts', '\\~~~ts'],
+      ['$$not a math block$$', '\\$\\$not a math block$$'],
+      ['[label]: not a definition', '\\[label]: not a definition'],
+      ['![alt](not-an-image)', '!\\[alt](not-an-image)'],
+    ] as const
+    const body: JSONContent[] = [
+      ...openers.map(([text]) => ({
+        type: 'paragraph',
+        content: [{ type: 'text', text }],
+      })),
+      {
+        type: 'bulletList',
+        content: [
+          {
+            type: 'listItem',
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  { type: 'text', text: '-' },
+                  { type: 'text', text: ' nested literal' },
+                ],
+              },
+            ],
+          },
+          {
+            type: 'listItem',
+            content: [
+              { type: 'paragraph', content: [{ type: 'text', text: '[x] literal checked box' }] },
+            ],
+          },
+          {
+            type: 'listItem',
+            content: [
+              { type: 'paragraph', content: [{ type: 'text', text: '[X] literal checked box' }] },
+            ],
+          },
+          {
+            type: 'listItem',
+            content: [
+              { type: 'paragraph', content: [{ type: 'text', text: '[ ] literal checkbox' }] },
+            ],
+          },
+        ],
+      },
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'before' },
+          { type: 'hardBreak' },
+          { type: 'text', text: '- after a hard break' },
+        ],
+      },
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: '- marked text is already safe', marks: [{ type: 'bold' }] },
+        ],
+      },
+    ]
+
+    const once = yDocToMarkdown(yDocFromBody(body))
+    for (const [, expected] of openers) expect(once).toContain(expected)
+    expect(once).toContain('- \\- nested literal')
+    expect(once).toContain('- \\[ ] literal checkbox')
+    expect(once).toContain('- \\[x] literal checked box')
+    expect(once).toContain('- \\[X] literal checked box')
+    expect(once).toContain('before  \n\\- after a hard break')
+    expect(once).toContain('**- marked text is already safe**')
+
+    const reopened = markdownToYDoc(once)
+    const reopenedBody = yDocBodyJSON(reopened)
+    expect(reopenedBody.content?.slice(0, openers.length).map(node => node.type))
+      .toEqual(openers.map(() => 'paragraph'))
+    expect(reopenedBody.content?.at(openers.length)?.content).toHaveLength(4)
+    expect(yDocToMarkdown(reopened)).toBe(once)
+  })
+
+  it('keeps marked leading indentation as paragraph text after a rich-document reopen', () => {
+    const once = yDocToMarkdown(yDocFromBody([
+      {
+        type: 'paragraph',
+        content: [
+          {
+            type: 'text',
+            text: '\tmarked tab',
+            marks: [{ type: 'italic' }],
+          },
+        ],
+      },
+    ]))
+
+    expect(once).toBe('&#9;*marked tab*')
+    const reopened = markdownToYDoc(once)
+    expect(yDocBodyJSON(reopened).content?.[0]?.type).toBe('paragraph')
+    expect(yDocToMarkdown(reopened)).toBe(once)
+  })
+
+  it('keeps indentation split across marked runs as paragraph text after a rich-document reopen', () => {
+    const once = yDocToMarkdown(yDocFromBody([
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: '   ', marks: [{ type: 'italic' }] },
+          { type: 'text', text: ' marked spaces', marks: [{ type: 'bold' }] },
+        ],
+      },
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: '   ' },
+          { type: 'text', text: '\tmarked tab', marks: [{ type: 'italic' }] },
+        ],
+      },
+    ]))
+
+    expect(once).toBe(
+      '&#32;   **marked spaces**\n\n&#32;  \t*marked tab*',
+    )
+    const reopened = markdownToYDoc(once)
+    expect(yDocBodyJSON(reopened).content?.map(node => node.type))
+      .toEqual(['paragraph', 'paragraph'])
+    expect(yDocToMarkdown(reopened)).toBe(once)
+  })
+
+  it('keeps marked block openers after an inline newline as paragraph text', () => {
+    const once = yDocToMarkdown(yDocFromBody([
+      {
+        type: 'paragraph',
+        content: [
+          {
+            type: 'text',
+            text: 'before\n# heading text',
+            marks: [{ type: 'italic' }],
+          },
+        ],
+      },
+    ]))
+
+    expect(once).toBe('*before*\n*&#35; heading text*')
+    const reopened = markdownToYDoc(once)
+    expect(yDocBodyJSON(reopened).content?.[0]?.type).toBe('paragraph')
+    expect(yDocToMarkdown(reopened)).toBe(once)
+  })
+
+  it('keeps setext lines inside multiline paragraphs', () => {
+    for (const [source, expected] of [
+      ['before\n===', 'before\n&#61;=='],
+      ['before\n--', 'before\n&#45;-'],
+    ]) {
+      const once = yDocToMarkdown(yDocFromBody([{
+        type: 'paragraph',
+        content: [{ type: 'text', text: source }],
+      }]))
+      expect(once).toBe(expected)
+      const reopened = markdownToYDoc(once)
+      expect(yDocBodyJSON(reopened).content?.map(node => node.type))
+        .toEqual(['paragraph'])
+      expect(yDocToMarkdown(reopened)).toBe(once)
+    }
+
+    const ordinary = [
+      'before',
+      '==x',
+      'x=y',
+      'a|b',
+      '---|text',
+      'one | two',
+    ].join('\n')
+    expect(yDocToMarkdown(yDocFromBody([{
+      type: 'paragraph',
+      content: [{ type: 'text', text: ordinary }],
+    }]))).toBe(ordinary)
+
+    for (const [source, expected] of [
+      ['before\n\t===', 'before\n&#9;==='],
+      ['before\n \t===', 'before\n&#32;\t==='],
+    ]) {
+      const once = yDocToMarkdown(yDocFromBody([{
+        type: 'paragraph',
+        content: [{ type: 'text', text: source }],
+      }]))
+      expect(once).toBe(expected)
+      const reopened = markdownToYDoc(once)
+      expect(yDocBodyJSON(reopened).content?.map(node => node.type))
+        .toEqual(['paragraph'])
+      expect(yDocToMarkdown(reopened)).toBe(once)
+    }
+  })
+
+  it('encodes CR and starts a new Markdown line only after LF', () => {
+    for (const [source, expected] of [
+      ['before\r---\rnext', 'before&#13;---&#13;next'],
+      ['before\r\n---\r\nnext', 'before&#13;\n---&#13;\nnext'],
+    ]) {
+      const once = yDocToMarkdown(yDocFromBody([{
+        type: 'paragraph',
+        content: [{ type: 'text', text: source }],
+      }]))
+      expect(once).toBe(expected)
+      const reopened = markdownToYDoc(once)
+      expect(yDocBodyJSON(reopened).content?.map(node => node.type))
+        .toEqual(['paragraph'])
+      expect(yDocBodyJSON(reopened).content?.[0]?.content?.[0]?.text)
+        .toBe(source)
+      expect(yDocToMarkdown(reopened)).toBe(once)
+    }
+
+    const markedSource = 'before\r\n---\r\nnext'
+    const markedOnce = yDocToMarkdown(yDocFromBody([{
+      type: 'paragraph',
+      content: [{
+        type: 'text',
+        text: markedSource,
+        marks: [{ type: 'italic' }],
+      }],
+    }]))
+    const markedReopened = markdownToYDoc(markedOnce)
+    const markedText = yDocBodyJSON(markedReopened).content?.[0]?.content
+    expect(markedText?.map(node => node.text).join('')).toBe(markedSource)
+    expect(markedText?.filter(node => node.text !== '\n')
+      .every(node => node.marks?.some(mark => mark.type === 'italic'))).toBe(true)
+    expect(yDocToMarkdown(markedReopened)).toBe(markedOnce)
+  })
+
+  it('keeps representative marked multiline block openers in one paragraph', () => {
+    const sourceText = [
+      'before',
+      '===',
+      '# heading',
+      '- list',
+      '1. ordered',
+      '---',
+      '```backtick fence',
+      '~~~tilde fence',
+      '$$math$$',
+      '[label]: definition',
+    ].join('\n')
+    const once = yDocToMarkdown(yDocFromBody([
+      {
+        type: 'paragraph',
+        content: [
+          {
+            type: 'text',
+            text: sourceText,
+            marks: [{ type: 'italic' }],
+          },
+        ],
+      },
+    ]))
+
+    for (const escaped of [
+      '&#35;',
+      '&#61;',
+      '&#45;',
+      '&#46;',
+      '&#96;',
+      '&#126;',
+      '&#36;',
+      '&#91;',
+    ]) {
+      expect(once).toContain(escaped)
+    }
+    const reopened = markdownToYDoc(once)
+    const reopenedBody = yDocBodyJSON(reopened)
+    expect(reopenedBody.content?.map(node => node.type))
+      .toEqual(['paragraph'])
+    const reopenedCharacters = reopenedBody.content?.[0]?.content?.flatMap((node) => {
+      const value = node.type === 'escapedPunctuation'
+        ? String(node.attrs?.value ?? '')
+        : node.text ?? ''
+      return Array.from(value)
+        .filter(character => character !== '\n')
+        .map(character => ({
+          character,
+          marks: node.marks?.map(mark => mark.type) ?? [],
+        }))
+    })
+    expect(reopenedCharacters).toEqual(
+      Array.from(sourceText)
+        .filter(character => character !== '\n')
+        .map(character => ({ character, marks: ['italic'] })),
+    )
+    expect(yDocToMarkdown(reopened)).toBe(once)
+  })
+
   it('escapes line breaks inside inline markdown node attributes', () => {
     const output = yDocToMarkdown(
       yDocFromBody([

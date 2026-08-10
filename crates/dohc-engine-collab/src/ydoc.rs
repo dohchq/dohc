@@ -442,10 +442,9 @@ impl Ydoc {
     /// chosen markdown SOURCE into the projection's own block schema —
     /// frontmatter scalars, headings, blockquotes, bullet/ordered/task
     /// lists, fenced code blocks, horizontal rules, and paragraphs — so the
-    /// folded document projects the chosen bytes back AND renders as
-    /// structure, not literal syntax. A construct the parser does not model
-    /// stays verbatim paragraph text, which the projector re-emits
-    /// byte-identically (plain text runs are never escaped on projection).
+    /// folded document projects the chosen bytes back AND renders as structure,
+    /// not literal syntax. The production caller reprojects this rewrite and
+    /// refuses the resolution when the parser cannot reproduce the chosen bytes.
     pub fn rewrite_content_to_markdown(
         &self,
         content_kind: ContentKind,
@@ -531,8 +530,8 @@ impl Ydoc {
 
 /// One block of the conflict-resolution fold's markdown parse — the subset
 /// of the projection schema the fold reconstructs. Anything else stays a
-/// verbatim [`MdBlock::Paragraph`], which the projector re-emits
-/// byte-identically.
+/// [`MdBlock::Paragraph`]; the production fold re-projects that result and
+/// refuses the resolution if it cannot reproduce the chosen bytes exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MdBlock {
     Heading { level: i64, text: String },
@@ -1762,6 +1761,132 @@ fn markdown_output_is_empty(markdown: &str) -> bool {
     trim_js(&without_entities).is_empty()
 }
 
+fn escape_markdown_block_syntax(markdown: &str, mut starts_line: bool) -> ProjectionResult<String> {
+    let mut output = ProjectionBuffer::new();
+    let markdown = markdown.replace('\r', "&#13;");
+    for line in markdown.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        if starts_line {
+            if let Some(entity) = indented_code_leading_entity(body) {
+                output.push_str(entity)?;
+                output.push_str(&body[1..])?;
+            } else if let Some((index, escape_next)) = leading_markdown_block_escape_index(body) {
+                output.push_str(&body[..index])?;
+                output.push('\\')?;
+                if escape_next {
+                    output.push_str(&body[index..index + 1])?;
+                    output.push('\\')?;
+                    output.push_str(&body[index + 1..])?;
+                } else {
+                    output.push_str(&body[index..])?;
+                }
+            } else {
+                output.push_str(body)?;
+            }
+        } else {
+            output.push_str(body)?;
+        }
+        if line.ends_with('\n') {
+            output.push('\n')?;
+            starts_line = true;
+        } else {
+            starts_line = false;
+        }
+    }
+    Ok(output.into_string())
+}
+
+fn indented_code_leading_entity(markdown: &str) -> Option<&'static str> {
+    let mut column = 0usize;
+    for byte in markdown.bytes() {
+        match byte {
+            b' ' => column += 1,
+            b'\t' => column += 4 - (column % 4),
+            _ => break,
+        }
+        if column >= 4 {
+            return match markdown.as_bytes().first() {
+                Some(b' ') => Some("&#32;"),
+                Some(b'\t') => Some("&#9;"),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+fn leading_markdown_block_escape_index(markdown: &str) -> Option<(usize, bool)> {
+    let bytes = markdown.as_bytes();
+    let indent = bytes
+        .iter()
+        .take(4)
+        .take_while(|byte| **byte == b' ')
+        .count();
+    if indent == 4 {
+        return None;
+    }
+    let rest = &bytes[indent..];
+    let boundary = |index: usize| {
+        rest.get(index)
+            .is_none_or(|byte| matches!(*byte, b' ' | b'\t'))
+    };
+
+    let hashes = rest.iter().take_while(|byte| **byte == b'#').count();
+    if (1..=6).contains(&hashes) && boundary(hashes) {
+        return Some((indent, false));
+    }
+    if rest.starts_with(b"$$") {
+        return Some((indent, true));
+    }
+    if rest
+        .first()
+        .is_some_and(|byte| matches!(*byte, b'-' | b'+' | b'*'))
+        && boundary(1)
+    {
+        return Some((indent, false));
+    }
+    if rest.starts_with(b"```") || rest.starts_with(b"~~~") {
+        return Some((indent, false));
+    }
+    if let Some(marker @ (b'-' | b'*' | b'_')) = rest.first().copied() {
+        let marker_count = rest.iter().filter(|byte| **byte == marker).count();
+        if marker_count >= 3
+            && rest
+                .iter()
+                .all(|byte| matches!(*byte, b' ' | b'\t') || *byte == marker)
+        {
+            return Some((indent, false));
+        }
+    }
+    let setext_end = rest
+        .iter()
+        .rposition(|byte| !matches!(*byte, b' ' | b'\t'))
+        .map_or(0, |index| index + 1);
+    let setext = &rest[..setext_end];
+    if !setext.is_empty()
+        && setext.iter().all(|byte| *byte == b'=' || *byte == b'-')
+        && setext.iter().all(|byte| *byte == setext[0])
+    {
+        return Some((indent, false));
+    }
+    if rest.starts_with(b"![") {
+        return Some((indent + 1, false));
+    }
+    if rest.starts_with(b"[") {
+        return Some((indent, false));
+    }
+    let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    if (1..=9).contains(&digits)
+        && rest
+            .get(digits)
+            .is_some_and(|byte| matches!(*byte, b'.' | b')'))
+        && boundary(digits + 1)
+    {
+        return Some((indent + digits, false));
+    }
+    None
+}
+
 fn render_nodes(
     nodes: &[MarkdownNode],
     parent_tag: &str,
@@ -1789,7 +1914,7 @@ fn render_nodes(
 
 fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionResult<String> {
     match node {
-        MarkdownNode::Text(_) => render_inline(std::slice::from_ref(node), false),
+        MarkdownNode::Text(_) => render_inline(std::slice::from_ref(node), false, false),
         MarkdownNode::Fragment(children) => {
             render_nodes(children, context.parent_tag, context.parent_attrs, "")
         }
@@ -1807,7 +1932,7 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                         Ok(String::new())
                     }
                 } else {
-                    render_inline(children, false)
+                    render_inline(children, false, true)
                 }
             }
             "heading" => {
@@ -1820,7 +1945,7 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                     // out-of-range positive levels and can itself fail; level
                     // six is the closest safe schema-valid projection.
                     let level = attr_i64(attrs, "level").unwrap_or(1).clamp(1, 6) as usize;
-                    let inline = render_inline(children, false)?;
+                    let inline = render_inline(children, false, false)?;
                     let mut output = ProjectionBuffer::with_capacity(level + 1 + inline.len())?;
                     output.push_repeat('#', level)?;
                     output.push(' ')?;
@@ -1853,6 +1978,7 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
             }
             "table" => render_table(children),
             "tableRow" | "tableCell" | "tableHeader" => render_nodes(children, tag, attrs, ""),
+            _ if context.parent_tag == "paragraph" => render_inline(children, false, true),
             _ => render_nodes(children, tag, attrs, ""),
         },
     }
@@ -2482,7 +2608,11 @@ fn collapse_js_whitespace(value: &str) -> ProjectionResult<String> {
     Ok(trim_js(&collapsed.into_string()).to_string())
 }
 
-fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> ProjectionResult<String> {
+fn render_inline(
+    nodes: &[MarkdownNode],
+    code_context: bool,
+    escape_block_syntax: bool,
+) -> ProjectionResult<String> {
     enum SourceInlinePart<'a> {
         Text(&'a TextRun),
         Node(&'a MarkdownNode),
@@ -2505,6 +2635,67 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> ProjectionResult
                 MarkdownNode::Fragment(children) => flatten(children, parts),
                 MarkdownNode::Element { .. } => parts.push(SourceInlinePart::Node(node)),
             }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct InlineReplacement {
+        text: &'static str,
+        preserve_marks: bool,
+    }
+
+    fn encoded_block_punctuation(byte: u8) -> &'static str {
+        match byte {
+            b'#' => "&#35;",
+            b'$' => "&#36;",
+            b')' => "&#41;",
+            b'*' => "&#42;",
+            b'+' => "&#43;",
+            b'-' => "&#45;",
+            b'.' => "&#46;",
+            b'=' => "&#61;",
+            b'[' => "&#91;",
+            b'_' => "&#95;",
+            b'`' => "&#96;",
+            b'~' => "&#126;",
+            _ => unreachable!(),
+        }
+    }
+
+    fn record_post_newline_block_escapes(
+        line: &[u8],
+        positions: &[(usize, usize)],
+        line_break: Option<(usize, usize)>,
+        replacements: &mut BTreeMap<usize, BTreeMap<usize, InlineReplacement>>,
+    ) {
+        let Ok(line_text) = std::str::from_utf8(line) else {
+            return;
+        };
+        let Some((escape_index, escape_next)) = leading_markdown_block_escape_index(line_text)
+        else {
+            return;
+        };
+        let count = if escape_next { 2 } else { 1 };
+        if let Some((part_index, offset)) = line_break {
+            replacements.entry(part_index).or_default().insert(
+                offset,
+                InlineReplacement {
+                    text: "\n",
+                    preserve_marks: false,
+                },
+            );
+        }
+        for (index, &byte) in line.iter().enumerate().skip(escape_index).take(count) {
+            let Some(&(part_index, offset)) = positions.get(index) else {
+                continue;
+            };
+            replacements.entry(part_index).or_default().insert(
+                offset,
+                InlineReplacement {
+                    text: encoded_block_punctuation(byte),
+                    preserve_marks: true,
+                },
+            );
         }
     }
 
@@ -2555,6 +2746,265 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> ProjectionResult
         source_index = end;
     }
 
+    if escape_block_syntax {
+        let mut replacements: BTreeMap<usize, BTreeMap<usize, InlineReplacement>> = BTreeMap::new();
+        let mut captures_line = false;
+        let mut line = Vec::new();
+        let mut positions = Vec::new();
+        let mut line_break = None;
+        for (part_index, part) in parts.iter().enumerate() {
+            let InlinePart::Text {
+                run,
+                literal_markdown: false,
+            } = part
+            else {
+                if captures_line {
+                    record_post_newline_block_escapes(
+                        &line,
+                        &positions,
+                        line_break,
+                        &mut replacements,
+                    );
+                }
+                captures_line = false;
+                line.clear();
+                positions.clear();
+                line_break = None;
+                continue;
+            };
+            for (offset, byte) in run.text.bytes().enumerate() {
+                if byte == b'\r' {
+                    replacements.entry(part_index).or_default().insert(
+                        offset,
+                        InlineReplacement {
+                            text: "&#13;",
+                            preserve_marks: true,
+                        },
+                    );
+                    if captures_line {
+                        line.push(byte);
+                        positions.push((part_index, offset));
+                    }
+                    continue;
+                }
+                if byte == b'\n' {
+                    if captures_line {
+                        record_post_newline_block_escapes(
+                            &line,
+                            &positions,
+                            line_break,
+                            &mut replacements,
+                        );
+                    }
+                    captures_line = true;
+                    line.clear();
+                    positions.clear();
+                    line_break = Some((part_index, offset));
+                    continue;
+                }
+                if !captures_line {
+                    continue;
+                }
+                line.push(byte);
+                positions.push((part_index, offset));
+            }
+        }
+        if captures_line {
+            record_post_newline_block_escapes(&line, &positions, line_break, &mut replacements);
+        }
+
+        let mut leading_column = Some(0usize);
+        let mut leading_whitespace = Vec::new();
+        for (part_index, part) in parts.iter().enumerate() {
+            match part {
+                InlinePart::Text {
+                    run,
+                    literal_markdown: false,
+                } => {
+                    for (offset, byte) in run.text.bytes().enumerate() {
+                        if byte == b'\n' {
+                            leading_column = Some(0);
+                            leading_whitespace.clear();
+                            continue;
+                        }
+                        let Some(column) = leading_column else {
+                            continue;
+                        };
+                        if byte != b' ' && byte != b'\t' {
+                            leading_column = None;
+                            leading_whitespace.clear();
+                            continue;
+                        }
+
+                        leading_whitespace.push((part_index, offset, byte));
+                        let next_column = if byte == b' ' {
+                            column + 1
+                        } else {
+                            column + 4 - (column % 4)
+                        };
+                        leading_column = Some(next_column);
+                        if next_column < 4 {
+                            continue;
+                        }
+
+                        for (index, &(index_part, index_offset, whitespace)) in
+                            leading_whitespace.iter().enumerate()
+                        {
+                            let replacement = if index == 0 {
+                                if whitespace == b' ' {
+                                    "&#32;"
+                                } else {
+                                    "&#9;"
+                                }
+                            } else if whitespace == b' ' {
+                                " "
+                            } else {
+                                "\t"
+                            };
+                            replacements.entry(index_part).or_default().insert(
+                                index_offset,
+                                InlineReplacement {
+                                    text: replacement,
+                                    preserve_marks: false,
+                                },
+                            );
+                        }
+                        leading_column = None;
+                        leading_whitespace.clear();
+                    }
+                }
+                InlinePart::Node(MarkdownNode::Element { tag, .. }) if tag == "hardBreak" => {
+                    leading_column = Some(0);
+                    leading_whitespace.clear();
+                }
+                _ => {
+                    leading_column = None;
+                    leading_whitespace.clear();
+                }
+            }
+        }
+
+        if !replacements.is_empty() {
+            let mut escaped_parts = Vec::new();
+            for (part_index, part) in std::mem::take(&mut parts).into_iter().enumerate() {
+                let Some(part_replacements) = replacements.get(&part_index) else {
+                    escaped_parts.push(part);
+                    continue;
+                };
+                let InlinePart::Text {
+                    run,
+                    literal_markdown,
+                } = part
+                else {
+                    unreachable!();
+                };
+                let mut cursor = 0usize;
+                for (&offset, &replacement) in part_replacements {
+                    if offset > cursor {
+                        let mut text = run.clone();
+                        text.text = run.text[cursor..offset].to_string();
+                        escaped_parts.push(InlinePart::Text {
+                            run: text,
+                            literal_markdown,
+                        });
+                    }
+                    escaped_parts.push(InlinePart::Text {
+                        run: TextRun {
+                            text: replacement.text.to_string(),
+                            marks: if replacement.preserve_marks {
+                                run.marks.clone()
+                            } else {
+                                Vec::new()
+                            },
+                        },
+                        literal_markdown: true,
+                    });
+                    cursor = offset + 1;
+                }
+                if cursor < run.text.len() {
+                    let mut text = run;
+                    text.text = text.text[cursor..].to_string();
+                    escaped_parts.push(InlinePart::Text {
+                        run: text,
+                        literal_markdown,
+                    });
+                }
+            }
+            parts = escaped_parts;
+        }
+    }
+
+    let mut rendered_nodes = BTreeMap::new();
+    let mut starts_line = true;
+    let mut part_index = 0usize;
+    while escape_block_syntax && part_index < parts.len() {
+        let is_plain_text = matches!(
+            &parts[part_index],
+            InlinePart::Text {
+                run,
+                literal_markdown: false,
+            } if run.marks.is_empty()
+        );
+        if is_plain_text {
+            let run_start = part_index;
+            let mut text = ProjectionBuffer::new();
+            while part_index < parts.len()
+                && matches!(
+                    &parts[part_index],
+                    InlinePart::Text {
+                        run,
+                        literal_markdown: false,
+                    } if run.marks.is_empty()
+                )
+            {
+                let InlinePart::Text { run, .. } = &parts[part_index] else {
+                    unreachable!();
+                };
+                text.push_str(&run.text)?;
+                part_index += 1;
+            }
+            let text = text.into_string();
+            let encoded = encode_html_entities(&text)?;
+            let escaped = escape_markdown_block_syntax(&encoded, starts_line)?;
+            let InlinePart::Text {
+                run,
+                literal_markdown,
+            } = &mut parts[run_start]
+            else {
+                unreachable!();
+            };
+            run.text = escaped;
+            *literal_markdown = true;
+            for part in &mut parts[run_start + 1..part_index] {
+                let InlinePart::Text { run, .. } = part else {
+                    unreachable!();
+                };
+                run.text.clear();
+            }
+            starts_line = text.ends_with('\n');
+            continue;
+        }
+
+        starts_line = match &parts[part_index] {
+            InlinePart::Node(node) => {
+                let rendered = render_node(
+                    node,
+                    RenderContext {
+                        parent_tag: "paragraph",
+                        parent_attrs: &BTreeMap::new(),
+                        previous: None,
+                        index: part_index,
+                    },
+                )?;
+                let starts_line = rendered.ends_with('\n');
+                rendered_nodes.insert(part_index, rendered);
+                starts_line
+            }
+            InlinePart::Text { .. } => false,
+        };
+        part_index += 1;
+    }
+
     let mut output = ProjectionBuffer::new();
     let mut active: Vec<MarkdownMark> = Vec::new();
     let mut modes: BTreeMap<MarkKind, OpeningMode> = BTreeMap::new();
@@ -2579,15 +3029,19 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> ProjectionResult
                 }
                 active.clear();
                 modes.clear();
-                let rendered = render_node(
-                    node,
-                    RenderContext {
-                        parent_tag: "paragraph",
-                        parent_attrs: &BTreeMap::new(),
-                        previous: None,
-                        index,
-                    },
-                )?;
+                let rendered = if let Some(rendered) = rendered_nodes.remove(&index) {
+                    rendered
+                } else {
+                    render_node(
+                        node,
+                        RenderContext {
+                            parent_tag: "paragraph",
+                            parent_attrs: &BTreeMap::new(),
+                            previous: None,
+                            index,
+                        },
+                    )?
+                };
                 output.push_str(&before)?;
                 output.push_str(&rendered)?;
             }
@@ -3069,6 +3523,93 @@ mod projection_tests {
         assert_eq!(
             markdown_document(&nodes).expect("small projection"),
             "content survives"
+        );
+    }
+
+    #[test]
+    fn inline_node_line_endings_preserve_text_and_protect_following_block_openers() {
+        for (line_ending, expected) in [
+            ("\n", "before\n\\- still paragraph text"),
+            ("\r", "before&#13;- still paragraph text"),
+            ("\r\n", "before&#13;\n\\- still paragraph text"),
+        ] {
+            let nodes = vec![MarkdownNode::Element {
+                tag: "paragraph".to_string(),
+                attrs: BTreeMap::new(),
+                children: vec![
+                    MarkdownNode::Element {
+                        tag: "futureInline".to_string(),
+                        attrs: BTreeMap::new(),
+                        children: vec![text_run(&format!("before{line_ending}"), Vec::new())],
+                    },
+                    text_run("- still paragraph text", Vec::new()),
+                ],
+            }];
+
+            assert_eq!(
+                markdown_document(&nodes).expect("small projection"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn inline_node_raw_attributes_preserve_carriage_returns() {
+        for nested in [false, true] {
+            let math = MarkdownNode::Element {
+                tag: "mathInline".to_string(),
+                attrs: BTreeMap::from([("tex".to_string(), Value::String("x\ry".to_string()))]),
+                children: Vec::new(),
+            };
+            let child = if nested {
+                MarkdownNode::Element {
+                    tag: "futureInline".to_string(),
+                    attrs: BTreeMap::new(),
+                    children: vec![math],
+                }
+            } else {
+                math
+            };
+            let nodes = vec![MarkdownNode::Element {
+                tag: "paragraph".to_string(),
+                attrs: BTreeMap::new(),
+                children: vec![child],
+            }];
+
+            assert_eq!(
+                markdown_document(&nodes).expect("small projection"),
+                "$x\ry$"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_inline_nodes_protect_internal_block_openers() {
+        let nodes = vec![MarkdownNode::Element {
+            tag: "paragraph".to_string(),
+            attrs: BTreeMap::new(),
+            children: vec![MarkdownNode::Element {
+                tag: "futureInline".to_string(),
+                attrs: BTreeMap::new(),
+                children: vec![text_run("before\n- still paragraph text", Vec::new())],
+            }],
+        }];
+
+        assert_eq!(
+            markdown_document(&nodes).expect("small projection"),
+            "before\n&#45; still paragraph text"
+        );
+    }
+
+    #[test]
+    fn block_opener_escaping_encodes_cr_and_starts_lines_only_after_lf() {
+        assert_eq!(
+            escape_markdown_block_syntax("before\r---\rnext", true).expect("small projection"),
+            "before&#13;---&#13;next"
+        );
+        assert_eq!(
+            escape_markdown_block_syntax("before\r\n---\r\nnext", true).expect("small projection"),
+            "before&#13;\n---&#13;\nnext"
         );
     }
 
