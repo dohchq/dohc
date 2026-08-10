@@ -644,7 +644,6 @@ fn equivalent_ydoc_settlement_preimage(snapshot: &Snapshot, payload: &MomentAppe
             .before_latest_moment_id
             .as_deref()
             .is_some_and(is_ydoc_settlement_moment_id)
-        && payload.before_present == "present"
         && payload.before_object_id.as_deref() == Some(snapshot.object_id.as_str())
         && payload.before_version_id.as_deref() == Some(payload.version_id.as_str())
         && payload.before_path.as_deref() == Some(snapshot.path.as_str())

@@ -271,12 +271,10 @@ fn insert_shipped_snapshot(
     } else {
         ("text", Some(snapshot.blob_sha256.as_str()), None)
     };
-    for table in ["snapshots", "fork_base_snapshots"] {
-        let metadata_origin = if table == "snapshots" {
-            REPLICATED_SNAPSHOT_ORIGIN
-        } else {
-            snapshot.metadata.origin.as_str()
-        };
+    for (table, metadata_origin) in [
+        ("snapshots", REPLICATED_SNAPSHOT_ORIGIN),
+        ("fork_base_snapshots", snapshot.metadata.origin.as_str()),
+    ] {
         let sql = format!(
             "INSERT OR IGNORE INTO {table} \
              (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \

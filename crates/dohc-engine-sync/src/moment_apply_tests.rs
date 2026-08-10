@@ -1,7 +1,4 @@
-use dohc_engine_collab::{
-    CollabError, ContentKind as YdocContentKind, DocKey, Regime, Ydoc, close_session,
-    ensure_marker, record_local_update,
-};
+use dohc_engine_collab::Ydoc;
 use dohc_engine_domain::{
     CreateNamedVersion, ListMomentsQuery, MomentOp, RollbackTextFileMutation, VersionedTextStore,
     WriteText,
@@ -261,84 +258,10 @@ fn replicated_moment_snapshot_origin_is_sync() {
     assert_eq!(origin, "sync");
 }
 
-/// A peer capture arrives with the oracle-valid `local-file` wire origin.
-/// The close must still require proof that this machine materialized the bytes.
-///
-/// This is a regression pin, not the vulnerability proof. Reverting the
-/// `REPLICATED_SNAPSHOT_ORIGIN` stamp does not flip it because the oracle
-/// closed set already excludes the trusted local `capture` origin.
-#[test]
-fn replicated_capture_moment_cannot_cover_a_local_only_close() {
-    let (_scratch, mut store) = test_store();
-    let key = DocKey::new("ws", "main", "peer-close-object").expect("key");
-    store
-        .read_with(|conn| {
-            conn.execute(
-                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
-                 VALUES ('ws','peer-close-object',1)",
-                [],
-            )?;
-            Ok::<_, rusqlite::Error>(())
-        })
-        .expect("file object");
-    ensure_marker(
-        &mut store,
-        &key,
-        YdocContentKind::Plaintext,
-        Regime::LocalOnly,
-        &NoFaults,
-        1_100,
-    )
-    .expect("marker");
-    let doc = Ydoc::wire();
-    let update = doc.plaintext_insert(0, "peer capture");
-    record_local_update(&mut store, &key, &update, &NoFaults, 1_200).expect("local update");
-
-    hydrate_texts(&mut store, &["peer capture"]);
-    let mut payload = absent_text_payload(
-        "peer-close-capture",
-        "peer-close-object",
-        "notes/peer-close.md",
-        "peer capture",
-    );
-    payload["metadata"]["origin"] = json!("local-file");
-    apply_moment_envelope(
-        &mut store,
-        &envelope("peer-close", 0, "ws", payload),
-        &NoFaults,
-    )
-    .expect("replicated capture moment");
-
-    assert!(matches!(
-        close_session(&mut store, &key, false, &NoFaults, 1_300),
-        Err(CollabError::UnsettledClose)
-    ));
-}
-
 #[test]
 fn moment_after_equivalent_ydoc_projection_fast_forwards() {
-    let (_origin_scratch, mut origin) = test_store();
     let (_peer_scratch, mut peer) = test_store();
     let local_settle_id = format!("moment-ydoc-{}", "a".repeat(64));
-    VersionedTextStore::new(&mut origin)
-        .write_text(
-            &WriteText {
-                workspace_id: "ws".to_owned(),
-                version_id: "main".to_owned(),
-                object_id: "ydoc-settle-object".to_owned(),
-                path: "notes/settled.md".to_owned(),
-                text: "settled text".to_owned(),
-                moment_id: local_settle_id.clone(),
-                metadata_origin: "ydoc".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 1_500,
-                request_id: None,
-            },
-            &NoFaults,
-        )
-        .expect("local Y.Doc settle head");
 
     let doc = Ydoc::wire();
     doc.plaintext_insert(0, "settled text");

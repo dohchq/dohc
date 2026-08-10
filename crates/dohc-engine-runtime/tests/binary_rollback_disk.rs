@@ -726,6 +726,27 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
         replay.materialize_outcome,
         PostCommitMaterializeOutcome::Conflict
     );
+
+    // The deduped replay drains the still-pending write job to completion
+    // even though the outcome reports Conflict; the already-terminal delete
+    // stays cancelled. This proves the post-replay ledger state instead of
+    // only the pre-replay setup above.
+    let connection = rusqlite::Connection::open(&db).expect("reopen job ledger");
+    let statuses_after_replay: (String, String) = connection
+        .query_row(
+            "SELECT write.status, delete_job.status \
+             FROM materialization_jobs write, materialization_jobs delete_job \
+             WHERE write.job_id=?1 AND delete_job.job_id=?2",
+            rusqlite::params![write_job_id, delete_job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("paired statuses after replay");
+    assert_eq!(
+        statuses_after_replay,
+        ("complete".to_owned(), "cancelled".to_owned())
+    );
+    drop(connection);
+
     supervisor.close(&db).expect("close actor");
 }
 

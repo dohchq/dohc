@@ -156,6 +156,28 @@ fn secret_key() -> SecretDataKey {
     SecretDataKey::from_bytes(&[0x11; 32]).expect("secret key")
 }
 
+/// `snapshots` carries a `metadata_origin` column that the replication
+/// boundary is allowed to rewrite (see dohc-engine-collab's
+/// `captured_head_sha`); comparisons against that table drop the column by
+/// name so the assertion still catches a genuine content mismatch.
+fn snapshot_origin_column_index(statement: &rusqlite::Statement<'_>, table: &str) -> Option<usize> {
+    (table == "snapshots")
+        .then(|| {
+            statement
+                .column_names()
+                .into_iter()
+                .position(|name| name == "metadata_origin")
+        })
+        .flatten()
+}
+
+fn row_values(row: &rusqlite::Row<'_>, skip: Option<usize>) -> rusqlite::Result<Vec<String>> {
+    (0..row.as_ref().column_count())
+        .filter(|index| Some(*index) != skip)
+        .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
+        .collect()
+}
+
 fn workspace_table_rows(
     store: &EngineStore,
     workspace_id: &str,
@@ -167,24 +189,12 @@ fn workspace_table_rows(
             let mut statement = conn.prepare(&format!(
                 "SELECT * FROM {table} WHERE workspace_id=?1 ORDER BY {order_by}"
             ))?;
+            let skip = snapshot_origin_column_index(&statement, table);
             statement
-                .query_map([workspace_id], |row| {
-                    (0..row.as_ref().column_count())
-                        .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
-                        .collect::<Result<Vec<_>, _>>()
-                })?
+                .query_map([workspace_id], |row| row_values(row, skip))?
                 .collect::<Result<Vec<_>, _>>()
         })
         .expect("read workspace table")
-}
-
-fn without_snapshot_origin(rows: Vec<Vec<String>>) -> Vec<Vec<String>> {
-    rows.into_iter()
-        .map(|mut row| {
-            row.remove(7);
-            row
-        })
-        .collect()
 }
 
 fn version_rows(store: &EngineStore, workspace_id: &str, table: &str) -> Vec<Vec<String>> {
@@ -202,11 +212,10 @@ fn one_version_rows(
             let mut statement = conn.prepare(&format!(
                 "SELECT * FROM {table} WHERE workspace_id=?1 AND version_id=?2 ORDER BY path"
             ))?;
+            let skip = snapshot_origin_column_index(&statement, table);
             statement
                 .query_map(params![workspace_id, version_id], |row| {
-                    (0..row.as_ref().column_count())
-                        .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
-                        .collect::<Result<Vec<_>, _>>()
+                    row_values(row, skip)
                 })?
                 .collect::<Result<Vec<_>, _>>()
         })
@@ -478,36 +487,13 @@ async fn named_fork_splits_an_oversized_snapshot_payload_into_bounded_ops() {
         copy_op_blobs(&source_store, &mut peer_store, op);
         apply_logged_op(&mut peer_store, workspace_id, op);
     }
-    assert_eq!(
-        without_snapshot_origin(one_version_rows(
-            &peer_store,
-            workspace_id,
-            "version-chunked",
-            "snapshots",
-        )),
-        without_snapshot_origin(one_version_rows(
-            &source_store,
-            workspace_id,
-            "version-chunked",
-            "snapshots",
-        )),
-        "snapshots differs apart from boundary-local origin"
-    );
-    assert_eq!(
-        one_version_rows(
-            &peer_store,
-            workspace_id,
-            "version-chunked",
-            "fork_base_snapshots",
-        ),
-        one_version_rows(
-            &source_store,
-            workspace_id,
-            "version-chunked",
-            "fork_base_snapshots",
-        ),
-        "fork_base_snapshots differs"
-    );
+    for table in ["snapshots", "fork_base_snapshots"] {
+        assert_eq!(
+            one_version_rows(&peer_store, workspace_id, "version-chunked", table),
+            one_version_rows(&source_store, workspace_id, "version-chunked", table),
+            "{table} differs"
+        );
+    }
 }
 
 #[tokio::test]
@@ -775,7 +761,7 @@ async fn lagging_peer_applies_prior_ops_then_a_chunked_fork_in_sequence() {
         copy_op_blobs(&source_store, &mut peer_store, op);
         apply_logged_op(&mut peer_store, workspace_id, op);
     }
-    for table in ["versions", "fork_base_snapshots"] {
+    for table in ["versions", "fork_base_snapshots", "snapshots"] {
         let order = if table == "versions" {
             "version_id"
         } else {
@@ -787,19 +773,6 @@ async fn lagging_peer_applies_prior_ops_then_a_chunked_fork_in_sequence() {
             "{table} differs"
         );
     }
-    let snapshot_rows_without_origin = |store: &EngineStore| {
-        without_snapshot_origin(workspace_table_rows(
-            store,
-            workspace_id,
-            "snapshots",
-            "version_id,path,object_id",
-        ))
-    };
-    assert_eq!(
-        snapshot_rows_without_origin(&peer_store),
-        snapshot_rows_without_origin(&source_store),
-        "snapshots differs apart from boundary-local origin"
-    );
 }
 
 async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root_dir: &Path) {

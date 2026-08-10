@@ -7064,11 +7064,7 @@ fn worker_main(
                         },
                         faults.as_ref(),
                         |tx, result| {
-                            journal_secret_moment_outbound_in_tx(
-                                tx,
-                                result.moment.as_ref(),
-                                |tx, _moment| journal_secret_put_outbound_in_tx(tx, result),
-                            )
+                            journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref())
                         },
                     )
                     .map_err(RuntimeError::from)
@@ -7103,11 +7099,7 @@ fn worker_main(
                         now_ms,
                         faults.as_ref(),
                         |tx, result| {
-                            journal_secret_moment_outbound_in_tx(
-                                tx,
-                                result.moment.as_ref(),
-                                journal_secret_put_moment_outbound_in_tx,
-                            )
+                            journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref())
                         },
                     )
                     .map_err(RuntimeError::from)
@@ -10079,16 +10071,12 @@ fn journal_secret_put_outbound_in_tx(
 fn journal_secret_moment_outbound_in_tx(
     tx: &rusqlite::Transaction<'_>,
     moment: Option<&SecretMomentRecord>,
-    journal_write: impl FnOnce(
-        &rusqlite::Transaction<'_>,
-        &SecretMomentRecord,
-    ) -> Result<(), DomainError>,
 ) -> Result<(), DomainError> {
     let Some(moment) = moment else {
         return Ok(());
     };
     match moment.operation {
-        SecretOp::Write => journal_write(tx, moment),
+        SecretOp::Write => journal_secret_put_moment_outbound_in_tx(tx, moment),
         SecretOp::Delete => journal_secret_delete_outbound_in_tx(tx, moment),
     }
 }
