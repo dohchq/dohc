@@ -138,22 +138,12 @@ pub fn enqueue_delete_job(
     enqueue_operation(tx, spec, MaterializationOperation::Delete)
 }
 
-/// Cancel every PENDING job targeting `path`, in the SAME transaction as the
-/// delete that removes the path from `path_aliases` (#739). A pending job
-/// predating this delete describes intent for a path the registry is about
-/// to stop tracking; left pending, a later replay (crash recovery, a fresh
-/// daemon start) would materialize it and resurrect exactly the bytes the
-/// delete removed — the daemon-side twin of the desktop capture's
-/// delete-wins rule (#697).
-///
-/// `Cancelled`, not deleted: the row stays as the durable record that a
-/// delete overtook it, the same way `Conflict` records an external write did
-/// — but never surfaced as something to resolve, because there is nothing to
-/// resolve.
-///
-/// Scoped like [`max_completed_generation_for_path`]: an empty
-/// `workspace_id` is the legacy global sentinel, matching every workspace's
-/// jobs for the path.
+/// Cancel pending WRITE jobs targeting `path` in the same transaction as the
+/// delete that removes the path from `path_aliases` (#739). Preserve a prior
+/// pending DELETE for the same path. After the prior delete clears the target,
+/// the replay ladder's "target already absent" short-circuit makes a later
+/// delete idempotent even if its preimage is stale. An empty `workspace_id` is
+/// the legacy global sentinel and matches every workspace's jobs for the path.
 pub fn cancel_pending_jobs_for_path(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -162,7 +152,7 @@ pub fn cancel_pending_jobs_for_path(
 ) -> Result<usize, StorageError> {
     tx.execute(
         "UPDATE materialization_jobs SET status = 'cancelled', completed_at_ms = ?3 \
-         WHERE status = 'pending' AND target_path = ?2 \
+         WHERE status = 'pending' AND operation = 'write' AND target_path = ?2 \
            AND (?1 = '' OR workspace_id = ?1 OR workspace_id = '')",
         rusqlite::params![workspace_id, path, now_ms],
     )
