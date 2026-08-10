@@ -1367,6 +1367,219 @@ async fn conflict_resolution_moment_replays_to_the_resolved_text_on_a_clean_peer
 }
 
 #[tokio::test]
+async fn conflict_resolution_delete_replays_to_an_absent_head_on_a_clean_peer() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-resolve-delete-outbound";
+    let path = "notes/delete.md";
+    initialize_workspace(&source_db, workspace_id, true);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
+    actor
+        .versioned_text_write_indexed(
+            write_path_input(
+                workspace_id,
+                "main",
+                path,
+                "object-delete-current",
+                "moment-delete-current",
+                "delete me\n",
+                10,
+            ),
+            source.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write current text");
+    let current =
+        VersionedTextStore::new(&mut EngineStore::open(&source_db, 3).expect("open current store"))
+            .read_text(workspace_id, "main", path)
+            .expect("read current")
+            .expect("current exists");
+    actor
+        .conflict_open(
+            Box::new(TextConflict {
+                conflict_id: "conflict-resolve-delete-outbound".to_owned(),
+                workspace_id: workspace_id.to_owned(),
+                path: path.to_owned(),
+                target_version_id: "main".to_owned(),
+                source_version_id: "source-version".to_owned(),
+                created_at_ms: 20,
+                updated_at_ms: 20,
+                status: ConflictStatus::Open,
+                chosen_from: ConflictChoice::Current,
+                resolution: None,
+                metadata: ConflictMetadata::origin("api"),
+                base: ConflictFileState::text(path, None),
+                current: ConflictFileState::text(path, Some(current)),
+                incoming: ConflictFileState::text(path, None),
+            }),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open delete conflict");
+    actor
+        .conflict_resolve_indexed(
+            ResolveTextConflict {
+                workspace_id: workspace_id.to_owned(),
+                conflict_id: "conflict-resolve-delete-outbound".to_owned(),
+                resolution: ResolveConflictKind::ApplyIncoming,
+                object_id: "resolved-delete-object".to_owned(),
+                write_moment_id: "moment-resolved-delete-write".to_owned(),
+                delete_moment_id: "moment-resolved-delete".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 30,
+                request_id: None,
+                conflict_answer_budget_bytes: usize::MAX,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            source.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("resolve delete conflict");
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ops(&source_db);
+    assert_eq!(
+        ops.iter().map(|op| op.op_kind.as_str()).collect::<Vec<_>>(),
+        ["moment.append", "moment.append"]
+    );
+    assert_eq!(ops[1].payload["momentId"], "moment-resolved-delete");
+    assert_eq!(ops[1].payload["operation"], "delete");
+    let peer = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer.engine_db_path().expect("peer db");
+    initialize_workspace(&peer_db, workspace_id, false);
+    let source_store = EngineStore::open(&source_db, 4).expect("open source store");
+    let mut peer_store = EngineStore::open(&peer_db, 5).expect("open peer store");
+    for op in &ops {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    assert!(
+        VersionedTextStore::new(&mut peer_store)
+            .read_text(workspace_id, "main", path)
+            .expect("read peer")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn conflict_resolution_binary_write_replays_to_the_incoming_bytes_on_a_clean_peer() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-resolve-binary-outbound";
+    let path = "assets/logo.bin";
+    let incoming_bytes = b"\x89BIN\x00incoming";
+    initialize_workspace(&source_db, workspace_id, true);
+    let incoming_sha = EngineStore::open(&source_db, 2)
+        .expect("open blob store")
+        .put_binary_blob(incoming_bytes)
+        .expect("store incoming blob");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&source_db, 3).expect("open actor").actor;
+    actor
+        .versioned_text_write_indexed(
+            write_path_input(
+                workspace_id,
+                "main",
+                path,
+                "object-binary-current",
+                "moment-binary-current",
+                "replace me\n",
+                10,
+            ),
+            source.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write current text");
+    let current =
+        VersionedTextStore::new(&mut EngineStore::open(&source_db, 4).expect("open current store"))
+            .read_text(workspace_id, "main", path)
+            .expect("read current")
+            .expect("current exists");
+    actor
+        .conflict_open(
+            Box::new(TextConflict {
+                conflict_id: "conflict-resolve-binary-outbound".to_owned(),
+                workspace_id: workspace_id.to_owned(),
+                path: path.to_owned(),
+                target_version_id: "main".to_owned(),
+                source_version_id: "source-version".to_owned(),
+                created_at_ms: 20,
+                updated_at_ms: 20,
+                status: ConflictStatus::Open,
+                chosen_from: ConflictChoice::Current,
+                resolution: None,
+                metadata: ConflictMetadata::origin("api"),
+                base: ConflictFileState::text(path, None),
+                current: ConflictFileState::text(path, Some(current)),
+                incoming: ConflictFileState::binary(path, incoming_sha.clone()),
+            }),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open binary conflict");
+    actor
+        .conflict_resolve_indexed(
+            ResolveTextConflict {
+                workspace_id: workspace_id.to_owned(),
+                conflict_id: "conflict-resolve-binary-outbound".to_owned(),
+                resolution: ResolveConflictKind::ApplyIncoming,
+                object_id: "resolved-binary-object".to_owned(),
+                write_moment_id: "moment-resolved-binary".to_owned(),
+                delete_moment_id: "moment-resolved-binary-delete".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 30,
+                request_id: None,
+                conflict_answer_budget_bytes: usize::MAX,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            source.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("resolve binary conflict");
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ops(&source_db);
+    assert_eq!(
+        ops.iter().map(|op| op.op_kind.as_str()).collect::<Vec<_>>(),
+        ["moment.append", "moment.append"]
+    );
+    assert_eq!(ops[1].payload["momentId"], "moment-resolved-binary");
+    assert_eq!(ops[1].payload["payloadAfterContentKind"], "binary");
+    let peer = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer.engine_db_path().expect("peer db");
+    initialize_workspace(&peer_db, workspace_id, false);
+    let source_store = EngineStore::open(&source_db, 5).expect("open source store");
+    let mut peer_store = EngineStore::open(&peer_db, 6).expect("open peer store");
+    for op in &ops {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    let peer_binary = VersionedTextStore::new(&mut peer_store)
+        .read_binary(workspace_id, "main", path)
+        .expect("read peer")
+        .expect("peer binary exists");
+    assert_eq!(peer_binary.sha256, incoming_sha);
+    assert_eq!(peer_binary.bytes, incoming_bytes);
+}
+
+#[tokio::test]
 async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
     let source = ScratchDir::new().expect("source scratch");
     let source_db = source.engine_db_path().expect("source db");
@@ -1388,18 +1601,19 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
             .await
             .expect("write rollback fixture");
     }
-    actor
+    let rollback = RollbackTextFileMutation {
+        workspace_id: workspace_id.to_owned(),
+        version_id: "main".to_owned(),
+        path: "notes/plan.md".to_owned(),
+        mutation_moment_id: "moment-rolled-back".to_owned(),
+        request_id: Some("rollback-outbound-stable".to_owned()),
+        legacy_before_text: None,
+        metadata_origin: "api".to_owned(),
+        author_json: None,
+    };
+    let first = actor
         .versioned_text_rollback(
-            RollbackTextFileMutation {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                path: "notes/plan.md".to_owned(),
-                mutation_moment_id: "moment-rolled-back".to_owned(),
-                request_id: None,
-                legacy_before_text: None,
-                metadata_origin: "api".to_owned(),
-                author_json: None,
-            },
+            rollback.clone(),
             source.path().to_path_buf(),
             Arc::new(NoRecorder),
             Arc::new(NoFaults),
@@ -1407,12 +1621,35 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
         )
         .await
         .expect("rollback latest write");
+    assert!(!first.deduped);
+    let replay = actor
+        .versioned_text_rollback(
+            rollback,
+            source.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("replay rollback");
+    assert!(replay.deduped);
     supervisor.close(&source_db).expect("close source actor");
 
     let ops = local_ops(&source_db);
     assert_eq!(
         ops.iter().map(|op| op.op_kind.as_str()).collect::<Vec<_>>(),
         ["moment.append", "moment.append", "moment.append"]
+    );
+    assert_eq!(
+        ops.iter()
+            .filter(|op| {
+                op.op_kind == "moment.append"
+                    && op.payload["momentId"]
+                        .as_str()
+                        .is_some_and(|moment_id| moment_id.starts_with("rollback-"))
+            })
+            .count(),
+        1
     );
     let peer = ScratchDir::new().expect("peer scratch");
     let peer_db = peer.engine_db_path().expect("peer db");
