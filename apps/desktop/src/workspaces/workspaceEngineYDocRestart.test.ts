@@ -21,6 +21,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import {
   createWorkspaceEngineCapture,
+  EXPECTED_ENGINE_EVENT_EXPIRY_MS,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
@@ -2294,7 +2295,21 @@ it("announces a recovered edit exactly once when both arm points run", async () 
 // stale until an unrelated edit.
 async function lockedRebindCapture(
   prefix: string,
-  options?: { daemonOwnsCapture?: boolean },
+  options?: {
+    daemonOwnsCapture?: boolean;
+    now?: () => number;
+    // Wraps the base provider open for one test's own generation, so it
+    // can override a single method (e.g. `settleNow`'s timing) while
+    // reusing everything else — the shared `state`'s locking, failure
+    // injection, and bookkeeping all keep working unmodified.
+    wrapProvider?: (
+      base: (
+        openOptions: EngineYdocProviderSessionOptions,
+      ) => Promise<EngineYdocProviderSession>,
+    ) => (
+      openOptions: EngineYdocProviderSessionOptions,
+    ) => Promise<EngineYdocProviderSession>;
+  },
 ) {
   // #630's scratch, like every other harness in this file: the run root is
   // swept even when a test fails, and an unremovable tree fails the suite
@@ -2364,6 +2379,11 @@ async function lockedRebindCapture(
     // The MESSAGE, not just the context: a debt that gives up has to say
     // what the user can act on, and only the error carries that.
     errorMessages: [] as string[],
+    // #746 P1-B: how many times a session discharged through evict instead
+    // of a materializing close. The orphan path already counts on this
+    // exit; a suppressed close-retry's own dirty-session refusal needs the
+    // same escape or its lease wedges the path busy until restart.
+    evicts: 0,
   };
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
@@ -2403,7 +2423,9 @@ async function lockedRebindCapture(
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
-      evict: async () => undefined,
+      evict: async () => {
+        state.evicts += 1;
+      },
       async applyLocalUpdate(update) {
         // The provider's post-#658 contract for a transient journal refusal:
         // it KEEPS the update (its own ladder resends it from durable state)
@@ -2417,6 +2439,9 @@ async function lockedRebindCapture(
       async settleNow() {
         state.settleCalls.push(gen);
         const token = ++tokens;
+        // Real provider ordering: the settle ANNOUNCES itself before its
+        // outcome is known, whatever that outcome turns out to be.
+        options.onSettleStart?.(token);
         if (state.settleFailure) {
           const failure = state.settleFailure;
           options.onSettleError?.(failure, token);
@@ -2537,7 +2562,9 @@ async function lockedRebindCapture(
     workspaceId,
     rootPath,
     rustEngineSessions: sessions,
-    openRustYDocProviderSession: openProvider,
+    openRustYDocProviderSession: options?.wrapProvider
+      ? options.wrapProvider(openProvider)
+      : openProvider,
     onError: (context, error) => {
       state.errors.push(context);
       state.errorMessages.push(
@@ -2545,6 +2572,7 @@ async function lockedRebindCapture(
       );
     },
     ...(options?.daemonOwnsCapture ? { daemonOwnsCapture: true } : {}),
+    ...(options?.now ? { now: options.now } : {}),
   });
   return { capture, state, loopback, workspaceId, rootPath };
 }
@@ -3374,6 +3402,467 @@ it("a materialized settle retires a session's deletion fence, so post-recovery e
   await capture.stop();
 }, 20_000);
 
+it("a retry whose own opts already carry settle:false still consults the tombstone before an escalated write", async () => {
+  // Codex P1-A on #746. `EngineYdocProviderSession.close` treats `settle:
+  // false` as a preference, not a promise: a release the daemon refuses
+  // ESCALATES to a full settling close unless the caller also passes
+  // `settleOnRefusal: false` (packages/workspace-engine-client/src/ydoc/
+  // ydocProviderSession.ts). The retry guard used to read `opts?.settle
+  // !== false && suppressSettleForRemoval()`: once a caller had ALREADY
+  // asked for `settle: false` — the vacate-before-delete shape,
+  // `entry.close({ settle: false })` from `settleAndCloseLiveYDocSessions`
+  // — the short-circuit skipped the tombstone check entirely and never
+  // forced `settleOnRefusal: false`, so a retry whose own close kept
+  // escalating on a persistent refusal could still materialize the doc
+  // onto a path deleted mid-ladder.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-settlefalse-escalate-",
+  );
+  const { session } = await openWithOneEdit(
+    capture,
+    "would resurrect via escalation",
+  );
+
+  // A release refusal unrelated to the settle itself — the shape
+  // `entry.close({ settle: false })` meets when the daemon's own store is
+  // busy releasing the lease. `settle: false` alone is only a preference,
+  // so the provider escalates and materializes the pending edit before
+  // throwing.
+  state.closeFailure = busyRefusal();
+  await expect(session.close({ settle: false })).rejects.toThrow(
+    "engine-store-busy",
+  );
+  // That escalation landed the pending edit once, before anything was
+  // deleted — the write is legitimate.
+  expect(state.settledMarkdowns).toEqual(["would resurrect via escalation"]);
+
+  // The watcher observes the external delete while the ladder sleeps
+  // between attempts, exactly as the sibling pin below.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // RED before the fix: the retry's own opts still carry `settle: false`
+  // from the original call, so `opts?.settle !== false` short-circuited
+  // the tombstone check and the retry's escalated settle re-wrote the doc
+  // onto the path the user just deleted — a SECOND entry lands in
+  // `settledMarkdowns` after the delete.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.settledMarkdowns).toEqual(["would resurrect via escalation"]);
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+  await capture.stop();
+}, 10_000);
+
+it("a suppressed retry's dirty-session refusal discharges through evict instead of wedging the lease", async () => {
+  // Codex P1-B on #746. Forcing `settleOnRefusal: false` on a suppressed
+  // retry (the P1-A fix above) can meet a daemon that refuses the
+  // non-settling release because the session still holds unsettled state —
+  // `ydoc-unsettled-close` — and that refusal is TERMINAL, not transient
+  // (`isTransientEngineRefusal` names only file-locked and
+  // engine-store-busy). Left as a plain rethrow, `scheduleTransientCloseRetry`
+  // never re-arms, and the live entry stays registered with the daemon's
+  // lease held — every later open of the path refuses busy until restart.
+  // The evict discharge the orphan path already uses on this exact refusal
+  // must cover the suppressed-and-refused shape too: nothing is lost (the
+  // durable lineage survives an evict), and nothing is stranded.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-unsettled-discharge-",
+  );
+  const { session } = await openWithOneEdit(capture, "must not wedge the lease");
+
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // The lock clears, but the RELEASE itself now refuses hard: the daemon
+  // will not drop a dirty session without settling it.
+  state.locked = false;
+  state.closeFailure = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "ydoc-unsettled-close", retry: "no" },
+    new Error("daemon response"),
+  );
+
+  // RED before the fix: nothing ever evicts a non-orphaned entry, so the
+  // terminal refusal just stops the ladder with the lease still held.
+  await expect.poll(() => state.evicts, { timeout: 15_000 }).toBe(1);
+  // The refusal never escalated into a write: the deleted path stays gone.
+  expect(state.settledMarkdowns).toEqual([]);
+
+  // No busy-wedge: a fresh open of the same path succeeds outright. Clear
+  // the persistent release refusal first — it was this session's own
+  // refusal, not a standing property of the path.
+  state.closeFailure = null;
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  expect(reopened).toBeTruthy();
+  await reopened.close({ settle: false });
+  await capture.stop();
+}, 20_000);
+
+it("a delete delivered while the capture chain is busy still suppresses a retry that fires before the chain drains", async () => {
+  // Codex P1-C on #746. `captureBatch` QUEUES `cleanupDetachedDebtForEvent`
+  // — the only place that used to record the no-debt tombstone — onto the
+  // capture chain, so it does not run until the chain is free. The
+  // close-retry ladder's own timer runs OFF the chain, and every sibling
+  // pin above hides this ordering by awaiting `capture.flush()` before the
+  // retry window: that guarantees the tombstone landed first. In
+  // production a busy chain (reconciliation, a version op, another
+  // batch) can leave the cleanup queued behind it for as long as that
+  // work takes, and a retry firing inside that window used to find no
+  // tombstone at all and resurrect the file. No `flush()` runs here before
+  // the retry fires — the chain stays occupied the whole time.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-chain-busy-",
+  );
+  const { session } = await openWithOneEdit(
+    capture,
+    "would resurrect via chain race",
+  );
+
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+  // Nothing blocks the retry's own settle technically — only the tombstone
+  // (once it is visible) should stop it.
+  state.locked = false;
+
+  // Occupy the chain with a parked open, the same technique the existing
+  // rollback-window pins use: the open runs as a chain task and does not
+  // resolve until the test releases the gate, so anything enqueued after
+  // it — including this delete's cleanup — stays queued.
+  let releaseOpen!: () => void;
+  state.openGate = new Promise<void>((resolve) => {
+    releaseOpen = resolve;
+  });
+  const attemptsBeforePark = state.openAttempts;
+  const parked = capture.openYDocSession({
+    path: "other.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await expect
+    .poll(() => state.openAttempts, { timeout: 15_000 })
+    .toBeGreaterThan(attemptsBeforePark);
+
+  // The watcher delivers the delete while the chain is still stuck inside
+  // the parked open — deliberately no `await capture.flush()` here.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+
+  // RED before the fix: the enqueued cleanup that used to be the only
+  // place recording the tombstone is still queued behind the parked open,
+  // so the retry (which fires here, off-chain) finds nothing and
+  // resettles the doc onto the path the user just deleted.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.settledMarkdowns).toEqual([]);
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+
+  releaseOpen();
+  await (await parked).close({ settle: false });
+  await capture.stop();
+}, 20_000);
+
+it("a delete landing past the tombstone's own TTL still suppresses an active retry ladder directly", async () => {
+  // Certification follow-up on #746 (TTL boundary): the no-debt
+  // tombstone's TTL (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`, 10s) and the
+  // close-retry ladder's own doubling delay cap (`TEARDOWN_RETRY_CAP_MS`,
+  // also 10s) converge — once the ladder is capped, the gap between two
+  // consecutive retries EQUALS the tombstone's own TTL. A delete landing
+  // right after one retry's own consult can sit unconsulted for that
+  // whole gap, and the map-only tombstone expires before the next retry
+  // ever asks. `armRemovalSuppression` (the fix) arms the session
+  // directly, at watcher-delivery time, bypassing the TTL-bounded map for
+  // that session entirely — nothing there can expire.
+  //
+  // A virtual clock proves this without a real 10s+ wait: the retry
+  // ladder still fires on its own real timers, but `now()` reports a
+  // delete old enough that the map-only path would already read it as
+  // expired by the time any retry consults it.
+  let virtualNowMs = 1_000_000;
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-ttl-boundary-",
+    { now: () => virtualNowMs },
+  );
+  const { session } = await openWithOneEdit(
+    capture,
+    "must not resurrect past the tombstone's own TTL",
+  );
+
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+
+  // Virtual time must actually move past the session's own open time
+  // before the delete lands — the age discrimination (recreation vs. the
+  // stale incarnation a delete orphaned) reads an EQUAL timestamp as "not
+  // before the delete", same as the map-based door does.
+  virtualNowMs += 500;
+
+  // The delete lands — `armRemovalSuppression` sees it immediately, at
+  // THIS virtual time. Only afterward does virtual time jump past the
+  // tombstone's own TTL, well before the retry (still on a real ~1s
+  // timer) ever fires.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  virtualNowMs += EXPECTED_ENGINE_EVENT_EXPIRY_MS + 1;
+
+  state.locked = false;
+
+  // RED before the fix: the retry's only door was the TTL-bounded map,
+  // already expired by virtual time, so the retry re-settled the doc onto
+  // the path the user just deleted.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.settledMarkdowns).toEqual([]);
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+  await capture.stop();
+}, 10_000);
+
+it("a delete landing after a settle's write but before its late onSettled callback still suppresses the retry", async () => {
+  // Codex P1 on 847ef7d9: the synchronous tombstone recording above (the
+  // P1-C fix) exposed an ordering hazard in the SEPARATE clear #681 round
+  // 9 added — `onSettled`, on a materialized write, unconditionally
+  // retired this path's no-debt tombstone, on the theory that landing a
+  // write proves an earlier deletion's premise no longer holds. But
+  // `onSettled` can run LATE: behind an occupied capture chain, or simple
+  // scheduling. A delete landing in that exact gap — after the write
+  // already materialized, before the stale callback finally runs — used
+  // to have its OWN, newer tombstone erased by that late callback, purely
+  // because an OLDER settle's completion happened to run after it.
+  let releaseSettled!: () => void;
+  const settleGate = new Promise<void>((resolve) => {
+    releaseSettled = resolve;
+  });
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-settle-clear-race-",
+    {
+      wrapProvider: (base) => async (openOptions) => {
+        const inner = await base(openOptions);
+        let token = 0;
+        return {
+          ...inner,
+          async settleNow() {
+            token += 1;
+            const thisToken = token;
+            const markdown = inner.doc.getText("plainText").toString();
+            openOptions.onSettleStart?.(thisToken);
+            const result = {
+              momentId: `moment-race-${thisToken}`,
+              path: openOptions.path,
+              markdown,
+              sha256: createHash("sha256").update(markdown).digest("hex"),
+              materialized: true,
+              projection: {
+                contentKind: "plaintext" as const,
+                sourceStateVectorSha256: "c".repeat(64),
+                destructive: false,
+              },
+            };
+            // THE WRITE LANDS now — observable immediately, same as a real
+            // materialized settle.
+            state.settledMarkdowns.push(markdown);
+            // The callback that reports it is late.
+            await settleGate;
+            await openOptions.onSettled?.(result, thisToken);
+            return result;
+          },
+        };
+      },
+    },
+  );
+  const { session } = await openWithOneEdit(capture, "first version");
+
+  // The settle starts and its write lands, but its own completion
+  // callback is held open — modelling a chain occupied by other work.
+  const settling = session.settleNow();
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["first version"]);
+
+  // The delete lands INSIDE the gap: after the write, before the stale
+  // callback. No debt exists for this path, so this is the no-debt
+  // tombstone the stale callback must not erase.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // The stale callback finally fires and reaches its own clear.
+  releaseSettled();
+  await settling;
+
+  // A later close-retry ladder must still find the tombstone. RED before
+  // the fix: the stale callback already erased it, so this retry
+  // resettles the doc onto the path the user just deleted.
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+  state.locked = false;
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.settledMarkdowns).toEqual(["first version"]);
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+  await capture.stop();
+}, 20_000);
+
+it("a recreated path's fresh close-retry ladder still settles normally despite an earlier delete", async () => {
+  // #746 non-regression, the inverse of the pin above: this session opens
+  // AFTER the delete-then-recreate, so it is not the incarnation any
+  // tombstone names — the fix must not start refusing it. True at both
+  // the unfixed and the fixed head (run first, to prove the pin does not
+  // depend on the fix): a fresh session's close-retry ladder never
+  // consulted the tombstone before this PR either, and the age
+  // discrimination #744 built for the registration door already answers
+  // "no" for this session once the fix asks it too.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-recreate-",
+  );
+
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  await capture.flush();
+
+  const { session } = await openWithOneEdit(capture, "a real pending edit");
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+
+  state.locked = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["a real pending edit"]);
+  await capture.stop();
+}, 20_000);
+
+it("a suppressed close-retry ladder stands down once, honestly, instead of resurrecting or repeating", async () => {
+  // #746: `scheduleDetachedLockedSettle` (above) is the debt-REGISTRATION
+  // door, reached only through the replicated `YdocReleasedWithSettleFailureError`
+  // shape. An UNREPLICATED close refusal never reaches it at all —
+  // `scheduleTransientCloseRetry` retries `closeEntry` itself, off the
+  // capture chain, with no debt ever registered — so none of #744's
+  // registry-side fences ever see this ladder. An external delete landing
+  // between the failed first attempt and a later retry used to be
+  // silently undone by that retry's own settle.
+  //
+  // Stand-down honesty (the close-result contract): once removal evidence
+  // suppresses a retry's settle, the ladder must record that ONE
+  // stand-down and stop — never report a landed artifact, and never
+  // re-consult (or re-announce) a tombstone it already consumed on a
+  // later retry. The exactly-once assertion below subsumes the weaker
+  // at-least-once check a resurrection alone would need: it proves both
+  // that nothing resettled AND that the stand-down never repeats.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-standdown-",
+  );
+  const { session } = await openWithOneEdit(capture, "stood-down content");
+
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+
+  // The watcher observes the external delete while the ladder sleeps
+  // between attempts. No debt exists yet for this path — Ladder B never
+  // registers one — so the no-debt tombstone is the only place this is
+  // remembered.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  state.locked = false;
+
+  // Let several retry windows pass — the ladder's own doubling delay,
+  // twice over.
+  await new Promise((resolve) => setTimeout(resolve, 3_500));
+
+  // The close result stays truthful: no artifact ever landed...
+  expect(state.settledMarkdowns).toEqual([]);
+  // ...and the stand-down was recorded exactly once, not re-announced on
+  // every later retry.
+  expect(
+    state.errorMessages.filter((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toHaveLength(1);
+  await capture.stop();
+}, 15_000);
+
+it("a suppressed retry's own transient release failure still stands down on the following retry", async () => {
+  // Certification follow-up on #746: `suppressSettleForRemoval`'s
+  // stickiness (`if (writeCancelled) return true;`, checked before any
+  // tombstone consult) is what protects a SECOND retry once the FIRST
+  // suppressed close's own release fails transiently — not a lock, this
+  // time, but the same file-locked/engine-store-busy class the ladder
+  // already retries through. Without stickiness, the tombstone was
+  // already consumed by the first suppression, so a later retry that
+  // re-asked would find nothing and settle the doc back onto the deleted
+  // path. `writeCancelled` alone is what makes a second, third, or
+  // Nth suppressed retry as honest as the first.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-standdown-sticky-",
+  );
+  const { session } = await openWithOneEdit(
+    capture,
+    "must not resurrect after a hiccup",
+  );
+
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  state.locked = false;
+  // The suppressed retry's own settle:false release meets a transient
+  // refusal of its own — unrelated to the file lock above, and unrelated
+  // to the tombstone this retry already consumed.
+  state.closeFailure = busyRefusal();
+
+  // The first suppressed retry fires (~1s) and stands down exactly once.
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.filter((message) =>
+          message.includes("an external delete of note.md removed the path"),
+        ).length,
+      { timeout: 15_000 },
+    )
+    .toBe(1);
+  expect(state.settledMarkdowns).toEqual([]);
+  const closesAtFirstStandDown = state.closeCalls.length;
+
+  // The release clears; the next retry (~2s later, the doubled delay)
+  // must complete WITHOUT re-consulting or re-announcing the tombstone —
+  // only `writeCancelled`'s stickiness can produce that, since the
+  // tombstone itself was already consumed by the first suppression. Poll
+  // for the SECOND retry's own close call having actually run before
+  // asserting silence — a fixed sleep here would let a loaded runner pass
+  // vacuously, before the second retry ever fires.
+  state.closeFailure = null;
+  await expect
+    .poll(() => state.closeCalls.length, { timeout: 15_000 })
+    .toBeGreaterThan(closesAtFirstStandDown);
+  expect(state.settledMarkdowns).toEqual([]);
+  expect(
+    state.errorMessages.filter((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toHaveLength(1);
+
+  // No busy-wedge left behind: the eventually-clean release freed the path.
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await reopened.close({ settle: false });
+  await capture.stop();
+}, 20_000);
+
 it("a delete refuses the open that could register a debt while disk work is in flight", async () => {
   // #696 rescanned for debts registered after its suspension snapshot. #697
   // makes that late registration unreachable: a new live open cannot enter
@@ -3483,6 +3972,63 @@ it("a FAILED delete restores the detached locked debt instead of cancelling it",
   await expect
     .poll(() => state.settledMarkdowns, { timeout: 15_000 })
     .toEqual(["survives a failed delete"]);
+  await capture.stop();
+}, 20_000);
+
+it("a delete's watcher event landing during a suspended debt's window still suppresses the restored payment", async () => {
+  // Certification follow-up on #746, the three-way race the sibling pin
+  // above sets up half of. `settleAndCloseLiveSessionsForPath` SUSPENDS a
+  // registered debt for its own attempt window (`suspendDetachedDebts`
+  // removes it from the registry entirely, not merely marks it). An
+  // external delete's watcher event landing in that exact window sees NO
+  // debt registered — `detachedLockedDebts.has(path)` is false — so it
+  // becomes the no-debt tombstone (#681 round 7), the same door a path
+  // with no debt at all would hit. When the destructive op then FAILS,
+  // `restoreSuspendedDebts` puts the SAME debt back and re-arms it. The
+  // restored payment's own `settleForProof` must still ask
+  // `suppressSettleForRemoval()` before writing — the debt's mere
+  // continued existence says nothing about whether the path is still
+  // there.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-suspend-restore-race-",
+  );
+  const { session } = await openWithOneEdit(
+    capture,
+    "must not resurrect after a suspended restore",
+  );
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+
+  // A destructive op suspends the debt for the length of its own attempt.
+  const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
+
+  // The external delete's watcher event lands INSIDE the suspension
+  // window — no debt is registered right now, so this is the exact
+  // no-debt tombstone shape.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // The destructive op FAILS: restore and re-arm, not cancel.
+  finishDelete(false);
+  state.locked = false;
+
+  // RED before the fix: the restored payment's own settle never asked
+  // about the tombstone and resettled the doc onto the path the watcher
+  // had already confirmed gone.
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.some((message) =>
+          message.includes("an external delete of note.md removed the path"),
+        ),
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+  expect(state.settledMarkdowns).toEqual([]);
   await capture.stop();
 }, 20_000);
 

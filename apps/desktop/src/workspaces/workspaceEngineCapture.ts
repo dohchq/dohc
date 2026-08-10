@@ -1430,6 +1430,14 @@ export function createWorkspaceEngineCapture(
     // data-integrity-critical teardown). Reused by the returned session's
     // close(), the renderer close IPC, and every lifecycle op below.
     close: (opts?: WorkspaceEngineYDocCloseOptions) => Promise<void>;
+    // This session's own way to apply a delete directly (codex P1-C
+    // follow-up on #746), read only while `status` is "failing-close":
+    // `captureBatch`'s synchronous delete pass calls it at
+    // watcher-delivery time instead of relying solely on the TTL-bounded
+    // no-debt tombstone map. A close-retry ladder's own doubling delay
+    // caps at the same 10s as that TTL, so a delete landing right after
+    // one retry can otherwise expire before the next retry arrives to ask.
+    armRemovalSuppression: (expected: boolean, deletedAtMs: number) => void;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
   // The detached locked-write debts, by path: each entry is the payment
@@ -2657,20 +2665,10 @@ export function createWorkspaceEngineCapture(
   // leaves that path's own verdict intact either way).
   async function cleanupDetachedDebtForEvent(event: WatcherEvent): Promise<void> {
     if (!detachedLockedDebts.has(event.path)) {
-      // A confirmed "delete" operation still means the path is gone, even
-      // with no debt registered yet to clean up: remember it, so a debt
-      // that registers LATER (#681 round 7) does not treat this as news.
-      // Scoped to the "delete" operation only (no disk read needed) to
-      // keep every other path, secrets included, untouched by this door
-      // (#681 round 5). `peekExpectedEvent` decides EXPECTED vs EXTERNAL
-      // here too (#681 round 8) — the recorder is the only place that
-      // verdict is still known once this becomes a bare memory.
-      if (event.operation === "delete") {
-        noteExternalDeleteWithNoDebt(
-          event.path,
-          peekExpectedEvent("delete", event.path),
-        );
-      }
+      // `captureBatch`'s own synchronous pass, at watcher-delivery time,
+      // already recorded a delete's no-debt tombstone (codex P1-C on
+      // #746) — nothing is left to do for a path with no debt by the time
+      // this enqueued task runs.
       return;
     }
     if (event.operation === "delete") {
@@ -3226,6 +3224,35 @@ export function createWorkspaceEngineCapture(
     captureBatch(events) {
       if (events.length === 0) return;
       const batch = events.map((event) => ({ ...event }));
+      // The no-debt tombstone (codex P1-C on #746), recorded HERE at
+      // watcher-delivery time rather than inside the enqueued cleanup
+      // below. A close-retry's own removal check runs OFF the capture
+      // chain, on its own timer, and a chain busy with reconciliation or a
+      // version op can leave the cleanup task queued behind that work for
+      // as long as it runs. A retry firing inside that window used to find
+      // no tombstone at all — nothing had recorded it yet — and resurrect
+      // the file. `detachedLockedDebts` and `expectedEvents` are plain
+      // maps a synchronous read sees exactly as fresh as the enqueued
+      // read would, so recording immediately only narrows the window.
+      //
+      // A retrying entry ALSO gets armed directly (codex P1-C follow-up):
+      // the tombstone's own TTL (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`) caps at
+      // the same 10s the close-retry ladder's doubling delay eventually
+      // reaches, so a delete landing right after one retry can otherwise
+      // expire before the next one arrives to consume it. Calling the
+      // session's own door bypasses the TTL for that session entirely —
+      // nothing here can expire, because nothing here is a map entry.
+      for (const event of batch) {
+        if (event.operation !== "delete") continue;
+        const expected = peekExpectedEvent("delete", event.path);
+        if (!detachedLockedDebts.has(event.path)) {
+          noteExternalDeleteWithNoDebt(event.path, expected);
+        }
+        const live = liveYDocSessions.get(event.path);
+        if (live?.status === "failing-close") {
+          live.armRemovalSuppression(expected, now());
+        }
+      }
       // Registry maintenance, not capture (#681 round 6, codex P2-B): runs
       // for every batch regardless of `daemonOwnsCapture`, ahead of the
       // early return below. See `cleanupDetachedDebtForEvent`'s own
@@ -3430,6 +3457,17 @@ export function createWorkspaceEngineCapture(
         const settleClaims = new Map<string, number>();
         const settleId = (token: number, generation: number): string =>
           `${generation}:${token}`;
+        // WHEN this settle started (codex P1 on #746's synchronous
+        // tombstone): the no-debt tombstone clear below must not erase a
+        // delete newer than the write it certifies. A settle's own
+        // completion callback can run late — behind an occupied capture
+        // chain, or simple scheduling — so an external delete landing
+        // AFTER the write already materialized, but BEFORE this callback
+        // runs, must survive the clear. Keyed on start, not completion:
+        // the write could have landed any time from here on, so a
+        // tombstone recorded at or after this moment might be exactly
+        // that delete.
+        const settleStartedAtMs = new Map<string, number>();
         const noteUpdate = (): void => {
           updatesSeen += 1;
         };
@@ -3460,6 +3498,8 @@ export function createWorkspaceEngineCapture(
           // redeem.
           const claim = settleClaims.get(settleId(token, generation));
           settleClaims.delete(settleId(token, generation));
+          const startedAtMs = settleStartedAtMs.get(settleId(token, generation));
+          settleStartedAtMs.delete(settleId(token, generation));
           if (claim !== undefined && claim > updatesSettled) updatesSettled = claim;
           lastSettledSha = result.sha256;
           // The settle committed, but the engine says the FILE did not move
@@ -3491,7 +3531,22 @@ export function createWorkspaceEngineCapture(
           // this, a still-later transient close failure for the SAME
           // session, over edits made AFTER this recovery, would read as
           // belonging to the deleted incarnation and get wrongly cancelled.
-          recentExternalDeletesWithNoDebt.delete(input.path);
+          //
+          // ONLY a tombstone that PREDATES this settle's own start (codex
+          // P1 follow-up on #746's synchronous recording): this callback
+          // can run late, behind an occupied capture chain, and a delete
+          // landing after the write already materialized but before this
+          // callback runs must survive — clearing it here would erase the
+          // one place that evidence is recorded, purely because an OLDER
+          // settle's completion happened to run after it.
+          const staleTombstone = recentExternalDeletesWithNoDebt.get(input.path);
+          if (
+            staleTombstone !== undefined &&
+            startedAtMs !== undefined &&
+            staleTombstone.deletedAtMs <= startedAtMs
+          ) {
+            recentExternalDeletesWithNoDebt.delete(input.path);
+          }
           //
           // Clear the ABANDONMENT, not the debt (CodeRabbit): this entry may
           // belong to an OLDER generation whose own release is still being
@@ -3575,6 +3630,7 @@ export function createWorkspaceEngineCapture(
         // settle that follows it; one sent after this point is not.
         const onSettleStart = (token: number, generation: number) => {
           settleClaims.set(settleId(token, generation), updatesSeen);
+          settleStartedAtMs.set(settleId(token, generation), now());
           reportSaveState("settling", token);
         };
         // The one place a background settle failure is observable. Log it with
@@ -3605,6 +3661,7 @@ export function createWorkspaceEngineCapture(
           // This settle carried nothing to History, so its claim is dropped
           // unredeemed — and only ITS claim, whichever settle finishes first.
           settleClaims.delete(settleId(token, generation));
+          settleStartedAtMs.delete(settleId(token, generation));
           if (typeof error === "object" && error !== null) {
             settleFailureTokens.set(error, token);
           }
@@ -3774,6 +3831,49 @@ export function createWorkspaceEngineCapture(
             `locked-write retry stopped: the engine committed the settle but did not write ${input.path}. dohc does not write through symlinks, and either the file or a folder above it is one. The edits stay in the document's history. Replace the linked file with a real file, or the linked folder with a real folder. Then open ${input.path} to write it again.`,
           );
 
+        // The one stand-down message both the registration door
+        // (`scheduleDetachedLockedSettle`, below) and a retry's own consult
+        // (`suppressSettleForRemoval`, next) report on the same tombstone
+        // match — kept as one string so the two doors can never drift apart.
+        const removalStandDownMessage = (tombstone: { expected: boolean }): string =>
+          tombstone.expected
+            ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
+            : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`;
+
+        // `captureBatch`'s direct-arm door (codex P1-C follow-up, #746):
+        // called at watcher-delivery time, bypassing the TTL-bounded
+        // no-debt tombstone map entirely, so nothing here can expire before
+        // a later-stage retry arrives to ask. The same age discrimination
+        // `consumeRecentExternalDeleteWithNoDebt` applies still holds — a
+        // session opened AFTER the delete is this path's later recreation,
+        // not the incarnation the delete orphaned.
+        const armRemovalSuppression = (expected: boolean, deletedAtMs: number): void => {
+          if (writeCancelled || sessionOpenedAtMs >= deletedAtMs) return;
+          standDownFromWrite(removalStandDownMessage({ expected }));
+        };
+
+        // A RETRY's own removal check (#746). `scheduleDetachedLockedSettle`
+        // (below) is the debt-REGISTRATION door and asks this once, but two
+        // ladders re-run a settle without ever passing back through it: this
+        // debt's own payment retry (`settleForProof`) once armed, and the
+        // separate close-retry ladder (`scheduleTransientCloseRetry`) that
+        // owns the unreplicated shape and never registers a debt at all. A
+        // delete landing after registration but before one of those retries
+        // used to reach neither fence. Both ask HERE, at the last point
+        // before their own write. `writeCancelled` makes the stand-down
+        // sticky: once one retry stands down, every later retry short-circuits
+        // without re-consuming or re-announcing the same tombstone.
+        const suppressSettleForRemoval = (): boolean => {
+          if (writeCancelled) return true;
+          const tombstone = consumeRecentExternalDeleteWithNoDebt(
+            input.path,
+            sessionOpenedAtMs,
+          );
+          if (tombstone === null) return false;
+          standDownFromWrite(removalStandDownMessage(tombstone));
+          return true;
+        };
+
         const payDetachedLockedDebt = async (): Promise<void> => {
           // Another edge may have paid, transferred, or CANCELLED this debt
           // after the timer's own check — a destructive vacate cancels
@@ -3829,10 +3929,15 @@ export function createWorkspaceEngineCapture(
             // awaited RPC — the version read, the open, the reconnect ladder.
             // Settling on that stale yes writes the path the user just removed
             // or moved away, which is the recreation every fence above exists
-            // to prevent.
+            // to prevent. `suppressSettleForRemoval` covers the same window
+            // for a delete that landed AFTER registration passed with no
+            // tombstone yet on record (#746). `suppressSettleForRemoval`
+            // already opens with `if (writeCancelled) return true;`, side-
+            // effect-free, so a separate `writeCancelled ||` guard here
+            // would only duplicate that check.
             if (
-              writeCancelled ||
-              detachedLockedDebts.get(input.path)?.pay !== payDetachedLockedDebt
+              detachedLockedDebts.get(input.path)?.pay !== payDetachedLockedDebt ||
+              suppressSettleForRemoval()
             ) {
               throw new DetachedPaymentCancelledError(input.path);
             }
@@ -4122,11 +4227,7 @@ export function createWorkspaceEngineCapture(
           if (tombstone !== null) {
             onError(
               `ydoc close retry of ${input.path}`,
-              new Error(
-                tombstone.expected
-                  ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
-                  : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`,
-              ),
+              new Error(removalStandDownMessage(tombstone)),
             );
             return;
           }
@@ -4162,9 +4263,31 @@ export function createWorkspaceEngineCapture(
           transientCloseRetryTimer = setTimeout(() => {
             transientCloseRetryTimer = null;
             if (stopped || liveYDocSessions.get(input.path) !== entry) return;
-            void closeEntry(opts).catch((retryError: unknown) => {
+            // THIS retry's own removal check (#746). No debt is ever
+            // registered for this ladder, so nothing else asks whether the
+            // file this retry is about to write was deleted since the last
+            // attempt. Ask here, at the last point before the retry's own
+            // settle — the FIRST attempt (above, not this timer) keeps
+            // asking nothing, exactly as before, so a settle refusal it
+            // meets still produces the same failure the registration door
+            // downstream depends on.
+            //
+            // ALWAYS asked, even when this retry's own opts already carry
+            // `settle: false` (codex P1-A): that option is a preference, not
+            // a promise — a release the daemon refuses still ESCALATES to a
+            // settling close unless `settleOnRefusal: false` comes with it
+            // (ydocProviderSession.ts) — so a caller's own settle:false does
+            // not retire the resurrection risk this check exists to catch.
+            const retryOpts: WorkspaceEngineYDocCloseOptions | undefined =
+              suppressSettleForRemoval()
+                ? { ...opts, settle: false, settleOnRefusal: false }
+                : opts;
+            void closeEntry(retryOpts).catch((retryError: unknown) => {
               if (isTransientEngineCause(retryError)) {
-                scheduleTransientCloseRetry(retryError, opts);
+                // `retryOpts`, not the outer `opts`: a suppressed retry's
+                // forced `settle: false, settleOnRefusal: false` must carry
+                // into whichever call ends up arming the next attempt.
+                scheduleTransientCloseRetry(retryError, retryOpts);
                 return;
               }
               // A non-lock failure is new information: the debt cannot be
@@ -4212,10 +4335,21 @@ export function createWorkspaceEngineCapture(
             // of the session and keeps the lineage, so the next open
             // resurrects this document's edits.
             //
-            // ONLY an orphan — a session someone HOLDS is converged by its
-            // holder. And only a TERMINAL refusal: a busy store or a spent
-            // budget is waited out by the ladders that already exist.
-            if (liveEntry.orphaned && isYdocUnsettledCloseRefusal(error)) {
+            // An orphan, OR a write this session already cancelled for good
+            // (codex P1-B on #746): a suppressed close-retry forces the same
+            // `settleOnRefusal: false` an orphan's release uses, and can meet
+            // the same dirty-session refusal — but `writeCancelled` means no
+            // caller is ever getting a materialized write from this session
+            // again, so leaving it to strand the lease busy until restart is
+            // strictly worse than discharging it the orphan's way. A session
+            // someone still HOLDS with an OPEN write is converged by its
+            // holder instead. And only a TERMINAL refusal either way: a busy
+            // store or a spent budget is waited out by the ladders that
+            // already exist.
+            if (
+              (liveEntry.orphaned || writeCancelled) &&
+              isYdocUnsettledCloseRefusal(error)
+            ) {
               try {
                 await session.evict();
                 dischargedByEvict = true;
@@ -4332,6 +4466,7 @@ export function createWorkspaceEngineCapture(
           status: "live",
           orphaned: false,
           close: closeEntry,
+          armRemovalSuppression,
         };
         entry = liveEntry;
         // A session whose release FAILED is still the daemon's: a refused
