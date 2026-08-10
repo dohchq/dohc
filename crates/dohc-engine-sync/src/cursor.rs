@@ -4,13 +4,6 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::SyncError;
 use crate::model::bounded;
 
-fn current_time_ms() -> Result<i64, SyncError> {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(SyncError::corrupt)?;
-    i64::try_from(elapsed.as_millis()).map_err(SyncError::corrupt)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorKind {
     RelayFetch,
@@ -79,6 +72,7 @@ pub fn commit_relay_cursor(
     workspace_id: &str,
     cursor: &RelayCursor,
     faults: &dyn FaultInjector,
+    now_ms: i64,
 ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     if !(0..=crate::MAX_WIRE_INTEGER).contains(&cursor.cursor) {
@@ -113,7 +107,8 @@ pub fn commit_relay_cursor(
                 ],
             )
             .map_err(SyncError::persist)?;
-            let sharing_declined = backfill_after_first_position(tx, workspace_id, was_enrolled)?;
+            let sharing_declined =
+                backfill_after_first_position(tx, workspace_id, was_enrolled, now_ms)?;
             // A committed cursor means the stream never replays coordinates
             // at or before this pull, so persisted pending-resolve decisions
             // kept for retry reconstruction are dead.
@@ -183,6 +178,7 @@ pub(crate) fn write_pushed_seq(
     origin_id: &str,
     pushed_seq: i64,
     faults: &dyn FaultInjector,
+    now_ms: i64,
 ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
     if !(-1..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
         return Err(SyncError::InvalidInput {
@@ -199,7 +195,7 @@ pub(crate) fn write_pushed_seq(
                 params![workspace_id, origin_id, pushed_seq],
             )
             .map_err(SyncError::persist)?;
-            backfill_after_first_position(tx, workspace_id, was_enrolled)
+            backfill_after_first_position(tx, workspace_id, was_enrolled, now_ms)
         })
 }
 
@@ -207,11 +203,12 @@ fn backfill_after_first_position(
     tx: &Transaction<'_>,
     workspace_id: &str,
     was_enrolled: bool,
+    now_ms: i64,
 ) -> Result<Vec<crate::SharingDeclined>, SyncError> {
     if was_enrolled {
         return Ok(Vec::new());
     }
-    crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, current_time_ms()?)
+    crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)
 }
 
 pub(crate) fn rewind_pushed_seq(

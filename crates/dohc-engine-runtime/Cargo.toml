@@ -31,6 +31,7 @@ thiserror = "2"
 # (libsqlite3-sys 0.35 build.rs: -DSQLITE_ENABLE_FTS5; bundle 3.50.2) — no extra
 # feature needed. Same version the storage/domain crates content-address with.
 rusqlite = { version = "0.40", features = ["bundled"] }
+yrs = "=0.27.3"
 # The async command loop. The writer connection still lives on ONE dedicated
 # blocking OS thread (never on the runtime); commands flow over tokio::sync
 # channels and the worker receives them via `blocking_recv`.

@@ -21,7 +21,9 @@ use dohc_engine_sync::{
 };
 use dohc_engine_testkit::ScratchDir;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use yrs::types::Attrs;
+use yrs::{Any, Doc, OffsetKind, Options, ReadTxn, Text, Transact};
 
 /// A locally-originated relay-visible op, shaped as a peer receives it.
 #[derive(Debug, Clone)]
@@ -262,6 +264,140 @@ async fn capture_seed(
         .object_id
 }
 
+struct OversizedLineage {
+    base: Vec<u8>,
+    remote_edit: Vec<u8>,
+}
+
+/// One projectable document whose accumulated CRDT history is too large to
+/// originate as a base. The visible text stays at 1 MiB while interior
+/// replacements add the unbounded revision-churn headroom described by #549.
+fn oversized_lineage() -> &'static OversizedLineage {
+    static LINEAGE: OnceLock<OversizedLineage> = OnceLock::new();
+    LINEAGE.get_or_init(|| {
+        let doc = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        let text = doc.get_or_insert_text(dohc_engine_collab::ROOT_PLAINTEXT);
+        let visible_bytes = 1024 * 1024;
+        text.insert(&mut doc.transact_mut(), 0, &"x".repeat(visible_bytes));
+
+        let limit = dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
+        {
+            let mut txn = doc.transact_mut();
+            for revision in 0..1_000_u32 {
+                let value = format!("revision-{revision:04}-{}", "x".repeat(22 * 1024));
+                text.format(
+                    &mut txn,
+                    revision,
+                    1,
+                    Attrs::from([("revision".into(), Any::String(value.into()))]),
+                );
+            }
+        }
+        let base = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        assert!(
+            base.len() > limit,
+            "the fixture must exceed MAX_YDOC_UPDATE_BYTES: {} <= {limit}",
+            base.len()
+        );
+        let projected = Ydoc::wire();
+        projected.apply(&base).expect("apply oversized fixture");
+        assert_eq!(
+            projected
+                .project(ContentKind::Plaintext)
+                .expect("the oversized state remains projectable")
+                .markdown
+                .len(),
+            visible_bytes
+        );
+        let before = doc.transact().state_vector();
+        text.insert(&mut doc.transact_mut(), 0, "remote ");
+        let remote_edit = doc.transact().encode_state_as_update_v1(&before);
+        OversizedLineage { base, remote_edit }
+    })
+}
+
+fn seed_unclaimed_oversized_lineage(db: &Path, key: &DocKey, path: &str) {
+    let fixture = oversized_lineage();
+    let mut store = EngineStore::open(db, 9_107).expect("open store");
+    let base_sha = store
+        .put_binary_blob(&fixture.base)
+        .expect("store oversized private base");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO ydoc_docs \
+                 (workspace_id, version_id, object_id, content_kind, regime, \
+                  head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms, path) \
+                 VALUES (?1, ?2, ?3, 'plaintext', 'replicated', 1, 0, 0, 150, ?4)",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id, path],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO ydoc_updates \
+                 (workspace_id, version_id, object_id, seq, update_blob_sha256, \
+                  actor_origin_id, recorded_at_ms) \
+                 VALUES (?1, ?2, ?3, 1, ?4, NULL, 150)",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id, base_sha,],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed unclaimed oversized lineage");
+}
+
+fn remote_edit_envelope(
+    store: &mut EngineStore,
+    key: &DocKey,
+    path: &str,
+    recorded_at_ms: i64,
+) -> ReplicationEnvelope {
+    let edit_sha = store
+        .put_binary_blob(&oversized_lineage().remote_edit)
+        .expect("store remote edit");
+    ReplicationEnvelope {
+        workspace_id: key.workspace_id.clone(),
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "ydoc.update".to_owned(),
+        payload: serde_json::json!({
+            "versionId": key.version_id,
+            "objectId": key.object_id,
+            "path": path,
+            "contentKind": "plaintext",
+            "updateBlobSha256": edit_sha,
+            "isBaseState": false
+        }),
+        recorded_at_ms,
+    }
+}
+
+fn assert_oversized_decline(declined: &dohc_engine_sync::SharingDeclined) {
+    assert_eq!(declined.constraint, "MAX_YDOC_UPDATE_BYTES");
+    assert_eq!(
+        declined.limit_bytes,
+        dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+    );
+    assert!(
+        declined.observed_bytes > declined.limit_bytes,
+        "the decline must report the oversized base: {declined:?}"
+    );
+}
+
+fn assert_remote_edit_committed(store: &EngineStore, key: &DocKey) {
+    let persisted = dohc_engine_collab::load_persisted(store, key)
+        .expect("load persisted lineage")
+        .expect("lineage exists");
+    assert!(
+        persisted.doc.plaintext_string().starts_with("remote "),
+        "the edit remains in the lineage when base origination declines"
+    );
+}
+
 /// The fresh-creation path: a first edit on a synced workspace mints exactly
 /// one base, later edits journal deltas, and a clean peer rebuilds the document
 /// from that pair alone.
@@ -452,6 +588,40 @@ async fn draining_a_late_predecessor_retries_origination() {
     );
 }
 
+/// The deferred-drain boundary returns an actionable decline without rolling
+/// back the remote edit that made an oversized unclaimed lineage complete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn draining_an_edit_surfaces_an_oversized_base_decline() {
+    const WS: &str = "ws-oversized-drain-decline";
+    const PATH: &str = "notes/oversized-drain.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    supervisor.close(&db).expect("close actor");
+    let key = DocKey::new(WS, "main", object_id).expect("key");
+    seed_unclaimed_oversized_lineage(&db, &key, PATH);
+
+    let mut store = EngineStore::open(&db, 9_501).expect("open store");
+    let envelope = remote_edit_envelope(&mut store, &key, PATH, 300);
+    let parked = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLiveLease)
+        .expect("park remote edit behind the live lease");
+    assert!(matches!(
+        parked,
+        dohc_engine_sync::ApplyOutcome::Applied(ref result) if result.deferred
+    ));
+
+    let drained =
+        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults).expect("drain remote edit");
+    assert_eq!(drained.drained, 1);
+    assert_eq!(drained.sharing_declined.len(), 1);
+    assert_oversized_decline(&drained.sharing_declined[0]);
+    assert_remote_edit_committed(&store, &key);
+}
+
 /// The ordinary non-leased apply path can also complete a local dependent
 /// update. It must retry origination after it projects the complete lineage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -525,6 +695,39 @@ async fn applying_a_late_predecessor_without_a_lease_retries_origination() {
     assert_eq!(ops.len(), 1, "the ordinary apply journals one base");
     assert!(ops[0].is_base());
     assert_eq!(replay_into_clean_peer(&db, &ops, WS, PATH), "more dep base");
+}
+
+/// The ordinary apply boundary returns the same actionable decline and keeps
+/// the edit when the completed base is too large to originate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn applying_an_edit_surfaces_an_oversized_base_decline() {
+    const WS: &str = "ws-oversized-apply-decline";
+    const PATH: &str = "notes/oversized-apply.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    supervisor.close(&db).expect("close actor");
+    let key = DocKey::new(WS, "main", object_id).expect("key");
+    seed_unclaimed_oversized_lineage(&db, &key, PATH);
+
+    let mut store = EngineStore::open(&db, 9_511).expect("open store");
+    let envelope = remote_edit_envelope(&mut store, &key, PATH, 300);
+    let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
+        .expect("apply remote edit");
+    let dohc_engine_sync::ApplyOutcome::Applied(result) = applied else {
+        panic!("the remote edit must apply");
+    };
+    assert_oversized_decline(
+        result
+            .sharing_declined
+            .as_ref()
+            .expect("ordinary apply surfaces the oversized base decline"),
+    );
+    assert_remote_edit_committed(&store, &key);
 }
 
 /// Edit a lineage twice on a workspace prepared by `prepare`, then assert it

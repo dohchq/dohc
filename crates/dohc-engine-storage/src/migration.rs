@@ -1914,6 +1914,31 @@ ALTER TABLE secret_fork_bases
 
 pub(crate) const SECRET_FORK_BASE_TIMESTAMP_MIGRATION_ID: &str = "v1-secret-fork-base-timestamp";
 
+/// Persist the path that owns a Y.Doc lineage. Enrollment can then originate
+/// a live lineage before its first settle, when no snapshot exists yet.
+const V1_YDOC_PATH_DDL: &str = "\
+ALTER TABLE ydoc_docs ADD COLUMN path TEXT;
+UPDATE ydoc_docs
+   SET path = (
+       SELECT s.path FROM snapshots s
+        WHERE s.workspace_id = ydoc_docs.workspace_id
+          AND s.version_id = ydoc_docs.version_id
+          AND s.object_id = ydoc_docs.object_id
+   )
+ WHERE path IS NULL;
+";
+
+pub(crate) const YDOC_PATH_MIGRATION_ID: &str = "v1-ydoc-path";
+
+/// Record the exact relay coordinate that created an imported secret moment.
+/// Local secret moments keep both fields NULL.
+const V1_SECRET_MOMENT_SOURCE_DDL: &str = "\
+ALTER TABLE secret_moments ADD COLUMN source_origin_id TEXT;
+ALTER TABLE secret_moments ADD COLUMN source_origin_seq INTEGER;
+";
+
+pub(crate) const SECRET_MOMENT_SOURCE_MIGRATION_ID: &str = "v1-secret-moment-source";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -2108,6 +2133,20 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SECRET_FORK_BASE_TIMESTAMP_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SECRET_FORK_BASE_TIMESTAMP_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 27,
+        id: YDOC_PATH_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_YDOC_PATH_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 28,
+        id: SECRET_MOMENT_SOURCE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SECRET_MOMENT_SOURCE_DDL,
         sets_user_version: None,
     },
 ];
@@ -2615,6 +2654,48 @@ mod tests {
             capture_owned("pending-absent"),
             0,
             "an absent after-state with an incomplete job owns no plaintext"
+        );
+    }
+
+    #[test]
+    fn secret_fork_base_timestamp_migration_upgrades_a_prior_shape_row() {
+        let dir = tempdir();
+        let path = dir.join("secret-fork-base-timestamp.db");
+        let ctx = MigrationContext::current(1_500);
+        let mut conn = open_bare(&path);
+        // Everything BEFORE ordinal 26, so this row models a fork base an
+        // existing store already holds, in its pre-migration shape (no
+        // `updated_at_ms` column yet).
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..26], &ctx, &NoFaults)
+            .expect("pre-timestamp migrations");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'main', 'main', 1);
+             INSERT INTO secret_fork_bases
+                 (workspace_id, version_id, path, iv_base64, auth_tag_base64,
+                  ciphertext_base64, byte_length)
+                 VALUES ('ws', 'main', '.env', 'iv', 'tag', 'ciphertext', 3);",
+        )
+        .expect("legacy secret fork base");
+
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..27], &ctx, &NoFaults)
+            .expect("timestamp migration");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+
+        let updated_at_ms: i64 = conn
+            .query_row(
+                "SELECT updated_at_ms FROM secret_fork_bases
+                 WHERE workspace_id = 'ws' AND version_id = 'main' AND path = '.env'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("upgraded fork base row");
+        assert_eq!(
+            updated_at_ms, 0,
+            "a pre-migration row cannot recover its original edit time, so it \
+             upgrades to the documented zero default rather than losing the row"
         );
     }
 

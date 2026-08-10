@@ -6,12 +6,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use base64::Engine as _;
+use dohc_engine_collab::Ydoc;
+use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
-use dohc_engine_storage::hex_sha256;
+use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use rusqlite::{Connection, OptionalExtension};
@@ -552,6 +555,164 @@ fn absent_moment_payload(
         "metadata": {"origin": "sync"},
         "beforePresent": "absent"
     })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_push_backfills_an_api_text_write_from_the_rpc_surface() {
+    let relay = FakeRelay::start(RelayState::default());
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "rpc-relay-api-write-enrolment";
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "objectId": "api-object",
+            "path": "notes/api.md",
+            "text": "written before enrollment",
+            "momentId": "moment-api-before-enrollment",
+            "origin": "api",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    seed_sync_identity(&transport, &handle, &mut id).await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+
+    let state = relay.state.lock().expect("relay state");
+    assert_eq!(
+        state
+            .pushed_workspace_ops
+            .iter()
+            .filter(|op| {
+                op["opKind"] == "moment.append"
+                    && op["payload"]["momentId"] == "moment-api-before-enrollment"
+            })
+            .count(),
+        1,
+        "the first push must backfill the pre-enrollment RPC write"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
+    let relay = FakeRelay::start(RelayState::default());
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "rpc-relay-unsettled-ydoc-enrolment";
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        &mut id,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/live-before-enrollment.md",
+            "contentKind": "plaintext",
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+    let doc = Ydoc::wire();
+    let update = base64::engine::general_purpose::STANDARD
+        .encode(doc.plaintext_insert(0, "edited before enrollment"));
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": update }),
+    )
+    .await;
+    seed_sync_identity(&transport, &handle, &mut id).await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+
+    let (origin_id, pushed) = {
+        let state = relay.state.lock().expect("relay state");
+        (
+            state.local_origin_id.clone().expect("local origin id"),
+            state.pushed_workspace_ops.clone(),
+        )
+    };
+    let source_db = Connection::open(scratch.engine_db_path().expect("source db path"))
+        .expect("open source db");
+    let peer_scratch = ScratchDir::new().expect("peer scratch");
+    let mut peer = EngineStore::open(&peer_scratch.engine_db_path().expect("peer db path"), 1_000)
+        .expect("open peer");
+    VersionedTextStore::new(&mut peer)
+        .ensure_main_version(workspace_id, "main", 1, &NoFaults)
+        .expect("peer main version");
+    for op in &pushed {
+        if op["opKind"] == "ydoc.update" {
+            let sha = op["payload"]["updateBlobSha256"]
+                .as_str()
+                .expect("Y.Doc update sha");
+            let bytes: Vec<u8> = source_db
+                .query_row(
+                    "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                    [sha],
+                    |row| row.get(0),
+                )
+                .expect("source Y.Doc blob");
+            assert_eq!(peer.put_binary_blob(&bytes).expect("copy Y.Doc blob"), sha);
+        }
+        dohc_engine_sync::apply_replication_envelope(
+            &mut peer,
+            &dohc_engine_sync::ReplicationEnvelope {
+                workspace_id: workspace_id.to_owned(),
+                origin_id: origin_id.clone(),
+                origin_seq: op["originSeq"].as_i64().expect("origin seq"),
+                op_kind: op["opKind"].as_str().expect("op kind").to_owned(),
+                payload: op["payload"].clone(),
+                recorded_at_ms: op["recordedAtMs"].as_i64().expect("recorded at"),
+            },
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+        )
+        .expect("peer applies source operation");
+    }
+    let peer_text: Option<String> = peer
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                 WHERE s.workspace_id=?1 AND s.version_id='main' \
+                   AND s.path='notes/live-before-enrollment.md'",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .optional()
+        })
+        .expect("read clean peer head");
+    assert_eq!(
+        peer_text.as_deref(),
+        Some("edited before enrollment"),
+        "the first enrollment must replicate a live lineage before its first settle"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

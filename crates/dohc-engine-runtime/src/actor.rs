@@ -275,13 +275,16 @@ impl std::fmt::Debug for RelayConfiguration {
 pub enum RelayOperation {
     Push {
         workspace_id: String,
+        now_ms: i64,
     },
     Pull {
         workspace_id: String,
+        now_ms: i64,
     },
     CommitCursor {
         workspace_id: String,
         cursor: RelayCursor,
+        now_ms: i64,
     },
     Probe {
         workspace_id: String,
@@ -6356,18 +6359,25 @@ fn execute_relay_operation(
 ) -> Result<RelayOperationOutcome, RuntimeError> {
     let client = RelaySyncClient::new(transport);
     match operation {
-        RelayOperation::Push { workspace_id } => client
-            .push_workspace(store, &workspace_id, &NoFaults)
+        RelayOperation::Push {
+            workspace_id,
+            now_ms,
+        } => client
+            .push_workspace(store, &workspace_id, &NoFaults, now_ms)
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
-        RelayOperation::Pull { workspace_id } => client
-            .pull_chat_workspace(store, &workspace_id, &NoFaults, leases)
+        RelayOperation::Pull {
+            workspace_id,
+            now_ms,
+        } => client
+            .pull_chat_workspace(store, &workspace_id, &NoFaults, leases, now_ms)
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::CommitCursor {
             workspace_id,
             cursor,
-        } => match client.commit_pull_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+            now_ms,
+        } => match client.commit_pull_cursor(store, &workspace_id, &cursor, &NoFaults, now_ms)? {
             TxnOutcome::Committed(sharing_declined) => {
                 Ok(RelayOperationOutcome::CursorCommitted { sharing_declined })
             }
@@ -8689,9 +8699,16 @@ fn ydoc_apply_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    // `ydoc.apply` (the legacy append RPC) carries no path in its params,
+    // unlike `ydoc.recordUpdate`'s `ydoc_record_update_on_store`, which
+    // threads the caller's path so enrolment can originate the lineage
+    // before any settle. A lineage created only through this legacy path
+    // stays outside that recovery until it settles or is reopened through
+    // the path-carrying RPC.
     match dohc_engine_collab::record_local_update_creating_marker(
         store,
         key,
+        None,
         content_kind,
         Regime::Replicated,
         update,
@@ -9077,6 +9094,7 @@ fn ydoc_record_update_on_store(
     match dohc_engine_collab::record_local_update_creating_marker_guarded(
         store,
         key,
+        Some(path),
         content_kind,
         regime,
         update,

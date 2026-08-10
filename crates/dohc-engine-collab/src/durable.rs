@@ -376,6 +376,7 @@ where
 pub fn record_local_update_creating_marker(
     store: &mut EngineStore,
     key: &DocKey,
+    path: Option<&str>,
     content_kind: ContentKind,
     regime: Regime,
     update: &[u8],
@@ -386,6 +387,7 @@ pub fn record_local_update_creating_marker(
     record_local_update_creating_marker_with_hook(
         store,
         key,
+        path,
         content_kind,
         regime,
         update,
@@ -403,6 +405,7 @@ pub fn record_local_update_creating_marker(
 pub fn record_local_update_creating_marker_with_hook<F>(
     store: &mut EngineStore,
     key: &DocKey,
+    path: Option<&str>,
     content_kind: ContentKind,
     regime: Regime,
     update: &[u8],
@@ -417,6 +420,7 @@ where
     record_local_update_creating_marker_guarded(
         store,
         key,
+        path,
         content_kind,
         regime,
         update,
@@ -439,6 +443,7 @@ where
 pub fn record_local_update_creating_marker_guarded<F>(
     store: &mut EngineStore,
     key: &DocKey,
+    path: Option<&str>,
     content_kind: ContentKind,
     regime: Regime,
     update: &[u8],
@@ -532,8 +537,8 @@ where
                 tx.execute(
                     "INSERT INTO ydoc_docs \
                      (workspace_id, version_id, object_id, content_kind, regime, \
-                      head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 0, ?6)",
+                      head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms, path) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 0, ?6, ?7)",
                     rusqlite::params![
                         key.workspace_id,
                         key.version_id,
@@ -541,6 +546,7 @@ where
                         content_kind.as_str(),
                         regime.as_str(),
                         now_ms,
+                        path,
                     ],
                 )
                 .map_err(map_sql)?;
@@ -553,6 +559,14 @@ where
                 }
             }
         };
+        if let Some(path) = path {
+            tx.execute(
+                "UPDATE ydoc_docs SET path=?4 \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id, path],
+            )
+            .map_err(map_sql)?;
+        }
         let sha = crate::hex_sha256(update);
         {
             let outcome =

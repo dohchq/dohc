@@ -2046,6 +2046,7 @@ impl EngineService {
                 configuration,
                 RelayOperation::Push {
                     workspace_id: open.workspace_id.clone(),
+                    now_ms: now_ms()?,
                 },
                 "sync.push",
             )
@@ -2069,6 +2070,7 @@ impl EngineService {
                 configuration,
                 RelayOperation::Pull {
                     workspace_id: open.workspace_id.clone(),
+                    now_ms: now_ms()?,
                 },
                 "sync.pull",
             )
@@ -2110,6 +2112,7 @@ impl EngineService {
             IssuedCursor::Relay(cursor) => RelayOperation::CommitCursor {
                 workspace_id: open.workspace_id.clone(),
                 cursor,
+                now_ms: now_ms()?,
             },
             IssuedCursor::ShareView(cursor) => RelayOperation::CommitShareViewCursor {
                 workspace_id: open.workspace_id.clone(),

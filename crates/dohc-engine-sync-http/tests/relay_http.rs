@@ -394,7 +394,7 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
     });
 
     let outcome = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_000)
         .expect("push workspace");
     assert!(matches!(
         outcome,
@@ -431,7 +431,7 @@ fn push_rejects_relay_origin_ahead_of_local_max() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_000)
         .expect_err("ahead relay must diverge");
     assert_eq!(error, RelayError::OriginDiverged);
     assert_eq!(
@@ -506,7 +506,7 @@ fn push_conflict_probes_empty_ops_rewinds_and_retries_once() {
         }
     });
     let outcome = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_000)
         .expect("rewind retry");
     assert!(matches!(
         outcome,
@@ -578,7 +578,12 @@ fn push_rewind_is_durable_before_a_failed_retry() {
     });
 
     assert_eq!(
-        RelaySyncClient::new(transport(&server)).push_workspace(&mut engine, "ws", &NoFaults),
+        RelaySyncClient::new(transport(&server)).push_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            1_000,
+        ),
         Err(RelayError::ServerInternal)
     );
     assert_eq!(
@@ -596,7 +601,7 @@ fn pull_aborts_when_has_more_cursor_does_not_advance() {
     seed_identity(&mut engine, &json!({}));
     let server = FakeServer::start(|_| log_page(Vec::new(), 0, true));
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect_err("non-advancing page must abort");
     assert_eq!(error, RelayError::NoProgress);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
@@ -629,7 +634,7 @@ fn pull_rejects_byte_different_coordinate_collision_before_apply() {
         )
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect_err("a foreign coordinate collision must fail closed");
     assert_eq!(error, RelayError::InvalidResponse);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
@@ -661,7 +666,7 @@ fn pull_accepts_the_relays_integral_float_normalization() {
     });
 
     let outcome = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("semantically identical number");
     assert!(matches!(
         outcome,
@@ -773,7 +778,7 @@ fn pull_rejects_fetched_blob_with_wrong_sha() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect_err("wrong blob content must fail");
     assert_eq!(error, RelayError::BlobInvalid);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
@@ -829,7 +834,7 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
     });
     let client = RelaySyncClient::new(transport(&server));
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("first pull");
     assert!(matches!(
         first,
@@ -858,7 +863,7 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
         "the simulated crash must leave the persisted cursor unchanged"
     );
     let second = client
-        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("second pull");
     let pending = match second {
         SyncPassOutcome::Complete {
@@ -878,7 +883,7 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
     );
     assert_eq!(
         client
-            .commit_pull_cursor(&mut reopened, "ws", &pending, &NoFaults)
+            .commit_pull_cursor(&mut reopened, "ws", &pending, &NoFaults, 1_000)
             .expect("commit after materialization"),
         TxnOutcome::Committed(Vec::new())
     );
@@ -900,7 +905,7 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
         1
     );
     let third = client
-        .pull_chat_workspace(&mut committed, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut committed, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("pull after cursor commit");
     assert!(matches!(
         third,
@@ -1405,7 +1410,8 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
             &mut engine,
             "ws",
             &NoFaults,
-            &NoLiveLeases
+            &NoLiveLeases,
+            1_000,
         ),
         Err(RelayError::BlobTooLarge {
             constraint,
@@ -1502,7 +1508,7 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect_err("a binary body past the read limit is refused");
     assert_eq!(
         error,

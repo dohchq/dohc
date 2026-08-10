@@ -117,7 +117,7 @@ impl<T> ApplyOutcome<T> {
 
 #[cfg(test)]
 mod diagnostic_tests {
-    use super::ApplyOutcome;
+    use super::{ApplyOutcome, RefusalReason, ReplicationRefusal};
 
     #[test]
     fn sharing_decline_survives_a_skipped_primary_outcome() {
@@ -132,6 +132,33 @@ mod diagnostic_tests {
 
         assert!(matches!(primary, ApplyOutcome::Skipped));
         assert!(refusals.is_empty());
+        assert_eq!(declines, [declined]);
+    }
+
+    #[test]
+    fn nested_refusal_and_sharing_decline_both_survive_unwrapping() {
+        let refusal = ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 3,
+            op_kind: "ydoc.update".to_owned(),
+            reason: RefusalReason::InvalidInput {
+                reason: "invalid update".to_owned(),
+            },
+        };
+        let declined = crate::SharingDeclined {
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: 20,
+            observed_bytes: 21,
+        };
+
+        let (primary, refusals, declines) = ApplyOutcome::<()>::Applied(())
+            .with_refusals(vec![refusal.clone()])
+            .with_sharing_declined(vec![declined.clone()])
+            .into_primary_and_diagnostics();
+
+        assert!(matches!(primary, ApplyOutcome::Applied(())));
+        assert_eq!(refusals, [refusal]);
         assert_eq!(declines, [declined]);
     }
 }

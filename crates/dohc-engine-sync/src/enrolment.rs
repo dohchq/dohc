@@ -6,9 +6,20 @@
 //! transaction, so the live caller gets identical bytes and delayed backfill
 //! keeps the fork-time state.
 //!
-//! Capture moments exclude rows labeled `sync` or `ydoc`, and exclude every
-//! object with a Y.Doc lineage. Once `ydoc_docs` exists, its base supersedes
-//! the capture lane's older representation whether or not the base is claimed.
+//! Moment backfill cannot use `metadata_origin` to tell local from imported:
+//! `moment_apply.rs` stores the sending peer's wire value verbatim (S2's
+//! boundary stamp covers `snapshots`/`fork_base_snapshots`, not `moments`).
+//! It excludes an imported moment by exact provenance instead — a matching
+//! `imported=1` row in `replication_log`, correlated on `momentId` (which
+//! the receiver preserves verbatim, unlike secrets) — and excludes `'ydoc'`
+//! moments outright, a true local origin whose content the CRDT stream
+//! supersedes. It also excludes every object with a Y.Doc lineage. Once
+//! `ydoc_docs` exists, its base supersedes the moment lane's older
+//! representation whether or not the base is claimed.
+//!
+//! A live append stores its path on `ydoc_docs`, so enrollment can originate
+//! the lineage before any settle creates a snapshot. Deferring that case was
+//! unsafe: the local settle path does not retry origination.
 //!
 //! Secret-version payloads always read `secret_fork_bases`, including the
 //! source tip's frozen last-edit timestamp. Receivers store `updatedAtMs` in
@@ -43,10 +54,8 @@ fn backfill_ydoc_bases(
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     let rows: Vec<(String, String, String)> = collect_rows(
         tx,
-        "SELECT d.version_id, d.object_id, s.path FROM ydoc_docs d \
-         JOIN snapshots s ON s.workspace_id=d.workspace_id \
-           AND s.version_id=d.version_id AND s.object_id=d.object_id \
-         WHERE d.workspace_id=?1 AND d.base_claimed=0 \
+        "SELECT d.version_id, d.object_id, d.path FROM ydoc_docs d \
+         WHERE d.workspace_id=?1 AND d.base_claimed=0 AND d.path IS NOT NULL \
          ORDER BY d.version_id, d.object_id",
         workspace_id,
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -68,10 +77,26 @@ fn backfill_ydoc_bases(
 }
 
 fn backfill_moments(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), SyncError> {
+    // `metadata_origin` alone cannot tell a locally-authored moment from an
+    // imported one: `moment_apply.rs`'s `INSERT INTO moments` stores the
+    // WIRE payload's `metadata.origin` verbatim (the sending peer's own
+    // value — "api", "capture", "local-file", whatever that peer used), not
+    // a boundary stamp. Only `snapshots`/`fork_base_snapshots` get S2's
+    // "sync" stamp. The reliable discriminator is real import provenance:
+    // `moment_apply.rs` preserves the sender's `moment_id` verbatim (unlike
+    // secrets, which re-mint theirs), and every applied envelope lands a
+    // matching `imported=1` row in `replication_log` in the same
+    // transaction — so an exact `momentId` match against that log is exact,
+    // not inferred. `'ydoc'` is excluded separately: it is a true local
+    // origin (Y.Doc settle-projection), never imported, but its content is
+    // superseded by the CRDT stream once a lineage exists.
     let moment_ids = collect_ids(
         tx,
         "SELECT m.moment_id FROM moments m \
-         WHERE m.workspace_id=?1 AND m.metadata_origin='capture' \
+         WHERE m.workspace_id=?1 AND m.metadata_origin != 'ydoc' \
+           AND NOT EXISTS (SELECT 1 FROM replication_log r \
+             WHERE r.workspace_id=?1 AND r.imported=1 AND r.op_kind='moment.append' \
+               AND json_extract(r.payload_json,'$.momentId')=m.moment_id) \
            AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
              WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
                AND d.object_id=m.object_id) \
@@ -86,6 +111,9 @@ fn backfill_moments(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), Sync
 
 fn backfill_versions(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), SyncError> {
     type VersionRow = (String, String, String, i64, Option<String>, Option<String>);
+    // The JSON lookup scans the workspace log once for each named version.
+    // Enrollment runs once per workspace, so this bounded startup cost does
+    // not justify another durable index or an in-memory shadow of the log.
     let raw_records: Vec<VersionRow> = collect_rows(
         tx,
         "SELECT v.version_id, v.kind, v.name, v.created_at_ms, \
@@ -163,13 +191,7 @@ fn backfill_secret_moments(tx: &Transaction<'_>, workspace_id: &str) -> Result<(
                 after_iv_base64, after_auth_tag_base64, after_ciphertext_base64, \
                 after_byte_length \
          FROM secret_moments sm \
-         WHERE sm.workspace_id=?1 \
-           AND NOT EXISTS (SELECT 1 FROM replication_log r \
-             WHERE r.workspace_id=?1 AND r.imported=1 \
-               AND r.op_kind IN ('secret.file.put','secret.file.delete') \
-               AND r.recorded_at_ms=sm.recorded_at_ms \
-               AND json_extract(r.payload_json,'$.versionId')=sm.version_id \
-               AND json_extract(r.payload_json,'$.path')=sm.path) \
+         WHERE sm.workspace_id=?1 AND sm.source_origin_id IS NULL \
          ORDER BY sm.moment_order",
         workspace_id,
         |row| {
@@ -438,6 +460,22 @@ mod tests {
             "sync",
             10,
         );
+        // The exclusion reads real import provenance (`replication_log`), not
+        // `metadata_origin` — `moment_apply.rs` stores the sender's wire value
+        // verbatim, so a domain write alone does not simulate an import. Seed
+        // the matching imported row a real pull would have landed.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO replication_log \
+                     (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                     VALUES ('ws','peer',0,'moment.append',?1,10,1)",
+                    [serde_json::json!({"momentId": "moment-imported"}).to_string()],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed imported provenance");
 
         enroll(&mut store).expect("enroll");
 
@@ -468,6 +506,7 @@ mod tests {
         dohc_engine_collab::record_local_update_creating_marker(
             &mut store,
             &key,
+            Some("ydoc-object.md"),
             ContentKind::Plaintext,
             Regime::LocalOnly,
             &update,
@@ -560,6 +599,7 @@ mod tests {
         dohc_engine_collab::record_local_update_creating_marker(
             &mut store,
             &key,
+            Some("live-object.md"),
             ContentKind::Plaintext,
             Regime::LocalOnly,
             &update,
@@ -785,6 +825,7 @@ mod tests {
         dohc_engine_collab::record_local_update_creating_marker(
             &mut store,
             &key,
+            Some("forked.md"),
             ContentKind::Plaintext,
             Regime::LocalOnly,
             &update,
@@ -1039,6 +1080,17 @@ mod tests {
             crate::apply_secret_envelope(&mut store, &imported, &NoFaults),
             Ok(crate::ApplyOutcome::Applied(()))
         ));
+        let source: (Option<String>, Option<i64>) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT source_origin_id,source_origin_seq FROM secret_moments \
+                     WHERE workspace_id='ws' AND path='.env'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("imported secret provenance");
+        assert_eq!(source, (Some("peer".to_owned()), Some(0)));
 
         enroll(&mut store).expect("enroll");
 
@@ -1046,6 +1098,52 @@ mod tests {
             local_ops(&store)
                 .iter()
                 .all(|(kind, _)| kind != "secret.file.delete")
+        );
+    }
+
+    #[test]
+    fn imported_secret_coordinates_cannot_hide_an_unrelated_local_moment() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        let key = secret_key();
+        write_secret(
+            &mut store,
+            &key,
+            "main",
+            "local-secret-collision",
+            "genuinely local content",
+            10,
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO replication_log \
+                     (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                     VALUES ('ws','unrelated-peer',91,'secret.file.put',?1,10,1)",
+                    [serde_json::json!({
+                        "versionId": "main",
+                        "path": ".env",
+                        "metadata": {"origin": "sync"},
+                        "ciphertextSha256": "unrelated-imported-content",
+                    })
+                    .to_string()],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed colliding imported coordinate");
+
+        enroll(&mut store).expect("enroll");
+
+        assert_eq!(
+            local_ops(&store)
+                .iter()
+                .filter(|(kind, payload)| {
+                    kind == "secret.file.put" && payload["versionId"] == "main"
+                })
+                .count(),
+            1,
+            "an imported timestamp and payload correlation must not hide a local secret moment"
         );
     }
 
@@ -1102,8 +1200,8 @@ mod tests {
             .write_with(&NoFaults, |tx| {
                 tx.execute(
                     "INSERT INTO ydoc_docs \
-                     (workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,base_claimed,updated_at_ms) \
-                     VALUES ('ws','main','oversized','plaintext','local-only',1,0,0,11)",
+                     (workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,base_claimed,updated_at_ms,path) \
+                     VALUES ('ws','main','oversized','plaintext','local-only',1,0,0,11,'oversized.md')",
                     [],
                 )
                 .map_err(SyncError::persist)?;
