@@ -2657,20 +2657,10 @@ export function createWorkspaceEngineCapture(
   // leaves that path's own verdict intact either way).
   async function cleanupDetachedDebtForEvent(event: WatcherEvent): Promise<void> {
     if (!detachedLockedDebts.has(event.path)) {
-      // A confirmed "delete" operation still means the path is gone, even
-      // with no debt registered yet to clean up: remember it, so a debt
-      // that registers LATER (#681 round 7) does not treat this as news.
-      // Scoped to the "delete" operation only (no disk read needed) to
-      // keep every other path, secrets included, untouched by this door
-      // (#681 round 5). `peekExpectedEvent` decides EXPECTED vs EXTERNAL
-      // here too (#681 round 8) — the recorder is the only place that
-      // verdict is still known once this becomes a bare memory.
-      if (event.operation === "delete") {
-        noteExternalDeleteWithNoDebt(
-          event.path,
-          peekExpectedEvent("delete", event.path),
-        );
-      }
+      // `captureBatch`'s own synchronous pass, at watcher-delivery time,
+      // already recorded a delete's no-debt tombstone (codex P1-C on
+      // #746) — nothing is left to do for a path with no debt by the time
+      // this enqueued task runs.
       return;
     }
     if (event.operation === "delete") {
@@ -3226,6 +3216,24 @@ export function createWorkspaceEngineCapture(
     captureBatch(events) {
       if (events.length === 0) return;
       const batch = events.map((event) => ({ ...event }));
+      // The no-debt tombstone (codex P1-C on #746), recorded HERE at
+      // watcher-delivery time rather than inside the enqueued cleanup
+      // below. A close-retry's own removal check runs OFF the capture
+      // chain, on its own timer, and a chain busy with reconciliation or a
+      // version op can leave the cleanup task queued behind that work for
+      // as long as it runs. A retry firing inside that window used to find
+      // no tombstone at all — nothing had recorded it yet — and resurrect
+      // the file. `detachedLockedDebts` and `expectedEvents` are plain
+      // maps a synchronous read sees exactly as fresh as the enqueued
+      // read would, so recording immediately only narrows the window.
+      for (const event of batch) {
+        if (event.operation === "delete" && !detachedLockedDebts.has(event.path)) {
+          noteExternalDeleteWithNoDebt(
+            event.path,
+            peekExpectedEvent("delete", event.path),
+          );
+        }
+      }
       // Registry maintenance, not capture (#681 round 6, codex P2-B): runs
       // for every batch regardless of `daemonOwnsCapture`, ahead of the
       // early return below. See `cleanupDetachedDebtForEvent`'s own
@@ -3774,6 +3782,15 @@ export function createWorkspaceEngineCapture(
             `locked-write retry stopped: the engine committed the settle but did not write ${input.path}. dohc does not write through symlinks, and either the file or a folder above it is one. The edits stay in the document's history. Replace the linked file with a real file, or the linked folder with a real folder. Then open ${input.path} to write it again.`,
           );
 
+        // The one stand-down message both the registration door
+        // (`scheduleDetachedLockedSettle`, below) and a retry's own consult
+        // (`suppressSettleForRemoval`, next) report on the same tombstone
+        // match — kept as one string so the two doors can never drift apart.
+        const removalStandDownMessage = (tombstone: { expected: boolean }): string =>
+          tombstone.expected
+            ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
+            : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`;
+
         // A RETRY's own removal check (#746). `scheduleDetachedLockedSettle`
         // (below) is the debt-REGISTRATION door and asks this once, but two
         // ladders re-run a settle without ever passing back through it: this
@@ -3792,11 +3809,7 @@ export function createWorkspaceEngineCapture(
             sessionOpenedAtMs,
           );
           if (tombstone === null) return false;
-          standDownFromWrite(
-            tombstone.expected
-              ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
-              : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`,
-          );
+          standDownFromWrite(removalStandDownMessage(tombstone));
           return true;
         };
 
@@ -3857,9 +3870,11 @@ export function createWorkspaceEngineCapture(
             // or moved away, which is the recreation every fence above exists
             // to prevent. `suppressSettleForRemoval` covers the same window
             // for a delete that landed AFTER registration passed with no
-            // tombstone yet on record (#746).
+            // tombstone yet on record (#746). `suppressSettleForRemoval`
+            // already opens with `if (writeCancelled) return true;`, side-
+            // effect-free, so a separate `writeCancelled ||` guard here
+            // would only duplicate that check.
             if (
-              writeCancelled ||
               detachedLockedDebts.get(input.path)?.pay !== payDetachedLockedDebt ||
               suppressSettleForRemoval()
             ) {
@@ -4151,11 +4166,7 @@ export function createWorkspaceEngineCapture(
           if (tombstone !== null) {
             onError(
               `ydoc close retry of ${input.path}`,
-              new Error(
-                tombstone.expected
-                  ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
-                  : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`,
-              ),
+              new Error(removalStandDownMessage(tombstone)),
             );
             return;
           }
@@ -4199,13 +4210,23 @@ export function createWorkspaceEngineCapture(
             // asking nothing, exactly as before, so a settle refusal it
             // meets still produces the same failure the registration door
             // downstream depends on.
+            //
+            // ALWAYS asked, even when this retry's own opts already carry
+            // `settle: false` (codex P1-A): that option is a preference, not
+            // a promise — a release the daemon refuses still ESCALATES to a
+            // settling close unless `settleOnRefusal: false` comes with it
+            // (ydocProviderSession.ts) — so a caller's own settle:false does
+            // not retire the resurrection risk this check exists to catch.
             const retryOpts: WorkspaceEngineYDocCloseOptions | undefined =
-              opts?.settle !== false && suppressSettleForRemoval()
+              suppressSettleForRemoval()
                 ? { ...opts, settle: false, settleOnRefusal: false }
                 : opts;
             void closeEntry(retryOpts).catch((retryError: unknown) => {
               if (isTransientEngineCause(retryError)) {
-                scheduleTransientCloseRetry(retryError, opts);
+                // `retryOpts`, not the outer `opts`: a suppressed retry's
+                // forced `settle: false, settleOnRefusal: false` must carry
+                // into whichever call ends up arming the next attempt.
+                scheduleTransientCloseRetry(retryError, retryOpts);
                 return;
               }
               // A non-lock failure is new information: the debt cannot be
@@ -4253,10 +4274,21 @@ export function createWorkspaceEngineCapture(
             // of the session and keeps the lineage, so the next open
             // resurrects this document's edits.
             //
-            // ONLY an orphan — a session someone HOLDS is converged by its
-            // holder. And only a TERMINAL refusal: a busy store or a spent
-            // budget is waited out by the ladders that already exist.
-            if (liveEntry.orphaned && isYdocUnsettledCloseRefusal(error)) {
+            // An orphan, OR a write this session already cancelled for good
+            // (codex P1-B on #746): a suppressed close-retry forces the same
+            // `settleOnRefusal: false` an orphan's release uses, and can meet
+            // the same dirty-session refusal — but `writeCancelled` means no
+            // caller is ever getting a materialized write from this session
+            // again, so leaving it to strand the lease busy until restart is
+            // strictly worse than discharging it the orphan's way. A session
+            // someone still HOLDS with an OPEN write is converged by its
+            // holder instead. And only a TERMINAL refusal either way: a busy
+            // store or a spent budget is waited out by the ladders that
+            // already exist.
+            if (
+              (liveEntry.orphaned || writeCancelled) &&
+              isYdocUnsettledCloseRefusal(error)
+            ) {
               try {
                 await session.evict();
                 dischargedByEvict = true;
