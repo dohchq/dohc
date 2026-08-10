@@ -150,6 +150,9 @@ pub fn apply_shared_envelope(
         ApplyOutcome::Applied(_) | ApplyOutcome::Crashed { .. } => false,
         ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => true,
         ApplyOutcome::WithRefusals { .. } => unreachable!("refusals are attached below"),
+        ApplyOutcome::WithSharingDeclined { .. } => {
+            unreachable!("shared-channel apply cannot originate Y.Doc bases")
+        }
     };
     if advance_source {
         match store.write_with(faults, |tx| {

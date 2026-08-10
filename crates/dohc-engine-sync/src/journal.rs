@@ -75,12 +75,12 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 ///
 /// The window: a freshly enrolled workspace answers `false` until its first
 /// push or pull commits, so an edit inside that window does not originate.
-/// Nothing here retries, and #548 owns the retrigger. It costs at most one
-/// edit — origination is asked again on the next append, the base is a full
-/// state that carries everything typed inside the window, and a local-only
-/// close refuses until the markdown artifact is durable (`close_session` raises
-/// `UnsettledClose`), so a reopened document seeds from that markdown and
-/// originates then.
+/// The deferred drain, non-leased apply path, and enrolment backfill now retry
+/// the origination (#548). Before that retrigger, the window cost at most one
+/// edit: the next append asked again, the base carried the complete state, and
+/// a local-only close refused until the Markdown artifact was durable
+/// (`close_session` raises `UnsettledClose`), so reopening seeded from that
+/// Markdown and originated then.
 ///
 /// The latch: nothing deletes a position row, so this keeps answering `true`
 /// after the user signs out or unbinds the workspace. #558 owns that. Both come

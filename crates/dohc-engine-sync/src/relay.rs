@@ -727,6 +727,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     &mut pending_resolves,
                     &mut changed_paths,
                     &mut refusals,
+                    &mut sharing_declined,
                 )?,
             }
         }
@@ -750,6 +751,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             &mut pending_resolves,
                             &mut changed_paths,
                             &mut refusals,
+                            &mut sharing_declined,
                         )?;
                     }
                 }
@@ -1133,7 +1135,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             };
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(outcome) => {
-                    let (primary, nested_refusals) = outcome.into_primary_and_refusals();
+                    let (primary, nested_refusals, sharing_declined) =
+                        outcome.into_primary_and_diagnostics();
+                    debug_assert!(sharing_declined.is_empty());
                     for refusal in nested_refusals {
                         push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                     }
@@ -1148,6 +1152,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         }
                         ApplyOutcome::WithRefusals { .. } => {
                             unreachable!("refusals were flattened")
+                        }
+                        ApplyOutcome::WithSharingDeclined { .. } => {
+                            unreachable!("sharing declines were flattened")
                         }
                     }
                 }
@@ -1403,11 +1410,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(outcome) => {
-                    let (primary, nested_refusals) = outcome.into_primary_and_refusals();
+                    let (primary, nested_refusals, sharing_declined) =
+                        outcome.into_primary_and_diagnostics();
                     debug_assert!(
                         nested_refusals.is_empty(),
                         "share-view boundary application does not mutate chat dependencies"
                     );
+                    debug_assert!(sharing_declined.is_empty());
                     match primary {
                         ApplyOutcome::Applied(_) => {}
                         ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => {
@@ -1419,6 +1428,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         }
                         ApplyOutcome::WithRefusals { .. } => {
                             unreachable!("refusals were flattened")
+                        }
+                        ApplyOutcome::WithSharingDeclined { .. } => {
+                            unreachable!("sharing declines were flattened")
                         }
                     }
                 }
@@ -3441,13 +3453,24 @@ fn accumulate_pull_outcome(
     pending_resolves: &mut Vec<crate::PendingResolve>,
     changed_paths: &mut BTreeMap<String, crate::MomentMaterializationChange>,
     refusals: &mut Vec<crate::ReplicationRefusal>,
+    sharing_declined: &mut Vec<crate::SharingDeclined>,
 ) -> Result<(), RelayError> {
-    let (primary, drain_refusals) = outcome.into_primary_and_refusals();
+    let (primary, drain_refusals, drain_declines) = outcome.into_primary_and_diagnostics();
     for refusal in drain_refusals {
         push_refusal_once(refusals, refusal);
     }
+    for declined in drain_declines {
+        if !sharing_declined.contains(&declined) {
+            sharing_declined.push(declined);
+        }
+    }
     match primary {
         ApplyOutcome::Applied(routed) => {
+            for declined in &routed.sharing_declined {
+                if !sharing_declined.contains(declined) {
+                    sharing_declined.push(declined.clone());
+                }
+            }
             if let Some(pending) = routed.pending_resolve() {
                 pending_resolves.push(pending.clone());
             }
@@ -3491,6 +3514,9 @@ fn accumulate_pull_outcome(
             return Err(RelayError::Local("injected-crash".to_owned()));
         }
         ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
+        ApplyOutcome::WithSharingDeclined { .. } => {
+            unreachable!("sharing declines were flattened")
+        }
     }
     Ok(())
 }

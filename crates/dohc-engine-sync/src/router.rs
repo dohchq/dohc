@@ -19,6 +19,7 @@ pub struct RoutedApply {
     pub conflict: Option<ConflictApplyResult>,
     pub conflicts_opened: i64,
     pub materialization_changes: Vec<crate::MomentMaterializationChange>,
+    pub sharing_declined: Vec<crate::SharingDeclined>,
 }
 
 impl RoutedApply {
@@ -131,6 +132,7 @@ pub fn apply_replication_envelope(
             crate::apply_ydoc_envelope(store, envelope, faults, leases),
             |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,
+                sharing_declined: ydoc.sharing_declined.into_iter().collect(),
                 ..RoutedApply::default()
             },
         ),
@@ -173,14 +175,19 @@ fn map_applied<T>(
     wrap: impl FnOnce(T) -> RoutedApply,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
     result.map(|outcome| {
-        let (primary, refusals) = outcome.into_primary_and_refusals();
+        let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
         let mapped = match primary {
             ApplyOutcome::Applied(value) => ApplyOutcome::Applied(wrap(value)),
             ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
             ApplyOutcome::Skipped => ApplyOutcome::Skipped,
             ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
             ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
+            ApplyOutcome::WithSharingDeclined { .. } => {
+                unreachable!("sharing declines were flattened")
+            }
         };
-        mapped.with_refusals(refusals)
+        mapped
+            .with_refusals(refusals)
+            .with_sharing_declined(sharing_declined)
     })
 }

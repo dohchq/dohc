@@ -38,6 +38,12 @@ pub enum ApplyOutcome<T> {
         outcome: Box<ApplyOutcome<T>>,
         refusals: Vec<ReplicationRefusal>,
     },
+    /// The envelope has the nested primary disposition, and applying it also
+    /// surfaced actionable Y.Doc base-origination declines.
+    WithSharingDeclined {
+        outcome: Box<ApplyOutcome<T>>,
+        sharing_declined: Vec<crate::SharingDeclined>,
+    },
 }
 
 impl<T> ApplyOutcome<T> {
@@ -50,6 +56,13 @@ impl<T> ApplyOutcome<T> {
             Self::WithRefusals { outcome, refusals } => ApplyOutcome::WithRefusals {
                 outcome: Box::new(outcome.map(map)),
                 refusals,
+            },
+            Self::WithSharingDeclined {
+                outcome,
+                sharing_declined,
+            } => ApplyOutcome::WithSharingDeclined {
+                outcome: Box::new(outcome.map(map)),
+                sharing_declined,
             },
         }
     }
@@ -65,15 +78,61 @@ impl<T> ApplyOutcome<T> {
         }
     }
 
-    pub(crate) fn into_primary_and_refusals(self) -> (Self, Vec<ReplicationRefusal>) {
+    pub(crate) fn with_sharing_declined(
+        self,
+        sharing_declined: Vec<crate::SharingDeclined>,
+    ) -> Self {
+        if sharing_declined.is_empty() {
+            self
+        } else {
+            Self::WithSharingDeclined {
+                outcome: Box::new(self),
+                sharing_declined,
+            }
+        }
+    }
+
+    pub(crate) fn into_primary_and_diagnostics(
+        self,
+    ) -> (Self, Vec<ReplicationRefusal>, Vec<crate::SharingDeclined>) {
         match self {
             Self::WithRefusals { outcome, refusals } => {
-                let (primary, mut nested) = outcome.into_primary_and_refusals();
+                let (primary, mut nested, sharing_declined) =
+                    outcome.into_primary_and_diagnostics();
                 nested.extend(refusals);
-                (primary, nested)
+                (primary, nested, sharing_declined)
             }
-            primary => (primary, Vec::new()),
+            Self::WithSharingDeclined {
+                outcome,
+                sharing_declined,
+            } => {
+                let (primary, refusals, mut nested) = outcome.into_primary_and_diagnostics();
+                nested.extend(sharing_declined);
+                (primary, refusals, nested)
+            }
+            primary => (primary, Vec::new(), Vec::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::ApplyOutcome;
+
+    #[test]
+    fn sharing_decline_survives_a_skipped_primary_outcome() {
+        let declined = crate::SharingDeclined {
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: 20,
+            observed_bytes: 21,
+        };
+        let (primary, refusals, declines) = ApplyOutcome::<()>::Skipped
+            .with_sharing_declined(vec![declined.clone()])
+            .into_primary_and_diagnostics();
+
+        assert!(matches!(primary, ApplyOutcome::Skipped));
+        assert!(refusals.is_empty());
+        assert_eq!(declines, [declined]);
     }
 }
 
@@ -445,8 +504,8 @@ pub fn apply_chat_envelope(
         return Err(SyncError::UnsupportedOperation);
     }
     apply_envelope_with(store, envelope, faults, apply_chat_tx).map(|outcome| {
-        let (primary, nested_refusals) = outcome.into_primary_and_refusals();
-        match primary {
+        let (primary, nested_refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+        let outcome = match primary {
             ApplyOutcome::Applied(replay_refusals) => ApplyOutcome::Applied(())
                 .with_refusals(nested_refusals.into_iter().chain(replay_refusals).collect()),
             ApplyOutcome::Refused(refusal) => {
@@ -457,7 +516,11 @@ pub fn apply_chat_envelope(
                 ApplyOutcome::Crashed { committed }.with_refusals(nested_refusals)
             }
             ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
-        }
+            ApplyOutcome::WithSharingDeclined { .. } => {
+                unreachable!("sharing declines were flattened")
+            }
+        };
+        outcome.with_sharing_declined(sharing_declined)
     })
 }
 

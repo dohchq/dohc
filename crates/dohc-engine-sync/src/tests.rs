@@ -1791,7 +1791,8 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
     );
     let outcome =
         apply_chat_envelope(&mut engine, &private_channel, &NoFaults).expect("private channel");
-    let (primary, refusals) = outcome.into_primary_and_refusals();
+    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+    assert!(sharing_declined.is_empty());
     assert_eq!(primary, ApplyOutcome::Applied(()));
     assert_eq!(
         refusals,
@@ -6872,6 +6873,7 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
             deferred: true,
             reason: Some("ydoc-session-live"),
             conflicts_opened: 0,
+            sharing_declined: None,
         })
     );
 
@@ -7088,6 +7090,7 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             deferred: false,
             reason: Some("ydoc-base-conflict"),
             conflicts_opened: 1,
+            sharing_declined: None,
         })
     );
     assert_eq!(
@@ -7306,6 +7309,7 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
             deferred: false,
             reason: Some("ydoc-base-conflict"),
             conflicts_opened: 1,
+            sharing_declined: None,
         }),
         "a head this lineage never produced must open a conflict"
     );
@@ -7389,6 +7393,7 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            sharing_declined: None,
         })
     );
     let conflicts: i64 = engine
@@ -8028,6 +8033,7 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            sharing_declined: None,
         }))
     ));
     assert_eq!(
@@ -8071,6 +8077,7 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            sharing_declined: None,
         })
     );
     assert_eq!(
@@ -8186,6 +8193,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
+                sharing_declined: None,
             }))
         ));
         let descendant = envelope(
@@ -8207,6 +8215,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
+                sharing_declined: None,
             }))
         ));
 
@@ -8225,7 +8234,8 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
         );
         let outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
             .expect("base applies and mismatched kind is drained");
-        let (primary, refusals) = outcome.into_primary_and_refusals();
+        let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+        assert!(sharing_declined.is_empty());
         assert!(matches!(primary, ApplyOutcome::Applied(_)));
         assert_eq!(
             refusals,
@@ -8468,6 +8478,7 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            sharing_declined: None,
         }))
     ));
     let deferred: i64 = engine
@@ -8620,6 +8631,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            sharing_declined: None,
         }))
     ));
     assert_eq!(
@@ -8709,6 +8721,7 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            sharing_declined: None,
         }))
     ));
     assert_eq!(
@@ -8753,6 +8766,7 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            sharing_declined: None,
         }))
     ));
     let placeholder_timestamp: i64 = engine
@@ -8852,6 +8866,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
+                sharing_declined: None,
             }))
         ));
     }
@@ -8871,7 +8886,9 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
     );
     let base_outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
         .expect("base applies and drains");
-    let (base_primary, drain_refusals) = base_outcome.into_primary_and_refusals();
+    let (base_primary, drain_refusals, sharing_declined) =
+        base_outcome.into_primary_and_diagnostics();
+    assert!(sharing_declined.is_empty());
     assert!(matches!(base_primary, ApplyOutcome::Applied(_)));
     assert_eq!(
         drain_refusals,
@@ -8973,6 +8990,7 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            sharing_declined: None,
         }))
     ));
     let base = envelope(
@@ -8991,7 +9009,8 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
 
     let outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
         .expect("base applies and mismatched path drains");
-    let (primary, refusals) = outcome.into_primary_and_refusals();
+    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+    assert!(sharing_declined.is_empty());
     assert!(matches!(primary, ApplyOutcome::Applied(_)));
     assert_eq!(
         refusals,
@@ -15328,6 +15347,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            sharing_declined: None,
         }))
     ));
 

@@ -433,6 +433,7 @@ async fn draining_a_late_predecessor_retries_origination() {
     let drained =
         drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults).expect("drain predecessor");
     assert_eq!(drained.drained, 1);
+    assert!(drained.sharing_declined.is_empty());
     drop(store);
 
     assert_eq!(
@@ -506,8 +507,13 @@ async fn applying_a_late_predecessor_without_a_lease_retries_origination() {
         }),
         recorded_at_ms: 300,
     };
-    apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
+    let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
         .expect("ordinary predecessor apply");
+    assert!(matches!(
+        applied,
+        dohc_engine_sync::ApplyOutcome::Applied(ref result)
+            if result.sharing_declined.is_none()
+    ));
     drop(store);
 
     assert_eq!(

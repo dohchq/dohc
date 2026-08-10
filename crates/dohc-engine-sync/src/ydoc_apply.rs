@@ -64,12 +64,15 @@ pub struct YdocApplyResult {
     /// Sync conflicts this envelope opened (the first-base-over-divergent-head
     /// branch). Counted like the moment lane so the pull pass reports it.
     pub conflicts_opened: i64,
+    /// An actionable base-origination refusal surfaced after this apply.
+    pub sharing_declined: Option<crate::SharingDeclined>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct YdocDrainResult {
     pub drained: usize,
     pub refusals: Vec<crate::ReplicationRefusal>,
+    pub sharing_declined: Vec<crate::SharingDeclined>,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -252,6 +255,7 @@ pub fn drain_deferred_ydoc_for_key(
     let search_policy = search_policy_for_store(store);
     let mut applied = 0usize;
     let mut refusals = Vec::new();
+    let mut sharing_declined = Vec::new();
     let mut last_payload: Option<YdocUpdatePayload> = None;
     let mut payload_recorded_at = 0_i64;
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
@@ -362,11 +366,13 @@ pub fn drain_deferred_ydoc_for_key(
                 payload_recorded_at,
                 search_policy.as_ref(),
             )?;
-            let _ = crate::originate_ydoc_base_in_tx(tx, key, &payload.path, payload_recorded_at)?;
-            Ok(())
+            crate::originate_ydoc_base_in_tx(tx, key, &payload.path, payload_recorded_at)
         });
         match projected {
-            Ok(TxnOutcome::Committed(())) => {}
+            Ok(TxnOutcome::Committed(crate::BaseOrigination::Declined(declined))) => {
+                sharing_declined.push(declined);
+            }
+            Ok(TxnOutcome::Committed(_)) => {}
             Ok(TxnOutcome::Crashed { .. }) => return Err(SyncError::FaultCrash),
             // These rows are already ACKed and therefore cannot be retried
             // from the relay. If an identity pin now blocks projection,
@@ -405,6 +411,7 @@ pub fn drain_deferred_ydoc_for_key(
     Ok(YdocDrainResult {
         drained: drained_coordinates.len(),
         refusals,
+        sharing_declined,
     })
 }
 
@@ -979,6 +986,7 @@ pub fn apply_ydoc_envelope(
                 deferred: true,
                 reason: Some("ydoc-session-live"),
                 conflicts_opened: 0,
+                sharing_declined: None,
             })
         });
     }
@@ -1197,6 +1205,7 @@ pub fn apply_ydoc_envelope(
                         deferred: false,
                         reason: Some("ydoc-base-conflict"),
                         conflicts_opened,
+                        sharing_declined: None,
                     });
                 }
             }
@@ -1216,6 +1225,7 @@ pub fn apply_ydoc_envelope(
                 deferred: false,
                 reason: None,
                 conflicts_opened: 0,
+                sharing_declined: None,
             })
         })?;
         if matches!(outcome, ApplyOutcome::Applied(_) | ApplyOutcome::Skipped)
@@ -1224,7 +1234,9 @@ pub fn apply_ydoc_envelope(
                 .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
         {
             let drain = drain_deferred_ydoc_for_key(store, &key, faults)?;
-            return Ok(outcome.with_refusals(drain.refusals));
+            return Ok(outcome
+                .with_sharing_declined(drain.sharing_declined)
+                .with_refusals(drain.refusals));
         }
         return Ok(outcome);
     }
@@ -1232,13 +1244,13 @@ pub fn apply_ydoc_envelope(
     // phase drain FIRST, so the projection below reconstructs the COMPLETE
     // applied lineage (a partial projection would materialize a file missing
     // parked content).
-    let drain_refusals = if dohc_engine_collab::read_marker(store, &key)
+    let drain = if dohc_engine_collab::read_marker(store, &key)
         .map_err(map_collab_hard_error)?
         .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
     {
-        drain_deferred_ydoc_for_key(store, &key, faults)?.refusals
+        drain_deferred_ydoc_for_key(store, &key, faults)?
     } else {
-        Vec::new()
+        YdocDrainResult::default()
     };
     // Reconstruct the post-apply doc OUTSIDE the admission tx (commutative:
     // the in-tx apply of the same bytes yields the same converged state, and
@@ -1306,6 +1318,7 @@ pub fn apply_ydoc_envelope(
                     deferred: true,
                     reason: Some("ydoc-lineage-absent"),
                     conflicts_opened: 0,
+                    sharing_declined: None,
                 })
             });
         };
@@ -1316,7 +1329,11 @@ pub fn apply_ydoc_envelope(
                 faults,
                 "ydoc.update bytes fail durable validation",
             )
-            .map(|outcome| outcome.with_refusals(drain_refusals));
+            .map(|outcome| {
+                outcome
+                    .with_sharing_declined(drain.sharing_declined)
+                    .with_refusals(drain.refusals)
+            });
         }
         persisted
     };
@@ -1327,6 +1344,7 @@ pub fn apply_ydoc_envelope(
         origin_seq: envelope.origin_seq,
         bytes,
     };
+    let mut sharing_declined = None;
     let outcome =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
             let applied = apply_remote_update_in_transaction(tx, &key, &remote, op.recorded_at_ms)
@@ -1354,12 +1372,11 @@ pub fn apply_ydoc_envelope(
                 search_policy.as_ref(),
             ) {
                 Ok(()) => {
-                    let _ = crate::originate_ydoc_base_in_tx(
-                        tx,
-                        &key,
-                        &update_path,
-                        op.recorded_at_ms,
-                    )?;
+                    if let crate::BaseOrigination::Declined(declined) =
+                        crate::originate_ydoc_base_in_tx(tx, &key, &update_path, op.recorded_at_ms)?
+                    {
+                        sharing_declined = Some(declined);
+                    }
                     tx.execute_batch("RELEASE dohc_ydoc_projection")
                         .map_err(SyncError::persist)?;
                 }
@@ -1390,24 +1407,35 @@ pub fn apply_ydoc_envelope(
             reason: "ydoc.update compaction failed",
         })?;
     }
-    Ok(map_applied_ydoc_outcome(outcome).with_refusals(drain_refusals))
+    Ok(map_applied_ydoc_outcome(outcome, sharing_declined)
+        .with_sharing_declined(drain.sharing_declined)
+        .with_refusals(drain.refusals))
 }
 
 fn map_applied_ydoc_outcome(
     outcome: ApplyOutcome<ReplicationApplyOutcome>,
+    sharing_declined: Option<crate::SharingDeclined>,
 ) -> ApplyOutcome<YdocApplyResult> {
     match outcome {
         ApplyOutcome::Applied(_) => ApplyOutcome::Applied(YdocApplyResult {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            sharing_declined,
         }),
         ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
         ApplyOutcome::Skipped => ApplyOutcome::Skipped,
         ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
         ApplyOutcome::WithRefusals { outcome, refusals } => ApplyOutcome::WithRefusals {
-            outcome: Box::new(map_applied_ydoc_outcome(*outcome)),
+            outcome: Box::new(map_applied_ydoc_outcome(*outcome, sharing_declined)),
             refusals,
+        },
+        ApplyOutcome::WithSharingDeclined {
+            outcome,
+            sharing_declined: nested,
+        } => ApplyOutcome::WithSharingDeclined {
+            outcome: Box::new(map_applied_ydoc_outcome(*outcome, sharing_declined)),
+            sharing_declined: nested,
         },
     }
 }

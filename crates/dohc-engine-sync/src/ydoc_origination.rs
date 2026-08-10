@@ -62,6 +62,10 @@ pub fn originate_ydoc_base_in_tx(
     else {
         return Ok(BaseOrigination::NothingToDo);
     };
+    // #549 owns the measured base-specific bound that replaces this check.
+    // The decline is REPORTED, not silent (#632): it is the one branch here a
+    // user can act on, and it is indistinguishable from the four benign ones
+    // unless it says so.
     if encoded.base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
         return Ok(BaseOrigination::Declined(SharingDeclined {
             constraint: "MAX_YDOC_UPDATE_BYTES",

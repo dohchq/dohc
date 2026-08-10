@@ -10930,6 +10930,30 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
             }
             value
         }
+        ApplyOutcome::WithSharingDeclined {
+            outcome,
+            sharing_declined,
+        } => {
+            let mut value = replicated_conflict_json(*outcome);
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "sharingDeclined".to_owned(),
+                    Value::Array(
+                        sharing_declined
+                            .into_iter()
+                            .map(|declined| {
+                                json!({
+                                    "constraint": declined.constraint,
+                                    "limitBytes": declined.limit_bytes,
+                                    "observedBytes": declined.observed_bytes
+                                })
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            value
+        }
     }
 }
 

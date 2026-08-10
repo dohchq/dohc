@@ -8943,7 +8943,7 @@ fn ydoc_open_state_on_store(
         // Only the POST-LEASE read drains: a pre-lease probe mutating the
         // lineage while another session holds the lease would advance state
         // behind the active editor with no event or resync signal.
-        dohc_engine_sync::drain_deferred_ydoc_for_key(store, &key, &NoFaults)?;
+        drain_deferred_ydoc_for_local_rpc(store, &key, &NoFaults)?;
     }
     // An open sync conflict on this object freezes the OPEN as well as the
     // settle: the claimed lineage may be a peer's unreviewed base, and
@@ -9218,13 +9218,14 @@ fn ydoc_settle_on_store(
             // not seen them: settling would materialize content the user
             // never saw while they keep editing stale state. Refuse; the
             // client resyncs (which also drains) and settles again.
-            if marker.regime == Regime::Replicated
-                && dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?.drained > 0
-            {
-                return Err(dohc_engine_domain::DomainError::InvalidInput {
-                    reason: "ydoc-remote-updates-pending",
+            if marker.regime == Regime::Replicated {
+                let drained = drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
+                if drained.drained > 0 {
+                    return Err(dohc_engine_domain::DomainError::InvalidInput {
+                        reason: "ydoc-remote-updates-pending",
+                    }
+                    .into());
                 }
-                .into());
             }
         }
     }
@@ -9654,7 +9655,7 @@ fn ydoc_resync_on_store(
     if dohc_engine_collab::read_marker(store, key)?
         .is_some_and(|marker| marker.regime == Regime::Replicated)
     {
-        dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, &NoFaults)?;
+        drain_deferred_ydoc_for_local_rpc(store, key, &NoFaults)?;
     }
     Ok(match dohc_engine_collab::load_persisted(store, key)? {
         Some(persisted) => persisted.doc.encode_full_state(),
@@ -9695,9 +9696,23 @@ fn ydoc_close_session_on_store(
         // The drain PROJECTS internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
         // session left to settle it.
-        dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+        drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
     }
     Ok(Some(outcome))
+}
+
+/// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination
+/// decline visible at this boundary, matching the existing #632 diagnostic.
+fn drain_deferred_ydoc_for_local_rpc(
+    store: &mut EngineStore,
+    key: &DocKey,
+    faults: &dyn FaultInjector,
+) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
+    let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+    for declined in &drained.sharing_declined {
+        eprintln!("engine: {declined}");
+    }
+    Ok(drained)
 }
 
 fn versioned_text_write_on_store(
