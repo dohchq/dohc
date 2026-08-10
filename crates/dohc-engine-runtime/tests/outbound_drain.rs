@@ -156,6 +156,28 @@ fn secret_key() -> SecretDataKey {
     SecretDataKey::from_bytes(&[0x11; 32]).expect("secret key")
 }
 
+/// `snapshots` carries a `metadata_origin` column that the replication
+/// boundary is allowed to rewrite (see dohc-engine-collab's
+/// `captured_head_sha`); comparisons against that table drop the column by
+/// name so the assertion still catches a genuine content mismatch.
+fn snapshot_origin_column_index(statement: &rusqlite::Statement<'_>, table: &str) -> Option<usize> {
+    (table == "snapshots")
+        .then(|| {
+            statement
+                .column_names()
+                .into_iter()
+                .position(|name| name == "metadata_origin")
+        })
+        .flatten()
+}
+
+fn row_values(row: &rusqlite::Row<'_>, skip: Option<usize>) -> rusqlite::Result<Vec<String>> {
+    (0..row.as_ref().column_count())
+        .filter(|index| Some(*index) != skip)
+        .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
+        .collect()
+}
+
 fn workspace_table_rows(
     store: &EngineStore,
     workspace_id: &str,
@@ -167,12 +189,9 @@ fn workspace_table_rows(
             let mut statement = conn.prepare(&format!(
                 "SELECT * FROM {table} WHERE workspace_id=?1 ORDER BY {order_by}"
             ))?;
+            let skip = snapshot_origin_column_index(&statement, table);
             statement
-                .query_map([workspace_id], |row| {
-                    (0..row.as_ref().column_count())
-                        .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
-                        .collect::<Result<Vec<_>, _>>()
-                })?
+                .query_map([workspace_id], |row| row_values(row, skip))?
                 .collect::<Result<Vec<_>, _>>()
         })
         .expect("read workspace table")
@@ -193,11 +212,10 @@ fn one_version_rows(
             let mut statement = conn.prepare(&format!(
                 "SELECT * FROM {table} WHERE workspace_id=?1 AND version_id=?2 ORDER BY path"
             ))?;
+            let skip = snapshot_origin_column_index(&statement, table);
             statement
                 .query_map(params![workspace_id, version_id], |row| {
-                    (0..row.as_ref().column_count())
-                        .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
-                        .collect::<Result<Vec<_>, _>>()
+                    row_values(row, skip)
                 })?
                 .collect::<Result<Vec<_>, _>>()
         })
@@ -743,7 +761,7 @@ async fn lagging_peer_applies_prior_ops_then_a_chunked_fork_in_sequence() {
         copy_op_blobs(&source_store, &mut peer_store, op);
         apply_logged_op(&mut peer_store, workspace_id, op);
     }
-    for table in ["versions", "snapshots", "fork_base_snapshots"] {
+    for table in ["versions", "fork_base_snapshots", "snapshots"] {
         let order = if table == "versions" {
             "version_id"
         } else {

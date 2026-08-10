@@ -624,6 +624,133 @@ async fn completed_binary_rename_rollback_restores_old_path_and_removes_new_path
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict() {
+    // The first call commits both jobs but leaves them pending. The SQL update
+    // isolates the post-commit race: the write remains retryable while another
+    // disk action terminalizes its paired delete before the replay reloads it.
+    // MUTATION: map the paired delete's Cancelled status to Skipped in
+    // `versioned_text_rollback_on_store`; the replay reports Skipped.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+
+    actor
+        .versioned_binary_write(
+            binary_write("cancelled-old.bin", "cancelled-rename-seed"),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("binary seed");
+    actor
+        .versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "main".to_owned(),
+                from_path: "cancelled-old.bin".to_owned(),
+                to_path: "cancelled-new.bin".to_owned(),
+                moment_id: "cancelled-rename".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 20,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("completed rename");
+
+    let mut rollback_input = rollback("main", "cancelled-new.bin", "cancelled-rename");
+    rollback_input.request_id = Some("cancelled-rename-rollback-request".to_owned());
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+    let first = actor
+        .versioned_text_rollback(
+            rollback_input.clone(),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("committed rollback");
+    assert_eq!(
+        first.materialize_outcome,
+        PostCommitMaterializeOutcome::Error
+    );
+    assert!(faults.fired());
+
+    let rollback_identity = binary_rollback_job_identity(WORKSPACE, "main", "cancelled-rename");
+    let write_job_id = binary_rename_write_job_id(&rollback_identity);
+    let delete_job_id = binary_rename_delete_job_id(&rollback_identity);
+    let connection = rusqlite::Connection::open(&db).expect("open job ledger");
+    connection
+        .execute(
+            "UPDATE materialization_jobs SET status='cancelled', completed_at_ms=30 \
+             WHERE job_id=?1",
+            [&delete_job_id],
+        )
+        .expect("cancel paired delete");
+    let statuses: (String, String) = connection
+        .query_row(
+            "SELECT write.status, delete_job.status \
+             FROM materialization_jobs write, materialization_jobs delete_job \
+             WHERE write.job_id=?1 AND delete_job.job_id=?2",
+            rusqlite::params![write_job_id, delete_job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("paired statuses");
+    assert_eq!(statuses, ("pending".to_owned(), "cancelled".to_owned()));
+    drop(connection);
+
+    let replay = actor
+        .versioned_text_rollback(
+            rollback_input,
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("deduped rollback replay");
+    assert!(replay.deduped);
+    assert!(!replay.materialized);
+    assert_eq!(
+        replay.materialize_outcome,
+        PostCommitMaterializeOutcome::Conflict
+    );
+
+    // The deduped replay drains the still-pending write job to completion
+    // even though the outcome reports Conflict; the already-terminal delete
+    // stays cancelled. This proves the post-replay ledger state instead of
+    // only the pre-replay setup above.
+    let connection = rusqlite::Connection::open(&db).expect("reopen job ledger");
+    let statuses_after_replay: (String, String) = connection
+        .query_row(
+            "SELECT write.status, delete_job.status \
+             FROM materialization_jobs write, materialization_jobs delete_job \
+             WHERE write.job_id=?1 AND delete_job.job_id=?2",
+            rusqlite::params![write_job_id, delete_job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("paired statuses after replay");
+    assert_eq!(
+        statuses_after_replay,
+        ("complete".to_owned(), "cancelled".to_owned())
+    );
+    drop(connection);
+
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
     // MUTATION: omit pending rollback deletes from capture_manifest_seed ->
     // the baseline reports new-pending.bin as Added and capture can adopt it.

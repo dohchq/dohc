@@ -10044,6 +10044,57 @@ fn version_create_with_shipped_snapshots(
 }
 
 #[test]
+fn version_create_stamps_a_shipped_capture_head_as_replicated() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let sha = dohc_engine_storage::hex_sha256(b"captured fork state");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![sha, 19_i64, "captured fork state"],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed shipped capture blob");
+    let mut snapshot = shipped_text_snapshot("captured-object", "captured.md", &sha);
+    snapshot["metadata"]["origin"] = json!("capture");
+    let operation = version_create_with_shipped_snapshots(
+        "capture-version-peer",
+        "captured-fork",
+        vec![snapshot],
+    );
+
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+    ));
+    let (head_origin, base_origin): (String, String) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT metadata_origin FROM snapshots \
+                     WHERE workspace_id='ws' AND version_id='captured-fork' \
+                       AND object_id='captured-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT metadata_origin FROM fork_base_snapshots \
+                     WHERE workspace_id='ws' AND version_id='captured-fork' \
+                       AND object_id='captured-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("read shipped origins");
+    assert_eq!(head_origin, "sync");
+    assert_eq!(base_origin, "capture");
+}
+
+#[test]
 fn version_create_shipped_snapshot_rejects_a_missing_blob_deliberately() {
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");

@@ -1312,11 +1312,9 @@ fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, C
 /// `metadata_origin` directly and mints no job row either way, so it is the
 /// fact this function needs, not a proxy for it.
 ///
-/// A fact about LOCAL heads. Replication (#356, unbuilt) replays remote
-/// moments with their origins verbatim, so a peer's capture moment would
-/// satisfy this without the local disk holding the bytes — when sync lands,
-/// either rewrite origins at the replication boundary or add the locality
-/// test here.
+/// A fact about LOCAL heads. The replication boundary stamps replicated
+/// heads with `REPLICATED_SNAPSHOT_ORIGIN` (dohc-engine-sync), so this guard
+/// reads only locally-minted origins.
 fn captured_head_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
     conn.query_row(
         "SELECT s.blob_sha256 FROM snapshots s \

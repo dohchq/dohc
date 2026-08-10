@@ -12,6 +12,13 @@ use crate::file_search::{
 };
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
 
+/// The stored origin for every replicated snapshot head.
+///
+/// Wire origins describe the originating peer's provenance. Local capture and
+/// close guards treat `snapshots.metadata_origin` as proof of local disk state,
+/// so replicated heads must carry the established replication origin instead.
+pub(crate) const REPLICATED_SNAPSHOT_ORIGIN: &str = "sync";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MomentAppendPayload {
@@ -380,6 +387,7 @@ fn apply_moment_append(
     } else {
         local.as_ref().is_some_and(|snapshot| {
             Some(snapshot.latest_moment_id.as_str()) == payload.before_latest_moment_id.as_deref()
+                || equivalent_ydoc_settlement_preimage(snapshot, payload)
         }) && conflicting_occupant.is_none()
     };
     let after_kind = ContentKind::from_wire(payload.payload_after_content_kind.as_deref());
@@ -627,6 +635,32 @@ fn apply_moment_append(
         conflicts_opened: opened,
         materialization_changes: Vec::new(),
     })
+}
+
+fn equivalent_ydoc_settlement_preimage(snapshot: &Snapshot, payload: &MomentAppendPayload) -> bool {
+    snapshot.kind == ContentKind::Text
+        && is_ydoc_settlement_moment_id(&snapshot.latest_moment_id)
+        && payload
+            .before_latest_moment_id
+            .as_deref()
+            .is_some_and(is_ydoc_settlement_moment_id)
+        && payload.before_object_id.as_deref() == Some(snapshot.object_id.as_str())
+        && payload.before_version_id.as_deref() == Some(payload.version_id.as_str())
+        && payload.before_path.as_deref() == Some(snapshot.path.as_str())
+        && payload.before_blob_sha256.as_deref() == Some(snapshot.digest.as_str())
+        && ContentKind::from_wire(payload.before_content_kind.as_deref()) == snapshot.kind
+        && payload.payload_before_path.as_deref() == Some(snapshot.path.as_str())
+        && payload.payload_before_blob_sha256.as_deref() == Some(snapshot.digest.as_str())
+        && ContentKind::from_wire(payload.payload_before_content_kind.as_deref()) == snapshot.kind
+}
+
+fn is_ydoc_settlement_moment_id(moment_id: &str) -> bool {
+    moment_id
+        .strip_prefix("moment-ydoc-apply-")
+        .or_else(|| moment_id.strip_prefix("moment-ydoc-"))
+        .is_some_and(|digest| {
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 fn is_active_version(
@@ -1217,7 +1251,7 @@ fn upsert_snapshot(
             text_sha,
             payload.recorded_at_ms,
             payload.moment_id,
-            payload.metadata.origin,
+            REPLICATED_SNAPSHOT_ORIGIN,
             payload.metadata.summary,
             payload.metadata.correlation_id,
             kind.as_str(),

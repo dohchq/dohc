@@ -1,3 +1,4 @@
+use dohc_engine_collab::Ydoc;
 use dohc_engine_domain::{
     CreateNamedVersion, ListMomentsQuery, MomentOp, RollbackTextFileMutation, VersionedTextStore,
     WriteText,
@@ -8,8 +9,9 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::{
-    ApplyOutcome, RefusalReason, ReplicationEnvelope, ReplicationRefusal, SyncError,
-    apply_moment_envelope, apply_replication_envelope, read_replication_acked_seq,
+    ApplyOutcome, NoLiveLeases, RefusalReason, ReplicationEnvelope, ReplicationRefusal, SyncError,
+    apply_moment_envelope, apply_replication_envelope, apply_ydoc_envelope,
+    read_replication_acked_seq,
 };
 
 fn test_store() -> (ScratchDir, EngineStore) {
@@ -225,6 +227,116 @@ fn absent_text_payload(moment_id: &str, object_id: &str, path: &str, text: &str)
         "metadata": {"origin": "sync"},
         "beforePresent": "absent"
     })
+}
+
+#[test]
+fn replicated_moment_snapshot_origin_is_sync() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["peer capture"]);
+    let mut payload = absent_text_payload(
+        "peer-capture-moment",
+        "peer-capture-object",
+        "notes/peer.md",
+        "peer capture",
+    );
+    payload["metadata"]["origin"] = json!("local-file");
+
+    apply_moment_envelope(&mut store, &envelope("peer", 0, "ws", payload), &NoFaults)
+        .expect("replicated moment");
+
+    let origin: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT metadata_origin FROM snapshots \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='peer-capture-object'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("snapshot origin");
+    assert_eq!(origin, "sync");
+}
+
+#[test]
+fn moment_after_equivalent_ydoc_projection_fast_forwards() {
+    let (_peer_scratch, mut peer) = test_store();
+    let local_settle_id = format!("moment-ydoc-{}", "a".repeat(64));
+
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "settled text");
+    let base_sha = peer
+        .put_binary_blob(&doc.encode_full_state())
+        .expect("Y.Doc base blob");
+    let base = ReplicationEnvelope {
+        workspace_id: "ws".to_owned(),
+        origin_id: "ydoc-origin".to_owned(),
+        origin_seq: 0,
+        op_kind: "ydoc.update".to_owned(),
+        payload: json!({
+            "versionId": "main",
+            "objectId": "ydoc-settle-object",
+            "path": "notes/settled.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+        recorded_at_ms: 1_500,
+    };
+    apply_ydoc_envelope(&mut peer, &base, &NoFaults, &NoLiveLeases).expect("peer Y.Doc projection");
+    let peer_head: String = peer
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT latest_moment_id FROM snapshots \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='ydoc-settle-object'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("peer projected head");
+    assert!(peer_head.starts_with("moment-ydoc-apply-"));
+    assert_ne!(peer_head, local_settle_id);
+
+    hydrate_texts(&mut peer, &["next edit"]);
+    let next = envelope(
+        "moment-origin",
+        0,
+        "ws",
+        present_text_payload(
+            "moment-after-settle",
+            "ydoc-settle-object",
+            "write",
+            "notes/settled.md",
+            "notes/settled.md",
+            "settled text",
+            &local_settle_id,
+            "next edit",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut peer, &next, &NoFaults).expect("next moment"),
+        ApplyOutcome::Applied(0)
+    );
+    let (latest_moment_id, conflicts): (String, i64) = peer
+        .read_with(|conn| {
+            let latest = conn.query_row(
+                "SELECT latest_moment_id FROM snapshots \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='ydoc-settle-object'",
+                [],
+                |row| row.get(0),
+            )?;
+            let conflicts = conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((latest, conflicts))
+        })
+        .expect("peer result");
+    assert_eq!(latest_moment_id, "moment-after-settle");
+    assert_eq!(conflicts, 0);
 }
 
 #[allow(clippy::too_many_arguments)]

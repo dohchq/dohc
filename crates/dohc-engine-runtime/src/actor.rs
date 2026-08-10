@@ -7064,15 +7064,7 @@ fn worker_main(
                         },
                         faults.as_ref(),
                         |tx, result| {
-                            let Some(moment) = result.moment.as_ref() else {
-                                return Ok(());
-                            };
-                            match moment.operation {
-                                SecretOp::Write => journal_secret_put_outbound_in_tx(tx, result),
-                                SecretOp::Delete => {
-                                    journal_secret_delete_outbound_in_tx(tx, moment)
-                                }
-                            }
+                            journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref())
                         },
                     )
                     .map_err(RuntimeError::from)
@@ -7107,17 +7099,7 @@ fn worker_main(
                         now_ms,
                         faults.as_ref(),
                         |tx, result| {
-                            let Some(moment) = result.moment.as_ref() else {
-                                return Ok(());
-                            };
-                            match moment.operation {
-                                SecretOp::Write => {
-                                    journal_secret_put_moment_outbound_in_tx(tx, moment)
-                                }
-                                SecretOp::Delete => {
-                                    journal_secret_delete_outbound_in_tx(tx, moment)
-                                }
-                            }
+                            journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref())
                         },
                     )
                     .map_err(RuntimeError::from)
@@ -10084,6 +10066,19 @@ fn journal_secret_put_outbound_in_tx(
         return Ok(());
     };
     journal_secret_put_moment_outbound_in_tx(tx, moment)
+}
+
+fn journal_secret_moment_outbound_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    moment: Option<&SecretMomentRecord>,
+) -> Result<(), DomainError> {
+    let Some(moment) = moment else {
+        return Ok(());
+    };
+    match moment.operation {
+        SecretOp::Write => journal_secret_put_moment_outbound_in_tx(tx, moment),
+        SecretOp::Delete => journal_secret_delete_outbound_in_tx(tx, moment),
+    }
 }
 
 fn journal_secret_put_moment_outbound_in_tx(

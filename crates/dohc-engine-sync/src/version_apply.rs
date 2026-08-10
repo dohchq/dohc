@@ -5,6 +5,7 @@ use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
 
+use crate::moment_apply::REPLICATED_SNAPSHOT_ORIGIN;
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
 
 #[derive(Deserialize)]
@@ -270,7 +271,10 @@ fn insert_shipped_snapshot(
     } else {
         ("text", Some(snapshot.blob_sha256.as_str()), None)
     };
-    for table in ["snapshots", "fork_base_snapshots"] {
+    for (table, metadata_origin) in [
+        ("snapshots", REPLICATED_SNAPSHOT_ORIGIN),
+        ("fork_base_snapshots", snapshot.metadata.origin.as_str()),
+    ] {
         let sql = format!(
             "INSERT OR IGNORE INTO {table} \
              (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,metadata_summary,metadata_correlation_id,content_kind,binary_sha256) \
@@ -286,7 +290,7 @@ fn insert_shipped_snapshot(
                 text_sha,
                 snapshot.updated_at_ms,
                 snapshot.latest_moment_id,
-                snapshot.metadata.origin,
+                metadata_origin,
                 snapshot.metadata.summary,
                 snapshot.metadata.correlation_id,
                 content_kind,
