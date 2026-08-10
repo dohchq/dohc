@@ -3374,6 +3374,108 @@ it("a materialized settle retires a session's deletion fence, so post-recovery e
   await capture.stop();
 }, 20_000);
 
+it("an external delete landing mid-close-retry-ladder is not resurrected by a later retry's settle", async () => {
+  // #746: `scheduleDetachedLockedSettle` (above) is the debt-REGISTRATION
+  // door, reached only through the replicated `YdocReleasedWithSettleFailureError`
+  // shape. An UNREPLICATED close refusal never reaches it at all —
+  // `scheduleTransientCloseRetry` retries `closeEntry` itself, off the
+  // capture chain, with no debt ever registered — so none of #744's
+  // registry-side fences ever see this ladder. An external delete
+  // landing between the failed first attempt and a later retry used to
+  // be silently undone by that retry's own settle.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-delete-",
+  );
+  const { session } = await openWithOneEdit(capture, "would resurrect this too");
+
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+
+  // The watcher observes the external delete while the ladder sleeps
+  // between attempts. No debt exists yet for this path — Ladder B never
+  // registers one — so the no-debt tombstone is the only place this is
+  // remembered.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  state.locked = false;
+
+  // RED before the fix: nothing asked the retry ladder about the delete,
+  // so its own retry re-settled the canonical doc back onto the path the
+  // user removed.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.settledMarkdowns).toEqual([]);
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+  await capture.stop();
+}, 10_000);
+
+it("a recreated path's fresh close-retry ladder still settles normally despite an earlier delete", async () => {
+  // #746 non-regression, the inverse of the pin above: this session opens
+  // AFTER the delete-then-recreate, so it is not the incarnation any
+  // tombstone names — the fix must not start refusing it. True at both
+  // the unfixed and the fixed head (run first, to prove the pin does not
+  // depend on the fix): a fresh session's close-retry ladder never
+  // consulted the tombstone before this PR either, and the age
+  // discrimination #744 built for the registration door already answers
+  // "no" for this session once the fix asks it too.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-recreate-",
+  );
+
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  await capture.flush();
+
+  const { session } = await openWithOneEdit(capture, "a real pending edit");
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+
+  state.locked = false;
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["a real pending edit"]);
+  await capture.stop();
+}, 20_000);
+
+it("a suppressed close-retry ladder stands down once, honestly, instead of resurrecting or repeating", async () => {
+  // #746 stand-down honesty (the close-result contract): once removal
+  // evidence suppresses a retry's settle, the ladder must record that ONE
+  // stand-down and stop — never report a landed artifact, and never
+  // re-consult (or re-announce) a tombstone it already consumed on a
+  // later retry.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-standdown-",
+  );
+  const { session } = await openWithOneEdit(capture, "stood-down content");
+
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  state.locked = false;
+
+  // Let several retry windows pass — the ladder's own doubling delay,
+  // twice over.
+  await new Promise((resolve) => setTimeout(resolve, 3_500));
+
+  // The close result stays truthful: no artifact ever landed...
+  expect(state.settledMarkdowns).toEqual([]);
+  // ...and the stand-down was recorded exactly once, not re-announced on
+  // every later retry.
+  expect(
+    state.errorMessages.filter((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toHaveLength(1);
+  await capture.stop();
+}, 15_000);
+
 it("a delete refuses the open that could register a debt while disk work is in flight", async () => {
   // #696 rescanned for debts registered after its suspension snapshot. #697
   // makes that late registration unreachable: a new live open cannot enter
