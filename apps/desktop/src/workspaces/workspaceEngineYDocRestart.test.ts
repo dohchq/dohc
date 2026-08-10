@@ -21,6 +21,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import {
   createWorkspaceEngineCapture,
+  EXPECTED_ENGINE_EVENT_EXPIRY_MS,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
@@ -2294,7 +2295,21 @@ it("announces a recovered edit exactly once when both arm points run", async () 
 // stale until an unrelated edit.
 async function lockedRebindCapture(
   prefix: string,
-  options?: { daemonOwnsCapture?: boolean },
+  options?: {
+    daemonOwnsCapture?: boolean;
+    now?: () => number;
+    // Wraps the base provider open for one test's own generation, so it
+    // can override a single method (e.g. `settleNow`'s timing) while
+    // reusing everything else — the shared `state`'s locking, failure
+    // injection, and bookkeeping all keep working unmodified.
+    wrapProvider?: (
+      base: (
+        openOptions: EngineYdocProviderSessionOptions,
+      ) => Promise<EngineYdocProviderSession>,
+    ) => (
+      openOptions: EngineYdocProviderSessionOptions,
+    ) => Promise<EngineYdocProviderSession>;
+  },
 ) {
   // #630's scratch, like every other harness in this file: the run root is
   // swept even when a test fails, and an unremovable tree fails the suite
@@ -2424,6 +2439,9 @@ async function lockedRebindCapture(
       async settleNow() {
         state.settleCalls.push(gen);
         const token = ++tokens;
+        // Real provider ordering: the settle ANNOUNCES itself before its
+        // outcome is known, whatever that outcome turns out to be.
+        options.onSettleStart?.(token);
         if (state.settleFailure) {
           const failure = state.settleFailure;
           options.onSettleError?.(failure, token);
@@ -2544,7 +2562,9 @@ async function lockedRebindCapture(
     workspaceId,
     rootPath,
     rustEngineSessions: sessions,
-    openRustYDocProviderSession: openProvider,
+    openRustYDocProviderSession: options?.wrapProvider
+      ? options.wrapProvider(openProvider)
+      : openProvider,
     onError: (context, error) => {
       state.errors.push(context);
       state.errorMessages.push(
@@ -2552,6 +2572,7 @@ async function lockedRebindCapture(
       );
     },
     ...(options?.daemonOwnsCapture ? { daemonOwnsCapture: true } : {}),
+    ...(options?.now ? { now: options.now } : {}),
   });
   return { capture, state, loopback, workspaceId, rootPath };
 }
@@ -3549,6 +3570,151 @@ it("a delete delivered while the capture chain is busy still suppresses a retry 
   await capture.stop();
 }, 20_000);
 
+it("a delete landing past the tombstone's own TTL still suppresses an active retry ladder directly", async () => {
+  // Certification follow-up on #746 (TTL boundary): the no-debt
+  // tombstone's TTL (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`, 10s) and the
+  // close-retry ladder's own doubling delay cap (`TEARDOWN_RETRY_CAP_MS`,
+  // also 10s) converge — once the ladder is capped, the gap between two
+  // consecutive retries EQUALS the tombstone's own TTL. A delete landing
+  // right after one retry's own consult can sit unconsulted for that
+  // whole gap, and the map-only tombstone expires before the next retry
+  // ever asks. `armRemovalSuppression` (the fix) arms the session
+  // directly, at watcher-delivery time, bypassing the TTL-bounded map for
+  // that session entirely — nothing there can expire.
+  //
+  // A virtual clock proves this without a real 10s+ wait: the retry
+  // ladder still fires on its own real timers, but `now()` reports a
+  // delete old enough that the map-only path would already read it as
+  // expired by the time any retry consults it.
+  let virtualNowMs = 1_000_000;
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-close-retry-ttl-boundary-",
+    { now: () => virtualNowMs },
+  );
+  const { session } = await openWithOneEdit(
+    capture,
+    "must not resurrect past the tombstone's own TTL",
+  );
+
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+
+  // Virtual time must actually move past the session's own open time
+  // before the delete lands — the age discrimination (recreation vs. the
+  // stale incarnation a delete orphaned) reads an EQUAL timestamp as "not
+  // before the delete", same as the map-based door does.
+  virtualNowMs += 500;
+
+  // The delete lands — `armRemovalSuppression` sees it immediately, at
+  // THIS virtual time. Only afterward does virtual time jump past the
+  // tombstone's own TTL, well before the retry (still on a real ~1s
+  // timer) ever fires.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  virtualNowMs += EXPECTED_ENGINE_EVENT_EXPIRY_MS + 1;
+
+  state.locked = false;
+
+  // RED before the fix: the retry's only door was the TTL-bounded map,
+  // already expired by virtual time, so the retry re-settled the doc onto
+  // the path the user just deleted.
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.settledMarkdowns).toEqual([]);
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+  await capture.stop();
+}, 10_000);
+
+it("a delete landing after a settle's write but before its late onSettled callback still suppresses the retry", async () => {
+  // Codex P1 on 847ef7d9: the synchronous tombstone recording above (the
+  // P1-C fix) exposed an ordering hazard in the SEPARATE clear #681 round
+  // 9 added — `onSettled`, on a materialized write, unconditionally
+  // retired this path's no-debt tombstone, on the theory that landing a
+  // write proves an earlier deletion's premise no longer holds. But
+  // `onSettled` can run LATE: behind an occupied capture chain, or simple
+  // scheduling. A delete landing in that exact gap — after the write
+  // already materialized, before the stale callback finally runs — used
+  // to have its OWN, newer tombstone erased by that late callback, purely
+  // because an OLDER settle's completion happened to run after it.
+  let releaseSettled!: () => void;
+  const settleGate = new Promise<void>((resolve) => {
+    releaseSettled = resolve;
+  });
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-settle-clear-race-",
+    {
+      wrapProvider: (base) => async (openOptions) => {
+        const inner = await base(openOptions);
+        let token = 0;
+        return {
+          ...inner,
+          async settleNow() {
+            token += 1;
+            const thisToken = token;
+            const markdown = inner.doc.getText("plainText").toString();
+            openOptions.onSettleStart?.(thisToken);
+            const result = {
+              momentId: `moment-race-${thisToken}`,
+              path: openOptions.path,
+              markdown,
+              sha256: createHash("sha256").update(markdown).digest("hex"),
+              materialized: true,
+              projection: {
+                contentKind: "plaintext" as const,
+                sourceStateVectorSha256: "c".repeat(64),
+                destructive: false,
+              },
+            };
+            // THE WRITE LANDS now — observable immediately, same as a real
+            // materialized settle.
+            state.settledMarkdowns.push(markdown);
+            // The callback that reports it is late.
+            await settleGate;
+            await openOptions.onSettled?.(result, thisToken);
+            return result;
+          },
+        };
+      },
+    },
+  );
+  const { session } = await openWithOneEdit(capture, "first version");
+
+  // The settle starts and its write lands, but its own completion
+  // callback is held open — modelling a chain occupied by other work.
+  const settling = session.settleNow();
+  await expect
+    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .toEqual(["first version"]);
+
+  // The delete lands INSIDE the gap: after the write, before the stale
+  // callback. No debt exists for this path, so this is the no-debt
+  // tombstone the stale callback must not erase.
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  // The stale callback finally fires and reaches its own clear.
+  releaseSettled();
+  await settling;
+
+  // A later close-retry ladder must still find the tombstone. RED before
+  // the fix: the stale callback already erased it, so this retry
+  // resettles the doc onto the path the user just deleted.
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+  state.locked = false;
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  expect(state.settledMarkdowns).toEqual(["first version"]);
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+  ).toBe(true);
+  await capture.stop();
+}, 20_000);
+
 it("a recreated path's fresh close-retry ladder still settles normally despite an earlier delete", async () => {
   // #746 non-regression, the inverse of the pin above: this session opens
   // AFTER the delete-then-recreate, so it is not the incarnation any
@@ -3668,13 +3834,19 @@ it("a suppressed retry's own transient release failure still stands down on the 
     )
     .toBe(1);
   expect(state.settledMarkdowns).toEqual([]);
+  const closesAtFirstStandDown = state.closeCalls.length;
 
   // The release clears; the next retry (~2s later, the doubled delay)
   // must complete WITHOUT re-consulting or re-announcing the tombstone —
   // only `writeCancelled`'s stickiness can produce that, since the
-  // tombstone itself was already consumed by the first suppression.
+  // tombstone itself was already consumed by the first suppression. Poll
+  // for the SECOND retry's own close call having actually run before
+  // asserting silence — a fixed sleep here would let a loaded runner pass
+  // vacuously, before the second retry ever fires.
   state.closeFailure = null;
-  await new Promise((resolve) => setTimeout(resolve, 3_000));
+  await expect
+    .poll(() => state.closeCalls.length, { timeout: 15_000 })
+    .toBeGreaterThan(closesAtFirstStandDown);
   expect(state.settledMarkdowns).toEqual([]);
   expect(
     state.errorMessages.filter((message) =>
