@@ -64,6 +64,9 @@ fn looks_structurally_valid(envelope: &ReplicationEnvelope) -> bool {
         && !envelope.op_kind.is_empty()
         && envelope.op_kind.len() <= 128
         && (0..=MAX_WIRE_INTEGER).contains(&envelope.origin_seq)
+        && envelope
+            .relay_seq
+            .is_none_or(|relay_seq| (0..=MAX_WIRE_INTEGER).contains(&relay_seq))
         && serde_json::to_vec(&envelope.payload)
             .map(|bytes| bytes.len() <= MAX_PAYLOAD_BYTES)
             .unwrap_or(false)
@@ -88,6 +91,7 @@ fn arbitrary_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
         arbitrary_string(),
         arbitrary_string(),
         any::<i64>(),
+        prop::option::of(any::<i64>()),
         arbitrary_string(),
         prop_oneof![
             Just(serde_json::Value::Null),
@@ -97,11 +101,12 @@ fn arbitrary_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
         any::<i64>(),
     )
         .prop_map(
-            |(workspace_id, origin_id, origin_seq, op_kind, payload, recorded_at_ms)| {
+            |(workspace_id, origin_id, origin_seq, relay_seq, op_kind, payload, recorded_at_ms)| {
                 ReplicationEnvelope {
                     workspace_id,
                     origin_id,
                     origin_seq,
+                    relay_seq,
                     op_kind,
                     payload,
                     recorded_at_ms,
@@ -156,16 +161,18 @@ fn arbitrary_secret_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
         arbitrary_string(),
         arbitrary_string(),
         any::<i64>(),
+        prop::option::of(any::<i64>()),
         secret_op_kind(),
         arbitrary_secret_payload(),
         any::<i64>(),
     )
         .prop_map(
-            |(workspace_id, origin_id, origin_seq, op_kind, payload, recorded_at_ms)| {
+            |(workspace_id, origin_id, origin_seq, relay_seq, op_kind, payload, recorded_at_ms)| {
                 ReplicationEnvelope {
                     workspace_id,
                     origin_id,
                     origin_seq,
+                    relay_seq,
                     op_kind,
                     payload,
                     recorded_at_ms,
@@ -258,6 +265,7 @@ fn seed_valid_envelope_applies() {
         workspace_id: "ws".to_owned(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 0,
+        relay_seq: None,
         op_kind: "fuzz.seed".to_owned(),
         payload: serde_json::json!({ "hello": "fuzz" }),
         recorded_at_ms: 1_000,
@@ -277,6 +285,7 @@ fn seed_non_secret_op_kind_is_rejected_by_secret_applier() {
         workspace_id: "ws".to_owned(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 1,
+        relay_seq: None,
         op_kind: "fuzz.not-a-secret".to_owned(),
         payload: serde_json::Value::Null,
         recorded_at_ms: 1_000,
@@ -294,6 +303,7 @@ fn seed_empty_workspace_id_is_refused_before_mutation() {
         workspace_id: String::new(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 0,
+        relay_seq: None,
         op_kind: "fuzz.seed".to_owned(),
         payload: serde_json::Value::Null,
         recorded_at_ms: 1_000,
