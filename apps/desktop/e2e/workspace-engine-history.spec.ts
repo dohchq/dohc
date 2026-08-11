@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -127,24 +129,22 @@ test("explicit opt-out: app works, nothing records anywhere, and the app says hi
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/opted-out.md");
 
     // ...and an app-side edit through the normal bridge saves fine.
+    const expectedContentHash = createHash("sha256")
+      .update(await readFile(join(temp.rootPath, "notes/opted-out.md")))
+      .digest("hex");
     await page.evaluate(
       async (input) => {
         const api = (window as unknown as {
-          dohcDesktop: {
-            writeWorkspaceText(payload: {
-              workspaceId: string;
-              relativePath: string;
-              text: string;
-            }): Promise<unknown>;
-          };
+          dohcDesktop: Pick<DohcDesktopBridge, "writeWorkspaceText">;
         }).dohcDesktop;
         await api.writeWorkspaceText({
           workspaceId: input.workspaceId,
           relativePath: "notes/opted-out.md",
           text: "no history here — edited\n",
+          expectedContentHash: input.expectedContentHash,
         });
       },
-      { workspaceId: workspace.workspaceId },
+      { workspaceId: workspace.workspaceId, expectedContentHash },
     );
     await expect
       .poll(() =>

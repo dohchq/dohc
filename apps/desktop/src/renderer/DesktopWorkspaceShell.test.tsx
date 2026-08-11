@@ -44,6 +44,8 @@ import type {
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
+  WriteWorkspaceTextPayload,
+  WriteWorkspaceTextResult,
   WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
@@ -316,7 +318,11 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       drivers: [],
       session: null,
     })),
-    readWorkspaceText: vi.fn(async () => ({ text: "# Doc\n", truncated: false })),
+    readWorkspaceText: vi.fn(async () => ({
+      text: "# Doc\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    })),
     // The linked-mentions panel bails without this, and its chat-mention read
     // is an ENGINE CAPTURE call (#615) — so a fake that omits it makes every
     // no-call pin on that read pass for the wrong reason.
@@ -339,7 +345,12 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       omittedFileCount: 0,
       truncatedFileCount: 0,
     })),
-    writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+    writeWorkspaceText: vi.fn(
+      async (_payload: WriteWorkspaceTextPayload): Promise<WriteWorkspaceTextResult> => ({
+        status: "written",
+        contentHash: "a".repeat(64),
+      }),
+    ),
     createWorkspaceFile: vi.fn(async (payload: { relativePath: string }) => ({
       path: payload.relativePath,
     })),
@@ -2792,6 +2803,251 @@ describe("file-open-start marking", () => {
   });
 });
 
+async function openDirtyMarkdown(
+  bridge: ReturnType<typeof makeBridge>,
+): Promise<{
+  user: ReturnType<typeof userEvent.setup>;
+  editor: HTMLTextAreaElement;
+}> {
+  const user = userEvent.setup();
+  renderShell(bridge);
+  const row = (await screen.findAllByTestId("tree-row")).find(
+    (candidate) => candidate.dataset.path === "a.md",
+  )!;
+  await user.click(row);
+  await screen.findByTestId("view-markdown");
+  await user.click(screen.getByTestId("markdown-edit-toggle"));
+  const editor = await screen.findByTestId("markdown-editor");
+  await user.type(editor, "Draft!");
+  await waitFor(() =>
+    expect(screen.queryAllByTestId("tab-dirty").length).toBeGreaterThan(0),
+  );
+  return { user, editor: editor as HTMLTextAreaElement };
+}
+
+describe("dirty tab close boundaries", () => {
+  it("keeps the active tab mounted when its flush fails", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.writeWorkspaceText = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const { user, editor } = await openDirtyMarkdown(bridge);
+
+    await user.click(
+      within(screen.getByTestId("tab-a.md")).getByRole("button", {
+        name: "Close a.md",
+      }),
+    );
+
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(editor.isConnected).toBe(true);
+    expect(editor.value).toContain("Draft!");
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "disk full",
+    );
+  });
+
+  it("keeps the active tab mounted when Ctrl+W cannot flush it", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.writeWorkspaceText = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const { user, editor } = await openDirtyMarkdown(bridge);
+
+    await user.keyboard("{Control>}w{/Control}");
+
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(editor.isConnected).toBe(true);
+  });
+
+  it("keeps every tab when close-all cannot flush the active tab", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["a.md", "b.md"],
+        activeTab: "a.md",
+      }),
+    );
+    bridge.writeWorkspaceText = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const { user, editor } = await openDirtyMarkdown(bridge);
+
+    await user.click(screen.getByRole("button", { name: "Close all editors" }));
+
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(editor.isConnected).toBe(true);
+  });
+
+  it("flushes a captured tab that becomes active while close-all waits", async () => {
+    const aSave = deferred<{ status: "written"; contentHash: string }>();
+    let rejectBSave!: (cause: Error) => void;
+    const bSave = new Promise<{ status: "written"; contentHash: string }>(
+      (_resolve, reject) => {
+        rejectBSave = reject;
+      },
+    );
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    bridge.writeWorkspaceText = vi.fn((payload) =>
+      payload.relativePath === "a.md" ? aSave.promise : bSave,
+    );
+    const { user } = await openDirtyMarkdown(bridge);
+
+    await user.click(screen.getByRole("button", { name: "Close all editors" }));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText.mock.calls[0]?.[0].relativePath).toBe("a.md"),
+    );
+
+    // This is a later action, but b.md was already in the captured close set.
+    // Its newly mounted editor therefore needs its own flush before it closes.
+    await user.click(screen.getByTestId("tab-b.md"));
+    await user.click(await screen.findByTestId("markdown-edit-toggle"));
+    const bEditor = (await screen.findByTestId(
+      "markdown-editor",
+    )) as HTMLTextAreaElement;
+    await user.type(bEditor, "Second draft!");
+
+    await act(async () => {
+      aSave.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await aSave.promise;
+    });
+    await waitFor(() =>
+      expect(
+        bridge.writeWorkspaceText.mock.calls.some(
+          ([payload]) => payload.relativePath === "b.md",
+        ),
+      ).toBe(true),
+    );
+
+    await act(async () => {
+      rejectBSave(new Error("disk full"));
+      await bSave.catch(() => undefined);
+    });
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(bEditor.isConnected).toBe(true);
+  });
+
+  it("does not close a tab reopened while close-all waits", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["a.md", "b.md"],
+        activeTab: "a.md",
+      }),
+    );
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const { user } = await openDirtyMarkdown(bridge);
+
+    await user.click(screen.getByRole("button", { name: "Close all editors" }));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+
+    // Remove the original b.md tab, then open the same path as a new tab while
+    // close-all still waits for a.md. The later tab is not part of that click.
+    fireEvent.click(
+      within(screen.getByTestId("tab-b.md")).getByRole("button", {
+        name: "Close b.md",
+      }),
+    );
+    expect(screen.queryByTestId("tab-b.md")).toBeNull();
+    const bRow = screen
+      .getAllByTestId("tree-row")
+      .find((row) => row.dataset.path === "b.md")!;
+    await user.click(bRow);
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+  });
+
+  it("closes an inactive tab synchronously while the active flush is pending", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["a.md", "b.md"],
+        activeTab: "a.md",
+      }),
+    );
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const { editor } = await openDirtyMarkdown(bridge);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close all editors" }));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(
+      within(screen.getByTestId("tab-b.md")).getByRole("button", {
+        name: "Close b.md",
+      }),
+    );
+
+    expect(screen.queryByTestId("tab-b.md")).toBeNull();
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(editor.isConnected).toBe(true);
+    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
+  });
+
+  it("keeps every tab when close-others cannot flush the active tab", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        tabs: ["a.md", "b.md"],
+        activeTab: "a.md",
+      }),
+    );
+    bridge.showWorkbenchMenu.mockResolvedValue("close-other-tabs");
+    bridge.writeWorkspaceText = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const { editor } = await openDirtyMarkdown(bridge);
+
+    fireEvent.contextMenu(screen.getByTestId("tab-b.md"));
+
+    await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(editor.isConnected).toBe(true);
+  });
+
+  it("waits for a successful flush before closing the active tab", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const { user } = await openDirtyMarkdown(bridge);
+
+    await user.click(
+      within(screen.getByTestId("tab-a.md")).getByRole("button", {
+        name: "Close a.md",
+      }),
+    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+});
+
 describe("active file sharing", () => {
   it("opens the relay share dialog for the active inspector path and returns a code", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -2955,6 +3211,611 @@ describe("content search", () => {
     const reopenedInclude = await screen.findByTestId("search-include");
     expect((reopenedInclude as HTMLInputElement).value).toBe("*.md");
     expect(screen.getByTestId("search-exclude")).toBeTruthy();
+  });
+});
+
+describe("explorer destructive change flush boundaries", () => {
+  it("does not rename a file when the active draft flush fails", async () => {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(async () => undefined),
+    });
+    bridge.writeWorkspaceText = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const { user, editor } = await openDirtyMarkdown(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+
+    await user.click(row);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed.md{Enter}");
+
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
+    expect((await screen.findByTestId("explorer-error")).textContent).toContain(
+      "disk full",
+    );
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(editor.isConnected).toBe(true);
+  });
+
+  it("does not move a file when the active draft flush fails", async () => {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(async () => undefined),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [
+        { path: "a.md", kind: "file" as const },
+        { path: "docs/b.md", kind: "file" as const },
+      ],
+      folders: ["docs"],
+    });
+    bridge.writeWorkspaceText = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const { editor } = await openDirtyMarkdown(bridge);
+    const rows = await screen.findAllByTestId("tree-row");
+    const source = rows.find((row) => row.dataset.path === "a.md")!;
+    const target = rows.find((row) => row.dataset.path === "docs")!;
+    const dataTransfer = {
+      effectAllowed: "move",
+      dropEffect: "move",
+      files: [],
+      types: [],
+      setData: vi.fn(),
+    };
+
+    fireEvent.dragStart(source, { dataTransfer });
+    fireEvent.dragOver(target, { dataTransfer });
+    fireEvent.drop(target, { dataTransfer });
+
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
+    expect((await screen.findByTestId("explorer-error")).textContent).toContain(
+      "disk full",
+    );
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(editor.isConnected).toBe(true);
+  });
+
+  it("does not delete a file when the active draft flush fails", async () => {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      deleteWorkspacePath: vi.fn(async () => undefined),
+    });
+    bridge.writeWorkspaceText = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const { user, editor } = await openDirtyMarkdown(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+
+    await user.click(row);
+    await user.keyboard("{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    expect(bridge.deleteWorkspacePath).not.toHaveBeenCalled();
+    expect((await screen.findByTestId("explorer-error")).textContent).toContain(
+      "disk full",
+    );
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(editor.isConnected).toBe(true);
+  });
+
+  it("rechecks the active editor before deleting its folder", async () => {
+    const aSave = deferred<{ status: "written"; contentHash: string }>();
+    let rejectBSave!: (cause: Error) => void;
+    const bSave = new Promise<{ status: "written"; contentHash: string }>(
+      (_resolve, reject) => {
+        rejectBSave = reject;
+      },
+    );
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      deleteWorkspacePath: vi.fn(async () => undefined),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [
+        { path: "a.md", kind: "file" as const },
+        { path: "docs/b.md", kind: "file" as const },
+      ],
+      folders: ["docs"],
+    });
+    bridge.writeWorkspaceText = vi.fn((payload) =>
+      payload.relativePath === "a.md" ? aSave.promise : bSave,
+    );
+    const { user } = await openDirtyMarkdown(bridge);
+    const docs = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "docs",
+    )!;
+
+    await user.click(docs);
+    await user.keyboard("{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText.mock.calls[0]?.[0].relativePath).toBe("a.md"),
+    );
+
+    const bRow = screen
+      .getAllByTestId("tree-row")
+      .find((candidate) => candidate.dataset.path === "docs/b.md")!;
+    await user.click(bRow);
+    await user.click(await screen.findByTestId("markdown-edit-toggle"));
+    const bEditor = (await screen.findByTestId(
+      "markdown-editor",
+    )) as HTMLTextAreaElement;
+    await user.type(bEditor, "Second draft!");
+
+    await act(async () => {
+      aSave.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await aSave.promise;
+    });
+    await waitFor(() =>
+      expect(
+        bridge.writeWorkspaceText.mock.calls.some(
+          ([payload]) => payload.relativePath === "docs/b.md",
+        ),
+      ).toBe(true),
+    );
+    await act(async () => {
+      rejectBSave(new Error("disk full"));
+      await bSave.catch(() => undefined);
+    });
+
+    expect(bridge.deleteWorkspacePath).not.toHaveBeenCalled();
+    expect((await screen.findByTestId("explorer-error")).textContent).toContain(
+      "disk full",
+    );
+    expect(screen.getByTestId("tab-docs/b.md")).toBeTruthy();
+    expect(bEditor.isConnected).toBe(true);
+  });
+
+  it("waits for a successful flush before renaming the file", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(async () => undefined),
+    });
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const { user } = await openDirtyMarkdown(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+
+    await user.click(row);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed.md{Enter}");
+
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+    await waitFor(() =>
+      expect(bridge.moveWorkspacePath).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        fromPath: "a.md",
+        toPath: "renamed.md",
+      }),
+    );
+  });
+
+  it("keeps a late queued rename conflict on the renamed tab", async () => {
+    const move = deferred<void>();
+    const lateWrite = deferred<{
+      status: "conflict";
+      currentContentHash: null;
+    }>();
+    let writes = 0;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(() => move.promise),
+    });
+    bridge.writeWorkspaceText = vi.fn(() => {
+      writes += 1;
+      return writes === 1
+        ? Promise.resolve({ status: "written" as const, contentHash: "b".repeat(64) })
+        : lateWrite.promise;
+    });
+    const { user, editor } = await openDirtyMarkdown(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+
+    await user.click(row);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed.md{Enter}");
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
+    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await user.click(editor);
+    await user.type(editor, " Late");
+    const lateDraft = editor.value;
+    await user.keyboard("{Control>}s{/Control}");
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+    expect(bridge.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
+      workspaceId: WORKSPACE.workspaceId,
+      relativePath: "a.md",
+      text: lateDraft,
+      expectedContentHash: "b".repeat(64),
+    });
+
+    // Main releases the queued write only after the exclusive rename. The
+    // shell must now join that late obligation before projecting the path;
+    // otherwise recovery can arrive after the one-shot path remap.
+    await act(async () => {
+      move.resolve(undefined);
+      await move.promise;
+    });
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.queryByTestId("tab-renamed.md")).toBeNull();
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+
+    await act(async () => {
+      lateWrite.resolve({ status: "conflict", currentContentHash: null });
+      await lateWrite.promise;
+    });
+    await screen.findByTestId("tab-renamed.md");
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(lateDraft),
+    );
+    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a late queued delete conflict in global recovery", async () => {
+    const deletion = deferred<void>();
+    const lateWrite = deferred<{
+      status: "conflict";
+      currentContentHash: null;
+    }>();
+    let writes = 0;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      deleteWorkspacePath: vi.fn(() => deletion.promise),
+    });
+    bridge.writeWorkspaceText = vi.fn(() => {
+      writes += 1;
+      return writes === 1
+        ? Promise.resolve({ status: "written" as const, contentHash: "b".repeat(64) })
+        : lateWrite.promise;
+    });
+    const { user, editor } = await openDirtyMarkdown(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+
+    await user.click(row);
+    await user.keyboard("{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(1));
+    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await user.click(editor);
+    await user.type(editor, " Late");
+    const lateDraft = editor.value;
+    await user.keyboard("{Control>}s{/Control}");
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+    expect(bridge.writeWorkspaceText.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ relativePath: "a.md", text: lateDraft }),
+    );
+
+    await act(async () => {
+      deletion.resolve(undefined);
+      await deletion.promise;
+    });
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    await act(async () => {
+      lateWrite.resolve({ status: "conflict", currentContentHash: null });
+      await lateWrite.promise;
+    });
+    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
+
+    const recovery = render(<GlobalRecoveryList />);
+    const recoveryRow = await within(recovery.container).findByTestId(
+      "recovery-list-row",
+    );
+    await user.click(within(recoveryRow).getByTestId("recovery-list-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(lateDraft),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
+  });
+
+  it("resumes a late queued write when the rename fails", async () => {
+    let rejectMove!: (error: Error) => void;
+    const move = new Promise<void>((_resolve, reject) => {
+      rejectMove = reject;
+    });
+    const lateWrite = deferred<{
+      status: "written";
+      contentHash: string;
+    }>();
+    let writes = 0;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(() => move),
+    });
+    bridge.writeWorkspaceText = vi.fn(() => {
+      writes += 1;
+      return writes === 1
+        ? Promise.resolve({ status: "written" as const, contentHash: "b".repeat(64) })
+        : lateWrite.promise;
+    });
+    const { user, editor } = await openDirtyMarkdown(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+
+    await user.click(row);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed.md{Enter}");
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
+
+    await user.click(editor);
+    await user.type(editor, " Late");
+    const lateDraft = editor.value;
+    await user.keyboard("{Control>}s{/Control}");
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+
+    // Start a second Explorer flush while the write and rename are held.
+    // The rename settlement must add recovery semantics when it joins this
+    // promise, even though the create operation started it without them.
+    await user.click(screen.getByLabelText("New file"));
+    await user.type(await screen.findByLabelText("New file name"), "spare.md{Enter}");
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+
+    await act(async () => {
+      rejectMove(new Error("rename failed"));
+      await move.catch(() => undefined);
+    });
+    expect((await screen.findByTestId("explorer-error")).textContent).toContain(
+      "rename failed",
+    );
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(editor.isConnected).toBe(true);
+
+    await act(async () => {
+      lateWrite.resolve({ status: "written", contentHash: "c".repeat(64) });
+      await lateWrite.promise;
+    });
+    expect(bridge.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
+      workspaceId: WORKSPACE.workspaceId,
+      relativePath: "a.md",
+      text: lateDraft,
+      expectedContentHash: "b".repeat(64),
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+      ).toBe("saved"),
+    );
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+  });
+
+  it("settles every editor registered during a held rename", async () => {
+    const move = deferred<void>();
+    const lateA = deferred<{
+      status: "conflict";
+      currentContentHash: null;
+    }>();
+    const lateB = deferred<{
+      status: "written";
+      contentHash: string;
+    }>();
+    let writes = 0;
+    const bridge = Object.assign(
+      makeBridge(
+        Promise.resolve({
+          ...STORED_STATE,
+          tabs: ["a.md", "b.md"],
+          activeTab: "a.md",
+        }),
+      ),
+      { moveWorkspacePath: vi.fn(() => move.promise) },
+    );
+    bridge.writeWorkspaceText = vi.fn(() => {
+      writes += 1;
+      if (writes === 1) {
+        return Promise.resolve({
+          status: "written" as const,
+          contentHash: "b".repeat(64),
+        });
+      }
+      return writes === 2 ? lateA.promise : lateB.promise;
+    });
+    const { user, editor: editorA } = await openDirtyMarkdown(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+
+    await user.click(row);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed.md{Enter}");
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
+
+    await user.click(editorA);
+    await user.type(editorA, " Late A");
+    const lateADraft = editorA.value;
+    await user.keyboard("{Control>}s{/Control}");
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+
+    await user.click(screen.getByTestId("tab-b.md"));
+    await user.click(await screen.findByTestId("markdown-edit-toggle"));
+    const editorB = (await screen.findByTestId("markdown-editor")) as HTMLTextAreaElement;
+    await user.type(editorB, "Late B");
+    const lateBDraft = editorB.value;
+    await user.keyboard("{Control>}s{/Control}");
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
+
+    await act(async () => {
+      move.resolve(undefined);
+      await move.promise;
+      lateB.resolve({ status: "written", contentHash: "c".repeat(64) });
+      await lateB.promise;
+    });
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.queryByTestId("tab-renamed.md")).toBeNull();
+
+    await act(async () => {
+      lateA.resolve({ status: "conflict", currentContentHash: null });
+      await lateA.promise;
+    });
+    await screen.findByTestId("tab-renamed.md");
+    await user.click(screen.getByTestId("tab-renamed.md"));
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(lateADraft),
+    );
+    expect(bridge.writeWorkspaceText.mock.calls[2]?.[0]).toEqual(
+      expect.objectContaining({ relativePath: "b.md", text: lateBDraft }),
+    );
+  });
+
+  it("settles every editor registered during a held delete", async () => {
+    const deletion = deferred<void>();
+    const lateA = deferred<{
+      status: "conflict";
+      currentContentHash: null;
+    }>();
+    const lateB = deferred<{
+      status: "written";
+      contentHash: string;
+    }>();
+    let writes = 0;
+    const bridge = Object.assign(
+      makeBridge(
+        Promise.resolve({
+          ...STORED_STATE,
+          tabs: ["a.md", "b.md"],
+          activeTab: "a.md",
+        }),
+      ),
+      { deleteWorkspacePath: vi.fn(() => deletion.promise) },
+    );
+    bridge.writeWorkspaceText = vi.fn(() => {
+      writes += 1;
+      if (writes === 1) {
+        return Promise.resolve({
+          status: "written" as const,
+          contentHash: "b".repeat(64),
+        });
+      }
+      return writes === 2 ? lateA.promise : lateB.promise;
+    });
+    const { user, editor: editorA } = await openDirtyMarkdown(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+
+    await user.click(row);
+    await user.keyboard("{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(1));
+
+    await user.click(editorA);
+    await user.type(editorA, " Late A");
+    const lateADraft = editorA.value;
+    await user.keyboard("{Control>}s{/Control}");
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+
+    await user.click(screen.getByTestId("tab-b.md"));
+    await user.click(await screen.findByTestId("markdown-edit-toggle"));
+    const editorB = (await screen.findByTestId("markdown-editor")) as HTMLTextAreaElement;
+    await user.type(editorB, "Late B");
+    const lateBDraft = editorB.value;
+    await user.keyboard("{Control>}s{/Control}");
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
+
+    await act(async () => {
+      deletion.resolve(undefined);
+      await deletion.promise;
+      lateB.resolve({ status: "written", contentHash: "c".repeat(64) });
+      await lateB.promise;
+    });
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+
+    await act(async () => {
+      lateA.resolve({ status: "conflict", currentContentHash: null });
+      await lateA.promise;
+    });
+    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
+    const recovery = render(<GlobalRecoveryList />);
+    const rows = await within(recovery.container).findAllByTestId("recovery-list-row");
+    const rowA = rows.find((candidate) => candidate.textContent?.includes("a.md"))!;
+    await user.click(within(rowA).getByTestId("recovery-list-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(lateADraft),
+    );
+    expect(bridge.writeWorkspaceText.mock.calls[2]?.[0]).toEqual(
+      expect.objectContaining({ relativePath: "b.md", text: lateBDraft }),
+    );
+  });
+
+  it("captures an ordinary post-rename I/O failure before remapping recovery", async () => {
+    const move = deferred<void>();
+    let rejectLateWrite!: (error: Error) => void;
+    const lateWrite = new Promise<never>((_resolve, reject) => {
+      rejectLateWrite = reject;
+    });
+    let writes = 0;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(() => move.promise),
+    });
+    bridge.writeWorkspaceText = vi.fn(() => {
+      writes += 1;
+      if (writes === 1) {
+        return Promise.resolve({
+          status: "written" as const,
+          contentHash: "b".repeat(64),
+        });
+      }
+      if (writes === 2) return lateWrite;
+      return Promise.reject(new Error("disk unavailable"));
+    });
+    const { user, editor } = await openDirtyMarkdown(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+
+    await user.click(row);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed.md{Enter}");
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
+
+    await user.click(editor);
+    await user.type(editor, " Late");
+    const lateDraft = editor.value;
+    await user.keyboard("{Control>}s{/Control}");
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      move.resolve(undefined);
+      await move.promise;
+      rejectLateWrite(new Error("disk unavailable"));
+      await lateWrite.catch(() => undefined);
+    });
+    await screen.findByTestId("tab-renamed.md");
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(lateDraft),
+    );
+    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3);
   });
 });
 

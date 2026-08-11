@@ -3,7 +3,7 @@ import {
   validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
   open,
@@ -15,6 +15,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { TextDecoder } from "node:util";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
@@ -124,6 +125,25 @@ export async function readWorkspaceAsset(
 // download affordance in the renderer.
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 
+export type WorkspaceTextReadResult =
+  | { text: string; truncated: false; contentHash: string }
+  | { text: string; truncated: true; contentHash: null };
+
+export type WorkspaceTextWriteResult =
+  | { status: "written"; contentHash: string }
+  | { status: "conflict"; currentContentHash: string | null };
+
+function hashContent(content: Uint8Array | string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function isMissingTargetError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+class WorkspaceTextTargetMissingError extends Error {}
+
 function siblingTempPath(target: string, now: number, uniqueId: string): string {
   return join(
     dirname(target),
@@ -137,25 +157,40 @@ export function createAtomicTextWriter(deps: {
   writeFile: (temp: string, text: string) => Promise<void>;
   rename: (temp: string, target: string) => Promise<void>;
   remove: (temp: string) => Promise<void>;
+  readCurrentContentHash: (target: string) => Promise<string | null>;
 }) {
-  return async (target: string, text: string): Promise<void> => {
+  return async (
+    target: string,
+    text: string,
+    expectedContentHash: string,
+  ): Promise<WorkspaceTextWriteResult> => {
     const temp = siblingTempPath(target, deps.now(), deps.uniqueId());
     let committed = false;
     try {
       await deps.writeFile(temp, text);
+      // Optimistic preimage check, not a filesystem compare-and-swap. An
+      // uncooperative process can still change the target between this read
+      // and the rename. A conflict means we observed a mismatch before the
+      // atomic replacement; written means that replacement landed. The Rust
+      // materializer records the same portable-filesystem limit as R04.
+      const currentContentHash = await deps.readCurrentContentHash(target);
+      if (currentContentHash !== expectedContentHash) {
+        return { status: "conflict", currentContentHash };
+      }
       await deps.rename(temp, target);
       committed = true;
+      return { status: "written", contentHash: hashContent(text) };
     } finally {
       if (!committed) await deps.remove(temp).catch(() => undefined);
     }
   };
 }
 
-async function enqueueOrdered(
+async function enqueueOrdered<T>(
   tails: Map<string, Promise<void>>,
   key: string,
-  run: () => Promise<void>,
-): Promise<void> {
+  run: () => Promise<T>,
+): Promise<T> {
   const previous = tails.get(key) ?? Promise.resolve();
   const current = previous.catch(() => undefined).then(run);
   const tail = current.then(
@@ -164,34 +199,237 @@ async function enqueueOrdered(
   );
   tails.set(key, tail);
   try {
-    await current;
+    return await current;
   } finally {
     if (tails.get(key) === tail) tails.delete(key);
   }
 }
 
-export function createOrderedWorkspaceTextWriter(deps: {
-  resolveTarget: (rootPath: string, relativePath: string) => Promise<string>;
-  writeTarget: (target: string, text: string) => Promise<void>;
-}) {
-  const rootTails = new Map<string, Promise<void>>();
-  const targetTails = new Map<string, Promise<void>>();
+type WorkspaceOperationEntry = {
+  mode: "shared" | "exclusive";
+  run: () => Promise<{ changed: boolean }>;
+};
+
+type WorkspaceOperationState = {
+  activeShared: number;
+  activeExclusive: boolean;
+  generation: number;
+  queue: WorkspaceOperationEntry[];
+};
+
+class WorkspaceOperationSupersededError extends Error {
+  constructor() {
+    super(
+      "A file or folder changed before this write started. Try the action again.",
+    );
+    this.name = "WorkspaceOperationSupersededError";
+  }
+}
+
+export function createWorkspaceOperationScheduler() {
+  const states = new Map<string, WorkspaceOperationState>();
   const pathKey = (value: string) =>
     process.platform === "win32" ? value.toLowerCase() : value;
 
-  return async (rootPath: string, relativePath: string, text: string): Promise<void> => {
-    // Different relative spellings can resolve to one file. Queue before
-    // resolution at workspace scope, then admit the resolved write in that
-    // order. The target queue owns the write so other files can proceed.
-    let admittedWrite!: Promise<void>;
-    await enqueueOrdered(rootTails, pathKey(rootPath), async () => {
-      const target = await deps.resolveTarget(rootPath, relativePath);
-      admittedWrite = enqueueOrdered(targetTails, pathKey(target), () =>
-        deps.writeTarget(target, text),
+  const drain = (key: string, state: WorkspaceOperationState): void => {
+    if (state.activeExclusive) return;
+    if (state.queue.length === 0) {
+      if (state.activeShared === 0) states.delete(key);
+      return;
+    }
+
+    const releaseShared = () => {
+      state.activeShared -= 1;
+      drain(key, state);
+    };
+    const releaseExclusive = () => {
+      state.activeExclusive = false;
+      drain(key, state);
+    };
+    if (state.queue[0]?.mode === "exclusive") {
+      if (state.activeShared > 0) return;
+      const entry = state.queue.shift();
+      if (!entry) return;
+      state.activeExclusive = true;
+      void entry.run().then(
+        (outcome) => {
+          if (outcome.changed) state.generation += 1;
+          releaseExclusive();
+        },
+        releaseExclusive,
       );
-    });
-    await admittedWrite;
+      return;
+    }
+
+    // Admit the contiguous shared prefix together. Once an exclusive request
+    // reaches the head, later shared requests wait behind it instead of
+    // starving the workspace mutation.
+    while (state.queue[0]?.mode === "shared") {
+      const entry = state.queue.shift();
+      if (!entry) break;
+      state.activeShared += 1;
+      void entry.run().then(releaseShared, releaseShared);
+    }
   };
+
+  const enqueue = <T>(
+    rootPath: string,
+    mode: "shared" | "exclusive",
+    operation: (markChanged: () => void) => Promise<T>,
+    staleSensitive = false,
+  ): Promise<T> => {
+    const key = pathKey(rootPath);
+    const state = states.get(key) ?? {
+      activeShared: 0,
+      activeExclusive: false,
+      generation: 0,
+      queue: [],
+    };
+    states.set(key, state);
+    const admittedGeneration = state.generation;
+    const result = new Promise<T>((resolve, reject) => {
+      state.queue.push({
+        mode,
+        run: async () => {
+          if (staleSensitive && state.generation !== admittedGeneration) {
+            reject(new WorkspaceOperationSupersededError());
+            return { changed: false };
+          }
+          let changed = false;
+          try {
+            const value = await operation(() => {
+              changed = true;
+            });
+            if (mode === "exclusive") changed = true;
+            resolve(value);
+          } catch (error) {
+            reject(error);
+          }
+          return { changed };
+        },
+      });
+    });
+    drain(key, state);
+    return result;
+  };
+
+  return {
+    shared: <T>(rootPath: string, operation: () => Promise<T>) =>
+      enqueue(rootPath, "shared", () => operation()),
+    staleSensitiveShared: <T>(rootPath: string, operation: () => Promise<T>) =>
+      enqueue(rootPath, "shared", () => operation(), true),
+    exclusive: <T>(
+      rootPath: string,
+      operation: (markChanged: () => void) => Promise<T>,
+    ) => enqueue(rootPath, "exclusive", operation),
+  };
+}
+
+export type WorkspaceOperationScheduler = ReturnType<
+  typeof createWorkspaceOperationScheduler
+>;
+
+export function createOrderedWorkspaceTextAccess(deps: {
+  resolveTarget: (
+    rootPath: string,
+    relativePath: string,
+    access: "read" | "write",
+  ) => Promise<string>;
+  readTarget: (target: string) => Promise<WorkspaceTextReadResult>;
+  writeTarget: (
+    target: string,
+    text: string,
+    expectedContentHash: string,
+  ) => Promise<WorkspaceTextWriteResult>;
+  scheduler?: WorkspaceOperationScheduler;
+}) {
+  const rootTails = new Map<string, Promise<void>>();
+  const targetTails = new Map<string, Promise<void>>();
+  const scheduler = deps.scheduler ?? createWorkspaceOperationScheduler();
+  const pathKey = (value: string) =>
+    process.platform === "win32" ? value.toLowerCase() : value;
+
+  const admit = async <T>(
+    rootPath: string,
+    relativePath: string,
+    access: "read" | "write",
+    run: (target: string) => Promise<T>,
+  ): Promise<T> => {
+    // Different relative spellings can resolve to one file. Queue before
+    // resolution at workspace scope, then admit the resolved operation in
+    // that order. The target queue owns the operation so other files proceed.
+    let admittedOperation!: Promise<T>;
+    await enqueueOrdered(rootTails, pathKey(rootPath), async () => {
+      const target = await deps.resolveTarget(rootPath, relativePath, access);
+      admittedOperation = enqueueOrdered(targetTails, pathKey(target), () => run(target));
+    });
+    return admittedOperation;
+  };
+
+  return {
+    read: (rootPath: string, relativePath: string) =>
+      scheduler.shared(rootPath, () =>
+        admit(rootPath, relativePath, "read", deps.readTarget),
+      ),
+    write: (
+      rootPath: string,
+      relativePath: string,
+      text: string,
+      expectedContentHash: string,
+    ) =>
+      scheduler.shared(rootPath, () =>
+        admit(rootPath, relativePath, "write", (target) =>
+          deps.writeTarget(target, text, expectedContentHash),
+        ),
+      ),
+  };
+}
+
+async function readTextTarget(target: string): Promise<WorkspaceTextReadResult> {
+  const handle = await open(target, "r");
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      throw new Error(`Text path is not a file: ${target}`);
+    }
+    // Only the first MAX_TEXT_BYTES (+1 byte to detect overflow) enters memory.
+    const buffer = Buffer.alloc(MAX_TEXT_BYTES + 1);
+    let totalBytesRead = 0;
+    while (totalBytesRead < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        totalBytesRead,
+        buffer.length - totalBytesRead,
+        totalBytesRead,
+      );
+      if (bytesRead === 0) break;
+      totalBytesRead += bytesRead;
+    }
+    const truncated = totalBytesRead > MAX_TEXT_BYTES || info.size > MAX_TEXT_BYTES;
+    const content = buffer.subarray(0, Math.min(totalBytesRead, MAX_TEXT_BYTES));
+    if (truncated) {
+      const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(content, {
+        stream: true,
+      });
+      return { text, truncated: true, contentHash: null };
+    }
+    return {
+      text: content.toString("utf8"),
+      truncated: false,
+      contentHash: hashContent(content),
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readCurrentContentHash(target: string): Promise<string | null> {
+  try {
+    return (await readTextTarget(target)).contentHash;
+  } catch (error) {
+    if (isMissingTargetError(error)) return null;
+    throw error;
+  }
 }
 
 const atomicTextWriter = createAtomicTextWriter({
@@ -200,13 +438,40 @@ const atomicTextWriter = createAtomicTextWriter({
   writeFile: async (temp, text) => writeFile(temp, text, "utf8"),
   rename,
   remove: async (temp) => rm(temp, { force: true }),
+  readCurrentContentHash,
 });
 
-const orderedWorkspaceTextWriter = createOrderedWorkspaceTextWriter({
-  resolveTarget: async (rootPath, relativePath) =>
-    (await resolveWorkspaceFile(rootPath, relativePath)).realTarget,
+const workspaceOperationScheduler = createWorkspaceOperationScheduler();
+
+const orderedWorkspaceTextAccess = createOrderedWorkspaceTextAccess({
+  resolveTarget: async (rootPath, relativePath, access) => {
+    try {
+      return (await resolveWorkspaceFile(rootPath, relativePath, access)).realTarget;
+    } catch (error) {
+      if (access === "write" && isMissingTargetError(error)) {
+        throw new WorkspaceTextTargetMissingError();
+      }
+      throw error;
+    }
+  },
+  readTarget: readTextTarget,
   writeTarget: atomicTextWriter,
+  scheduler: workspaceOperationScheduler,
 });
+
+export function withExclusiveWorkspaceOperation<T>(
+  rootPath: string,
+  operation: (markChanged: () => void) => Promise<T>,
+): Promise<T> {
+  return workspaceOperationScheduler.exclusive(rootPath, operation);
+}
+
+export function withStaleSensitiveWorkspaceOperation<T>(
+  rootPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return workspaceOperationScheduler.staleSensitiveShared(rootPath, operation);
+}
 
 // The editor's save path: same validation + real-path containment as reads,
 // atomic temp+rename so the watcher (and any reader) never sees a torn file,
@@ -216,11 +481,24 @@ export async function writeWorkspaceText(
   rootPath: string,
   relativePath: string,
   text: string,
-): Promise<void> {
+  expectedContentHash: string,
+): Promise<WorkspaceTextWriteResult> {
   if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
   }
-  await orderedWorkspaceTextWriter(rootPath, relativePath, text);
+  try {
+    return await orderedWorkspaceTextAccess.write(
+      rootPath,
+      relativePath,
+      text,
+      expectedContentHash,
+    );
+  } catch (error) {
+    if (error instanceof WorkspaceTextTargetMissingError) {
+      return { status: "conflict", currentContentHash: null };
+    }
+    throw error;
+  }
 }
 
 // Binary sibling of restoreWorkspaceText: writes image (or other asset) bytes
@@ -326,7 +604,9 @@ export async function writeWorkspaceAsset(
       `Asset exceeds the ${MAX_ASSET_WRITE_BYTES}-byte write limit`,
     );
   }
-  await writeContainedFile(rootPath, relativePath, bytes, "asset");
+  await workspaceOperationScheduler.staleSensitiveShared(rootPath, () =>
+    writeContainedFile(rootPath, relativePath, bytes, "asset"),
+  );
 }
 
 export async function restoreWorkspaceText(
@@ -338,7 +618,9 @@ export async function restoreWorkspaceText(
   if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
   }
-  await writeContainedFile(rootPath, relativePath, text, "restore", options);
+  await workspaceOperationScheduler.staleSensitiveShared(rootPath, () =>
+    writeContainedFile(rootPath, relativePath, text, "restore", options),
+  );
 }
 
 // Creates a text file with the filesystem's exclusive-create primitive. This
@@ -353,41 +635,17 @@ export async function createWorkspaceTextExclusive(
   if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
   }
-  await writeContainedFile(rootPath, relativePath, text, "restore", {
-    exclusive: true,
-    ...options,
-  });
+  await workspaceOperationScheduler.staleSensitiveShared(rootPath, () =>
+    writeContainedFile(rootPath, relativePath, text, "restore", {
+      exclusive: true,
+      ...options,
+    }),
+  );
 }
 
 export async function readWorkspaceText(
   rootPath: string,
   relativePath: string,
-): Promise<{ text: string; truncated: boolean }> {
-  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath, "read");
-  const info = await stat(realTarget);
-  if (!info.isFile()) {
-    throw new Error(`Text path is not a file: ${relativePath}`);
-  }
-  // Bounded read: only the first MAX_TEXT_BYTES (+1 byte to detect overflow)
-  // ever enters memory, so a multi-GB file can't freeze the main process.
-  const handle = await open(realTarget, "r");
-  try {
-    const buf = Buffer.alloc(MAX_TEXT_BYTES + 1);
-    let totalBytesRead = 0;
-    while (totalBytesRead < buf.length) {
-      const { bytesRead } = await handle.read(
-        buf,
-        totalBytesRead,
-        buf.length - totalBytesRead,
-        totalBytesRead,
-      );
-      if (bytesRead === 0) break;
-      totalBytesRead += bytesRead;
-    }
-    const truncated = totalBytesRead > MAX_TEXT_BYTES || info.size > MAX_TEXT_BYTES;
-    const slice = buf.subarray(0, Math.min(totalBytesRead, MAX_TEXT_BYTES));
-    return { text: slice.toString("utf8"), truncated };
-  } finally {
-    await handle.close();
-  }
+): Promise<WorkspaceTextReadResult> {
+  return orderedWorkspaceTextAccess.read(rootPath, relativePath);
 }

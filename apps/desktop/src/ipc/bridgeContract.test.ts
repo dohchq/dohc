@@ -65,10 +65,90 @@ import {
   UpdateCheckResult,
   UpdateStateEvent,
   WriteClipboardTextPayload,
+  ReadWorkspaceTextResult,
+  WriteWorkspaceTextPayload,
+  WriteWorkspaceTextResult,
   parseInvokeSiteSdkPayloadForIpc,
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+
+describe("workspace text IPC contract", () => {
+  const hash = "a".repeat(64);
+
+  it("ties complete and truncated reads to an unambiguous content hash", () => {
+    expect(
+      ReadWorkspaceTextResult.parse({
+        text: "complete",
+        truncated: false,
+        contentHash: hash,
+      }),
+    ).toEqual({ text: "complete", truncated: false, contentHash: hash });
+    expect(
+      ReadWorkspaceTextResult.parse({
+        text: "partial",
+        truncated: true,
+        contentHash: null,
+      }),
+    ).toEqual({ text: "partial", truncated: true, contentHash: null });
+    expect(
+      ReadWorkspaceTextResult.safeParse({
+        text: "complete",
+        truncated: false,
+        contentHash: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      ReadWorkspaceTextResult.safeParse({
+        text: "partial",
+        truncated: true,
+        contentHash: hash,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires a lowercase SHA-256 precondition and validates both write outcomes", () => {
+    expect(
+      WriteWorkspaceTextPayload.parse({
+        workspaceId: "workspace-a",
+        relativePath: "notes/a.md",
+        text: "next",
+        expectedContentHash: hash,
+      }).expectedContentHash,
+    ).toBe(hash);
+    expect(
+      WriteWorkspaceTextPayload.safeParse({
+        workspaceId: "workspace-a",
+        relativePath: "notes/a.md",
+        text: "next",
+      }).success,
+    ).toBe(false);
+    expect(
+      WriteWorkspaceTextPayload.safeParse({
+        workspaceId: "workspace-a",
+        relativePath: "notes/a.md",
+        text: "next",
+        expectedContentHash: hash.toUpperCase(),
+      }).success,
+    ).toBe(false);
+
+    expect(
+      WriteWorkspaceTextResult.parse({ status: "written", contentHash: hash }),
+    ).toEqual({ status: "written", contentHash: hash });
+    expect(
+      WriteWorkspaceTextResult.parse({
+        status: "conflict",
+        currentContentHash: null,
+      }),
+    ).toEqual({ status: "conflict", currentContentHash: null });
+    expect(
+      WriteWorkspaceTextResult.parse({
+        status: "conflict",
+        currentContentHash: hash,
+      }),
+    ).toEqual({ status: "conflict", currentContentHash: hash });
+  });
+});
 
 describe("chat IPC contract", () => {
   it("validates DM request lanes and their account/workspace mutations", () => {

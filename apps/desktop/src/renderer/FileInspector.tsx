@@ -399,43 +399,86 @@ function useTextContent(
   enabled: boolean,
   refreshKey: number,
 ) {
-  const [text, setText] = useState<string | null>(null);
-  // Which path `text` belongs to. Consumers must not render text under a
-  // different path: switching files otherwise shows the PREVIOUS file's
-  // content under the new header for one render (and corrupts the
-  // open-latency measure with a near-zero stale sample).
-  const [loadedPath, setLoadedPath] = useState<string | null>(null);
-  const [truncated, setTruncated] = useState(false);
+  const [conflictRefreshKey, setConflictRefreshKey] = useState(0);
+  const refreshAfterConflict = useCallback(() => {
+    setConflictRefreshKey((key) => key + 1);
+  }, []);
+  const requestRef = useRef({
+    workspaceId: "",
+    path: "",
+    enabled: false,
+    refreshKey: -1,
+    conflictRefreshKey: -1,
+    id: 0,
+  });
+  const requestChanged =
+    requestRef.current.workspaceId !== workspaceId ||
+    requestRef.current.path !== path ||
+    requestRef.current.enabled !== enabled ||
+    requestRef.current.refreshKey !== refreshKey ||
+    requestRef.current.conflictRefreshKey !== conflictRefreshKey;
+  if (requestChanged) {
+    requestRef.current = {
+      workspaceId,
+      path,
+      enabled,
+      refreshKey,
+      conflictRefreshKey,
+      id: requestRef.current.id + 1,
+    };
+  }
+  const requestId = requestRef.current.id;
+  // The body and its hash are one authoritative read snapshot. A render must
+  // never pair a new body with the previous read's write precondition.
+  const [content, setContent] = useState<{
+    text: string;
+    loadedWorkspaceId: string;
+    loadedPath: string;
+    truncated: boolean;
+    contentHash: string | null;
+    requestId: number;
+  } | null>(null);
   const [error, setError] = useState(false);
   // Bumped once per ANSWERED read. The dispatcher uses it to tell "the reread
   // a version switch triggered has landed" from "the pre-switch body is still
   // on screen" — the window the plain-text autosave used to write into
   // (#579 adversarial review, F1).
   const [readSeq, setReadSeq] = useState(0);
-  const lastPathRef = useRef<string | null>(null);
+  const lastLocationRef = useRef<{
+    workspaceId: string;
+    path: string;
+  } | null>(null);
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    // Blank only when switching FILES — an activity refresh of the open file
-    // swaps content in place instead of flashing the document away.
-    if (lastPathRef.current !== path) {
-      lastPathRef.current = path;
-      setText(null);
+    // Blank when switching workspaces or files. An activity refresh at the
+    // same location swaps content in place instead of flashing it away.
+    if (
+      lastLocationRef.current?.workspaceId !== workspaceId ||
+      lastLocationRef.current.path !== path
+    ) {
+      lastLocationRef.current = { workspaceId, path };
+      setContent(null);
       setError(false);
     }
     void bridge()
       .readWorkspaceText({ workspaceId, relativePath: path })
       .then((r) => {
         if (cancelled) return;
-        setText(r.text);
-        setLoadedPath(path);
-        setTruncated(r.truncated);
+        setContent({
+          text: r.text,
+          loadedWorkspaceId: workspaceId,
+          loadedPath: path,
+          truncated: r.truncated,
+          contentHash: r.contentHash,
+          requestId,
+        });
         setError(false);
         setReadSeq((seq) => seq + 1);
       })
       .catch(() => {
         if (cancelled) return;
-        setText(null);
+        setContent(null);
         setError(true);
         // A failed read still answers for request bookkeeping. Switch safety
         // also checks `error` and keeps writes refused until a later success.
@@ -446,8 +489,22 @@ function useTextContent(
     };
     // refreshKey bumps on workspace activity so an open file re-reads when it
     // changes on disk (e.g. an agent edits it).
-  }, [workspaceId, path, enabled, refreshKey]);
-  return { text, loadedPath, truncated, error, readSeq };
+  }, [workspaceId, path, enabled, refreshKey, conflictRefreshKey, requestId]);
+  const currentContent =
+    content?.loadedWorkspaceId === workspaceId && content.loadedPath === path
+      ? content
+      : null;
+  return {
+    text: currentContent?.text ?? null,
+    loadedPath: currentContent?.loadedPath ?? null,
+    truncated: currentContent?.truncated ?? false,
+    contentHash: currentContent?.contentHash ?? null,
+    contentRequestId: currentContent?.requestId ?? 0,
+    latestContentRequestId: requestId,
+    error,
+    readSeq,
+    refreshAfterConflict,
+  };
 }
 
 // `actions` puts a view's controls (edit toggle, save state, presence) in the
@@ -628,6 +685,8 @@ const MARKDOWN_COMPONENTS = {
 
 type SaveState = "saved" | "saving" | "error";
 export type FileSaveState = SaveState | "deleted";
+export type DraftFlushOptions = { captureOnFailure?: boolean };
+export type DraftFlush = (options?: DraftFlushOptions) => Promise<void>;
 
 // The plain-text autosave, used by every NON-markdown editable view (CSV,
 // JSON, text). It carries the same three write seams as MarkdownView — an
@@ -645,6 +704,9 @@ export type FileSaveState = SaveState | "deleted";
 // stop.
 function useAutosavedTextDraft(props: {
   body: string;
+  contentHash: string | null;
+  contentRequestId: number;
+  latestContentRequestId: number;
   workspaceId: string;
   path: string;
   disabled?: boolean;
@@ -656,11 +718,39 @@ function useAutosavedTextDraft(props: {
   switchReadPending: boolean;
   switchUnresyncedRef: { current: boolean };
   onSaveStateChange?: (state: SaveState) => void;
-  registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
+  registerDraftFlush?: (flush: DraftFlush | null) => void;
+  refreshAfterConflict: () => void;
 }) {
   const [draft, setDraft] = useState(props.body);
   const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
+  const orphanedDrafts = useOrphanedDrafts(props.workspaceId, props.path);
   const latestDraft = useRef(props.body);
+  const baseContentHash = useRef(props.contentHash);
+  const baseContentRequestId = useRef(props.contentRequestId);
+  const latestSnapshot = useRef({
+    body: props.body,
+    contentHash: props.contentHash,
+    requestId: props.contentRequestId,
+  });
+  latestSnapshot.current = {
+    body: props.body,
+    contentHash: props.contentHash,
+    requestId: props.contentRequestId,
+  };
+  const latestContentRequestId = useRef(props.latestContentRequestId);
+  latestContentRequestId.current = props.latestContentRequestId;
+  const acceptedRequestFloor = useRef(0);
+  const staleBaseline = useRef(false);
+  const flushConflict = useRef(false);
+  const conflictContentHash = useRef<string | null>(null);
+  const conflictRequestId = useRef(0);
+  const verifyAfterRequestId = useRef<number | null>(null);
+  const editGeneration = useRef(0);
+  const blockedEditGeneration = useRef(-1);
+  const capturedConflictDraft = useRef<string | null>(null);
+  const conflictDraftId = useRef<number | null>(null);
+  const unmounted = useRef(false);
   // Only accepted external values advance this revision. Local draft echoes
   // must not make CodeMirror replay an older controlled value.
   const valueRevision = useRef(0);
@@ -677,21 +767,124 @@ function useAutosavedTextDraft(props: {
   const disabledRef = useRef(props.disabled);
   disabledRef.current = props.disabled;
   const writesBlocked = () =>
-    disabledRef.current === true || props.switchUnresyncedRef.current === true;
+    disabledRef.current === true ||
+    props.switchUnresyncedRef.current === true ||
+    staleBaseline.current;
+
+  function captureLatestConflictDraft(text = latestDraft.current) {
+    if (capturedConflictDraft.current === text) return;
+    conflictDraftId.current = captureOrphanedDraft(
+      props.workspaceId,
+      props.path,
+      text,
+    );
+    capturedConflictDraft.current = text;
+  }
+
+  function captureFailedFlush() {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    unsavedDraft.current = false;
+    blockedEditGeneration.current = Math.max(
+      blockedEditGeneration.current,
+      editGeneration.current,
+    );
+    captureLatestConflictDraft();
+    if (!unmounted.current) setSaveState("error");
+  }
+
+  function acceptSnapshot(
+    snapshot: { body: string; contentHash: string | null; requestId: number },
+    state: SaveState,
+  ) {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    if (staleBaseline.current && unsavedDraft.current) {
+      captureLatestConflictDraft();
+    }
+    unsavedDraft.current = false;
+    blockedEditGeneration.current = Math.max(
+      blockedEditGeneration.current,
+      editGeneration.current,
+    );
+    staleBaseline.current = false;
+    baseContentHash.current = snapshot.contentHash;
+    baseContentRequestId.current = snapshot.requestId;
+    if (
+      verifyAfterRequestId.current !== null &&
+      snapshot.requestId > verifyAfterRequestId.current
+    ) {
+      verifyAfterRequestId.current = null;
+    }
+    acceptedRequestFloor.current = Math.max(
+      acceptedRequestFloor.current,
+      snapshot.requestId,
+    );
+    if (latestDraft.current !== snapshot.body) valueRevision.current += 1;
+    setDraft(snapshot.body);
+    latestDraft.current = snapshot.body;
+    setSaveState(state);
+    props.switchUnresyncedRef.current = false;
+  }
+
+  function acceptConflictSnapshotIfCurrent(): boolean {
+    const snapshot = latestSnapshot.current;
+    if (
+      snapshot.contentHash !== conflictContentHash.current &&
+      snapshot.requestId <= conflictRequestId.current
+    ) {
+      return false;
+    }
+    acceptSnapshot(snapshot, "error");
+    return true;
+  }
 
   useEffect(() => {
     props.onSaveStateChange?.(saveState);
   }, [saveState, props.onSaveStateChange]);
 
   useEffect(() => {
-    if (props.switchReadPending) return;
-    if (unsavedDraft.current) return;
-    if (latestDraft.current !== props.body) valueRevision.current += 1;
-    setDraft(props.body);
-    latestDraft.current = props.body;
+    const id = conflictDraftId.current;
+    if (!flushConflict.current || staleBaseline.current || id === null) return;
+    if (orphanedDrafts.some((draft) => draft.id === id)) return;
+    conflictDraftId.current = null;
+    capturedConflictDraft.current = null;
+    flushConflict.current = false;
     setSaveState("saved");
-    props.switchUnresyncedRef.current = false;
-  }, [props.body, props.path, props.switchReadPending, props.switchUnresyncedRef]);
+  }, [orphanedDrafts, saveState, props.contentRequestId]);
+
+  useEffect(() => {
+    if (props.switchReadPending) return;
+    if (staleBaseline.current) {
+      if (!acceptConflictSnapshotIfCurrent()) props.refreshAfterConflict();
+      return;
+    }
+    if (
+      verifyAfterRequestId.current !== null &&
+      latestSnapshot.current.requestId <= verifyAfterRequestId.current
+    ) {
+      return;
+    }
+    if (unsavedDraft.current) return;
+    if (writersLive.current > 0) return;
+    if (props.contentRequestId <= acceptedRequestFloor.current) return;
+    acceptSnapshot(latestSnapshot.current, "saved");
+    // acceptSnapshot reads mutable write state and the exact body/hash pair
+    // above. The dependencies name the authoritative snapshot identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    props.body,
+    props.contentHash,
+    props.contentRequestId,
+    props.path,
+    props.switchReadPending,
+    props.switchUnresyncedRef,
+    writerSettledEpoch,
+  ]);
 
   // Cancel-and-restore, during the render that first sees the new version
   // (#567, extended to these views by #579's adversarial review). The armed
@@ -720,35 +913,108 @@ function useAutosavedTextDraft(props: {
       setSaveState("saved");
       setDraft(props.body);
       latestDraft.current = props.body;
+      baseContentHash.current = props.contentHash;
+      baseContentRequestId.current = props.contentRequestId;
+      acceptedRequestFloor.current = Math.max(
+        acceptedRequestFloor.current,
+        props.contentRequestId,
+      );
     }
   }
 
   async function writeDraftNow(
-    options: { rejectOnError?: boolean; fromFlush?: boolean } = {},
+    options: {
+      rejectOnError?: boolean;
+      fromFlush?: boolean;
+      textSnapshot?: string;
+      captureOnFailure?: boolean;
+    } = {},
   ): Promise<void> {
-    if (flushBarrier.current && !options.fromFlush) return;
+    if (flushBarrier.current && !options.fromFlush) {
+      if (options.captureOnFailure && options.textSnapshot !== undefined) {
+        captureLatestConflictDraft(options.textSnapshot);
+      }
+      return;
+    }
+    const enteredEditGeneration = editGeneration.current;
     const run = async (): Promise<void> => {
-      if (writesBlocked()) return;
+      if (enteredEditGeneration <= blockedEditGeneration.current) return;
+      if (writesBlocked()) {
+        if (options.captureOnFailure && options.textSnapshot !== undefined) {
+          captureLatestConflictDraft(options.textSnapshot);
+        }
+        return;
+      }
+      const expectedContentHash = baseContentHash.current;
+      if (expectedContentHash === null) {
+        if (options.captureOnFailure && options.textSnapshot !== undefined) {
+          captureLatestConflictDraft(options.textSnapshot);
+        }
+        return;
+      }
+      const issuedBaseRequestId = baseContentRequestId.current;
       // Read after older writes finish. A queued save therefore carries the
       // latest draft, not the text that was current when it joined the queue.
-      const text = latestDraft.current;
+      const text = options.textSnapshot ?? latestDraft.current;
+      latestDraft.current = text;
       unsavedDraft.current = false;
-      setSaveState("saving");
+      if (!unmounted.current) setSaveState("saving");
       try {
-        await bridge().writeWorkspaceText({
+        const result = await bridge().writeWorkspaceText({
           workspaceId: props.workspaceId,
           relativePath: props.path,
           text,
+          expectedContentHash,
         });
+        if (result.status === "conflict") {
+          if (saveTimer.current) {
+            clearTimeout(saveTimer.current);
+            saveTimer.current = null;
+          }
+          staleBaseline.current = true;
+          flushConflict.current = true;
+          conflictContentHash.current = result.currentContentHash;
+          conflictRequestId.current = latestSnapshot.current.requestId;
+          blockedEditGeneration.current = Math.max(
+            blockedEditGeneration.current,
+            editGeneration.current,
+          );
+          unsavedDraft.current = false;
+          captureLatestConflictDraft();
+          if (!unmounted.current) {
+            setSaveState("error");
+            if (!acceptConflictSnapshotIfCurrent()) props.refreshAfterConflict();
+          }
+          if (options.rejectOnError) {
+            throw new Error("The file changed on disk while dohc saved it.");
+          }
+          return;
+        }
+        baseContentHash.current = result.contentHash;
+        acceptedRequestFloor.current = Math.max(
+          acceptedRequestFloor.current,
+          issuedBaseRequestId,
+        );
+        if (latestContentRequestId.current > issuedBaseRequestId) {
+          verifyAfterRequestId.current = latestContentRequestId.current;
+          if (!unmounted.current) {
+            setSaveState("saving");
+            props.refreshAfterConflict();
+          }
+          return;
+        }
         // A user can keep typing while this write is in flight. Never repaint
         // that newer draft with the older text that just reached disk.
-        if (latestDraft.current === text) {
+        if (!unmounted.current && latestDraft.current === text) {
           setDraft(text);
           setSaveState("saved");
         }
       } catch (error) {
         unsavedDraft.current = true;
-        setSaveState("error");
+        if (options.captureOnFailure && options.textSnapshot !== undefined) {
+          captureLatestConflictDraft(options.textSnapshot);
+        }
+        if (!unmounted.current) setSaveState("error");
         if (options.rejectOnError) throw error;
       }
     };
@@ -757,6 +1023,7 @@ function useAutosavedTextDraft(props: {
     const queued = (runsNow ? run() : writeChain.current.then(run)).finally(
       () => {
         writersLive.current -= 1;
+        if (!unmounted.current) setWriterSettledEpoch((epoch) => epoch + 1);
       },
     );
     writeChain.current = queued.then(
@@ -773,6 +1040,7 @@ function useAutosavedTextDraft(props: {
   function scheduleSave(next: string) {
     setDraft(next);
     latestDraft.current = next;
+    editGeneration.current += 1;
     // Deliberately NOT gated on writesBlocked(): swallowing the keystroke here
     // would lose it silently when the reread lands and the sync effect
     // repaints. It arms as normal, the write seams refuse it, and the capture
@@ -786,9 +1054,20 @@ function useAutosavedTextDraft(props: {
 
   const { workspaceId, path, registerDraftFlush } = props;
   useEffect(() => {
+    unmounted.current = false;
     return () => {
+      unmounted.current = true;
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      if (!unsavedDraft.current) return;
+      if (!unsavedDraft.current) {
+        if (writersLive.current > 0) {
+          void writeChain.current.then(() => {
+            if (!unsavedDraft.current) return;
+            unsavedDraft.current = false;
+            captureOrphanedDraft(workspaceId, path, latestDraft.current);
+          });
+        }
+        return;
+      }
       // A pending draft that cannot be written is SET ASIDE, never dropped
       // (#579 adversarial review, F3). A reread that REJECTS selects the error
       // branch while the refusal stays live, so this view is gone before a
@@ -799,7 +1078,8 @@ function useAutosavedTextDraft(props: {
         captureOrphanedDraft(workspaceId, path, latestDraft.current);
         return;
       }
-      void writeDraftNow();
+      const text = latestDraft.current;
+      void writeDraftNow({ textSnapshot: text, captureOnFailure: true });
     };
     // `disabled` is deliberately NOT a dep: as one it made every flip run this
     // cleanup with the PREVIOUS render's value captured, so turning writes off
@@ -811,12 +1091,22 @@ function useAutosavedTextDraft(props: {
 
   useEffect(() => {
     if (!registerDraftFlush) return;
-    registerDraftFlush(() => {
-      if (flushInFlight.current) return flushInFlight.current;
+    registerDraftFlush((options) => {
+      if (flushInFlight.current) {
+        const inFlight = flushInFlight.current;
+        if (!options?.captureOnFailure) return inFlight;
+        return inFlight.catch((error) => {
+          captureFailedFlush();
+          throw error;
+        });
+      }
       flushBarrier.current = true;
       const flush = (async () => {
         try {
           await writeChain.current;
+          if (flushConflict.current) {
+            throw new Error("The file changed on disk while dohc saved it.");
+          }
           while (unsavedDraft.current && !writesBlocked()) {
             if (saveTimer.current) {
               clearTimeout(saveTimer.current);
@@ -824,6 +1114,12 @@ function useAutosavedTextDraft(props: {
             }
             await writeDraftNow({ rejectOnError: true, fromFlush: true });
           }
+          if (flushConflict.current) {
+            throw new Error("The file changed on disk while dohc saved it.");
+          }
+        } catch (error) {
+          if (options?.captureOnFailure) captureFailedFlush();
+          throw error;
         } finally {
           flushBarrier.current = false;
           flushInFlight.current = null;
@@ -898,6 +1194,10 @@ const ENGINE_CHIP: Record<
 
 function MarkdownView(props: {
   body: string;
+  contentHash: string | null;
+  contentRequestId: number;
+  latestContentRequestId: number;
+  refreshAfterConflict: () => void;
   workspaceId: string;
   path: string;
   truncated?: boolean;
@@ -910,7 +1210,7 @@ function MarkdownView(props: {
   chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: FileSaveState) => void;
-  registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
+  registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
   pendingUndo?: PendingTextUndo;
   onPendingUndoConsumed?: (token: number) => void;
@@ -968,6 +1268,7 @@ function MarkdownView(props: {
   const [wysiwygResyncEpoch, setWysiwygResyncEpoch] = useState(0);
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+  const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
 
   const engine = props.engine;
   // #533. The engine open runs ON the capture chain, so a document opened
@@ -1038,6 +1339,31 @@ function MarkdownView(props: {
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const wysiwygRef = useRef<MarkdownEditorHandle | null>(null);
   const latestDraft = useRef(props.body);
+  const baseContentHash = useRef(props.contentHash);
+  const baseContentRequestId = useRef(props.contentRequestId);
+  const latestSnapshot = useRef({
+    body: props.body,
+    contentHash: props.contentHash,
+    requestId: props.contentRequestId,
+  });
+  latestSnapshot.current = {
+    body: props.body,
+    contentHash: props.contentHash,
+    requestId: props.contentRequestId,
+  };
+  const latestContentRequestId = useRef(props.latestContentRequestId);
+  latestContentRequestId.current = props.latestContentRequestId;
+  const acceptedRequestFloor = useRef(0);
+  const staleBaseline = useRef(false);
+  const flushConflict = useRef(false);
+  const conflictContentHash = useRef<string | null>(null);
+  const conflictRequestId = useRef(0);
+  const verifyAfterRequestId = useRef<number | null>(null);
+  const blockedDraftRevision = useRef(-1);
+  const capturedConflictDraft = useRef<string | null>(null);
+  const conflictDraftId = useRef<number | null>(null);
+  const draftRevision = useRef(0);
+  const unmounted = useRef(false);
   const serializeDraftRef = useRef<() => string>(() => props.body);
   const editing = surfaceMode !== "read";
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1059,13 +1385,86 @@ function MarkdownView(props: {
   // Writers that have ENTERED and not yet finished. Zero means the queue is
   // idle and the next writer can run without deferring (see writeDraftNow).
   const writersLive = useRef(0);
-  // Armed while the flush drains. A writer arriving now holds text from the
-  // version (or path) the caller is about to leave: running it before the
-  // change races the flush, and running it after IS the clobber #567 is
-  // about. So it is REFUSED rather than re-armed — re-arming would write
-  // pre-switch text onto the post-switch tree. The draft stays unsaved, and
-  // the reopen's render-phase capture above sets it aside.
+  // Armed while the flush drains. New edits stay on this side of the barrier
+  // and are written before the shell can move or close the current path.
   const flushBarrier = useRef(false);
+  const flushInFlight = useRef<Promise<void> | null>(null);
+
+  function captureLatestConflictDraft(text?: string) {
+    const capturedText =
+      text ??
+      (unmounted.current ? latestDraft.current : serializeDraftRef.current());
+    if (capturedConflictDraft.current === capturedText) return;
+    conflictDraftId.current = captureOrphanedDraft(
+      props.workspaceId,
+      props.path,
+      capturedText,
+    );
+    capturedConflictDraft.current = capturedText;
+  }
+
+  function captureFailedFlush() {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    unsavedDraft.current = false;
+    blockedDraftRevision.current = Math.max(
+      blockedDraftRevision.current,
+      draftRevision.current,
+    );
+    captureLatestConflictDraft();
+    if (!unmounted.current) setSaveState("error");
+  }
+
+  function acceptSnapshot(
+    snapshot: { body: string; contentHash: string | null; requestId: number },
+    state: SaveState,
+  ) {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    if (staleBaseline.current && unsavedDraft.current) {
+      captureLatestConflictDraft();
+    }
+    unsavedDraft.current = false;
+    draftRevision.current += 1;
+    blockedDraftRevision.current = Math.max(
+      blockedDraftRevision.current,
+      draftRevision.current,
+    );
+    staleBaseline.current = false;
+    baseContentHash.current = snapshot.contentHash;
+    baseContentRequestId.current = snapshot.requestId;
+    if (
+      verifyAfterRequestId.current !== null &&
+      snapshot.requestId > verifyAfterRequestId.current
+    ) {
+      verifyAfterRequestId.current = null;
+    }
+    acceptedRequestFloor.current = Math.max(
+      acceptedRequestFloor.current,
+      snapshot.requestId,
+    );
+    setDraft(snapshot.body);
+    setSavedBody(snapshot.body);
+    latestDraft.current = snapshot.body;
+    if (mode === "wysiwyg") setWysiwygResyncEpoch((epoch) => epoch + 1);
+    setSaveState(state);
+  }
+
+  function acceptConflictSnapshotIfCurrent(): boolean {
+    const snapshot = latestSnapshot.current;
+    if (
+      snapshot.contentHash !== conflictContentHash.current &&
+      snapshot.requestId <= conflictRequestId.current
+    ) {
+      return false;
+    }
+    acceptSnapshot(snapshot, "error");
+    return true;
+  }
 
   // #567 cancel-and-restore: the moment `opening` flips true, the pending
   // draft leaves the save pipeline. Writing it would land the previous
@@ -1110,12 +1509,28 @@ function MarkdownView(props: {
       // byte-identical, so that effect has nothing to fire on and the
       // set-aside title/property edit would keep painting the view and ride
       // into the next property save (#579 review, r7). Reset here.
+      draftRevision.current += 1;
       setDraft(props.body);
       setSavedBody(props.body);
       latestDraft.current = props.body;
+      baseContentHash.current = props.contentHash;
+      baseContentRequestId.current = props.contentRequestId;
+      acceptedRequestFloor.current = Math.max(
+        acceptedRequestFloor.current,
+        props.contentRequestId,
+      );
     }
   }
   openingRef.current = opening;
+  useEffect(() => {
+    const id = conflictDraftId.current;
+    if (!flushConflict.current || staleBaseline.current || id === null) return;
+    if (orphanedDrafts.some((draft) => draft.id === id)) return;
+    conflictDraftId.current = null;
+    capturedConflictDraft.current = null;
+    flushConflict.current = false;
+    setSaveState("saved");
+  }, [orphanedDrafts, saveState, props.contentRequestId]);
   // What the header chip shows: a real pending/failed save wins; otherwise an
   // unresolved set-aside draft gets its OWN state (#579 review, P2). The
   // set-aside edit is not in the file, but it is not savable-dirty either —
@@ -1275,7 +1690,8 @@ function MarkdownView(props: {
   // here too would shadow it) that a long-lived closure may never get to
   // render.
   const { writesRefusedRef } = props;
-  const writesBlocked = () => readOnlyRef.current || writesRefusedRef.current;
+  const writesBlocked = () =>
+    readOnlyRef.current || writesRefusedRef.current || staleBaseline.current;
   const engineMode = engine.available && engine.doc !== null;
 
   // "View markdown as source" (engine mode): a READ-ONLY projection of the
@@ -1353,12 +1769,51 @@ function MarkdownView(props: {
   // This runs before the switch fire effect. A read-mode resync therefore
   // applies before that effect lifts the shared write refusal.
   useEffect(() => {
-    if (!editing && !unsavedDraft.current) {
-      setDraft(props.body);
-      setSavedBody(props.body);
-      latestDraft.current = props.body;
+    if (staleBaseline.current) {
+      if (!acceptConflictSnapshotIfCurrent()) props.refreshAfterConflict();
+      return;
     }
-  }, [props.body, editing]);
+    const verificationFloor = verifyAfterRequestId.current;
+    if (verificationFloor !== null) {
+      const snapshot = latestSnapshot.current;
+      if (snapshot.requestId <= verificationFloor) return;
+      if (unsavedDraft.current || writersLive.current > 0) return;
+      if (editing) {
+        if (snapshot.contentHash === baseContentHash.current) {
+          verifyAfterRequestId.current = null;
+          baseContentRequestId.current = snapshot.requestId;
+          acceptedRequestFloor.current = Math.max(
+            acceptedRequestFloor.current,
+            snapshot.requestId,
+          );
+          setSaveState("saved");
+          return;
+        }
+        flushConflict.current = true;
+        conflictContentHash.current = snapshot.contentHash;
+        conflictRequestId.current = snapshot.requestId;
+        captureLatestConflictDraft();
+        acceptSnapshot(snapshot, "error");
+        return;
+      }
+    }
+    if (
+      !editing &&
+      !unsavedDraft.current &&
+      writersLive.current === 0 &&
+      props.contentRequestId > acceptedRequestFloor.current
+    ) {
+      acceptSnapshot(latestSnapshot.current, "saved");
+    }
+    // The helpers read mutable writer state and the atomic snapshot above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    props.body,
+    props.contentHash,
+    props.contentRequestId,
+    editing,
+    writerSettledEpoch,
+  ]);
   useEffect(() => {
     if (props.reopenKey === headingReopenKey.current) return;
     headingReopenKey.current = props.reopenKey;
@@ -1405,9 +1860,16 @@ function MarkdownView(props: {
         );
         setSaveState("saved");
       }
+      draftRevision.current += 1;
       setDraft(props.body);
       setSavedBody(props.body);
       latestDraft.current = props.body;
+      baseContentHash.current = props.contentHash;
+      baseContentRequestId.current = props.contentRequestId;
+      acceptedRequestFloor.current = Math.max(
+        acceptedRequestFloor.current,
+        props.contentRequestId,
+      );
       if (resyncMode === "wysiwyg") {
         setWysiwygResyncEpoch((epoch) => epoch + 1);
       }
@@ -1613,14 +2075,22 @@ function MarkdownView(props: {
   }, [props.path]);
 
   async function writeDraftNow(
-    options: { rejectOnError?: boolean; fromFlush?: boolean } = {},
+    options: {
+      rejectOnError?: boolean;
+      fromFlush?: boolean;
+      textSnapshot?: string;
+      captureOnFailure?: boolean;
+    } = {},
   ): Promise<void> {
-    // Refused, not queued (see flushBarrier): a writer that joined behind the
-    // barrier could only ever land stale text. Silent, because the flush owns
-    // the save state from here — it either lands this same draft itself or
-    // the reopen sets it aside.
-    if (flushBarrier.current && !options.fromFlush) return;
+    if (flushBarrier.current && !options.fromFlush) {
+      if (options.captureOnFailure && options.textSnapshot !== undefined) {
+        captureLatestConflictDraft(options.textSnapshot);
+      }
+      return;
+    }
+    const enteredRevision = draftRevision.current;
     const run = async (): Promise<void> => {
+      if (enteredRevision <= blockedDraftRevision.current) return;
       // The REFS, not captured values. The 800ms autosave timer holds the
       // closure from the render that armed it, where readOnly was false — so
       // a document that turned read-only after the keystroke still wrote
@@ -1638,30 +2108,89 @@ function MarkdownView(props: {
       // `opening` window is different: its render-phase capture serialized
       // the draft eagerly and surfaced it, so this gate only refuses.
       if (writesBlocked() || openingRef.current) {
-        setSaveState("error");
+        if (options.captureOnFailure && options.textSnapshot !== undefined) {
+          captureLatestConflictDraft(options.textSnapshot);
+        }
+        if (!unmounted.current) setSaveState("error");
         return;
       }
+      const expectedContentHash = baseContentHash.current;
+      if (expectedContentHash === null) {
+        if (options.captureOnFailure && options.textSnapshot !== undefined) {
+          captureLatestConflictDraft(options.textSnapshot);
+        }
+        return;
+      }
+      const issuedBaseRequestId = baseContentRequestId.current;
       // Serialized HERE, not at enqueue: a writer that waited reads the
       // newest text, so an older queued write can never land over a newer one
       // (#579 review, r4).
-      const text = serializeDraftRef.current();
+      const issuedRevision = draftRevision.current;
+      const text = options.textSnapshot ?? serializeDraftRef.current();
       latestDraft.current = text;
       unsavedDraft.current = false;
-      setSaveState("saving");
+      if (!unmounted.current) setSaveState("saving");
       try {
-        await bridge().writeWorkspaceText({
+        const result = await bridge().writeWorkspaceText({
           workspaceId: props.workspaceId,
           relativePath: props.path,
           text,
+          expectedContentHash,
         });
-        setDraft(text);
-        setSavedBody(text);
-        setSaveState("saved");
+        if (result.status === "conflict") {
+          if (saveTimer.current) {
+            clearTimeout(saveTimer.current);
+            saveTimer.current = null;
+          }
+          staleBaseline.current = true;
+          flushConflict.current = true;
+          conflictContentHash.current = result.currentContentHash;
+          conflictRequestId.current = latestSnapshot.current.requestId;
+          blockedDraftRevision.current = Math.max(
+            blockedDraftRevision.current,
+            draftRevision.current,
+          );
+          unsavedDraft.current = false;
+          captureLatestConflictDraft();
+          if (!unmounted.current) {
+            setSaveState("error");
+            if (!acceptConflictSnapshotIfCurrent()) props.refreshAfterConflict();
+          }
+          if (options.rejectOnError) {
+            throw new Error("The file changed on disk while dohc saved it.");
+          }
+          return;
+        }
+        baseContentHash.current = result.contentHash;
+        acceptedRequestFloor.current = Math.max(
+          acceptedRequestFloor.current,
+          issuedBaseRequestId,
+        );
+        if (latestContentRequestId.current > issuedBaseRequestId) {
+          verifyAfterRequestId.current = latestContentRequestId.current;
+          if (!unmounted.current) {
+            setSaveState("saving");
+            props.refreshAfterConflict();
+          }
+          return;
+        }
+        if (!unmounted.current && draftRevision.current === issuedRevision) {
+          setDraft(text);
+          setSavedBody(text);
+          setSaveState("saved");
+        } else if (!unmounted.current && !unsavedDraft.current) {
+          // The write queue cannot start a newer writer until this run returns.
+          // A queued or pending local edit therefore keeps this flag set.
+          setSaveState("saved");
+        }
       } catch (error) {
         // The write failed: the draft is still unsaved, so the unmount flush
         // gets another shot at landing it.
         unsavedDraft.current = true;
-        setSaveState("error");
+        if (options.captureOnFailure && options.textSnapshot !== undefined) {
+          captureLatestConflictDraft(options.textSnapshot);
+        }
+        if (!unmounted.current) setSaveState("error");
         if (options.rejectOnError) throw error;
       }
     };
@@ -1675,6 +2204,7 @@ function MarkdownView(props: {
     const queued = (runsNow ? run() : writeChain.current.then(run)).finally(
       () => {
         writersLive.current -= 1;
+        if (!unmounted.current) setWriterSettledEpoch((epoch) => epoch + 1);
       },
     );
     writeChain.current = queued.then(
@@ -1705,6 +2235,7 @@ function MarkdownView(props: {
 
   function scheduleSave() {
     if (readOnly) return;
+    draftRevision.current += 1;
     unsavedDraft.current = true;
     setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -1783,11 +2314,23 @@ function MarkdownView(props: {
   // itself a write (#534). The ref carries the current value to a real unmount.
   const { workspaceId, path } = props;
   useEffect(() => {
+    unmounted.current = false;
     return () => {
+      unmounted.current = true;
+      draftRevision.current += 1;
       if (saveTimer.current) clearTimeout(saveTimer.current);
       // `opening` too (#567): unmounting mid-reopen must not land the
       // previous version's draft on the tree the reopen is binding.
-      if (!unsavedDraft.current) return;
+      if (!unsavedDraft.current) {
+        if (writersLive.current > 0) {
+          void writeChain.current.then(() => {
+            if (!unsavedDraft.current) return;
+            unsavedDraft.current = false;
+            captureOrphanedDraft(workspaceId, path, latestDraft.current);
+          });
+        }
+        return;
+      }
       unsavedDraft.current = false;
       const text = serializeDraftRef.current();
       // Same invariant as the plain-text hook (#579 adversarial review, F3):
@@ -1808,13 +2351,11 @@ function MarkdownView(props: {
         captureOrphanedDraft(workspaceId, path, text);
         return;
       }
-      void bridge()
-        .writeWorkspaceText({
-          workspaceId,
-          relativePath: path,
-          text,
-        })
-        .catch(() => undefined);
+      // Join the same queue as every mounted save. The hash is read when this
+      // task reaches the head, after any in-flight write has advanced it.
+      // Capture the text now because the editor is gone before the task runs.
+      latestDraft.current = text;
+      void writeDraftNow({ textSnapshot: text, captureOnFailure: true });
     };
   }, [workspaceId, path]);
 
@@ -1826,7 +2367,15 @@ function MarkdownView(props: {
   const { registerDraftFlush } = props;
   useEffect(() => {
     if (!registerDraftFlush) return;
-    registerDraftFlush(async () => {
+    registerDraftFlush((options) => {
+      if (flushInFlight.current) {
+        const inFlight = flushInFlight.current;
+        if (!options?.captureOnFailure) return inFlight;
+        return inFlight.catch((error) => {
+          captureFailedFlush();
+          throw error;
+        });
+      }
       // A write already past the guards is the same obligation as an armed
       // timer (#579 review, r3): the caller is about to move paths or switch
       // versions, and must not proceed while the previous state's text is
@@ -1838,28 +2387,38 @@ function MarkdownView(props: {
       // Arming and reading the tail are one synchronous step, so no writer
       // can slip between them.
       flushBarrier.current = true;
-      try {
-        // Everything already enqueued — in flight OR parked behind it — runs
-        // to completion ahead of this point, and nothing can join behind.
-        await writeChain.current;
-        // This seam is now the only writer that can exist. Land the draft, so
-        // the keystrokes reach disk while this path and this version still
-        // mean what the editor shows. The REFS, not captured values: the
-        // shell can call this between the refusal and the re-registration,
-        // and `opening` (#567) means a flush arriving mid-reopen must not
-        // write the previous version's draft. A write that FAILS leaves
-        // `unsavedDraft` true, and the unmount flush gets the next shot.
-        if (!unsavedDraft.current || writesBlocked() || openingRef.current) {
-          return;
+      const flush = (async () => {
+        try {
+          // Everything already enqueued — in flight OR parked behind it — runs
+          // to completion ahead of this point, and nothing can join behind.
+          await writeChain.current;
+          if (flushConflict.current) {
+            throw new Error("The file changed on disk while dohc saved it.");
+          }
+          while (
+            unsavedDraft.current &&
+            !writesBlocked() &&
+            !openingRef.current
+          ) {
+            if (saveTimer.current) {
+              clearTimeout(saveTimer.current);
+              saveTimer.current = null;
+            }
+            await writeDraftNow({ rejectOnError: true, fromFlush: true });
+          }
+          if (flushConflict.current) {
+            throw new Error("The file changed on disk while dohc saved it.");
+          }
+        } catch (error) {
+          if (options?.captureOnFailure) captureFailedFlush();
+          throw error;
+        } finally {
+          flushBarrier.current = false;
+          flushInFlight.current = null;
         }
-        if (saveTimer.current) clearTimeout(saveTimer.current);
-        await writeDraftNow({ rejectOnError: true, fromFlush: true });
-      } finally {
-        flushBarrier.current = false;
-      }
-      // INVARIANT at return: the queue is empty. No writer — in flight,
-      // parked, or arriving during the drain — survives this seam holding
-      // text from before the caller's change.
+      })();
+      flushInFlight.current = flush;
+      return flush;
     });
     return () => registerDraftFlush(null);
     // writeDraftNow and this flush read mutable state through refs plus
@@ -2298,6 +2857,10 @@ function deriveImportTarget(sourcePath: string): { dbPath: string; tableName: st
 
 function CsvView({
   body,
+  contentHash,
+  contentRequestId,
+  latestContentRequestId,
+  refreshAfterConflict,
   workspaceId,
   path,
   onOpenPath,
@@ -2312,18 +2875,26 @@ function CsvView({
   switchReadPending: boolean;
   switchUnresyncedRef: { current: boolean };
   body: string;
+  contentHash: string | null;
+  contentRequestId: number;
+  latestContentRequestId: number;
+  refreshAfterConflict: () => void;
   workspaceId: string;
   path: string;
   onOpenPath?: (path: string) => void;
   truncated?: boolean;
   onSaveStateChange?: (state: SaveState) => void;
-  registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
+  registerDraftFlush?: (flush: DraftFlush | null) => void;
 }) {
   const [raw, setRaw] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const draft = useAutosavedTextDraft({
     body,
+    contentHash,
+    contentRequestId,
+    latestContentRequestId,
+    refreshAfterConflict,
     workspaceId,
     path,
     disabled: truncated,
@@ -2766,6 +3337,10 @@ function ImageView({ url, path }: { url: string; path: string }) {
 
 function TextEditorView({
   body,
+  contentHash,
+  contentRequestId,
+  latestContentRequestId,
+  refreshAfterConflict,
   testId,
   language,
   scrollLine,
@@ -2784,13 +3359,17 @@ function TextEditorView({
   switchReadPending: boolean;
   switchUnresyncedRef: { current: boolean };
   body: string;
+  contentHash: string | null;
+  contentRequestId: number;
+  latestContentRequestId: number;
+  refreshAfterConflict: () => void;
   testId: string;
   language: string;
   workspaceId: string;
   path: string;
   truncated?: boolean;
   onSaveStateChange?: (state: SaveState) => void;
-  registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
+  registerDraftFlush?: (flush: DraftFlush | null) => void;
   pendingUndo?: PendingTextUndo;
   onPendingUndoConsumed?: (token: number) => void;
   // Search-result landing for read-only text views (Phase E5.0): scroll the
@@ -2799,6 +3378,10 @@ function TextEditorView({
 }) {
   const editor = useAutosavedTextDraft({
     body,
+    contentHash,
+    contentRequestId,
+    latestContentRequestId,
+    refreshAfterConflict,
     workspaceId,
     path,
     disabled: truncated,
@@ -3002,7 +3585,7 @@ export function FileInspector(props: {
   onSaveStateChange?: (state: FileSaveState) => void;
   // Registers the active editor's draft flush with the shell: explorer ops
   // await it before re-pathing files.
-  registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
+  registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownMarkdownFiles?: ReadonlyArray<WikilinkFile>;
   onSharePath?: (path: string) => void;
   pendingUndo?: PendingFileUndo;
@@ -3026,7 +3609,17 @@ export function FileInspector(props: {
   // refusal arrives — which is the only way to have it, since the refusal
   // unmounts the reporter.
   const [pendingDraft, setPendingDraft] = useState(false);
-  const { text, loadedPath, truncated, error, readSeq } = useTextContent(
+  const {
+    text,
+    loadedPath,
+    truncated,
+    contentHash,
+    contentRequestId,
+    latestContentRequestId,
+    error,
+    readSeq,
+    refreshAfterConflict,
+  } = useTextContent(
     props.workspaceId,
     props.path,
     isText,
@@ -3224,6 +3817,10 @@ export function FileInspector(props: {
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <MarkdownView
             body={text ?? ""}
+            contentHash={contentHash}
+            contentRequestId={contentRequestId}
+            latestContentRequestId={latestContentRequestId}
+            refreshAfterConflict={refreshAfterConflict}
             workspaceId={props.workspaceId}
             path={props.path}
             truncated={truncated}
@@ -3265,6 +3862,10 @@ export function FileInspector(props: {
           {recoveryNotices}
           <CsvView
             body={text ?? ""}
+            contentHash={contentHash}
+            contentRequestId={contentRequestId}
+            latestContentRequestId={latestContentRequestId}
+            refreshAfterConflict={refreshAfterConflict}
             workspaceId={props.workspaceId}
             path={props.path}
             onOpenPath={props.onOpenPath}
@@ -3291,6 +3892,10 @@ export function FileInspector(props: {
           {recoveryNotices}
           <TextEditorView
             body={text ?? ""}
+            contentHash={contentHash}
+            contentRequestId={contentRequestId}
+            latestContentRequestId={latestContentRequestId}
+            refreshAfterConflict={refreshAfterConflict}
             testId={kind === "json" ? "view-json" : "view-text"}
             language={kind === "json" ? "json" : extensionOf(props.path) || "text"}
             workspaceId={props.workspaceId}

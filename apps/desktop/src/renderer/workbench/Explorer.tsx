@@ -26,6 +26,7 @@ import {
 } from "react";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import type { DraftFlush } from "../FileInspector";
 import { Overlay } from "../Overlay";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
@@ -85,13 +86,10 @@ export interface ExplorerProps {
   onSetFolderExpanded: (path: string, expanded: boolean) => void;
   onToggleFolder: (path: string) => void;
   onTogglePin: (path: string) => void;
-  // Awaited BEFORE the disk ops of a change batch: the shell flushes the
-  // active editor's unsaved draft. A rename of the open file would otherwise
-  // unmount the inspector AFTER the path moved — its unmount flush writes to
-  // the OLD path (ENOENT, swallowed) and keystrokes inside the autosave
-  // window are silently lost. For deletes it means the trashed copy carries
-  // the latest keystrokes too.
-  onBeforeChanges?: () => Promise<void>;
+  // The shell flushes the stable active editor before disk changes and returns
+  // a settlement that retains every editor mounted while those changes run.
+  // A rejected initial flush aborts the batch.
+  onBeginChanges?: () => Promise<DraftFlush>;
   // Successful moves/deletes re-project tabs/pins/expansion in the shell.
   onPathsChanged: (changes: PendingTreeChange[]) => void;
   // Import into targetDir ("" = root): the folder that was dropped on, or the
@@ -362,7 +360,7 @@ export function Explorer(props: ExplorerProps) {
   const {
     workspaceId,
     onRefresh,
-    onBeforeChanges,
+    onBeginChanges,
     onPathsChanged,
     onSetFolderExpanded,
     onToggleFolder,
@@ -593,9 +591,15 @@ export function Explorer(props: ExplorerProps) {
     ) => {
       if (changes.length === 0) return;
       setOpError(null);
-      // Land any pending editor draft BEFORE paths move underneath it (see
-      // onBeforeChanges). A failed flush must not block the op itself.
-      await onBeforeChanges?.().catch(() => undefined);
+      // Land the stable active draft before paths move underneath it. The
+      // operation cannot preserve text that this initial flush rejected.
+      let settleDrafts: DraftFlush | null = null;
+      try {
+        settleDrafts = (await onBeginChanges?.()) ?? null;
+      } catch (cause) {
+        setOpError(cause instanceof Error ? cause.message : String(cause));
+        return;
+      }
       setPending((current) => [...current, ...changes]);
       const succeeded: PendingTreeChange[] = [];
       for (const change of changes) {
@@ -607,10 +611,22 @@ export function Explorer(props: ExplorerProps) {
           setOpError(cause instanceof Error ? cause.message : String(cause));
         }
       }
+      const changedExistingPath = succeeded.some(
+        (change) => change.kind !== "create-file" && change.kind !== "create-folder",
+      );
+      try {
+        await settleDrafts?.(
+          changedExistingPath ? { captureOnFailure: true } : undefined,
+        );
+      } catch (cause) {
+        // The disk change already completed. Surface the settlement error,
+        // then project the successful paths so the shell matches storage.
+        setOpError(cause instanceof Error ? cause.message : String(cause));
+      }
       if (succeeded.length > 0) onPathsChanged(succeeded);
       onRefresh();
     },
-    [onBeforeChanges, onPathsChanged, onRefresh],
+    [onBeginChanges, onPathsChanged, onRefresh],
   );
 
   const performMoves = useCallback(
