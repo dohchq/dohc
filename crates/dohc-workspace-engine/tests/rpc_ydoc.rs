@@ -80,6 +80,35 @@ fn plaintext_update(text: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, text))
 }
 
+#[tokio::test]
+async fn ydoc_apply_is_not_a_public_method() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-no-legacy-apply", 1).await;
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "ydoc.apply",
+                Some(handle),
+                json!({
+                    "versionId": "main",
+                    "objectId": "object-legacy",
+                    "contentKind": "plaintext",
+                    "updateBase64": plaintext_update("legacy")
+                }),
+            ),
+        )
+        .await
+        .expect_err("the legacy append RPC must not be exposed");
+
+    assert_eq!(error.code, ErrorCode::MethodNotFound);
+}
+
 /// Stage the #346 interleaving: a 0-byte artifact on disk that capture has NOT
 /// yet ingested, with a live session opened over it. Returns the path it
 /// staged and the open result.
@@ -583,85 +612,6 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         .await
         .expect_err("binary heads cannot open as Y.Doc text");
     assert_eq!(binary.code, ErrorCode::InvalidParams);
-
-    let race = call(
-        &transport,
-        &handle,
-        19,
-        "ydoc.open",
-        json!({ "versionId": "main", "path": "notes/race.md" }),
-    )
-    .await;
-    assert_eq!(race["lineage"], json!("absent"));
-    let race_session = race["sessionId"].as_str().expect("race session");
-    // The legacy append path cannot advance the CRDT behind a live editor:
-    // the session's lease is single-writer, so the old raced-seed scenario
-    // (apply a durable head under an open absent session) is refused at the
-    // door. The recordUpdate seed guard stays as actor-level defense-in-depth.
-    let busy_apply = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                20,
-                "ydoc.apply",
-                Some(handle.clone()),
-                json!({
-                    "versionId": "main",
-                    "objectId": race["objectId"],
-                    "contentKind": "plaintext",
-                    "updateBase64": plaintext_update("winner")
-                }),
-            ),
-        )
-        .await
-        .expect_err("a leased doc refuses legacy appends");
-    assert_eq!(busy_apply.message, "ydoc-session-busy");
-    // An untouched absent session closes without settling (nothing durable
-    // exists to project) and releases the lease.
-    call(
-        &transport,
-        &handle,
-        21,
-        "ydoc.close",
-        json!({ "sessionId": race_session }),
-    )
-    .await;
-    call(
-        &transport,
-        &handle,
-        22,
-        "ydoc.apply",
-        json!({
-            "versionId": "main",
-            "objectId": race["objectId"],
-            "contentKind": "plaintext",
-            "updateBase64": plaintext_update("winner")
-        }),
-    )
-    .await;
-    let reraced = call(
-        &transport,
-        &handle,
-        33,
-        "ydoc.open",
-        json!({ "versionId": "main", "path": "notes/race.md" }),
-    )
-    .await;
-    assert_eq!(
-        reraced["lineage"],
-        json!("existing"),
-        "a lineage created after the lease released is existing on reopen"
-    );
-    // Default close settles the raced winner over its captured base and
-    // prunes cleanly.
-    call(
-        &transport,
-        &handle,
-        34,
-        "ydoc.close",
-        json!({ "sessionId": reraced["sessionId"] }),
-    )
-    .await;
 
     let isolated = call(
         &transport,

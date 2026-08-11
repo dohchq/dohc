@@ -8,6 +8,7 @@ use crate::{SyncError, journal_local_op_in_tx, workspace_replicates_with_relay_i
 /// the observed size, because the caller cannot act on "it did not happen".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharingDeclined {
+    pub path: String,
     pub constraint: &'static str,
     pub limit_bytes: usize,
     pub observed_bytes: usize,
@@ -17,9 +18,9 @@ impl std::fmt::Display for SharingDeclined {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "document too large to share: {} allows {} bytes, observed {} bytes of encoded base \
-             state. The edit is saved and markdown stays this document's artifact.",
-            self.constraint, self.limit_bytes, self.observed_bytes
+            "File {} is too large to share. {} allows {} bytes; the encoded base uses {} bytes. \
+             The edit is saved. Reduce the file to share it.",
+            self.path, self.constraint, self.limit_bytes, self.observed_bytes
         )
     }
 }
@@ -68,6 +69,7 @@ pub fn originate_ydoc_base_in_tx(
     // unless it says so.
     if encoded.base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
         return Ok(BaseOrigination::Declined(SharingDeclined {
+            path: path.to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
             observed_bytes: encoded.base.len(),

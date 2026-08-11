@@ -1914,18 +1914,11 @@ ALTER TABLE secret_fork_bases
 
 pub(crate) const SECRET_FORK_BASE_TIMESTAMP_MIGRATION_ID: &str = "v1-secret-fork-base-timestamp";
 
-/// Persist the path that owns a Y.Doc lineage. Enrollment can then originate
-/// a live lineage before its first settle, when no snapshot exists yet.
+/// Persist the path for a live Y.Doc lineage before its first snapshot.
+/// Enrollment reads an existing snapshot's current path directly; copying it
+/// here would become stale after a closed-document rename.
 const V1_YDOC_PATH_DDL: &str = "\
 ALTER TABLE ydoc_docs ADD COLUMN path TEXT;
-UPDATE ydoc_docs
-   SET path = (
-       SELECT s.path FROM snapshots s
-        WHERE s.workspace_id = ydoc_docs.workspace_id
-          AND s.version_id = ydoc_docs.version_id
-          AND s.object_id = ydoc_docs.object_id
-   )
- WHERE path IS NULL;
 ";
 
 pub(crate) const YDOC_PATH_MIGRATION_ID: &str = "v1-ydoc-path";
@@ -2716,7 +2709,7 @@ mod tests {
     }
 
     #[test]
-    fn ydoc_path_migration_upgrades_a_prior_shape_row() {
+    fn ydoc_path_migration_adds_a_live_path_without_freezing_snapshot_state() {
         let dir = tempdir();
         let path = dir.join("ydoc-path.db");
         let ctx = MigrationContext::current(1_500);
@@ -2758,9 +2751,8 @@ mod tests {
             )
             .expect("matched Y.Doc path");
         assert_eq!(
-            matched_path.as_deref(),
-            Some("docs/matched.md"),
-            "the migration must recover a legacy Y.Doc path from its matching snapshot"
+            matched_path, None,
+            "enrollment reads the snapshot's current path instead of freezing a copy"
         );
         let orphaned_path: Option<String> = conn
             .query_row(

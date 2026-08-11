@@ -951,10 +951,6 @@ impl EngineService {
                 self.versioned_text_read(&ctx, request.workspace, request.params)
                     .await?
             }
-            "ydoc.apply" => {
-                self.ydoc_apply(&ctx, request.workspace, request.params)
-                    .await?
-            }
             "ydoc.open" => {
                 self.ydoc_open(&ctx, request.workspace, request.params)
                     .await?
@@ -7059,63 +7055,6 @@ impl EngineService {
         Ok(json!({ "failed": true }))
     }
 
-    async fn ydoc_apply(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: YdocApplyParams = parse(params)?;
-        let open = self.open(handle.as_ref())?;
-        // Serialize with the session surface: the lease check below is only
-        // meaningful if no ydoc.open can interleave between it and the
-        // append (open holds this same lock across lease + state read).
-        // Cancellation stays honored while queued — a long settle must not
-        // pin an already-expired apply on the transport.
-        let cancellation = OperationCancellation::new(ctx);
-        let _serial = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("ydoc.apply (queued)"));
-            }
-            serial = open.session_ops.lock() => serial,
-        };
-        let update = base64::engine::general_purpose::STANDARD
-            .decode(params.update_base64)
-            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
-        let key = DocKey::new(open.workspace_id, params.version_id, params.object_id)
-            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid document coordinates"))?;
-        // A live session's lease is single-writer: the legacy append path
-        // must not advance the durable CRDT behind an open editor (no
-        // remoteUpdate delivery, no forced resync). Same refusal shape as a
-        // second ydoc.open.
-        if self.leases.scoped(&open.root).is_held(&key) {
-            return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
-        }
-        let content_kind = match params.content_kind.as_str() {
-            "plaintext" => ContentKind::Plaintext,
-            "richdoc" => ContentKind::Richdoc,
-            _ => return Err(wire(ErrorCode::InvalidParams, "unknown Y.Doc content kind")),
-        };
-        let outcome = open
-            .actor
-            .ydoc_apply(
-                key,
-                content_kind,
-                update,
-                params.now_ms.unwrap_or(now_ms()?),
-                Arc::new(NoFaults),
-                cancellation.token(),
-            )
-            .await
-            .map_err(map_runtime)?;
-        Ok(json!({
-            "seq": outcome.seq,
-            "deduped": outcome.deduped,
-            "emitOutbound": outcome.emit_outbound
-        }))
-    }
-
     async fn ydoc_open(
         &self,
         ctx: &RequestContext,
@@ -7141,9 +7080,8 @@ impl EngineService {
         };
         // The first read only DERIVES the key (head resolution can't happen
         // without it). The lease is then taken on that key and the state is
-        // RE-READ under it — a legacy ydoc.apply landing between read one and
-        // the lease can no longer hand the opener stale initial state (the
-        // second read is the authoritative one; apply refuses while leased).
+        // RE-READ under it, so the second read is authoritative for the
+        // acquired session.
         let probe = open
             .actor
             .ydoc_open_state(
@@ -9106,16 +9044,6 @@ struct MomentsGetParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct YdocApplyParams {
-    version_id: String,
-    object_id: String,
-    content_kind: String,
-    update_base64: String,
-    now_ms: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocOpenParams {
     version_id: String,
     path: String,
@@ -10941,18 +10869,7 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
             if let Some(object) = value.as_object_mut() {
                 object.insert(
                     "sharingDeclined".to_owned(),
-                    Value::Array(
-                        sharing_declined
-                            .into_iter()
-                            .map(|declined| {
-                                json!({
-                                    "constraint": declined.constraint,
-                                    "limitBytes": declined.limit_bytes,
-                                    "observedBytes": declined.observed_bytes
-                                })
-                            })
-                            .collect(),
-                    ),
+                    Value::Array(sharing_declined_json(sharing_declined)),
                 );
             }
             value
@@ -11098,6 +11015,7 @@ fn sharing_declined_json(declines: Vec<dohc_engine_sync::SharingDeclined>) -> Ve
         .into_iter()
         .map(|declined| {
             json!({
+                "path": declined.path,
                 "constraint": declined.constraint,
                 "limitBytes": declined.limit_bytes,
                 "observedBytes": declined.observed_bytes,
@@ -12439,6 +12357,7 @@ mod tests {
             pending_resolves: Vec::new(),
             refusals: Vec::new(),
             sharing_declined: vec![dohc_engine_sync::SharingDeclined {
+                path: "notes/oversized.md".to_owned(),
                 constraint: "MAX_YDOC_UPDATE_BYTES",
                 limit_bytes: 20,
                 observed_bytes: 21,
@@ -12453,6 +12372,7 @@ mod tests {
         assert_eq!(
             value["sharingDeclined"],
             json!([{
+                "path": "notes/oversized.md",
                 "constraint": "MAX_YDOC_UPDATE_BYTES",
                 "limitBytes": 20,
                 "observedBytes": 21,

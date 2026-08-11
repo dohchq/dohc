@@ -13,17 +13,27 @@
 //! reconstructs them from its own private tables.
 
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
-use dohc_engine_domain::VersionedTextStore;
-use dohc_engine_runtime::{CancellationToken, CaptureIngest, NoFaults, WorkspaceSupervisor};
+use dohc_engine_domain::{DeleteTextFile, VersionedTextStore};
+use dohc_engine_runtime::{
+    CancellationToken, CaptureIngest, NoFaults, SelfWriteRecorder, WorkspaceSupervisor,
+};
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_sync::{
-    LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
+    LeaseProbe, NoLiveLeases, RelayCursor, ReplicationEnvelope, apply_ydoc_envelope,
+    commit_relay_cursor, drain_deferred_ydoc_for_key,
 };
 use dohc_engine_testkit::ScratchDir;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use yrs::types::Attrs;
 use yrs::{Any, Doc, OffsetKind, Options, ReadTxn, Text, Transact};
+
+struct NoRecorder;
+
+impl SelfWriteRecorder for NoRecorder {
+    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+}
 
 /// A locally-originated relay-visible op, shaped as a peer receives it.
 #[derive(Debug, Clone)]
@@ -376,7 +386,8 @@ fn remote_edit_envelope(
     }
 }
 
-fn assert_oversized_decline(declined: &dohc_engine_sync::SharingDeclined) {
+fn assert_oversized_decline(declined: &dohc_engine_sync::SharingDeclined, path: &str) {
+    assert_eq!(declined.path, path);
     assert_eq!(declined.constraint, "MAX_YDOC_UPDATE_BYTES");
     assert_eq!(
         declined.limit_bytes,
@@ -618,7 +629,7 @@ async fn draining_an_edit_surfaces_an_oversized_base_decline() {
         drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults).expect("drain remote edit");
     assert_eq!(drained.drained, 1);
     assert_eq!(drained.sharing_declined.len(), 1);
-    assert_oversized_decline(&drained.sharing_declined[0]);
+    assert_oversized_decline(&drained.sharing_declined[0], PATH);
     assert_remote_edit_committed(&store, &key);
 }
 
@@ -726,6 +737,7 @@ async fn applying_an_edit_surfaces_an_oversized_base_decline() {
             .sharing_declined
             .as_ref()
             .expect("ordinary apply surfaces the oversized base decline"),
+        PATH,
     );
     assert_remote_edit_committed(&store, &key);
 }
@@ -936,6 +948,136 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
         "alpha beta gamma",
         "the promoted base carries the rows the lineage held before promotion, \
          and later deltas still apply to it"
+    );
+}
+
+/// A crash can leave a private Y.Doc lineage durable without a live lease. If
+/// the user deletes that closed file before first relay contact, the deletion
+/// must retire the lineage. Otherwise enrollment sees the orphaned marker,
+/// publishes its stale path as a Y.Doc base, and excludes the delete moment
+/// from the ordinary moment lane.
+///
+/// Mutation check: omit lineage retirement from ordinary delete. Enrollment
+/// then emits a `ydoc.update`, retains the marker, and never journals the
+/// delete moment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
+    const WS: &str = "ws-originate-delete-before-enrollment";
+    const PATH: &str = "notes/deleted.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_identity(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+    let doc = Ydoc::wire();
+    let update = doc.plaintext_insert(0, "private edit");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            false,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("private Y.Doc edit");
+    assert_eq!(
+        marker_state(&db, &key),
+        (Regime::LocalOnly, false),
+        "the private lineage exists before the crash-shaped close"
+    );
+    // No session close ran. This is the durable state left by a daemon crash:
+    // the next process has no live lease, but the lineage rows remain.
+    supervisor
+        .close(&db)
+        .expect("stop actor without a Y.Doc close");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    handle
+        .versioned_text_delete(
+            DeleteTextFile {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                moment_id: "moment-delete-private-ydoc".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 300,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("delete the closed Y.Doc file");
+    supervisor.close(&db).expect("close actor after delete");
+
+    let mut store = EngineStore::open(&db, 9_350).expect("open store for enrollment");
+    let cursor = RelayCursor {
+        cursor: 0,
+        replication_epoch: "epoch-local".to_owned(),
+        stream_identity: "stream-local".to_owned(),
+        refusal_report_id: None,
+    };
+    commit_relay_cursor(&mut store, WS, &cursor, &NoFaults, 400)
+        .expect("first relay position enrolls the workspace");
+    let (markers, snapshots): (i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id=?1 AND version_id='main' AND object_id=?2",
+                    rusqlite::params![WS, object_id],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND object_id=?2",
+                    rusqlite::params![WS, object_id],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("inspect deleted lineage");
+    drop(store);
+    assert_eq!(
+        (markers, snapshots),
+        (0, 0),
+        "the deleted file stays absent"
+    );
+
+    let ops = local_ops(&db);
+    assert!(
+        ops.iter().all(|op| op.op_kind != "ydoc.update"),
+        "enrollment must not publish the deleted lineage: {ops:?}"
+    );
+    assert!(
+        ops.iter().any(|op| {
+            op.op_kind == "moment.append"
+                && op
+                    .payload
+                    .get("momentId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("moment-delete-private-ydoc")
+                && op
+                    .payload
+                    .get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("delete")
+        }),
+        "the ordinary delete moment is the relay representation: {ops:?}"
     );
 }
 
@@ -1264,6 +1406,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     let declined = append
         .sharing_declined
         .expect("a lineage past the base cap declines OUT LOUD");
+    assert_eq!(declined.path, PATH);
     assert_eq!(declined.constraint, "MAX_YDOC_UPDATE_BYTES");
     assert_eq!(
         declined.limit_bytes,
@@ -1275,10 +1418,12 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     );
     let named = declined.to_string();
     for part in [
+        PATH,
         "MAX_YDOC_UPDATE_BYTES",
         &declined.limit_bytes.to_string(),
         &declined.observed_bytes.to_string(),
         "bytes",
+        "Reduce the file to share it.",
     ] {
         assert!(
             named.contains(part),

@@ -10,16 +10,21 @@
 //! `moment_apply.rs` stores the sending peer's wire value verbatim (S2's
 //! boundary stamp covers `snapshots`/`fork_base_snapshots`, not `moments`).
 //! It excludes an imported moment by exact provenance instead — a matching
-//! `imported=1` row in `replication_log`, correlated on `momentId` (which
-//! the receiver preserves verbatim, unlike secrets) — and excludes `'ydoc'`
-//! moments outright, a true local origin whose content the CRDT stream
-//! supersedes. It also excludes every object with a Y.Doc lineage. Once
-//! `ydoc_docs` exists, its base supersedes the moment lane's older
-//! representation whether or not the base is claimed.
+//! successfully applied `imported=1` row in `replication_log`, correlated on
+//! `momentId` (which the receiver preserves verbatim, unlike secrets). An
+//! imported coordinate with a pending refusal did not create the matching
+//! domain row, so it is not import provenance. The backfill also excludes
+//! `'ydoc'` moments outright, a true local origin whose content the CRDT
+//! stream supersedes, and every object with a Y.Doc lineage. Once `ydoc_docs`
+//! exists, its base supersedes the moment lane's older representation whether
+//! or not the base is claimed.
 //!
 //! A live append stores its path on `ydoc_docs`, so enrollment can originate
-//! the lineage before any settle creates a snapshot. Deferring that case was
-//! unsafe: the local settle path does not retry origination.
+//! the lineage before any settle creates a snapshot. Once a snapshot exists,
+//! its path is canonical and can change while the document is closed. The
+//! enrollment read therefore prefers the snapshot path and uses the Y.Doc path
+//! only for a never-settled lineage. Deferring the live case was unsafe: the
+//! local settle path does not retry origination.
 //!
 //! Secret-version payloads always read `secret_fork_bases`, including the
 //! source tip's frozen last-edit timestamp. Receivers store `updatedAtMs` in
@@ -27,7 +32,7 @@
 
 use dohc_engine_collab::DocKey;
 use dohc_engine_domain::{SecretMomentRecord, SecretOp, VersionKind, VersionRecord};
-use rusqlite::{Row, Transaction, params};
+use rusqlite::{Row, Transaction};
 
 use crate::{
     BaseOrigination, SharingDeclined, SyncError, journal_moment_append_in_tx,
@@ -54,7 +59,10 @@ fn backfill_ydoc_bases(
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     let rows: Vec<(String, String, Option<String>)> = collect_rows(
         tx,
-        "SELECT d.version_id, d.object_id, d.path FROM ydoc_docs d \
+        "SELECT d.version_id, d.object_id, COALESCE(s.path,d.path) \
+         FROM ydoc_docs d LEFT JOIN snapshots s \
+           ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
+          AND s.object_id=d.object_id \
          WHERE d.workspace_id=?1 AND d.base_claimed=0 \
          ORDER BY d.version_id, d.object_id",
         workspace_id,
@@ -91,23 +99,28 @@ fn backfill_moments(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), Sync
     // "sync" stamp. The reliable discriminator is real import provenance:
     // `moment_apply.rs` preserves the sender's `moment_id` verbatim (unlike
     // secrets, which re-mint theirs), and every applied envelope lands a
-    // matching `imported=1` row in `replication_log` in the same
-    // transaction — so an exact `momentId` match against that log is exact,
-    // not inferred. `'ydoc'` is excluded separately: it is a true local
-    // origin (Y.Doc settle-projection), never imported, but its content is
-    // superseded by the CRDT stream once a lineage exists.
-    let moment_ids = collect_ids(
+    // matching `imported=1` row in `replication_log` in the same transaction.
+    // A refused coordinate is logged and ACKed too, but its pending refusal
+    // still exists while first-position backfill runs. Exclude only a matching
+    // coordinate with no refusal. `'ydoc'` is excluded separately: it is a
+    // true local origin (Y.Doc settle-projection), never imported, but its
+    // content is superseded by the CRDT stream once a lineage exists.
+    let moment_ids: Vec<String> = collect_rows(
         tx,
         "SELECT m.moment_id FROM moments m \
          WHERE m.workspace_id=?1 AND m.metadata_origin != 'ydoc' \
            AND NOT EXISTS (SELECT 1 FROM replication_log r \
-             WHERE r.workspace_id=?1 AND r.imported=1 AND r.op_kind='moment.append' \
-               AND json_extract(r.payload_json,'$.momentId')=m.moment_id) \
+              WHERE r.workspace_id=?1 AND r.imported=1 AND r.op_kind='moment.append' \
+                AND json_extract(r.payload_json,'$.momentId')=m.moment_id \
+                AND NOT EXISTS (SELECT 1 FROM replication_pending_refusals p \
+                  WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
+                    AND p.origin_seq=r.origin_seq)) \
            AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
              WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
                AND d.object_id=m.object_id) \
          ORDER BY m.moment_order",
         workspace_id,
+        |row| row.get(0),
     )?;
     for moment_id in moment_ids {
         journal_moment_append_in_tx(tx, workspace_id, &moment_id)?;
@@ -126,9 +139,13 @@ fn backfill_versions(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), Syn
                     v.fork_version_id, v.fork_moment_id \
              FROM versions v \
              WHERE v.workspace_id=?1 AND v.kind='named' \
-               AND NOT EXISTS (SELECT 1 FROM replication_log r \
-                 WHERE r.workspace_id=?1 AND r.op_kind='version.create' \
-                   AND json_extract(r.payload_json,'$.versionId')=v.version_id) \
+                AND NOT EXISTS (SELECT 1 FROM replication_log r \
+                  WHERE r.workspace_id=?1 AND r.op_kind='version.create' \
+                    AND json_extract(r.payload_json,'$.versionId')=v.version_id \
+                    AND (r.imported=0 OR NOT EXISTS ( \
+                      SELECT 1 FROM replication_pending_refusals p \
+                      WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
+                        AND p.origin_seq=r.origin_seq))) \
              ORDER BY v.created_at_ms, v.version_id",
         workspace_id,
         |row| {
@@ -281,19 +298,6 @@ fn backfill_secret_moments(tx: &Transaction<'_>, workspace_id: &str) -> Result<(
     Ok(())
 }
 
-fn collect_ids(
-    tx: &Transaction<'_>,
-    sql: &str,
-    workspace_id: &str,
-) -> Result<Vec<String>, SyncError> {
-    let mut statement = tx.prepare(sql).map_err(SyncError::corrupt)?;
-    statement
-        .query_map(params![workspace_id], |row| row.get(0))
-        .map_err(SyncError::corrupt)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(SyncError::corrupt)
-}
-
 fn collect_rows<T, F>(
     tx: &Transaction<'_>,
     sql: &str,
@@ -318,8 +322,8 @@ mod tests {
     use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
     use dohc_engine_crypto::{SECRET_KEY_BYTES, SecretDataKey};
     use dohc_engine_domain::{
-        CreateNamedVersion, SecretDelete, SecretDiskIntent, SecretFileStore, SecretWrite,
-        VersionedTextStore, WriteText,
+        CreateNamedVersion, RenameTextFile, SecretDelete, SecretDiskIntent, SecretFileStore,
+        SecretWrite, VersionedTextStore, WriteText,
     };
     use dohc_engine_storage::{EngineStore, NoFaults};
     use dohc_engine_testkit::ScratchDir;
@@ -565,6 +569,99 @@ mod tests {
     }
 
     #[test]
+    fn refused_import_does_not_hide_a_local_moment_with_the_same_id() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        write_text(
+            &mut store,
+            "main",
+            "local",
+            "moment-collision",
+            "local",
+            "capture",
+            10,
+        );
+        let refused = crate::ReplicationEnvelope {
+            workspace_id: "ws".to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 0,
+            op_kind: "moment.append".to_owned(),
+            payload: serde_json::json!({"momentId": "moment-collision"}),
+            recorded_at_ms: 10,
+        };
+        assert!(matches!(
+            crate::apply_moment_envelope(&mut store, &refused, &NoFaults),
+            Ok(crate::ApplyOutcome::Refused(_))
+        ));
+
+        enroll(&mut store).expect("enroll");
+
+        assert_eq!(
+            local_ops(&store)
+                .iter()
+                .filter(|(kind, payload)| {
+                    kind == "moment.append" && payload["momentId"] == "moment-collision"
+                })
+                .count(),
+            1,
+            "a refused import is not successful import provenance"
+        );
+    }
+
+    #[test]
+    fn refused_import_does_not_hide_a_local_version_with_the_same_id() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        write_text(
+            &mut store,
+            "main",
+            "forked",
+            "moment-base",
+            "base",
+            "capture",
+            10,
+        );
+        VersionedTextStore::new(&mut store)
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: "ws".to_owned(),
+                    from_version_id: "main".to_owned(),
+                    new_version_id: "named-collision".to_owned(),
+                    name: "Named collision".to_owned(),
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("named version");
+        let refused = crate::ReplicationEnvelope {
+            workspace_id: "ws".to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 0,
+            op_kind: "version.create".to_owned(),
+            payload: serde_json::json!({"versionId": "named-collision"}),
+            recorded_at_ms: 20,
+        };
+        assert!(matches!(
+            crate::apply_version_envelope(&mut store, &refused, &NoFaults),
+            Ok(crate::ApplyOutcome::Refused(_))
+        ));
+
+        enroll(&mut store).expect("enroll");
+
+        assert_eq!(
+            local_ops(&store)
+                .iter()
+                .filter(|(kind, payload)| {
+                    kind == "version.create" && payload["versionId"] == "named-collision"
+                })
+                .count(),
+            1,
+            "a refused import is not successful import provenance"
+        );
+    }
+
+    #[test]
     fn ydoc_projection_moments_are_excluded_while_the_base_is_backfilled() {
         let (_scratch, mut store) = store();
         seed_main(&mut store);
@@ -654,6 +751,62 @@ mod tests {
         assert!(
             peer_head.starts_with("moment-ydoc-apply-"),
             "the clean peer must derive Markdown from the CRDT stream"
+        );
+    }
+
+    #[test]
+    fn closed_rename_backfills_the_ydoc_base_at_the_current_path() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        write_text(
+            &mut store,
+            "main",
+            "renamed-object",
+            "moment-base",
+            "base",
+            "capture",
+            10,
+        );
+        let key = DocKey::new("ws", "main", "renamed-object").expect("key");
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "base");
+        record_unsettled_ydoc(&mut store, &key, &update, Some("renamed-object.md"), None);
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    from_path: "renamed-object.md".to_owned(),
+                    to_path: "current-name.md".to_owned(),
+                    moment_id: "moment-rename".to_owned(),
+                    request_id: None,
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 11,
+                },
+                &NoFaults,
+            )
+            .expect("rename closed document");
+        assert_eq!(
+            ydoc_path(&store, "renamed-object").as_deref(),
+            Some("renamed-object.md"),
+            "the Y.Doc marker intentionally retains the last live-session path"
+        );
+
+        enroll(&mut store).expect("enroll");
+
+        let payload = local_ops(&store)
+            .into_iter()
+            .find_map(|(kind, payload)| {
+                (kind == "ydoc.update" && payload["objectId"] == "renamed-object")
+                    .then_some(payload)
+            })
+            .expect("backfilled Y.Doc base");
+        assert_eq!(
+            payload["path"], "current-name.md",
+            "enrollment must derive the current closed-document path from the snapshot"
         );
     }
 

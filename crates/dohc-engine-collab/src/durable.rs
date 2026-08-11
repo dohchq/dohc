@@ -477,6 +477,14 @@ where
         )
     });
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
+        if let Some(path) = path {
+            tx.execute(
+                "UPDATE ydoc_docs SET path=?4 \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id, path],
+            )
+            .map_err(map_sql)?;
+        }
         if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
             let recorded: Option<(String, i64)> = tx
                 .query_row(
@@ -491,19 +499,6 @@ where
                     return Err(CollabError::Corrupt {
                         reason: "idempotency key reused with different content".to_owned(),
                     });
-                }
-                if let Some(path) = path {
-                    tx.execute(
-                        "UPDATE ydoc_docs SET path=?4 \
-                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                        rusqlite::params![
-                            key.workspace_id,
-                            key.version_id,
-                            key.object_id,
-                            path
-                        ],
-                    )
-                    .map_err(map_sql)?;
                 }
                 // Negative namespace: -seq (see the insert below).
                 return Ok(AppendOutcome {
@@ -530,19 +525,6 @@ where
             // dedupe, not refuse: check the blob before the guard.
             let sha = crate::hex_sha256(update);
             if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
-                if let Some(path) = path {
-                    tx.execute(
-                        "UPDATE ydoc_docs SET path=?4 \
-                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                        rusqlite::params![
-                            key.workspace_id,
-                            key.version_id,
-                            key.object_id,
-                            path
-                        ],
-                    )
-                    .map_err(map_sql)?;
-                }
                 return Ok(AppendOutcome {
                     seq: existing,
                     deduped: true,
@@ -585,14 +567,6 @@ where
                 }
             }
         };
-        if let Some(path) = path {
-            tx.execute(
-                "UPDATE ydoc_docs SET path=?4 \
-                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                rusqlite::params![key.workspace_id, key.version_id, key.object_id, path],
-            )
-            .map_err(map_sql)?;
-        }
         let sha = crate::hex_sha256(update);
         {
             let outcome =

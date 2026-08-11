@@ -18,6 +18,7 @@ export interface RelayMaterializedPath {
 }
 
 export interface SharingDeclined {
+  path: string;
   constraint: string;
   limitBytes: number;
   observedBytes: number;

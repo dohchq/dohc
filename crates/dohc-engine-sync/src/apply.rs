@@ -122,6 +122,7 @@ mod diagnostic_tests {
     #[test]
     fn sharing_decline_survives_a_skipped_primary_outcome() {
         let declined = crate::SharingDeclined {
+            path: "notes/skipped.md".to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
             observed_bytes: 21,
@@ -147,6 +148,7 @@ mod diagnostic_tests {
             },
         };
         let declined = crate::SharingDeclined {
+            path: "notes/nested.md".to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
             observed_bytes: 21,
@@ -531,23 +533,11 @@ pub fn apply_chat_envelope(
         return Err(SyncError::UnsupportedOperation);
     }
     apply_envelope_with(store, envelope, faults, apply_chat_tx).map(|outcome| {
-        let (primary, nested_refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
-        let outcome = match primary {
-            ApplyOutcome::Applied(replay_refusals) => ApplyOutcome::Applied(())
-                .with_refusals(nested_refusals.into_iter().chain(replay_refusals).collect()),
-            ApplyOutcome::Refused(refusal) => {
-                ApplyOutcome::Refused(refusal).with_refusals(nested_refusals)
-            }
-            ApplyOutcome::Skipped => ApplyOutcome::Skipped.with_refusals(nested_refusals),
-            ApplyOutcome::Crashed { committed } => {
-                ApplyOutcome::Crashed { committed }.with_refusals(nested_refusals)
-            }
-            ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
-            ApplyOutcome::WithSharingDeclined { .. } => {
-                unreachable!("sharing declines were flattened")
-            }
-        };
-        outcome.with_sharing_declined(sharing_declined)
+        let mut replay_refusals = Vec::new();
+        let outcome = outcome.map(|refusals| {
+            replay_refusals = refusals;
+        });
+        outcome.with_refusals(replay_refusals)
     })
 }
 

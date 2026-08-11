@@ -313,6 +313,7 @@ describe("EngineRelayClient", () => {
         refusals: [],
         sharingDeclined: [
           {
+            path: pulls === 1 ? "notes/first.md" : "notes/second.md",
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 20,
             observedBytes: 20 + pulls,
@@ -329,11 +330,13 @@ describe("EngineRelayClient", () => {
       "the desktop client must not discard the engine's actionable declines",
     ).toEqual([
       {
+        path: "notes/first.md",
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 21,
       },
       {
+        path: "notes/second.md",
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 22,
@@ -342,7 +345,40 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  it("carries an empty-probe push enrollment decline", async () => {
+  it("carries the canonical path for an empty-probe push enrollment decline", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.push") return undefined;
+      return {
+        status: "complete",
+        pushed: 0,
+        sharingDeclined: [
+          {
+            path: "notes/oversized.md",
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limitBytes: 20,
+            observedBytes: 21,
+          },
+        ],
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    await expect(client.push()).resolves.toEqual({
+      pushed: 0,
+      originsPushed: [],
+      sharingDeclined: [
+        {
+          path: "notes/oversized.md",
+          constraint: "MAX_YDOC_UPDATE_BYTES",
+          limitBytes: 20,
+          observedBytes: 21,
+        },
+      ],
+    });
+    await sessions.closeAll();
+  });
+
+  it("rejects a sharing decline without a canonical path", async () => {
     const daemon = new MockDaemon((request) => {
       if (request.method !== "sync.push") return undefined;
       return {
@@ -359,17 +395,9 @@ describe("EngineRelayClient", () => {
     });
     const { sessions, client } = await harness(daemon);
 
-    await expect(client.push()).resolves.toEqual({
-      pushed: 0,
-      originsPushed: [],
-      sharingDeclined: [
-        {
-          constraint: "MAX_YDOC_UPDATE_BYTES",
-          limitBytes: 20,
-          observedBytes: 21,
-        },
-      ],
-    });
+    await expect(client.push()).rejects.toThrow(
+      "Rust engine sync.push.sharingDeclined[0].path must be a string.",
+    );
     await sessions.closeAll();
   });
 
@@ -396,6 +424,7 @@ describe("EngineRelayClient", () => {
           committed: true,
           sharingDeclined: [
             {
+              path: "notes/commit.md",
               constraint: "MAX_YDOC_UPDATE_BYTES",
               limitBytes: 20,
               observedBytes: 22,
@@ -412,6 +441,7 @@ describe("EngineRelayClient", () => {
 
     expect(pull.sharingDeclined).toEqual([
       {
+        path: "notes/commit.md",
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 22,

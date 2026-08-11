@@ -556,7 +556,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
- "yrs",
 ]
 
 [[package]]

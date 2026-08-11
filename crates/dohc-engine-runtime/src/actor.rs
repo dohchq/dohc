@@ -1153,15 +1153,6 @@ enum Command {
         version_id: String,
         reply: oneshot::Sender<Result<Vec<CaptureManifestSeedEntry>, RuntimeError>>,
     },
-    YdocApply {
-        key: DocKey,
-        content_kind: ContentKind,
-        update: Vec<u8>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<AppendOutcome, RuntimeError>>,
-    },
     YdocOpenState {
         workspace_id: String,
         now_ms: i64,
@@ -3231,33 +3222,6 @@ impl ActorHandle {
                 workspace_id,
                 version_id,
                 path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    /// Validate and append one local Y.Doc update. Marker creation and append
-    /// are separate bounded transactions with a cancellation point between.
-    pub async fn ydoc_apply(
-        &self,
-        key: DocKey,
-        content_kind: ContentKind,
-        update: Vec<u8>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<AppendOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocApply {
-                key,
-                content_kind,
-                update,
-                now_ms,
-                faults,
-                token,
                 reply,
             })
             .await
@@ -7319,26 +7283,6 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
-            Command::YdocApply {
-                key,
-                content_kind,
-                update,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_apply_on_store(
-                    &mut store,
-                    &key,
-                    content_kind,
-                    &update,
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
             Command::YdocOpenState {
                 workspace_id,
                 now_ms,
@@ -8685,40 +8629,6 @@ fn worker_main(
     // publishes Closed as it falls out of scope (same ordering the guard
     // guarantees on a panic unwind).
     drop(store);
-}
-
-fn ydoc_apply_on_store(
-    store: &mut EngineStore,
-    key: &DocKey,
-    content_kind: ContentKind,
-    update: &[u8],
-    now_ms: i64,
-    faults: &dyn FaultInjector,
-    token: &CancellationToken,
-) -> Result<AppendOutcome, RuntimeError> {
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
-    // `ydoc.apply` (the legacy append RPC) carries no path in its params,
-    // unlike `ydoc.recordUpdate`'s `ydoc_record_update_on_store`, which
-    // threads the caller's path so enrolment can originate the lineage
-    // before any settle. A lineage created only through this legacy path
-    // stays outside that recovery until it settles or is reopened through
-    // the path-carrying RPC.
-    match dohc_engine_collab::record_local_update_creating_marker(
-        store,
-        key,
-        None,
-        content_kind,
-        Regime::Replicated,
-        update,
-        None,
-        faults,
-        now_ms,
-    )? {
-        TxnOutcome::Committed(outcome) => Ok(outcome),
-        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
-    }
 }
 
 /// Durable Y.Doc state exists when the lineage holds updates OR snapshots.
@@ -10149,6 +10059,15 @@ fn versioned_text_delete_on_store(
             )
             .map_err(RuntimeError::from)?;
             enqueue_binary_delete(tx, &result).map_err(RuntimeError::from)?;
+            // A closed Y.Doc has no lease to block this delete. Retire its
+            // canonical rows with the snapshot so nothing can restore it.
+            dohc_engine_sync::retire_ydoc_lineage_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object.object_id,
+            )
+            .map_err(RuntimeError::from)?;
         }
         journal_moment_outbound_in_tx(
             tx,

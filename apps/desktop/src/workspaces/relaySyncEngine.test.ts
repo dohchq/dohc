@@ -297,16 +297,17 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
   });
 
-  it("logs each sharing decline at the current desktop UI boundary", async () => {
-    const result = pullResult() as PullWorkspaceFromRelayResult & {
-      sharingDeclined: Array<{
-        constraint: string;
-        limitBytes: number;
-        observedBytes: number;
-      }>;
-    };
+  it("logs equal-sized sharing declines for each affected path", async () => {
+    const result = pullResult();
     result.sharingDeclined = [
       {
+        path: "notes/first.md",
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 21,
+      },
+      {
+        path: "notes/second.md",
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 21,
@@ -318,10 +319,14 @@ describe("relaySyncEngine", () => {
 
     await sync.start();
 
-    expect(warning).toHaveBeenCalledWith(
-      expect.stringContaining("MAX_YDOC_UPDATE_BYTES"),
+    expect(warning).toHaveBeenNthCalledWith(
+      1,
+      "[desktop] /tmp/workspace: File notes/first.md is too large to share. MAX_YDOC_UPDATE_BYTES allows 20 bytes; the encoded base uses 21 bytes. The edit is saved. Reduce the file to share it.",
     );
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining("21 bytes"));
+    expect(warning).toHaveBeenNthCalledWith(
+      2,
+      "[desktop] /tmp/workspace: File notes/second.md is too large to share. MAX_YDOC_UPDATE_BYTES allows 20 bytes; the encoded base uses 21 bytes. The edit is saved. Reduce the file to share it.",
+    );
     warning.mockRestore();
     await sync.stop();
   });

@@ -236,7 +236,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     sharingDeclined.push(...(pullResult.sharingDeclined ?? []));
     for (const declined of sharingDeclined) {
       console.warn(
-        `[desktop] document sharing declined for ${options.rootDir}: ${declined.constraint} allows ${declined.limitBytes} bytes; observed ${declined.observedBytes} bytes.`,
+        `[desktop] ${options.rootDir}: File ${declined.path} is too large to share. ${declined.constraint} allows ${declined.limitBytes} bytes; the encoded base uses ${declined.observedBytes} bytes. The edit is saved. Reduce the file to share it.`,
       );
     }
     for (const pending of pullResult.pendingResolves ?? []) {

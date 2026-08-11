@@ -3465,16 +3465,12 @@ fn accumulate_pull_outcome(
         push_refusal_once(refusals, refusal);
     }
     for declined in drain_declines {
-        if !sharing_declined.contains(&declined) {
-            sharing_declined.push(declined);
-        }
+        push_sharing_declined_once(sharing_declined, declined);
     }
     match primary {
         ApplyOutcome::Applied(routed) => {
             for declined in &routed.sharing_declined {
-                if !sharing_declined.contains(declined) {
-                    sharing_declined.push(declined.clone());
-                }
+                push_sharing_declined_once(sharing_declined, declined.clone());
             }
             if let Some(pending) = routed.pending_resolve() {
                 pending_resolves.push(pending.clone());
@@ -3539,6 +3535,15 @@ fn push_refusal_once(
     }
 }
 
+fn push_sharing_declined_once(
+    declines: &mut Vec<crate::SharingDeclined>,
+    declined: crate::SharingDeclined,
+) {
+    if !declines.contains(&declined) {
+        declines.push(declined);
+    }
+}
+
 fn push_shared_channel_rejection(
     refused: &mut usize,
     rejections: &mut Vec<SharedChannelRejection>,
@@ -3570,4 +3575,35 @@ fn local(error: SyncError) -> RelayError {
         return RelayError::StoreBusy;
     }
     RelayError::Local(error.code().to_owned())
+}
+
+#[cfg(test)]
+mod sharing_decline_tests {
+    use super::push_sharing_declined_once;
+
+    fn decline(path: &str) -> crate::SharingDeclined {
+        crate::SharingDeclined {
+            path: path.to_owned(),
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: 20,
+            observed_bytes: 21,
+        }
+    }
+
+    #[test]
+    fn equal_sized_declines_for_distinct_paths_do_not_collapse() {
+        let mut declines = Vec::new();
+
+        push_sharing_declined_once(&mut declines, decline("notes/first.md"));
+        push_sharing_declined_once(&mut declines, decline("notes/second.md"));
+        push_sharing_declined_once(&mut declines, decline("notes/first.md"));
+
+        assert_eq!(
+            declines
+                .iter()
+                .map(|declined| declined.path.as_str())
+                .collect::<Vec<_>>(),
+            ["notes/first.md", "notes/second.md"]
+        );
+    }
 }

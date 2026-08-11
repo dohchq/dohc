@@ -441,6 +441,7 @@ function sharingDeclined(
     const at = `${label}.sharingDeclined[${index}]`;
     const record = resultRecord(entry, at);
     return {
+      path: stringField(record, "path", at),
       constraint: stringField(record, "constraint", at),
       limitBytes: numberField(record, "limitBytes", at),
       observedBytes: numberField(record, "observedBytes", at),
