@@ -1086,6 +1086,32 @@ pub fn apply_ydoc_envelope(
             .map_err(|error| {
                 map_collab_payload_error(error, "ydoc.update base could not be claimed")
             })?;
+            // A shipped fork snapshot preserves its source metadata in
+            // `fork_base_snapshots`. Copy that existing ancestry marker onto
+            // the newly claimed target lineage only while the current head is
+            // still the exact fork materialization.
+            tx.execute(
+                "UPDATE ydoc_docs SET last_settled_sha=(
+                     SELECT f.blob_sha256 FROM fork_base_snapshots f
+                     JOIN snapshots s
+                       ON s.workspace_id=f.workspace_id
+                      AND s.version_id=f.version_id
+                      AND s.object_id=f.object_id
+                      AND s.path=f.path
+                      AND s.blob_sha256=f.blob_sha256
+                      AND s.latest_moment_id=f.latest_moment_id
+                    WHERE f.workspace_id=?1 AND f.version_id=?2 AND f.object_id=?3
+                      AND f.path=?4 AND f.metadata_origin='ydoc'
+                 ) WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+                       AND last_settled_sha IS NULL",
+                params![
+                    claim_key.workspace_id,
+                    claim_key.version_id,
+                    claim_key.object_id,
+                    base_path
+                ],
+            )
+            .map_err(SyncError::persist)?;
             // The FIRST base is not a CRDT merge: a local head that no shared
             // lineage ever merged (capture or an external editor wrote it, and
             // the receiver holds no durable Y.Doc rows to union with) must not

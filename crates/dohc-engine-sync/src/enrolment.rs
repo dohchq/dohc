@@ -52,16 +52,22 @@ fn backfill_ydoc_bases(
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
-    let rows: Vec<(String, String, String)> = collect_rows(
+    let rows: Vec<(String, String, Option<String>)> = collect_rows(
         tx,
         "SELECT d.version_id, d.object_id, d.path FROM ydoc_docs d \
-         WHERE d.workspace_id=?1 AND d.base_claimed=0 AND d.path IS NOT NULL \
+         WHERE d.workspace_id=?1 AND d.base_claimed=0 \
          ORDER BY d.version_id, d.object_id",
         workspace_id,
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let mut sharing_declined = Vec::new();
     for (version_id, object_id, path) in rows {
+        let path = path.ok_or_else(|| {
+            SyncError::corrupt(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unclaimed Y.Doc path is NULL at {workspace_id}/{version_id}/{object_id}"),
+            ))
+        })?;
         let key = DocKey {
             workspace_id: workspace_id.to_owned(),
             version_id,
@@ -152,7 +158,25 @@ fn backfill_versions(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), Syn
             },
         )
         .collect::<Result<Vec<_>, SyncError>>()?;
-    for record in records {
+    let mut pending = records;
+    let mut ordered = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let next = pending.iter().position(|record| {
+            record.fork_version_id.as_ref().is_none_or(|parent_id| {
+                !pending
+                    .iter()
+                    .any(|candidate| candidate.version_id == *parent_id)
+            })
+        });
+        let Some(next) = next else {
+            return Err(SyncError::corrupt(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("named version fork graph contains a cycle in workspace {workspace_id}"),
+            )));
+        };
+        ordered.push(pending.remove(next));
+    }
+    for record in ordered {
         journal_version_create_in_tx(tx, &record)?;
         if let Some(from_version_id) = &record.fork_version_id {
             journal_secret_version_fork_in_tx(
@@ -416,6 +440,59 @@ mod tests {
             .expect("local ops")
     }
 
+    fn record_unsettled_ydoc(
+        store: &mut EngineStore,
+        key: &DocKey,
+        update: &[u8],
+        path: Option<&str>,
+        request_id: Option<&str>,
+    ) -> dohc_engine_collab::AppendOutcome {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO file_objects
+                     (workspace_id, object_id, created_at_ms) VALUES ('ws', ?1, 2)",
+                    [&key.object_id],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("file object");
+        match dohc_engine_collab::record_local_update_creating_marker_guarded(
+            store,
+            key,
+            path,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            false,
+            true,
+            request_id,
+            &NoFaults,
+            3,
+            |_, _| Ok(()),
+        )
+        .expect("record unsettled Y.Doc")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(outcome) => outcome,
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        }
+    }
+
+    fn ydoc_path(store: &EngineStore, object_id: &str) -> Option<String> {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT path FROM ydoc_docs
+                     WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                    [object_id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("Y.Doc path")
+    }
+
     fn secret_key() -> SecretDataKey {
         SecretDataKey::from_bytes(&[7_u8; SECRET_KEY_BYTES]).expect("test secret key")
     }
@@ -577,6 +654,212 @@ mod tests {
         assert!(
             peer_head.starts_with("moment-ydoc-apply-"),
             "the clean peer must derive Markdown from the CRDT stream"
+        );
+    }
+
+    #[test]
+    #[ignore = "known cross-shard first-pull Y.Doc origination race; item 5 is repro-only"]
+    fn first_remote_base_claim_prevents_local_ydoc_origination() {
+        let (_source_scratch, mut source) = store();
+        seed_main(&mut source);
+        let key = DocKey::new("ws", "main", "same-coordinate").expect("key");
+        let source_doc = Ydoc::wire();
+        let source_update = source_doc.plaintext_insert(0, "remote edit");
+        record_unsettled_ydoc(
+            &mut source,
+            &key,
+            &source_update,
+            Some("same-coordinate.md"),
+            None,
+        );
+        enroll(&mut source).expect("source enrolls");
+        let source_ops = local_ops(&source);
+        let remote_payload = source_ops
+            .iter()
+            .find_map(|(kind, payload)| (kind == "ydoc.update").then_some(payload.clone()))
+            .expect("remote base payload");
+        let remote_sha = remote_payload["updateBlobSha256"]
+            .as_str()
+            .expect("remote base sha")
+            .to_owned();
+        let remote_bytes = source
+            .get_binary_blob(&remote_sha)
+            .expect("read remote base")
+            .expect("remote base exists");
+
+        let (_local_scratch, mut local) = store();
+        seed_main(&mut local);
+        let local_doc = Ydoc::wire();
+        let local_update = local_doc.plaintext_insert(0, "local edit");
+        record_unsettled_ydoc(
+            &mut local,
+            &key,
+            &local_update,
+            Some("same-coordinate.md"),
+            None,
+        );
+        assert_eq!(
+            local
+                .put_binary_blob(&remote_bytes)
+                .expect("copy remote base"),
+            remote_sha
+        );
+        crate::apply_ydoc_envelope(
+            &mut local,
+            &crate::ReplicationEnvelope {
+                workspace_id: "ws".to_owned(),
+                origin_id: "peer".to_owned(),
+                origin_seq: 0,
+                op_kind: "ydoc.update".to_owned(),
+                payload: remote_payload,
+                recorded_at_ms: 4,
+            },
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("first pull applies remote base");
+
+        let (base_claimed, base_sha, local_updates): (i64, String, i64) = local
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT base_claimed FROM ydoc_docs
+                         WHERE workspace_id='ws' AND version_id='main'
+                           AND object_id='same-coordinate'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT snapshot_blob_sha256 FROM ydoc_snapshots
+                         WHERE workspace_id='ws' AND version_id='main'
+                           AND object_id='same-coordinate' AND up_to_seq=0",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_updates
+                         WHERE workspace_id='ws' AND version_id='main'
+                           AND object_id='same-coordinate'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("local lineage after remote claim");
+        assert_eq!(
+            base_claimed, 1,
+            "the remote base consumed the unclaimed slot"
+        );
+        assert_eq!(base_sha, remote_sha, "the claimed base is the remote base");
+        assert_eq!(
+            local_updates, 1,
+            "the independent local durable update remains stranded behind the remote base"
+        );
+
+        enroll(&mut local).expect("first-position backfill");
+        let local_ydoc_ops = local_ops(&local)
+            .into_iter()
+            .filter(|(kind, _)| kind == "ydoc.update")
+            .count();
+        assert_eq!(
+            local_ydoc_ops, 1,
+            "first-position enrolment must originate the pre-existing local Y.Doc history"
+        );
+    }
+
+    #[test]
+    fn request_retry_repairs_a_legacy_unsettled_ydoc_path() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        let key = DocKey::new("ws", "main", "legacy-request").expect("key");
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "local edit");
+        assert!(!record_unsettled_ydoc(&mut store, &key, &update, None, Some("request-1")).deduped);
+        assert_eq!(ydoc_path(&store, "legacy-request"), None);
+
+        let retry = match dohc_engine_collab::record_local_update_creating_marker_guarded(
+            &mut store,
+            &key,
+            Some("legacy-request.md"),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &update,
+            None,
+            false,
+            true,
+            Some("request-1"),
+            &NoFaults,
+            4,
+            |_, _| Ok(()),
+        )
+        .expect("retry")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(outcome) => outcome,
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        };
+        assert!(retry.deduped);
+        assert_eq!(
+            ydoc_path(&store, "legacy-request").as_deref(),
+            Some("legacy-request.md"),
+            "a request-id retry must repair the path before it returns"
+        );
+    }
+
+    #[test]
+    fn content_retry_repairs_a_legacy_unsettled_ydoc_path() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        let key = DocKey::new("ws", "main", "legacy-content").expect("key");
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "local edit");
+        assert!(!record_unsettled_ydoc(&mut store, &key, &update, None, None).deduped);
+        assert_eq!(ydoc_path(&store, "legacy-content"), None);
+
+        let retry = match dohc_engine_collab::record_local_update_creating_marker_guarded(
+            &mut store,
+            &key,
+            Some("legacy-content.md"),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &update,
+            None,
+            false,
+            true,
+            None,
+            &NoFaults,
+            4,
+            |_, _| Ok(()),
+        )
+        .expect("retry")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(outcome) => outcome,
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        };
+        assert!(retry.deduped);
+        assert_eq!(
+            ydoc_path(&store, "legacy-content").as_deref(),
+            Some("legacy-content.md"),
+            "a content-hash retry must repair the path before it returns"
+        );
+    }
+
+    #[test]
+    fn enrolment_rejects_an_unclaimed_ydoc_without_a_path() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        let key = DocKey::new("ws", "main", "legacy-orphan").expect("key");
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "local edit");
+        record_unsettled_ydoc(&mut store, &key, &update, None, None);
+
+        let error = enroll(&mut store).expect_err("a missing Y.Doc path must fail enrolment");
+        let message = format!("{error:?}");
+        assert!(message.contains("ws/main/legacy-orphan"), "{message}");
+        assert!(
+            local_ops(&store)
+                .iter()
+                .all(|(kind, _)| kind != "ydoc.update"),
+            "the corrupt lineage must not be silently dropped or journaled"
         );
     }
 
@@ -852,6 +1135,184 @@ mod tests {
         assert!(
             version < base,
             "the target version must exist before its Y.Doc base"
+        );
+    }
+
+    #[test]
+    fn forked_ydoc_base_fast_forwards_its_shipped_ancestor() {
+        let (_source_scratch, mut source) = store();
+        seed_main(&mut source);
+        write_text(
+            &mut source,
+            "main",
+            "forked-history",
+            "moment-base",
+            "base",
+            "ydoc",
+            10,
+        );
+        VersionedTextStore::new(&mut source)
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: "ws".to_owned(),
+                    from_version_id: "main".to_owned(),
+                    new_version_id: "named-history".to_owned(),
+                    name: "Named history".to_owned(),
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("named version");
+        let key = DocKey::new("ws", "named-history", "forked-history").expect("key");
+        let doc = Ydoc::wire();
+        let base_update = doc.plaintext_insert(0, "base");
+        dohc_engine_collab::record_local_update_creating_marker(
+            &mut source,
+            &key,
+            Some("forked-history.md"),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &base_update,
+            None,
+            &NoFaults,
+            21,
+        )
+        .expect("named Y.Doc base state");
+        let post_fork_update = doc.plaintext_insert(4, " plus edit");
+        dohc_engine_collab::record_local_update(
+            &mut source,
+            &key,
+            &post_fork_update,
+            &NoFaults,
+            22,
+        )
+        .expect("post-fork Y.Doc edit");
+        enroll(&mut source).expect("source enrolls");
+
+        let ops = local_ops(&source);
+        let version_payload = ops
+            .iter()
+            .find_map(|(kind, payload)| (kind == "version.create").then_some(payload.clone()))
+            .expect("version.create payload");
+        assert_eq!(
+            version_payload["forkSnapshots"][0]["metadata"]["origin"], "ydoc",
+            "the shipped fork snapshot must identify its Y.Doc ancestry"
+        );
+        let base_payload = ops
+            .iter()
+            .find_map(|(kind, payload)| (kind == "ydoc.update").then_some(payload.clone()))
+            .expect("Y.Doc base payload");
+        let base_sha = base_payload["updateBlobSha256"].as_str().expect("base sha");
+        let base_bytes = source
+            .get_binary_blob(base_sha)
+            .expect("read base")
+            .expect("base exists");
+
+        let (_peer_scratch, mut peer) = store();
+        seed_main(&mut peer);
+        let fork_sha = dohc_engine_storage::hex_sha256(b"base");
+        peer.write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256, byte_length, text) VALUES (?1, 4, 'base')",
+                [&fork_sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("copy fork snapshot blob");
+        assert_eq!(
+            peer.put_binary_blob(&base_bytes).expect("copy base"),
+            base_sha
+        );
+        crate::apply_version_envelope(
+            &mut peer,
+            &crate::ReplicationEnvelope {
+                workspace_id: "ws".to_owned(),
+                origin_id: "peer".to_owned(),
+                origin_seq: 0,
+                op_kind: "version.create".to_owned(),
+                payload: version_payload,
+                recorded_at_ms: 20,
+            },
+            &NoFaults,
+        )
+        .expect("peer applies version.create");
+        let outcome = crate::apply_ydoc_envelope(
+            &mut peer,
+            &crate::ReplicationEnvelope {
+                workspace_id: "ws".to_owned(),
+                origin_id: "peer".to_owned(),
+                origin_seq: 1,
+                op_kind: "ydoc.update".to_owned(),
+                payload: base_payload,
+                recorded_at_ms: 22,
+            },
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("peer applies Y.Doc base");
+        assert_eq!(
+            outcome,
+            crate::ApplyOutcome::Applied(crate::YdocApplyResult {
+                deferred: false,
+                reason: None,
+                conflicts_opened: 0,
+                sharing_declined: None,
+            }),
+            "the Y.Doc base must fast-forward its shipped fork ancestor"
+        );
+    }
+
+    #[test]
+    fn named_version_parent_is_backfilled_before_same_time_child() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: "ws".to_owned(),
+                    from_version_id: "main".to_owned(),
+                    new_version_id: "zzz-parent".to_owned(),
+                    name: "Parent".to_owned(),
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("parent version");
+        versions
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: "ws".to_owned(),
+                    from_version_id: "zzz-parent".to_owned(),
+                    new_version_id: "aaa-child".to_owned(),
+                    name: "Child".to_owned(),
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("child version");
+
+        enroll(&mut store).expect("enroll");
+
+        let version_ids = local_ops(&store)
+            .into_iter()
+            .filter_map(|(kind, payload)| {
+                (kind == "version.create").then(|| {
+                    payload["versionId"]
+                        .as_str()
+                        .expect("version id")
+                        .to_owned()
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            version_ids,
+            ["zzz-parent", "aaa-child"],
+            "a fork parent must be journaled before its child"
         );
     }
 

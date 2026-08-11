@@ -492,6 +492,19 @@ where
                         reason: "idempotency key reused with different content".to_owned(),
                     });
                 }
+                if let Some(path) = path {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET path=?4 \
+                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                        rusqlite::params![
+                            key.workspace_id,
+                            key.version_id,
+                            key.object_id,
+                            path
+                        ],
+                    )
+                    .map_err(map_sql)?;
+                }
                 // Negative namespace: -seq (see the insert below).
                 return Ok(AppendOutcome {
                     seq: -result_seq,
@@ -517,6 +530,19 @@ where
             // dedupe, not refuse: check the blob before the guard.
             let sha = crate::hex_sha256(update);
             if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
+                if let Some(path) = path {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET path=?4 \
+                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                        rusqlite::params![
+                            key.workspace_id,
+                            key.version_id,
+                            key.object_id,
+                            path
+                        ],
+                    )
+                    .map_err(map_sql)?;
+                }
                 return Ok(AppendOutcome {
                     seq: existing,
                     deduped: true,

@@ -1935,6 +1935,22 @@ pub(crate) const YDOC_PATH_MIGRATION_ID: &str = "v1-ydoc-path";
 const V1_SECRET_MOMENT_SOURCE_DDL: &str = "\
 ALTER TABLE secret_moments ADD COLUMN source_origin_id TEXT;
 ALTER TABLE secret_moments ADD COLUMN source_origin_seq INTEGER;
+UPDATE secret_moments
+   SET source_origin_id = (
+         SELECT r.origin_id FROM replication_log r
+          WHERE r.workspace_id = secret_moments.workspace_id
+            AND r.imported = 1
+            AND r.op_kind IN ('secret.file.put', 'secret.file.delete')
+            AND ('secret-sync-' || r.origin_id || '-' || r.origin_seq) = secret_moments.moment_id
+       ),
+       source_origin_seq = (
+         SELECT r.origin_seq FROM replication_log r
+          WHERE r.workspace_id = secret_moments.workspace_id
+            AND r.imported = 1
+            AND r.op_kind IN ('secret.file.put', 'secret.file.delete')
+            AND ('secret-sync-' || r.origin_id || '-' || r.origin_seq) = secret_moments.moment_id
+       )
+ WHERE source_origin_id IS NULL;
 ";
 
 pub(crate) const SECRET_MOMENT_SOURCE_MIGRATION_ID: &str = "v1-secret-moment-source";
@@ -2696,6 +2712,154 @@ mod tests {
             updated_at_ms, 0,
             "a pre-migration row cannot recover its original edit time, so it \
              upgrades to the documented zero default rather than losing the row"
+        );
+    }
+
+    #[test]
+    fn ydoc_path_migration_upgrades_a_prior_shape_row() {
+        let dir = tempdir();
+        let path = dir.join("ydoc-path.db");
+        let ctx = MigrationContext::current(1_500);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..27], &ctx, &NoFaults)
+            .expect("pre-path migrations");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'main', 'main', 1);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+                 VALUES ('ws', 'matched', 2), ('ws', 'orphaned', 3);
+             INSERT INTO blobs (sha256, byte_length, text)
+                 VALUES ('snapshot-sha', 8, 'snapshot');
+             INSERT INTO snapshots
+                 (workspace_id, version_id, object_id, path, blob_sha256,
+                  updated_at_ms, latest_moment_id, metadata_origin)
+                 VALUES ('ws', 'main', 'matched', 'docs/matched.md',
+                         'snapshot-sha', 4, 'moment-matched', 'api');
+             INSERT INTO ydoc_docs
+                 (workspace_id, version_id, object_id, content_kind, regime,
+                  head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms)
+                 VALUES
+                 ('ws', 'main', 'matched', 'richdoc', 'local-only', 1, 0, 0, 5),
+                 ('ws', 'main', 'orphaned', 'richdoc', 'local-only', 1, 0, 0, 6);",
+        )
+        .expect("legacy Y.Doc rows");
+
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..28], &ctx, &NoFaults)
+            .expect("Y.Doc path migration");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+
+        let matched_path: Option<String> = conn
+            .query_row(
+                "SELECT path FROM ydoc_docs WHERE object_id = 'matched'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("matched Y.Doc path");
+        assert_eq!(
+            matched_path.as_deref(),
+            Some("docs/matched.md"),
+            "the migration must recover a legacy Y.Doc path from its matching snapshot"
+        );
+        let orphaned_path: Option<String> = conn
+            .query_row(
+                "SELECT path FROM ydoc_docs WHERE object_id = 'orphaned'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("orphaned Y.Doc path");
+        assert_eq!(
+            orphaned_path, None,
+            "a legacy Y.Doc with no matching snapshot has no path to recover"
+        );
+    }
+
+    #[test]
+    fn secret_moment_source_migration_backfills_imported_rows() {
+        let dir = tempdir();
+        let path = dir.join("secret-moment-import-source.db");
+        let ctx = MigrationContext::current(1_500);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..28], &ctx, &NoFaults)
+            .expect("pre-source migrations");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'main', 'main', 1);
+             INSERT INTO replication_log
+                 (workspace_id, origin_id, origin_seq, op_kind, payload_json,
+                  recorded_at_ms, imported)
+                 VALUES ('ws', 'peer-with-hyphen', 42, 'secret.file.put', '{}', 2, 1);
+             INSERT INTO secret_moments
+                 (workspace_id, moment_order, moment_id, version_id, path,
+                  recorded_at_ms, operation, metadata_origin, after_present,
+                  after_iv_base64, after_auth_tag_base64,
+                  after_ciphertext_base64, after_byte_length)
+                 VALUES ('ws', 1, 'secret-sync-peer-with-hyphen-42', 'main', '.env',
+                         3, 'write', 'sync', 1, 'iv', 'tag', 'ciphertext', 10);",
+        )
+        .expect("legacy imported secret moment");
+
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..29], &ctx, &NoFaults)
+            .expect("secret moment source migration");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+
+        let source: (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT source_origin_id, source_origin_seq FROM secret_moments
+                 WHERE moment_id = 'secret-sync-peer-with-hyphen-42'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("imported secret source");
+        assert_eq!(
+            source,
+            (Some("peer-with-hyphen".to_owned()), Some(42)),
+            "the migration must preserve the imported relay coordinate"
+        );
+    }
+
+    #[test]
+    fn secret_moment_source_migration_leaves_existing_rows_null() {
+        let dir = tempdir();
+        let path = dir.join("secret-moment-local-source.db");
+        let ctx = MigrationContext::current(1_500);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..28], &ctx, &NoFaults)
+            .expect("pre-source migrations");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'main', 'main', 1);
+             INSERT INTO secret_moments
+                 (workspace_id, moment_order, moment_id, version_id, path,
+                  recorded_at_ms, operation, metadata_origin, after_present,
+                  after_iv_base64, after_auth_tag_base64,
+                  after_ciphertext_base64, after_byte_length)
+                 VALUES ('ws', 1, 'local-moment', 'main', '.env', 2, 'write',
+                         'api', 1, 'iv', 'tag', 'ciphertext', 10);",
+        )
+        .expect("legacy local secret moment");
+
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..29], &ctx, &NoFaults)
+            .expect("secret moment source migration");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+
+        let source: (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT source_origin_id, source_origin_seq FROM secret_moments
+                 WHERE moment_id = 'local-moment'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("local secret source");
+        assert_eq!(
+            source,
+            (None, None),
+            "a local secret moment has no imported relay coordinate"
         );
     }
 
