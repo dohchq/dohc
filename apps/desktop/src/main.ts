@@ -528,11 +528,15 @@ import {
   startSiteDevServer,
   startStaticSitePreview,
   type SiteLogEntry,
-  type SiteProcessHandle,
-  type StaticSitePreview,
 } from "./workspaces/siteRunner";
 import { invokeSiteSdkHost } from "./workspaces/siteSdkHost";
 import { createSitePreviewSdkAuthorityRegistry } from "./workspaces/sitePreviewSdkAuthority";
+import {
+  assertActiveWorkspaceForSitePreviewStop,
+  createSitePreviewLifecycle,
+  stopSitePreviewForActiveWorkspace,
+  type SitePreviewHandle,
+} from "./workspaces/sitePreviewLifecycle";
 import {
   mediaTypeForExtension,
   readWorkspaceAsset,
@@ -700,11 +704,11 @@ function assertSitePreviewMode(
   }
 }
 
-type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
-
-const sitePreviewHandles = new Map<string, SitePreviewHandle>();
-const sitePreviewOriginReleases = new Map<string, () => void>();
 const sitePreviewSdkAuthorities = createSitePreviewSdkAuthorityRegistry();
+const sitePreviews = createSitePreviewLifecycle({
+  allowOrigin: allowSitePreviewOrigin,
+  revokePreview: sitePreviewSdkAuthorities.revokePreview,
+});
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
 const sitePreviewStartControllersBySender = new Map<
   number,
@@ -743,7 +747,10 @@ function beginSitePreviewStart(senderId: number): {
     controller,
     finish: () => {
       controllers.delete(controller);
-      if (controllers.size === 0) {
+      if (
+        controllers.size === 0 &&
+        sitePreviewStartControllersBySender.get(senderId) === controllers
+      ) {
         sitePreviewStartControllersBySender.delete(senderId);
       }
     },
@@ -783,19 +790,6 @@ async function withSitePreviewStartLock<T>(
   }
 }
 
-async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Promise<void> {
-  const key = sitePreviewKey(workspaceId, siteRoot);
-  sitePreviewSdkAuthorities.revokePreview(workspaceId, siteRoot);
-  const handle = sitePreviewHandles.get(key);
-  sitePreviewHandles.delete(key);
-  try {
-    await handle?.stop();
-  } finally {
-    sitePreviewOriginReleases.get(key)?.();
-    sitePreviewOriginReleases.delete(key);
-  }
-}
-
 function stopSitePreviewsForQuit(): void {
   // Called once, from the will-quit teardown — the first moment a quit can no
   // longer be cancelled (#579 review, r19). It used to run at
@@ -804,40 +798,20 @@ function stopSitePreviewsForQuit(): void {
   // who clicked "Go back" to keep working got their site previews revoked and
   // their servers stopped anyway. Idempotent regardless.
   sitePreviewSdkAuthorities.revokeAll();
-  for (const [key, handle] of [...sitePreviewHandles]) {
-    sitePreviewOriginReleases.get(key)?.();
-    sitePreviewOriginReleases.delete(key);
-    sitePreviewHandles.delete(key);
-    void handle.stop().catch(() => undefined);
-  }
+  sitePreviews.stopAll();
 }
 
 async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {
-  const prefix = `${workspaceId}\0`;
-  const siteRoots = new Set<string>();
-  for (const key of sitePreviewHandles.keys()) {
-    if (key.startsWith(prefix)) siteRoots.add(key.slice(prefix.length));
-  }
-  for (const key of sitePreviewOriginReleases.keys()) {
-    if (key.startsWith(prefix)) siteRoots.add(key.slice(prefix.length));
-  }
-
   await Promise.all(
-    [...siteRoots].map((siteRoot) =>
+    sitePreviews.previewsForWorkspace(workspaceId).map(({ siteRoot, handle }) =>
       withSitePreviewStartLock(
         sitePreviewKey(workspaceId, siteRoot),
-        () => stopSitePreviewHandle(workspaceId, siteRoot),
+        () => sitePreviews.stop(workspaceId, siteRoot, handle),
       ).catch((error) => {
         console.warn("[desktop] failed to stop site preview during workspace switch", error);
       }),
     ),
   );
-}
-
-function rememberSitePreviewHandle(key: string, handle: SitePreviewHandle): void {
-  sitePreviewOriginReleases.get(key)?.();
-  sitePreviewHandles.set(key, handle);
-  sitePreviewOriginReleases.set(key, allowSitePreviewOrigin(handle.url));
 }
 
 function commandForSiteScript(
@@ -894,33 +868,35 @@ type SitePreviewStartInput = {
 };
 
 async function rememberCurrentSitePreviewHandle(
-  key: string,
+  input: SitePreviewStartInput,
   handle: SitePreviewHandle,
-  isCurrent: () => boolean,
 ): Promise<void> {
-  if (!isCurrent()) {
+  if (!input.isCurrent()) {
     await handle.stop().catch(() => undefined);
     throw new Error("Site preview start was cancelled because the renderer restarted.");
   }
-  rememberSitePreviewHandle(key, handle);
+  sitePreviews.remember(input.workspaceId, input.site.root, handle);
 }
+
+type StartedSitePreview = StartSitePreviewResult & {
+  handle: SitePreviewHandle;
+};
 
 async function startPreviewForSite(
   input: SitePreviewStartInput,
-): Promise<StartSitePreviewResult> {
+): Promise<StartedSitePreview> {
   const key = sitePreviewKey(input.workspaceId, input.site.root);
-  return withSitePreviewStartLock(key, async () => startPreviewForSiteUnlocked(input, key));
+  return withSitePreviewStartLock(key, async () => startPreviewForSiteUnlocked(input));
 }
 
 async function startPreviewForSiteUnlocked(
   input: SitePreviewStartInput,
-  key: string,
-): Promise<StartSitePreviewResult> {
+): Promise<StartedSitePreview> {
   if (!input.isCurrent()) {
     throw new Error("Site preview start was cancelled because the renderer restarted.");
   }
   try {
-    await stopSitePreviewHandle(input.workspaceId, input.site.root);
+    await sitePreviews.stop(input.workspaceId, input.site.root);
   } catch (error) {
     console.warn("[desktop] failed to stop previous site preview", error);
   }
@@ -941,8 +917,9 @@ async function startPreviewForSiteUnlocked(
     const handle = await startStaticSitePreview(input.workspaceRoot, target.root, {
       entry,
     });
-    await rememberCurrentSitePreviewHandle(key, handle, input.isCurrent);
+    await rememberCurrentSitePreviewHandle(input, handle);
     return {
+      handle,
       siteRoot: input.site.root,
       mode: input.mode,
       url: handle.url,
@@ -964,8 +941,9 @@ async function startPreviewForSiteUnlocked(
       args: command.args,
       signal: input.signal,
     });
-    await rememberCurrentSitePreviewHandle(key, handle, input.isCurrent);
+    await rememberCurrentSitePreviewHandle(input, handle);
     return {
+      handle,
       siteRoot: input.site.root,
       mode: input.mode,
       url: handle.url,
@@ -1024,8 +1002,9 @@ async function startPreviewForSiteUnlocked(
     input.workspaceRoot,
     buildOutputSiteRoot(input.site, outputRoot),
   );
-  await rememberCurrentSitePreviewHandle(key, handle, input.isCurrent);
+  await rememberCurrentSitePreviewHandle(input, handle);
   return {
+    handle,
     siteRoot: input.site.root,
     mode: input.mode,
     url: handle.url,
@@ -5624,6 +5603,13 @@ function registerIpcHandlers(
       rendererGeneration(sender.id) === generation;
     try {
       const workspace = requireWorkspace(input.workspaceId);
+      if (
+        activeWorkspaceIdBySender.get(sender.id) !== workspace.workspaceId
+      ) {
+        throw new Error(
+          "The Site preview request does not target the active workspace. Open the workspace and start the preview again.",
+        );
+      }
       const sharedView = sharedViewOf(workspace.workspaceId);
       assertSitePreviewMode(workspace.workspaceId, input.mode);
       // A mounted share may provide a ready browser artifact, but must never
@@ -5641,21 +5627,28 @@ function registerIpcHandlers(
           : sharedView
             ? "."
             : null;
-      const result = StartSitePreviewResult.parse(
-        await startPreviewForSite({
-          workspaceId: input.workspaceId,
-          workspaceRoot: workspace.rootPath,
-          site,
-          mode: input.mode,
-          isCurrent,
-          signal: pendingStart.controller.signal,
-          sharedView: !!sharedView,
-          sdkScopeRoot: scopeRoot,
-        }),
-      );
+      const started = await startPreviewForSite({
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace.rootPath,
+        site,
+        mode: input.mode,
+        isCurrent,
+        signal: pendingStart.controller.signal,
+        sharedView: !!sharedView,
+        sdkScopeRoot: scopeRoot,
+      });
+      const result = StartSitePreviewResult.parse(started);
       if (!isCurrent()) {
-        await stopSitePreviewHandle(input.workspaceId, input.siteRoot);
+        await sitePreviews.stop(input.workspaceId, site.root, started.handle);
         throw new Error("Site preview start was cancelled because the renderer restarted.");
+      }
+      if (!sitePreviews.isCurrent(input.workspaceId, site.root, started.handle)) {
+        if (sitePreviews.isRunning(input.workspaceId, site.root)) {
+          throw new Error("A newer site preview replaced this start.");
+        }
+        throw new Error(
+          "The site preview stopped before it opened. Start the preview again.",
+        );
       }
       sitePreviewSdkAuthorities.register({
         senderId: sender.id,
@@ -5675,10 +5668,20 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.stopSitePreview, async (event, payload) => {
     assertTrustedSender(event);
     const input = StopSitePreviewPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
+    const workspace = requireWorkspace(input.workspaceId);
+    const senderId = event.sender.id;
+    assertActiveWorkspaceForSitePreviewStop(
+      activeWorkspaceIdBySender.get(senderId),
+      workspace.workspaceId,
+    );
     await withSitePreviewStartLock(
-      sitePreviewKey(input.workspaceId, input.siteRoot),
-      () => stopSitePreviewHandle(input.workspaceId, input.siteRoot),
+      sitePreviewKey(workspace.workspaceId, input.siteRoot),
+      () =>
+        stopSitePreviewForActiveWorkspace({
+          activeWorkspaceId: () => activeWorkspaceIdBySender.get(senderId),
+          workspaceId: workspace.workspaceId,
+          stop: () => sitePreviews.stop(workspace.workspaceId, input.siteRoot),
+        }),
     );
   });
 
@@ -5692,7 +5695,7 @@ function registerIpcHandlers(
       activeWorkspaceId: activeWorkspaceIdBySender.get(sender.id),
       workspaceId: input.workspaceId,
       siteRoot: input.siteRoot,
-      previewRunning: sitePreviewHandles.has(sitePreviewKey(input.workspaceId, input.siteRoot)),
+      previewRunning: sitePreviews.isRunning(input.workspaceId, input.siteRoot),
     });
     const result = await invokeSiteSdkHost(
       {
@@ -5711,19 +5714,26 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = OpenWorkspacePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    const previousWorkspaceId = preferredWorkspaceId;
-    if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
-      await stopSitePreviewsForWorkspace(previousWorkspaceId);
-    }
+    const senderId = event.sender.id;
+    const previousWorkspaceId = activeWorkspaceIdBySender.get(senderId);
     preferredWorkspaceId = workspace.workspaceId;
-    activeWorkspaceIdBySender.set(event.sender.id, workspace.workspaceId);
+    activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);
     if (!activeWorkspaceCleanupHooked.has(event.sender)) {
       activeWorkspaceCleanupHooked.add(event.sender);
       event.sender.once("destroyed", () => {
-        sitePreviewSdkAuthorities.revokeSender(event.sender.id);
-        activeWorkspaceIdBySender.delete(event.sender.id);
-        rendererGenerationBySender.delete(event.sender.id);
+        const activeWorkspaceId = activeWorkspaceIdBySender.get(senderId);
+        abortSitePreviewStartsForSender(senderId);
+        sitePreviewSdkAuthorities.revokeSender(senderId);
+        activeWorkspaceIdBySender.delete(senderId);
+        rendererGenerationBySender.delete(senderId);
+        if (activeWorkspaceId) {
+          void stopSitePreviewsForWorkspace(activeWorkspaceId);
+        }
       });
+    }
+    if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
+      abortSitePreviewStartsForSender(senderId);
+      await stopSitePreviewsForWorkspace(previousWorkspaceId);
     }
     refreshNativeWorkspaceSurfaces();
     return SyncStatusResult.parse(await openWorkspaceActivity(workspace));

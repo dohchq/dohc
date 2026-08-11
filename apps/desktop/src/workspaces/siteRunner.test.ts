@@ -168,6 +168,26 @@ describe("package manager helpers", () => {
 });
 
 describe("startSiteDevServer", () => {
+  it("reports when a ready dev server exits on its own", async () => {
+    await mkdir(join(root, "site"), { recursive: true });
+    const handle = await startSiteDevServer({
+      workspaceRoot: root,
+      siteRoot: "site",
+      command: process.execPath,
+      args: [
+        "-e",
+        "console.log('Local: http://127.0.0.1:43210'); process.exit(0)",
+      ],
+      readyTimeoutMs: 5000,
+    });
+
+    // Subscribe after the process is already down. Main can be busy between
+    // receiving the ready URL and storing the handle, so late subscribers
+    // must still receive the exit.
+    await new Promise<void>((resolve) => handle.onExit(resolve));
+    await new Promise<void>((resolve) => handle.onExit(resolve));
+  });
+
   it("waits for a local URL, buffers logs, and stops the child process", async () => {
     await mkdir(join(root, "site"), { recursive: true });
     const handle = await startSiteDevServer({
