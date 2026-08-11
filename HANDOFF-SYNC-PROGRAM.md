@@ -31,32 +31,31 @@ Two pull requests are open and NEITHER is close to merge.
 
 ### PR #761 — S5, origination retry (#548)
 
-Five rounds deep. The enrolment backfill re-journals what a workspace
-originated before its first relay position existed. Its predicate is now
-exact provenance: a row backfills only when no imported replication-log row
+Five rounds landed; head `6d32f5db`. The enrolment backfill re-journals what
+a workspace originated before its first relay position existed. Its predicate
+is exact provenance: a row backfills only when no imported replication-log row
 carries the same identity. `metadata_origin` cannot decide this — the apply
 side stores the sender's value verbatim, and S2's boundary stamp covers
 snapshots only.
 
 Certification chain: `d11a2e0a` PASS, `389e5c7e` PASS, `4b459632` FAIL on one
-claim (fixed), `a84d707c` round 5 in flight.
+claim (fixed), `a84d707c` (round 5 input). Round 5 fixed, each red-first: the
+migration-ledger count in `crates/dohc-engine-testkit/tests/durability.rs`
+(26 → 29 for the new ordinals — that crate was missing from earlier
+verification lists, which is why the gate caught it); prior-store upgrade
+coverage for ordinals 27 and 28; a legacy unclaimed Y.Doc lineage whose NULL
+path reached neither replication channel (now persisted on both dedupe
+returns, and a still-NULL row is refused loudly rather than dropped); version
+backfill ordered by timestamp rather than fork ancestry, which wedged pulls
+past the 500-op page (now topological); migration 28 leaving legacy imported
+secrets NULL and re-journaling them as local; and a spurious conflict on fresh
+replicas for one causal history.
 
-Round 5 is fixing: the migration-ledger count in
-`crates/dohc-engine-testkit/tests/durability.rs` (26 → 29 — the PR adds
-ordinals 26, 27, 28, and this crate was missing from earlier verification
-lists, which is why the gate caught it); prior-store upgrade coverage for
-ordinals 27 and 28; a legacy unclaimed Y.Doc lineage whose NULL path makes it
-reach neither replication channel; version backfill ordered by timestamp
-rather than fork ancestry, which wedges pulls past the 500-op page; migration
-28 leaving legacy imported secrets NULL and re-journaling them as local; and
-a spurious conflict on fresh replicas for one causal history.
+Suites are green on that head, including testkit, fmt and clippy.
 
-**One item is deliberately NOT fixed there.** During a join-bootstrap pull,
-incoming operations apply before the first relay position exists, so two
-independently created Y.Doc lineages combine into a silent Yjs union, the
-marker flips to `base_claimed=1`, and enrolment then skips the lineage
-because it selects `base_claimed=0`. That is an auto-merge, which the S4
-design forbids. It belongs to the arbitration shard. Fix it there.
+**What #761 still needs:** certification of record on the exact merge head,
+the opus-5 simplification review, reviewer coverage with substitutions
+recorded, and both gates. It holds migration ordinals 26, 27 and 28.
 
 ### PR #762 — S4, base arbitration (#547): rebuild it
 
