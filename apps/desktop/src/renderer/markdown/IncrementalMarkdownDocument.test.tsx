@@ -3,7 +3,10 @@ import { act, cleanup, render } from "@testing-library/react";
 import { Profiler } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Components } from "react-markdown";
+import { bridge } from "../bridge";
 import { IncrementalMarkdownDocument } from "./IncrementalMarkdownDocument";
+
+vi.mock("../bridge", () => ({ bridge: vi.fn() }));
 
 const MULTI_SLICE_HEADING_COUNT = 240;
 
@@ -95,6 +98,132 @@ function stubIdleCallbacks() {
 }
 
 describe("IncrementalMarkdownDocument", () => {
+  it("activates a read-only link once for each supported input", () => {
+    const openWorkspaceLink = vi.fn();
+    const view = render(
+      <IncrementalMarkdownDocument
+        body="[FAQ](faq%3F.md?mode=preview#a%2520b) [Top](#)"
+        components={{}}
+        onOpenWorkspaceLink={openWorkspaceLink}
+      />,
+    );
+    const link = view.getByRole("link", { name: "FAQ" });
+    expect(link.getAttribute("href")).toBe("faq%3F.md?mode=preview#a%2520b");
+    link.focus();
+    expect(document.activeElement).toBe(link);
+
+    for (const detail of [1, 2, 3]) {
+      const click = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        detail,
+      });
+      expect(link.dispatchEvent(click)).toBe(false);
+      expect(click.defaultPrevented).toBe(true);
+    }
+    expect(openWorkspaceLink).toHaveBeenCalledWith({
+      path: "./faq?.md",
+      rawFragment: "a%2520b",
+    });
+    expect(openWorkspaceLink).toHaveBeenCalledOnce();
+
+    openWorkspaceLink.mockClear();
+    const middleClick = new MouseEvent("auxclick", {
+      bubbles: true,
+      button: 1,
+      cancelable: true,
+      detail: 1,
+    });
+    expect(link.dispatchEvent(middleClick)).toBe(false);
+    expect(middleClick.defaultPrevented).toBe(true);
+    expect(openWorkspaceLink).toHaveBeenCalledWith({
+      path: "./faq?.md",
+      rawFragment: "a%2520b",
+    });
+    expect(openWorkspaceLink).toHaveBeenCalledOnce();
+
+    openWorkspaceLink.mockClear();
+    for (const repeat of [false, true]) {
+      const enter = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "Enter",
+        repeat,
+      });
+      expect(link.dispatchEvent(enter)).toBe(false);
+      expect(enter.defaultPrevented).toBe(true);
+    }
+    expect(openWorkspaceLink).toHaveBeenCalledWith({
+      path: "./faq?.md",
+      rawFragment: "a%2520b",
+    });
+    expect(openWorkspaceLink).toHaveBeenCalledOnce();
+
+    openWorkspaceLink.mockClear();
+    const top = view.getByRole("link", { name: "Top" });
+    const topClick = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+    });
+    expect(top.dispatchEvent(topClick)).toBe(false);
+    expect(topClick.defaultPrevented).toBe(true);
+    expect(openWorkspaceLink).toHaveBeenCalledWith({
+      path: "",
+      rawFragment: "",
+    });
+    expect(openWorkspaceLink).toHaveBeenCalledOnce();
+  });
+
+  it("keeps root-relative, external, and unsafe link routing separate", () => {
+    const openWorkspaceLink = vi.fn();
+    const openExternalUrl = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(bridge).mockReturnValue({
+      openExternalUrl,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const view = render(
+      <IncrementalMarkdownDocument
+        body={[
+          "[Root](/plan.md?mode=preview#risks)",
+          "[External](https://example.com/plan?mode=preview#risks)",
+          "[Unsafe](javascript:alert(1)?mode=preview#risks)",
+        ].join(" ")}
+        components={{}}
+        onOpenWorkspaceLink={openWorkspaceLink}
+      />,
+    );
+
+    const root = view.getByRole("link", { name: "Root" });
+    const rootClick = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+    });
+    expect(root.dispatchEvent(rootClick)).toBe(false);
+    expect(openWorkspaceLink).toHaveBeenCalledWith({
+      path: "/plan.md",
+      rawFragment: "risks",
+    });
+    expect(openExternalUrl).not.toHaveBeenCalled();
+
+    const external = view.getByRole("link", { name: "External" });
+    const externalClick = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+    });
+    expect(external.dispatchEvent(externalClick)).toBe(false);
+    expect(openExternalUrl).toHaveBeenCalledWith({
+      url: "https://example.com/plan?mode=preview#risks",
+    });
+    expect(openWorkspaceLink).toHaveBeenCalledOnce();
+
+    expect(view.queryByRole("link", { name: "Unsafe" })).toBeNull();
+    expect(view.getByText("Unsafe")).toBeTruthy();
+    expect(openExternalUrl).toHaveBeenCalledOnce();
+  });
+
   it("keeps a replacement document inside the opening render window", async () => {
     vi.useFakeTimers();
     const renderedHeadings: string[] = [];

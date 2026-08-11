@@ -1,5 +1,9 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
+import {
+  activateReadOnlyLinkHref,
+  type WorkspaceLinkTarget,
+} from "../editor/linkMenu";
 import { initialChunkCount, splitMarkdownBlocks } from "./splitMarkdownBlocks";
 
 // Visible-first markdown rendering (Phase 16 recovery): parse + commit only
@@ -37,7 +41,42 @@ const MarkdownChunk = memo(function MarkdownChunk(props: {
 export function IncrementalMarkdownDocument(props: {
   body: string;
   components: Components;
+  onOpenWorkspaceLink?: (target: WorkspaceLinkTarget) => void;
 }) {
+  const onOpenWorkspaceLinkRef = useRef(props.onOpenWorkspaceLink);
+  onOpenWorkspaceLinkRef.current = props.onOpenWorkspaceLink;
+  const components = useMemo<Components>(
+    () => ({
+      ...props.components,
+      a: ({ children, href }) => {
+        if (!href) {
+          return <span className="text-accent underline">{children}</span>;
+        }
+        const activate = (
+          event: React.MouseEvent<HTMLAnchorElement> | React.KeyboardEvent<HTMLAnchorElement>,
+        ) =>
+          activateReadOnlyLinkHref(href, event, (target) =>
+            onOpenWorkspaceLinkRef.current?.(target),
+          );
+        return (
+          <a
+            href={href}
+            className="text-accent underline"
+            onClick={activate}
+            onAuxClick={(event) => {
+              if (event.button === 1) activate(event);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") activate(event);
+            }}
+          >
+            {children}
+          </a>
+        );
+      },
+    }),
+    [props.components],
+  );
   const chunks = useMemo(
     () =>
       props.body.length <= INCREMENTAL_THRESHOLD_BYTES
@@ -85,7 +124,7 @@ export function IncrementalMarkdownDocument(props: {
       {chunks.slice(0, visibleCount).map((chunk, i) => (
         // Chunks are content-stable for a given body; index keys are correct
         // because a body change rebuilds the whole list.
-        <MarkdownChunk key={i} source={chunk} components={props.components} />
+        <MarkdownChunk key={i} source={chunk} components={components} />
       ))}
     </>
   );

@@ -1271,6 +1271,10 @@ body {
   border-bottom-color: var(--dohc-match);
 }
 
+.dohc-notion-editor[contenteditable="false"] a {
+  cursor: pointer;
+}
+
 .dohc-link-menu {
   position: fixed;
   z-index: 70;

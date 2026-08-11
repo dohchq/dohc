@@ -40,6 +40,7 @@ import type {
   MarkdownEditorHandle,
   MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
+import type { WorkspaceLinkTarget } from "./editor/linkMenu";
 import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
@@ -109,6 +110,14 @@ export type WikilinkNavigation = {
   headingTarget?: HeadingTarget;
 };
 
+const MARKDOWN_EXTENSION_PATTERN = /\.(?:md|markdown)$/iu;
+
+function normalizeMarkdownExtension(path: string): string {
+  return path.replace(MARKDOWN_EXTENSION_PATTERN, (extension) =>
+    extension.toLowerCase(),
+  );
+}
+
 function normalizeWikilinkPath(path: string): string {
   const parts: string[] = [];
   for (const part of path.replace(/\\/gu, "/").split("/")) {
@@ -142,15 +151,29 @@ function findKnownWikilinkFile(
 ): WikilinkFile | undefined {
   const candidates = wikilinkPathCandidates(target, currentPath);
   for (const candidate of candidates) {
+    const hasMarkdownExtension = MARKDOWN_EXTENSION_PATTERN.test(candidate);
+    const candidateWithNormalizedExtension =
+      normalizeMarkdownExtension(candidate);
     const match = knownFiles.find((file) => {
       const knownPath = normalizeWikilinkPath(file.path);
-      const knownWithoutExtension = knownPath.replace(/\.md$/iu, "");
-      const withoutExtension = candidate.replace(/\.md$/iu, "");
-      return candidate === knownPath || withoutExtension === knownWithoutExtension;
+      const knownWithNormalizedExtension =
+        normalizeMarkdownExtension(knownPath);
+      const knownWithoutExtension = knownPath.replace(
+        MARKDOWN_EXTENSION_PATTERN,
+        "",
+      );
+      return (
+        candidateWithNormalizedExtension === knownWithNormalizedExtension ||
+        (!hasMarkdownExtension && candidate === knownWithoutExtension)
+      );
     });
     if (match) return match;
   }
   return undefined;
+}
+
+function withMarkdownExtension(path: string): string {
+  return MARKDOWN_EXTENSION_PATTERN.test(path) ? path : `${path}.md`;
 }
 
 /** Resolve a rich-editor wikilink. A complete known-file path is authoritative
@@ -203,12 +226,35 @@ export function resolveWikilinkNavigation(
   if (fileTarget) {
     const match = findKnownWikilinkFile(fileTarget, currentPath, knownFiles);
     const fallback = wikilinkPathCandidates(fileTarget, currentPath)[0] ?? fileTarget;
-    path = match?.path ?? `${fallback.replace(/\.md$/iu, "")}.md`;
+    path = match?.path ?? withMarkdownExtension(fallback);
   }
   return {
     path,
     ...(fragment
       ? { headingTarget: { anchor: fragment, nonce } }
+      : {}),
+  };
+}
+
+export function resolveWorkspaceLinkNavigation(
+  target: WorkspaceLinkTarget,
+  currentPath: string,
+  knownFiles: ReadonlyArray<WikilinkFile>,
+  nonce: number,
+): WikilinkNavigation {
+  let path = currentPath;
+  if (target.path) {
+    const resolutionBase = target.path.startsWith("/") ? "" : currentPath;
+    const match = findKnownWikilinkFile(target.path, resolutionBase, knownFiles);
+    const fallback =
+      wikilinkPathCandidates(target.path, resolutionBase)[0] ?? target.path;
+    path = match?.path ?? withMarkdownExtension(fallback);
+  }
+
+  return {
+    path,
+    ...(target.rawFragment !== undefined
+      ? { headingTarget: { anchor: target.rawFragment, nonce } }
       : {}),
   };
 }
@@ -654,8 +700,8 @@ function PropertiesFallback() {
 
 // Rendered markdown document — headings, lists, code, emphasis read as a
 // document, not raw source. react-markdown renders to React nodes (no raw
-// HTML execution); links render as inert styled text since the renderer's
-// navigation is locked down (external open is an explicit affordance instead).
+// HTML execution). The incremental renderer consumes link navigation and
+// routes it through the audited external or workspace path.
 const MARKDOWN_COMPONENTS = {
   h1: (p: { children?: React.ReactNode }) => (
     <h1 className="mb-3 mt-1 text-2xl font-semibold tracking-tight text-ink">{p.children}</h1>
@@ -677,9 +723,6 @@ const MARKDOWN_COMPONENTS = {
   ),
   code: (p: { children?: React.ReactNode }) => (
     <code className="rounded bg-panel-2 px-1 py-0.5 font-mono text-[13px]">{p.children}</code>
-  ),
-  a: (p: { children?: React.ReactNode }) => (
-    <span className="text-accent underline">{p.children}</span>
   ),
 };
 
@@ -1629,11 +1672,35 @@ function MarkdownView(props: {
   // raw `---`/`title:`/`icon:` block must not also render as body content (the
   // WYSIWYG editor uses the same `markdownEditorBody` split — keep read mode in
   // lockstep so both show the document body, not its metadata).
+  const linkNavigationNonce = useRef(0);
+  const openWikilinkRef = useRef<(target: string) => void>(() => undefined);
+  const openWorkspaceLinkRef = useRef<(target: WorkspaceLinkTarget) => void>(
+    () => undefined,
+  );
+  openWikilinkRef.current = (target) => {
+    const navigation = resolveWikilinkNavigation(
+      target,
+      props.path,
+      knownFiles,
+      ++linkNavigationNonce.current,
+    );
+    props.onOpenPath?.(navigation.path, navigation.headingTarget);
+  };
+  openWorkspaceLinkRef.current = (target) => {
+    const navigation = resolveWorkspaceLinkNavigation(
+      target,
+      props.path,
+      knownFiles,
+      ++linkNavigationNonce.current,
+    );
+    props.onOpenPath?.(navigation.path, navigation.headingTarget);
+  };
   const renderedDocument = useMemo(
     () => (
       <IncrementalMarkdownDocument
         body={markdownEditorBody(savedBody)}
         components={MARKDOWN_COMPONENTS}
+        onOpenWorkspaceLink={(target) => openWorkspaceLinkRef.current(target)}
       />
     ),
     [savedBody],
@@ -1703,6 +1770,7 @@ function MarkdownView(props: {
   const [showSource, setShowSource] = useState(false);
   const [sourceMarkdown, setSourceMarkdown] = useState<string | null>(null);
   const readDocumentRef = useRef<HTMLDivElement | null>(null);
+  const localDocPaneRef = useRef<HTMLDivElement | null>(null);
   // The engine branch's scroller. It holds the top-matter (title, properties)
   // ABOVE the editor, which is where a frontmatter search hit actually lives.
   const engineDocPaneRef = useRef<HTMLDivElement | null>(null);
@@ -1726,7 +1794,17 @@ function MarkdownView(props: {
       // The heading is the reader's newest destination, so a search jump that
       // has not landed yet is over. Left pending it lands the moment the lazy
       // editor arrives and pulls them off the heading they just chose.
-      setJump(null);
+      setJump(props.headingTarget.anchor === "" ? { kind: "top" } : null);
+      return true;
+    }
+    if (props.headingTarget.anchor === "") {
+      if (targetMode === "source") {
+        setJump({ kind: "line", line: 1 });
+        return true;
+      }
+      const pane = localDocPaneRef.current;
+      if (!pane) return false;
+      pane.scrollTo({ top: 0 });
       return true;
     }
     const source =
@@ -2289,15 +2367,12 @@ function MarkdownView(props: {
     return () => window.removeEventListener("keydown", onKeyDown);
   });
 
-  const wikilinkNavigationNonce = useRef(0);
   function openWikilink(target: string) {
-    const navigation = resolveWikilinkNavigation(
-      target,
-      props.path,
-      knownFiles,
-      ++wikilinkNavigationNonce.current,
-    );
-    props.onOpenPath?.(navigation.path, navigation.headingTarget);
+    openWikilinkRef.current(target);
+  }
+
+  function openWorkspaceLink(target: WorkspaceLinkTarget) {
+    openWorkspaceLinkRef.current(target);
   }
 
   // Unmount flush — silent loss is never acceptable. Closing/switching the
@@ -2593,6 +2668,7 @@ function MarkdownView(props: {
                 path={props.path}
                 knownFiles={knownFiles}
                 onOpenWikilink={openWikilink}
+                onOpenWorkspaceLink={openWorkspaceLink}
                 headingTarget={props.headingTarget}
                 blockTarget={jump?.kind === "block" ? jump : undefined}
                 onBlockTargetConsumed={retireJump}
@@ -2765,6 +2841,7 @@ function MarkdownView(props: {
       ) : surfaceMode === "wysiwyg" ? (
         // data-dohc-doc-pane: see the note on the engine pane above.
         <div
+          ref={localDocPaneRef}
           data-testid="view-markdown"
           data-dohc-doc-pane=""
           className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
@@ -2802,6 +2879,7 @@ function MarkdownView(props: {
                 path={props.path}
                 knownFiles={knownFiles}
                 onOpenWikilink={openWikilink}
+                onOpenWorkspaceLink={openWorkspaceLink}
                 headingTarget={props.headingTarget}
                 pendingUndo={editorPendingUndo}
                 onPendingUndoConsumed={props.onPendingUndoConsumed}
@@ -2814,6 +2892,7 @@ function MarkdownView(props: {
         </div>
       ) : (
         <div
+          ref={localDocPaneRef}
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto"
         >

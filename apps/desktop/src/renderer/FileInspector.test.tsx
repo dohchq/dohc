@@ -40,6 +40,7 @@ import {
   lineSpanInText,
   markdownEditorBody,
   mergeMarkdownEditorBody,
+  resolveWorkspaceLinkNavigation,
   resolveWikilinkNavigation,
 } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -118,6 +119,215 @@ describe("resolveWikilinkNavigation", () => {
   it("preserves whole-file wikilink resolution without manufacturing a target", () => {
     expect(resolveWikilinkNavigation("notes/plan", "today.md", files, 9)).toEqual({
       path: "notes/plan.md",
+    });
+  });
+
+  it("prefers the current document directory for an explicitly relative path", () => {
+    const competingFiles = [
+      { path: "plan.md", title: "Root plan" },
+      { path: "notes/plan.md", title: "Notes plan" },
+    ];
+    expect(
+      resolveWikilinkNavigation(
+        "./plan.md",
+        "notes/status.md",
+        competingFiles,
+        20,
+      ),
+    ).toEqual({ path: "notes/plan.md" });
+  });
+
+  it("matches an extensionless document-relative link to a known .markdown file", () => {
+    const competingFiles = [
+      { path: "guide.md", title: "Root guide" },
+      { path: "notes/guide.markdown", title: "Notes guide" },
+    ];
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: "./guide" },
+        "notes/status.md",
+        competingFiles,
+        21,
+      ),
+    ).toEqual({ path: "notes/guide.markdown" });
+  });
+
+  it.each([
+    [
+      "./guide.md",
+      [
+        { path: "notes/guide.markdown", title: "Markdown guide" },
+        { path: "notes/guide.md", title: "MD guide" },
+      ],
+      "notes/guide.md",
+    ],
+    [
+      "./guide.markdown",
+      [
+        { path: "notes/guide.md", title: "MD guide" },
+        { path: "notes/guide.markdown", title: "Markdown guide" },
+      ],
+      "notes/guide.markdown",
+    ],
+    [
+      "./guide.MD",
+      [
+        { path: "notes/guide.markdown", title: "Markdown guide" },
+        { path: "notes/guide.md", title: "MD guide" },
+      ],
+      "notes/guide.md",
+    ],
+    [
+      "./guide.MARKDOWN",
+      [
+        { path: "notes/guide.md", title: "MD guide" },
+        { path: "notes/guide.markdown", title: "Markdown guide" },
+      ],
+      "notes/guide.markdown",
+    ],
+  ])("prefers the exact Markdown extension for %s", (target, files, expected) => {
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: target },
+        "notes/status.md",
+        files,
+        22,
+      ),
+    ).toEqual({ path: expected });
+  });
+
+  it("resolves decoded delimiters in document-relative and root-relative paths", () => {
+    const competingFiles = [
+      { path: "#notes.md", title: "Root hash notes" },
+      { path: "notes/#notes.md", title: "Notes hash notes" },
+      { path: "notes/faq?.md", title: "FAQ" },
+    ];
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: "./faq?.md", rawFragment: "answers" },
+        "notes/status.md",
+        competingFiles,
+        21,
+      ),
+    ).toEqual({
+      path: "notes/faq?.md",
+      headingTarget: { anchor: "answers", nonce: 21 },
+    });
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: "/#notes.md", rawFragment: "risks" },
+        "notes/status.md",
+        competingFiles,
+        22,
+      ),
+    ).toEqual({
+      path: "#notes.md",
+      headingTarget: { anchor: "risks", nonce: 22 },
+    });
+  });
+
+  it("restricts only root-relative paths to the workspace root", () => {
+    const localFiles = [{ path: "notes/plan.md", title: "Local plan" }];
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: "/plan.md" },
+        "notes/status.md",
+        localFiles,
+        23,
+      ),
+    ).toEqual({ path: "plan.md" });
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: "plan.md" },
+        "notes/status.md",
+        localFiles,
+        24,
+      ),
+    ).toEqual({ path: "notes/plan.md" });
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: "./plan.md" },
+        "notes/status.md",
+        localFiles,
+        25,
+      ),
+    ).toEqual({ path: "notes/plan.md" });
+  });
+
+  it("preserves unknown hash filenames separately from heading fragments", () => {
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: "./new#plan.md" },
+        "notes/status.md",
+        [],
+        23,
+      ),
+    ).toEqual({ path: "notes/new#plan.md" });
+    expect(
+      resolveWorkspaceLinkNavigation(
+        {
+          path: "./new#release#1.md",
+          rawFragment: "decisions",
+        },
+        "notes/status.md",
+        [],
+        24,
+      ),
+    ).toEqual({
+      path: "notes/new#release#1.md",
+      headingTarget: { anchor: "decisions", nonce: 24 },
+    });
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: "", rawFragment: "a%2520b" },
+        "notes/status.md",
+        [],
+        25,
+      ),
+    ).toEqual({
+      path: "notes/status.md",
+      headingTarget: { anchor: "a%2520b", nonce: 25 },
+    });
+  });
+
+  it.each([
+    ["guide.md", "notes/guide.md"],
+    ["guide.markdown", "notes/guide.markdown"],
+    ["GUIDE.MARKDOWN", "notes/GUIDE.MARKDOWN"],
+    ["guide", "notes/guide.md"],
+  ])("preserves a recognized Markdown fallback for %s", (target, expected) => {
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: `./${target}` },
+        "notes/status.md",
+        [],
+        26,
+      ),
+    ).toEqual({ path: expected });
+  });
+
+  it("keeps an empty fragment as an explicit top-of-document target", () => {
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: "", rawFragment: "" },
+        "notes/status.md",
+        [],
+        27,
+      ),
+    ).toEqual({
+      path: "notes/status.md",
+      headingTarget: { anchor: "", nonce: 27 },
+    });
+    expect(
+      resolveWorkspaceLinkNavigation(
+        { path: "../plan.markdown", rawFragment: "" },
+        "notes/status.md",
+        [],
+        28,
+      ),
+    ).toEqual({
+      path: "plan.markdown",
+      headingTarget: { anchor: "", nonce: 28 },
     });
   });
 
@@ -664,6 +874,160 @@ describe("markdown editor unmount flush", () => {
     });
     expect(screen.getByTestId("markdown-edit-toggle").textContent).toBe("Edit");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("opens parsed links from the legacy read-only shared document", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: [
+        "# Status",
+        "",
+        "[FAQ](faq%3F.md?mode=preview#answers)",
+        "[Hash notes](%23notes.md?mode=preview#risks)",
+        "[Section](#next%20steps)",
+      ].join("\n"),
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const onOpenPath = vi.fn();
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/status.md"
+        readOnly
+        knownMarkdownFiles={[
+          { path: "#notes.md", title: "Root hash notes" },
+          { path: "notes/#notes.md", title: "Notes hash notes" },
+          { path: "notes/faq?.md", title: "FAQ" },
+        ]}
+        onOpenPath={onOpenPath}
+      />,
+    );
+    const link = await screen.findByRole("link", { name: "FAQ" });
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-edit-toggle").textContent).toBe("Edit"),
+    );
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    link.focus();
+    expect(document.activeElement).toBe(link);
+
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+    });
+    expect(link.dispatchEvent(click)).toBe(false);
+    expect(click.defaultPrevented).toBe(true);
+    expect(onOpenPath).toHaveBeenCalledWith("notes/faq?.md", {
+      anchor: "answers",
+      nonce: 1,
+    });
+    expect(onOpenPath).toHaveBeenCalledOnce();
+
+    const hashClick = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+    });
+    expect(
+      screen.getByRole("link", { name: "Hash notes" }).dispatchEvent(hashClick),
+    ).toBe(false);
+    expect(onOpenPath).toHaveBeenLastCalledWith("notes/#notes.md", {
+      anchor: "risks",
+      nonce: 2,
+    });
+
+    const fragmentClick = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+    });
+    expect(
+      screen.getByRole("link", { name: "Section" }).dispatchEvent(fragmentClick),
+    ).toBe(false);
+    expect(onOpenPath).toHaveBeenLastCalledWith("notes/status.md", {
+      anchor: "next%20steps",
+      nonce: 3,
+    });
+    expect(onOpenPath).toHaveBeenCalledTimes(3);
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("scrolls to the top for an explicit empty fragment target", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Status\n\nBody\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const scrollTo = stubScrollSpy("scrollTo");
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="notes/status.md" readOnly />,
+    );
+    await screen.findByTestId("view-markdown");
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/status.md"
+        readOnly
+        headingTarget={{ anchor: "", nonce: 29 }}
+      />,
+    );
+
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
+  });
+
+  it("keeps encoded filename hashes distinct from real fragments without known files", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: [
+        "[Unknown](new%23plan.md)",
+        "[Multiple](new%23release%231.md)",
+        "[Fragment](new%23plan.md?mode=preview#risks)",
+        "[Raw root](/plan.md#raw-root)",
+        "[Encoded root](%2Fplan.md#root)",
+        "[Encoded fragment](#a%2520b)",
+        "[Empty fragment](#)",
+        "[Malformed](bad%E0%A4%A.md#part%E0%A4%A)",
+      ].join("\n"),
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const onOpenPath = vi.fn();
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/status.md"
+        readOnly
+        knownMarkdownFiles={[]}
+        onOpenPath={onOpenPath}
+      />,
+    );
+    await screen.findByRole("link", { name: "Unknown" });
+
+    for (const [name, expectedPath, rawFragment] of [
+      ["Unknown", "notes/new#plan.md", undefined],
+      ["Multiple", "notes/new#release#1.md", undefined],
+      ["Fragment", "notes/new#plan.md", "risks"],
+      ["Raw root", "plan.md", "raw-root"],
+      ["Encoded root", "plan.md", "root"],
+      ["Encoded fragment", "notes/status.md", "a%2520b"],
+      ["Empty fragment", "notes/status.md", ""],
+      ["Malformed", "notes/bad%E0%A4%A.md", "part%E0%A4%25A"],
+    ] as const) {
+      const click = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        detail: 1,
+      });
+      expect(screen.getByRole("link", { name }).dispatchEvent(click)).toBe(false);
+      expect(onOpenPath).toHaveBeenLastCalledWith(
+        expectedPath,
+        rawFragment !== undefined
+          ? { anchor: rawFragment, nonce: onOpenPath.mock.calls.length }
+          : undefined,
+      );
+    }
+    expect(onOpenPath).toHaveBeenCalledTimes(8);
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 

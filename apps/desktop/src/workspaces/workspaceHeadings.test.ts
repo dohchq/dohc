@@ -3,6 +3,7 @@ import {
   extractWorkspaceHeadings,
   findWorkspaceHeading,
   headingAnchorBase,
+  resolveWorkspaceHeadingAnchorTarget,
   workspaceHeadingRecords,
   workspaceHeadingSection,
 } from "./workspaceHeadings";
@@ -155,6 +156,33 @@ describe("workspace headings", () => {
       })?.line,
     ).toBe(3);
     expect(findWorkspaceHeading(headings, { text: "Café plan", occurrence: 1 })?.line).toBe(3);
+  });
+
+  it("decodes a raw heading fragment exactly once", () => {
+    const headings = [
+      { anchor: "a b", text: "Space", occurrence: 0 },
+      { anchor: "a%20b", text: "Literal escape", occurrence: 0 },
+      {
+        anchor: "bad%E0%A4%A",
+        text: "Malformed escape",
+        occurrence: 0,
+      },
+    ];
+
+    expect(
+      resolveWorkspaceHeadingAnchorTarget(headings, { anchor: "a%20b" }),
+    ).toBe(headings[0]);
+    expect(
+      resolveWorkspaceHeadingAnchorTarget(headings, { anchor: "a%2520b" }),
+    ).toBe(headings[1]);
+    expect(
+      resolveWorkspaceHeadingAnchorTarget(headings, {
+        anchor: "bad%E0%A4%A",
+      }),
+    ).toBe(headings[2]);
+    expect(
+      resolveWorkspaceHeadingAnchorTarget(headings, { anchor: "" }),
+    ).toBeNull();
   });
 
   it("normalizes formatting without discarding unicode", () => {
