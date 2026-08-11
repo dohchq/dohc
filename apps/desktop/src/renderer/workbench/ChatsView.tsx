@@ -2849,6 +2849,7 @@ export function ChatsView(props: {
       setNav({ level: "thread", channel, thread: result.thread });
       setMessages([result.message]);
       setReactions([]);
+      setViewerAuthorId(result.viewerAuthorId);
       setDecisions([]);
       setAttachments(result.message.attachments ?? []);
       setRunRecords({});

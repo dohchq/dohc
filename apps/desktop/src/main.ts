@@ -7084,6 +7084,8 @@ function registerIpcHandlers(
         openDecisionCount: 0,
       }),
       message: chatMessageForIpc(started.message),
+      viewerAuthorId:
+        started.message.authorUserId ?? localReactorFallbackId(),
     });
   });
 
