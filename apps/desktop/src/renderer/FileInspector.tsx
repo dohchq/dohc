@@ -661,8 +661,18 @@ function useAutosavedTextDraft(props: {
   const [draft, setDraft] = useState(props.body);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const latestDraft = useRef(props.body);
+  // Only accepted external values advance this revision. Local draft echoes
+  // must not make CodeMirror replay an older controlled value.
+  const valueRevision = useRef(0);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unsavedDraft = useRef(false);
+  // One tail owns every writer that has entered, including writers waiting
+  // behind an in-flight save. The shell flush can therefore join the whole
+  // obligation instead of observing only the write that currently holds it.
+  const writeChain = useRef<Promise<void>>(Promise.resolve());
+  const writersLive = useRef(0);
+  const flushBarrier = useRef(false);
+  const flushInFlight = useRef<Promise<void> | null>(null);
   // Assigned during render, read at call time — `readOnlyRef` precedent.
   const disabledRef = useRef(props.disabled);
   disabledRef.current = props.disabled;
@@ -676,6 +686,7 @@ function useAutosavedTextDraft(props: {
   useEffect(() => {
     if (props.switchReadPending) return;
     if (unsavedDraft.current) return;
+    if (latestDraft.current !== props.body) valueRevision.current += 1;
     setDraft(props.body);
     latestDraft.current = props.body;
     setSaveState("saved");
@@ -705,30 +716,54 @@ function useAutosavedTextDraft(props: {
     if (unsavedDraft.current) {
       unsavedDraft.current = false;
       captureOrphanedDraft(props.workspaceId, props.path, latestDraft.current);
+      valueRevision.current += 1;
       setSaveState("saved");
       setDraft(props.body);
       latestDraft.current = props.body;
     }
   }
 
-  async function writeDraftNow(options: { rejectOnError?: boolean } = {}): Promise<void> {
-    if (writesBlocked()) return;
-    const text = latestDraft.current;
-    unsavedDraft.current = false;
-    setSaveState("saving");
-    try {
-      await bridge().writeWorkspaceText({
-        workspaceId: props.workspaceId,
-        relativePath: props.path,
-        text,
-      });
-      setDraft(text);
-      setSaveState("saved");
-    } catch (error) {
-      unsavedDraft.current = true;
-      setSaveState("error");
-      if (options.rejectOnError) throw error;
-    }
+  async function writeDraftNow(
+    options: { rejectOnError?: boolean; fromFlush?: boolean } = {},
+  ): Promise<void> {
+    if (flushBarrier.current && !options.fromFlush) return;
+    const run = async (): Promise<void> => {
+      if (writesBlocked()) return;
+      // Read after older writes finish. A queued save therefore carries the
+      // latest draft, not the text that was current when it joined the queue.
+      const text = latestDraft.current;
+      unsavedDraft.current = false;
+      setSaveState("saving");
+      try {
+        await bridge().writeWorkspaceText({
+          workspaceId: props.workspaceId,
+          relativePath: props.path,
+          text,
+        });
+        // A user can keep typing while this write is in flight. Never repaint
+        // that newer draft with the older text that just reached disk.
+        if (latestDraft.current === text) {
+          setDraft(text);
+          setSaveState("saved");
+        }
+      } catch (error) {
+        unsavedDraft.current = true;
+        setSaveState("error");
+        if (options.rejectOnError) throw error;
+      }
+    };
+    const runsNow = writersLive.current === 0;
+    writersLive.current += 1;
+    const queued = (runsNow ? run() : writeChain.current.then(run)).finally(
+      () => {
+        writersLive.current -= 1;
+      },
+    );
+    writeChain.current = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
   }
 
   async function saveNow(): Promise<void> {
@@ -759,18 +794,12 @@ function useAutosavedTextDraft(props: {
       // branch while the refusal stays live, so this view is gone before a
       // later success can let it act on the lift. Capturing here needs nothing
       // to survive: it is the last moment this draft exists.
-      unsavedDraft.current = false;
       if (writesBlocked()) {
+        unsavedDraft.current = false;
         captureOrphanedDraft(workspaceId, path, latestDraft.current);
         return;
       }
-      void bridge()
-        .writeWorkspaceText({
-          workspaceId,
-          relativePath: path,
-          text: latestDraft.current,
-        })
-        .catch(() => undefined);
+      void writeDraftNow();
     };
     // `disabled` is deliberately NOT a dep: as one it made every flip run this
     // cleanup with the PREVIOUS render's value captured, so turning writes off
@@ -782,10 +811,26 @@ function useAutosavedTextDraft(props: {
 
   useEffect(() => {
     if (!registerDraftFlush) return;
-    registerDraftFlush(async () => {
-      if (!unsavedDraft.current || writesBlocked()) return;
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      await writeDraftNow({ rejectOnError: true });
+    registerDraftFlush(() => {
+      if (flushInFlight.current) return flushInFlight.current;
+      flushBarrier.current = true;
+      const flush = (async () => {
+        try {
+          await writeChain.current;
+          while (unsavedDraft.current && !writesBlocked()) {
+            if (saveTimer.current) {
+              clearTimeout(saveTimer.current);
+              saveTimer.current = null;
+            }
+            await writeDraftNow({ rejectOnError: true, fromFlush: true });
+          }
+        } finally {
+          flushBarrier.current = false;
+          flushInFlight.current = null;
+        }
+      })();
+      flushInFlight.current = flush;
+      return flush;
     });
     return () => registerDraftFlush(null);
     // writeDraftNow uses refs for the draft; workspace/path are stable per keyed inspector.
@@ -798,6 +843,7 @@ function useAutosavedTextDraft(props: {
     setDraft: scheduleSave,
     saveNow,
     getDraft: () => latestDraft.current,
+    valueRevision: valueRevision.current,
   };
 }
 
@@ -1928,6 +1974,7 @@ function MarkdownView(props: {
                 <LazySourceCodeEditor
                   testId="markdown-source-view"
                   value={sourceMarkdown}
+                  valueRevision={sourceMarkdown}
                   language="markdown"
                   path={props.path}
                   readOnly
@@ -2794,6 +2841,7 @@ function TextEditorView({
         <LazySourceCodeEditor
           testId={`${testId}-editor`}
           value={editor.draft}
+          valueRevision={editor.valueRevision}
           language={language}
           path={path}
           readOnly={truncated}

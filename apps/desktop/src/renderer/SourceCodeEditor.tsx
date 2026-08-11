@@ -115,6 +115,7 @@ function readOnlyExtension(readOnly: boolean): Extension {
 export function SourceCodeEditor(props: {
   testId: string;
   value: string;
+  valueRevision: string | number;
   language: string;
   path: string;
   readOnly?: boolean;
@@ -130,8 +131,11 @@ export function SourceCodeEditor(props: {
   const languageCompartment = useRef(new Compartment()).current;
   const onChangeRef = useRef(props.onChange);
   const onSaveRef = useRef(props.onSave);
+  const valueRef = useRef(props.value);
   const applyingRemoteValue = useRef(false);
   const appliedUndoToken = useRef<number | null>(null);
+
+  valueRef.current = props.value;
 
   useEffect(() => {
     onChangeRef.current = props.onChange;
@@ -194,15 +198,20 @@ export function SourceCodeEditor(props: {
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    const next = valueRef.current;
     const current = view.state.doc.toString();
-    if (current === props.value) return;
+    if (current === next) return;
+    // Local onChange echoes do not change valueRevision. Accepted external
+    // values do, so a delayed local echo cannot replace a newer CodeMirror
+    // document. The revision also lets external text match an older local
+    // snapshot without being mistaken for that snapshot's delayed echo.
     applyingRemoteValue.current = true;
     view.dispatch({
-      changes: { from: 0, to: current.length, insert: props.value },
+      changes: { from: 0, to: current.length, insert: next },
       annotations: Transaction.addToHistory.of(false),
     });
     applyingRemoteValue.current = false;
-  }, [props.value]);
+  }, [props.valueRevision]);
 
   useEffect(() => {
     const view = viewRef.current;
