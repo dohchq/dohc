@@ -8504,6 +8504,8 @@ function registerIpcHandlers(
       return OpenEngineYDocSessionResult.parse({
         available: true,
         initialUpdate: session.initialUpdate,
+        ...(session.objectId ? { objectId: session.objectId } : {}),
+        ...(session.versionId ? { versionId: session.versionId } : {}),
       });
     } finally {
       finishPendingOpen();

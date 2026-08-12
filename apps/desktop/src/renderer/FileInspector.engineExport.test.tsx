@@ -21,6 +21,8 @@ const engineDocState: UseEngineDoc = {
   available: false,
   opening: false,
   doc: null,
+  objectId: null,
+  versionId: null,
   saveState: "saved",
   notInVersion: false,
   engineMayHoldDocument: false,

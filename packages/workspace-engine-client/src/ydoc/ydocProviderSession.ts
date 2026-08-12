@@ -103,6 +103,10 @@ export interface EngineYdocProviderSessionOptions {
 export interface EngineYdocProviderSession {
   readonly doc: Y.Doc;
   readonly initialUpdate: Uint8Array;
+  // Optional only for injected test providers. The daemon-backed provider
+  // always supplies both values.
+  readonly objectId?: string;
+  readonly versionId?: string;
   readonly contentKind: YdocContentKind;
   readonly path: string;
   // Whether the ENTERED VERSION has a committed snapshot for this path.
@@ -335,6 +339,8 @@ export async function openEngineYdocProviderSession(
   return {
     doc: session.doc,
     initialUpdate: session.initialUpdate,
+    objectId: session.objectId,
+    versionId: options.versionId,
     contentKind: session.contentKind,
     path: session.path,
     head: session.head,

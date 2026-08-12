@@ -1448,6 +1448,22 @@ describe("document export IPC contract", () => {
 });
 
 describe("engine Y.Doc update IPC contract", () => {
+  it("keeps bound document identity in the open result", () => {
+    expect(
+      OpenEngineYDocSessionResult.parse({
+        available: true,
+        initialUpdate: new Uint8Array(),
+        objectId: "object-1",
+        versionId: "main",
+      }),
+    ).toEqual({
+      available: true,
+      initialUpdate: new Uint8Array(),
+      objectId: "object-1",
+      versionId: "main",
+    });
+  });
+
   it("keeps a removal-window open refusal operation-aware in the renderer", () => {
     expect(
       OpenEngineYDocSessionResult.parse({

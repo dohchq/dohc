@@ -2051,6 +2051,8 @@ export function createWorkspaceEngineCapture(
     // applied it to `doc`; encode the installed canonical state so the
     // renderer cannot initialize from the stale pre-update snapshot.
     const initialUpdate = Y.encodeStateAsUpdate(canonicalDoc);
+    const objectId = current.objectId;
+    const sessionVersionId = current.versionId;
     const contentKind = current.contentKind;
     const sessionPath = current.path;
     const openedHead = current.head;
@@ -2059,6 +2061,8 @@ export function createWorkspaceEngineCapture(
     const restartSafeSession: RestartSafeYDocSession = {
       doc: canonicalDoc,
       initialUpdate,
+      ...(objectId ? { objectId } : {}),
+      ...(sessionVersionId ? { versionId: sessionVersionId } : {}),
       contentKind,
       path: sessionPath,
       applyLocalUpdate(update, onArmed) {
@@ -4614,6 +4618,8 @@ export function createWorkspaceEngineCapture(
         return {
           doc: session.doc,
           initialUpdate: session.initialUpdate,
+          ...(session.objectId ? { objectId: session.objectId } : {}),
+          ...(session.versionId ? { versionId: session.versionId } : {}),
           contentKind: session.contentKind,
           path: session.path,
           // TWO counters ride this call, and they are not the same count.

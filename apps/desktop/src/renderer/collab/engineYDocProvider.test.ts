@@ -44,7 +44,12 @@ function mockTransport(
   let closed = false;
   const transport: EngineYDocTransport = {
     async open() {
-      return { available: true, initialUpdate: Y.encodeStateAsUpdate(mainDoc) };
+      return {
+        available: true,
+        initialUpdate: Y.encodeStateAsUpdate(mainDoc),
+        objectId: "object-1",
+        versionId: "main",
+      };
     },
     stageLocalUpdate() {
       staged += 1;
@@ -318,6 +323,8 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const binding = await bindEngineYDoc(mock.transport, batches.scheduler);
     expect(binding.available).toBe(true);
     expect(binding.doc).not.toBeNull();
+    expect(binding.objectId).toBe("object-1");
+    expect(binding.versionId).toBe("main");
     expect(bodyText(binding.doc!)).toContain("Seeded from engine.");
     await binding.destroy();
   });
@@ -397,6 +404,8 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const binding = await bindEngineYDoc(transport);
     expect(binding.available).toBe(false);
     expect(binding.doc).toBeNull();
+    expect(binding.objectId).toBeNull();
+    expect(binding.versionId).toBeNull();
     await binding.destroy();
   });
 

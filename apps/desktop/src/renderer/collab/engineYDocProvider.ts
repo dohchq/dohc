@@ -44,6 +44,8 @@ export interface EngineYDocTransport {
   open(): Promise<{
     available: boolean;
     initialUpdate?: Uint8Array;
+    objectId?: string;
+    versionId?: string;
     notInVersion?: boolean;
     // A session for this document may still be the engine's (#564, #657) —
     // the other available:false that must not fall back to the plain editor.
@@ -121,6 +123,8 @@ export interface EngineYDocBinding {
   // (available:false) — the caller stays on the local autosave editor.
   readonly doc: Y.Doc | null;
   readonly available: boolean;
+  readonly objectId: string | null;
+  readonly versionId: string | null;
   // The path is not in the version this workspace is on. The caller must stop
   // editing the document, not downgrade it to the writable plain editor.
   readonly notInVersion: boolean;
@@ -147,6 +151,8 @@ export async function bindEngineYDoc(
     return {
       doc: null,
       available: false,
+      objectId: null,
+      versionId: null,
       notInVersion: opened.notInVersion === true,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,
       removalInProgress: opened.removalInProgress ?? null,
@@ -226,6 +232,8 @@ export async function bindEngineYDoc(
   return {
     doc,
     available: true,
+    objectId: opened.objectId ?? null,
+    versionId: opened.versionId ?? null,
     notInVersion: false,
     engineMayHoldDocument: false,
     removalInProgress: null,

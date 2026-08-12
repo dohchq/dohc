@@ -176,6 +176,10 @@ export type UseEngineDoc = {
   opening: boolean;
   // The mirror Y.Doc Tiptap binds to; null until bound / when unavailable.
   doc: Y.Doc | null;
+  // Exact engine identity for this bound document. Presence must not use the
+  // path because a rename does not create a new document.
+  objectId: string | null;
+  versionId: string | null;
   // The document's REAL save state. "saving" the moment an edit is made,
   // "saved" ONLY when main reports a settle that covered that edit actually
   // committed and wrote the .md, "error" when a settle failed. This used to be
@@ -226,7 +230,14 @@ function engineDocRequestKey(input: {
 
 // The settled result of one open, stamped with the request it answers.
 type EngineDocOpenOutcome =
-  | { key: string; token: number; kind: "bound"; doc: Y.Doc }
+  | {
+      key: string;
+      token: number;
+      kind: "bound";
+      doc: Y.Doc;
+      objectId: string | null;
+      versionId: string | null;
+    }
   | { key: string; kind: "unavailable" }
   // Their OWN kinds, not flags on "unavailable": every other unavailable
   // answer means "fall back to the plain editor", and these two mean the
@@ -265,6 +276,8 @@ function makeTransport(
       return {
         available: result.available,
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
+        ...(result.objectId ? { objectId: result.objectId } : {}),
+        ...(result.versionId ? { versionId: result.versionId } : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.removalInProgress
@@ -347,6 +360,8 @@ export function useEngineDoc(input: {
   const settled = outcome !== null && outcome.key === requestKey ? outcome : null;
   const available = settled?.kind === "bound";
   const doc = settled?.kind === "bound" ? settled.doc : null;
+  const objectId = settled?.kind === "bound" ? settled.objectId : null;
+  const versionId = settled?.kind === "bound" ? settled.versionId : null;
   const opening = input.enabled && settled === null;
   // Derived from the same settled result, so it is subject to the same
   // request-identity rule: a refusal for the version the user just LEFT never
@@ -578,7 +593,14 @@ export function useEngineDoc(input: {
         doc.on("update", onUpdate);
         detachSaveObserver = () => doc.off("update", onUpdate);
         if (deletionPending) captureDeletion(doc);
-        setOutcome({ key, token, kind: "bound", doc });
+        setOutcome({
+          key,
+          token,
+          kind: "bound",
+          doc,
+          objectId: bound.objectId,
+          versionId: bound.versionId,
+        });
       })
       .catch(() => {
         if (cancelled || token !== openTokenRef.current) return;
@@ -627,6 +649,8 @@ export function useEngineDoc(input: {
     available,
     opening,
     doc,
+    objectId,
+    versionId,
     saveState,
     notInVersion,
     engineMayHoldDocument,
