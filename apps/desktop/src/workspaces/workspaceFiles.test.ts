@@ -141,6 +141,24 @@ describe("listFiles", () => {
     expect(result.folders).toEqual([SHARED_WITH_ME_FOLDER, `${SHARED_WITH_ME_FOLDER}/alex`]);
   });
 
+  it("hides generated Excalidraw asset owners without hiding adjacent user assets", async () => {
+    const owner = "a".repeat(64);
+    await mkdir(join(root, "assets", "excalidraw", owner), { recursive: true });
+    await writeFile(join(root, "assets", "excalidraw", owner, `${"b".repeat(64)}.png`), "managed");
+    await mkdir(join(root, "assets", "excalidraw", "user"), { recursive: true });
+    await writeFile(join(root, "assets", "excalidraw", "user", "keep.png"), "user");
+
+    const result = await listFiles(root);
+    expect(result.files).toEqual([
+      { path: "assets/excalidraw/user/keep.png", kind: "file" },
+    ]);
+    expect(result.folders).toEqual([
+      "assets",
+      "assets/excalidraw",
+      "assets/excalidraw/user",
+    ]);
+  });
+
   it("does not follow symlinks (file or directory) out of the workspace", async () => {
     const outside = await createTestScratch("dohc-outside-");
     await writeFile(join(outside, "secret.md"), "leak");

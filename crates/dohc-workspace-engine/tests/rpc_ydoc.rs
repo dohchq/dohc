@@ -650,6 +650,116 @@ async fn scene_open_rejects_forged_asset_namespace_without_a_writable_fallback()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_open_rejects_text_sha_and_mime_asset_authority_without_a_writable_fallback() {
+    for (case, record_mime) in [
+        ("text-head", "image/png"),
+        ("sha-mismatch", "image/png"),
+        ("mime-mismatch", "image/jpeg"),
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+        let drawing_path = format!("{case}.excalidraw");
+        write_file(
+            scratch.path(),
+            &drawing_path,
+            br#"{"type":"excalidraw","elements":[],"appState":{},"files":{}}"#,
+        );
+        let service = Arc::new(EngineService::new());
+        let transport = InProcessTransport::new(service);
+        let workspace_id = format!("ws-rpc-scene-{case}");
+        let handle = open_workspace(&transport, &scratch, &workspace_id, 160).await;
+        let opened = call(
+            &transport,
+            &handle,
+            161,
+            "ydoc.open",
+            json!({
+                "versionId": "main", "path": drawing_path,
+                "contentKind": "scene", "seedFromArtifact": false
+            }),
+        )
+        .await;
+        let object_id = opened["objectId"].as_str().expect("object id");
+        let expected_bytes = [1_u8, 2, 3, 4];
+        let expected_sha = dohc_engine_storage::hex_sha256(&expected_bytes);
+        let asset_ref = dohc_engine_collab::scene_asset_ref(
+            &workspace_id,
+            "main",
+            object_id,
+            &expected_sha,
+            "image/png",
+        )
+        .expect("owned asset ref");
+        call(
+            &transport,
+            &handle,
+            162,
+            "ydoc.recordUpdate",
+            json!({
+                "sessionId": opened["sessionId"],
+                "updateBase64": image_scene_update_with_asset_record(
+                    "image-file", record_mime, &asset_ref, &expected_sha
+                )
+            }),
+        )
+        .await;
+        call(
+            &transport,
+            &handle,
+            163,
+            "ydoc.evict",
+            json!({ "sessionId": opened["sessionId"] }),
+        )
+        .await;
+
+        match case {
+            "text-head" => {
+                call(
+                    &transport,
+                    &handle,
+                    164,
+                    "versionedText.write",
+                    json!({
+                        "versionId": "main", "path": asset_ref,
+                        "text": "not binary image data", "origin": "api"
+                    }),
+                )
+                .await;
+            }
+            "sha-mismatch" => {
+                call(
+                    &transport,
+                    &handle,
+                    164,
+                    "versionedBinary.write",
+                    json!({
+                        "versionId": "main", "path": asset_ref,
+                        "bytes": [9, 9, 9, 9], "origin": "api"
+                    }),
+                )
+                .await;
+            }
+            "mime-mismatch" => {}
+            _ => unreachable!(),
+        }
+
+        let invalid = call_error(
+            &transport,
+            &handle,
+            165,
+            "ydoc.open",
+            json!({
+                "versionId": "main", "path": drawing_path,
+                "contentKind": "scene", "seedFromArtifact": false
+            }),
+        )
+        .await;
+        assert_eq!(invalid.code, ErrorCode::Internal, "{case}");
+        assert_eq!(invalid.message, "ydoc-artifact-assets-invalid", "{case}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_seed_omits_deleted_and_unused_native_files() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");

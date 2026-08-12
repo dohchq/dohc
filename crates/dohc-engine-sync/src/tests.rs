@@ -8367,10 +8367,28 @@ fn scene_base_permanently_refuses_forged_asset_authority() {
     let mismatched_hash_ref =
         dohc_engine_collab::scene_asset_ref("ws", "main", "scene-forged", &other_sha, "image/png")
             .expect("other hash ref");
+    let cross_workspace_ref = dohc_engine_collab::scene_asset_ref(
+        "other-workspace",
+        "main",
+        "scene-forged",
+        &sha,
+        "image/png",
+    )
+    .expect("cross-workspace ref");
+    let cross_version_ref = dohc_engine_collab::scene_asset_ref(
+        "ws",
+        "other-version",
+        "scene-forged",
+        &sha,
+        "image/png",
+    )
+    .expect("cross-version ref");
     for (case, mime_type, asset_ref) in [
         ("unrelated", "image/png", "user/image.png".to_owned()),
         ("hash-filename", "image/png", mismatched_hash_ref),
         ("mime-extension", "image/jpeg", png_ref.clone()),
+        ("cross-workspace", "image/png", cross_workspace_ref),
+        ("cross-version", "image/png", cross_version_ref),
     ] {
         let (_scratch, _path, mut engine) = store();
         seed_replication_version(&mut engine, "main", "main");

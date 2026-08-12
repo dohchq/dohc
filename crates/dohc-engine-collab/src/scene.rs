@@ -159,6 +159,9 @@ impl FoldedScene {
 }
 
 pub fn scene_asset_extension(mime_type: &str) -> Result<&'static str, SceneImportError> {
+    // BinaryFileData's validated MIME owns the native dataURL and canonical
+    // extension; SHA-256 authenticates the exact bytes. The engine does not
+    // sniff or transform provider-owned image formats.
     match mime_type {
         "image/svg+xml" => Ok("svg"),
         "image/png" => Ok("png"),
