@@ -44,10 +44,12 @@ test("editor groups keep mixed surfaces visible, resize, and collapse", async ()
     expect(markdownBox!.x + markdownBox!.width).toBeLessThanOrEqual(csvBox!.x + 1);
 
     const separator = page.getByRole("separator", { name: "Resize editor groups" });
-    const before = await separator.getAttribute("aria-valuenow");
+    const before = Number(await separator.getAttribute("aria-valuenow"));
     await separator.focus();
     await separator.press("ArrowRight");
-    await expect(separator).not.toHaveAttribute("aria-valuenow", before ?? "50");
+    await expect
+      .poll(async () => Number(await separator.getAttribute("aria-valuenow")))
+      .toBeGreaterThan(before);
 
     await page.keyboard.press(process.platform === "darwin" ? "Meta+w" : "Control+w");
     await expect(page.getByRole("region", { name: "Editor group 2" })).toHaveCount(0);

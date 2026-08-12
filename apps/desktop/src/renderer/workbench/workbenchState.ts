@@ -187,6 +187,9 @@ export const OPEN_EDITORS_MAX_HEIGHT = 2400;
 export const OPEN_EDITORS_DEFAULT_HEIGHT = 126;
 // Bounds the persisted payload (and the tab strip) — not a UX target.
 export const MAX_OPEN_TABS = 100;
+// The global tab cap bounds non-empty groups. The model can retain one extra
+// empty destination while a tab is moved or a split is created.
+export const MAX_EDITOR_GROUPS = MAX_OPEN_TABS + 1;
 export const MAX_EDITOR_GROUP_ID_CHARS = 128;
 export const DEFAULT_EDITOR_GROUP_ID = "primary";
 // Bounds the persisted explorer state the same way (oldest entries give way).
@@ -748,7 +751,12 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const tabPaths = new Set<string>();
   const rawGroups = own("editorGroups");
   if (Array.isArray(rawGroups)) {
-    for (const entry of rawGroups) {
+    for (
+      let groupIndex = 0;
+      groupIndex < Math.min(rawGroups.length, MAX_EDITOR_GROUPS);
+      groupIndex++
+    ) {
+      const entry = rawGroups[groupIndex];
       if (typeof entry !== "object" || entry === null) continue;
       const group = entry as Record<string, unknown>;
       const groupOwn = (key: string): unknown =>

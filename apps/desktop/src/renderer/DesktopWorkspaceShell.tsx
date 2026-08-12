@@ -1296,6 +1296,7 @@ export function DesktopWorkspaceShell(props: {
     new WeakMap<WorkbenchTab, Map<string, EditorRegistrationCallbacks>>(),
   );
   const dirtyTabsRef = useRef(new WeakSet<WorkbenchTab>());
+  const dirtyEpochsRef = useRef(new WeakMap<WorkbenchTab, number>());
   const [dirtyRevision, setDirtyRevision] = useState(0);
   const openSettings = useCallback(
     (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
@@ -1369,8 +1370,15 @@ export function DesktopWorkspaceShell(props: {
         onSaveStateChange: (state) => {
           const dirty = state !== "saved" && state !== "deleted";
           if (dirty === dirtyTabsRef.current.has(tab)) return;
-          if (dirty) dirtyTabsRef.current.add(tab);
-          else dirtyTabsRef.current.delete(tab);
+          if (dirty) {
+            dirtyTabsRef.current.add(tab);
+            dirtyEpochsRef.current.set(
+              tab,
+              (dirtyEpochsRef.current.get(tab) ?? 0) + 1,
+            );
+          } else {
+            dirtyTabsRef.current.delete(tab);
+          }
           setDirtyRevision((revision) => revision + 1);
         },
         registerDraftFlush: (flush) => {
@@ -1396,19 +1404,23 @@ export function DesktopWorkspaceShell(props: {
     async (
       shouldFlush: (groupId: string, tab: WorkbenchTab) => boolean = () => true,
     ) => {
-      const flushed = new Set<DraftFlush>();
+      const flushedAtEpoch = new Map<DraftFlush, number>();
       while (true) {
         const batch = [...mountedEditorsRef.current.entries()]
           .filter(
             ([groupId, registration]) =>
               registration.flush &&
-              !flushed.has(registration.flush) &&
+              (flushedAtEpoch.get(registration.flush) ?? -1) <
+                (dirtyEpochsRef.current.get(registration.tab) ?? 0) &&
               shouldFlush(groupId, registration.tab),
           )
-          .map(([, registration]) => registration.flush as DraftFlush);
+          .map(([, registration]) => ({
+            flush: registration.flush as DraftFlush,
+            epoch: dirtyEpochsRef.current.get(registration.tab) ?? 0,
+          }));
         if (batch.length === 0) return;
-        for (const flush of batch) {
-          flushed.add(flush);
+        for (const { flush, epoch } of batch) {
+          flushedAtEpoch.set(flush, epoch);
           await flush();
         }
       }
@@ -2841,9 +2853,20 @@ export function DesktopWorkspaceShell(props: {
         mutateWb((state) => activateTab(state, groupId, path));
         return;
       }
-      openFile(path);
+      setHeadingTarget(null);
+      if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
+      const group = wbRef.current.editorGroups.find(
+        (candidate) => candidate.id === groupId,
+      );
+      if (!group?.tabs.some((tab) => tab.path === path)) return;
+      if (group.activeTab !== path) {
+        rendererMarks.mark("file-open-start");
+      }
+      mutateWb((state) =>
+        recordRecentFile(activateTab(state, groupId, path), path),
+      );
     },
-    [mutateWb, openFile],
+    [mutateWb],
   );
 
   // Chats view "Files" grouping cross-link: a file-linked Chat opens where
@@ -2886,18 +2909,20 @@ export function DesktopWorkspaceShell(props: {
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
   // re-render the whole strip on every shell render, incl. each 800ms dirty
-  // flip while typing). Capture the requested tab objects before the flush:
-  // closing and reopening the same path creates a later tab that must stay.
+  // flip while typing). Capture the requested tab objects and their owners
+  // before the flush: a reopened tab or a tab moved later must stay.
   const closeTabsAfterFlush = useCallback(
-    (tabs: readonly WorkbenchTab[]) => {
-      const requested = new Set(tabs);
+    (targets: ReadonlyArray<{ groupId: string; tab: WorkbenchTab }>) => {
+      const requested = new Map(
+        targets.map(({ groupId, tab }) => [tab, groupId] as const),
+      );
       if (requested.size === 0) return;
 
       const closeRequestedTabs = (state: WorkbenchState): WorkbenchState => {
         let next = state;
         for (const group of state.editorGroups) {
           for (const tab of group.tabs) {
-            if (!requested.has(tab)) continue;
+            if (requested.get(tab) !== group.id) continue;
             next = closeTab(next, group.id, tab.path);
             const liveGroup = next.editorGroups.find(
               (candidate) => candidate.id === group.id,
@@ -2912,17 +2937,23 @@ export function DesktopWorkspaceShell(props: {
       const commitClose = () => {
         const current = wbRef.current;
         const next = closeRequestedTabs(current);
-        if (
-          activeTabPath(next) !== activeTabPath(current) &&
-          activeTabPath(next) !== null &&
-          !isVirtualTabPath(activeTabPath(next))
-        ) {
+        const mountsNewDocument = current.editorGroups.some((before) => {
+          const after = next.editorGroups.find((group) => group.id === before.id);
+          return (
+            after !== undefined &&
+            after.activeTab !== before.activeTab &&
+            after.activeTab !== null &&
+            !isVirtualTabPath(after.activeTab)
+          );
+        });
+        if (mountsNewDocument) {
           rendererMarks.mark("file-open-start");
         }
         mutateWb(closeRequestedTabs);
       };
-      const needsFlush = [...mountedEditorsRef.current.values()].some(
-        (registration) => registration.flush && requested.has(registration.tab),
+      const needsFlush = [...mountedEditorsRef.current.entries()].some(
+        ([groupId, registration]) =>
+          registration.flush && requested.get(registration.tab) === groupId,
       );
       if (!needsFlush) {
         commitClose();
@@ -2932,7 +2963,9 @@ export function DesktopWorkspaceShell(props: {
       // The active tab can change while a flush waits. If the new active tab
       // object was also in the original close request, flush its own mounted
       // editor before closing it. A reopened tab has a new object identity.
-      void flushStableDrafts((_groupId, tab) => requested.has(tab))
+      void flushStableDrafts(
+        (groupId, tab) => requested.get(tab) === groupId,
+      )
         .then(commitClose)
         .catch((error) => {
           reportShellError(
@@ -2950,7 +2983,7 @@ export function DesktopWorkspaceShell(props: {
         (candidate) => candidate.id === groupId,
       );
       const tab = group?.tabs.find((candidate) => candidate.path === path);
-      if (tab) void closeTabsAfterFlush([tab]);
+      if (tab) void closeTabsAfterFlush([{ groupId, tab }]);
     },
     [closeTabsAfterFlush],
   );
@@ -2960,14 +2993,18 @@ export function DesktopWorkspaceShell(props: {
     const group = activeGroup(current);
     const tab = group.tabs.find((candidate) => candidate.path === group.activeTab);
     if (tab) {
-      void closeTabsAfterFlush([tab]);
+      void closeTabsAfterFlush([{ groupId: group.id, tab }]);
     } else if (current.editorGroups.length > 1) {
       mutateWb((state) => closeEditorGroup(state, group.id));
     }
   }, [closeTabsAfterFlush, mutateWb]);
 
   const closeAllTabs = useCallback(() => {
-    void closeTabsAfterFlush(wbRef.current.editorGroups.flatMap((group) => group.tabs));
+    void closeTabsAfterFlush(
+      wbRef.current.editorGroups.flatMap((group) =>
+        group.tabs.map((tab) => ({ groupId: group.id, tab })),
+      ),
+    );
   }, [closeTabsAfterFlush]);
 
   const closeOtherTabs = useCallback(
@@ -2976,7 +3013,9 @@ export function DesktopWorkspaceShell(props: {
       const group = current.editorGroups.find((candidate) => candidate.id === groupId);
       if (!group?.tabs.some((tab) => tab.path === path)) return;
       void closeTabsAfterFlush(
-        group.tabs.filter((tab) => tab.path !== path),
+        group.tabs
+          .filter((tab) => tab.path !== path)
+          .map((tab) => ({ groupId, tab })),
       );
     },
     [closeTabsAfterFlush],
@@ -3317,7 +3356,7 @@ export function DesktopWorkspaceShell(props: {
         mutateWb((state) => closeEditorGroup(state, groupId));
         return;
       }
-      void closeTabsAfterFlush(group.tabs);
+      void closeTabsAfterFlush(group.tabs.map((tab) => ({ groupId, tab })));
     },
     [closeTabsAfterFlush, mutateWb],
   );

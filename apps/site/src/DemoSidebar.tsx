@@ -20,7 +20,7 @@ import {
 export type DemoPanelId = ViewId | "chats";
 
 // The demo has no editing pipeline, so no path ever holds a set-aside draft.
-const EMPTY_RECOVERY_PATHS: ReadonlySet<string> = new Set();
+const NO_PATHS: ReadonlySet<string> = new Set();
 const DEMO_EDITOR_GROUP_ID = "demo-editor-group";
 
 export type DemoWorkspaceDocument = {
@@ -150,8 +150,8 @@ export function DemoSidebar(props: {
             },
           ]}
           activeEditorGroup={DEMO_EDITOR_GROUP_ID}
-          dirtyPaths={EMPTY_RECOVERY_PATHS}
-          recoveryPaths={EMPTY_RECOVERY_PATHS}
+          dirtyPaths={NO_PATHS}
+          recoveryPaths={NO_PATHS}
           expandedFolders={expandedFolders}
           pinned={[]}
           openEditorsHeight={openEditorsHeight}

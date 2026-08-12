@@ -53,6 +53,7 @@ import {
   TryInVersionRunState,
   TryInVersionStateResult,
   TryInWorkspaceVersionPayload,
+  GetWorkspaceUiStateResult,
   WorkspaceUiState,
   WorkspaceGraphResult,
   WorkspaceVersionConflict,
@@ -72,7 +73,10 @@ import {
   parseInvokeSiteSdkPayloadForIpc,
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
-import { MAX_EDITOR_GROUP_ID_CHARS } from "../renderer/workbench/workbenchState";
+import {
+  MAX_EDITOR_GROUPS,
+  MAX_EDITOR_GROUP_ID_CHARS,
+} from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 
 describe("workbench menu IPC contract", () => {
@@ -100,6 +104,12 @@ describe("workbench menu IPC contract", () => {
         groupId: "g".repeat(MAX_EDITOR_GROUP_ID_CHARS + 1),
       }).success,
     ).toBe(false);
+    expect(
+      ShowWorkbenchMenuPayload.safeParse({
+        ...payload,
+        groupId: "g".repeat(MAX_EDITOR_GROUP_ID_CHARS),
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -633,11 +643,10 @@ describe("workspace UI state IPC contract", () => {
   });
 
   it("requires globally unique tabs, valid focus, and normalized sizes", () => {
-    expect(
-      WorkspaceUiState.safeParse({
+    const duplicate = WorkspaceUiState.safeParse({
         ...validState,
         editorGroups: [
-          validState.editorGroups[0],
+          { ...validState.editorGroups[0], size: 0.5 },
           {
             id: "right",
             tabs: ["notes/a.md"],
@@ -645,8 +654,13 @@ describe("workspace UI state IPC contract", () => {
             size: 0.5,
           },
         ],
-      }).success,
-    ).toBe(false);
+      });
+    expect(duplicate.success).toBe(false);
+    if (!duplicate.success) {
+      expect(duplicate.error.issues.map((issue) => issue.message)).toEqual([
+        "Open tab paths must be unique across editor groups.",
+      ]);
+    }
     expect(
       WorkspaceUiState.safeParse({
         ...validState,
@@ -661,9 +675,31 @@ describe("workspace UI state IPC contract", () => {
     ).toBe(false);
   });
 
+  it("accepts valid populated and empty editor groups", () => {
+    for (const right of [
+      {
+        id: "right",
+        tabs: ["notes/b.md"],
+        activeTab: "notes/b.md",
+        size: 0.5,
+      },
+      { id: "right", tabs: [], activeTab: null, size: 0.5 },
+    ]) {
+      expect(
+        WorkspaceUiState.safeParse({
+          ...validState,
+          editorGroups: [
+            { ...validState.editorGroups[0], size: 0.5 },
+            right,
+          ],
+          activeEditorGroup: "right",
+        }).success,
+      ).toBe(true);
+    }
+  });
+
   it("enforces the total open-tab cap across editor groups", () => {
-    expect(
-      WorkspaceUiState.safeParse({
+    const result = WorkspaceUiState.safeParse({
         ...validState,
         editorGroups: [
           {
@@ -680,8 +716,54 @@ describe("workspace UI state IPC contract", () => {
           },
         ],
         activeEditorGroup: "right",
+      });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.message)).toContain(
+        "Open tabs exceed the configured limit of 100 tabs (observed 101 tabs).",
+      );
+    }
+  });
+
+  it("accepts every model-constructible group and rejects one more before validation", () => {
+    const groups = Array.from({ length: MAX_EDITOR_GROUPS }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: index === MAX_EDITOR_GROUPS - 1 ? [] : [`file-${index}.md`],
+      activeTab:
+        index === MAX_EDITOR_GROUPS - 1 ? null : `file-${index}.md`,
+      size: 1 / MAX_EDITOR_GROUPS,
+    }));
+    expect(
+      WorkspaceUiState.safeParse({
+        ...validState,
+        editorGroups: groups,
+        activeEditorGroup: groups[0].id,
       }).success,
-    ).toBe(false);
+    ).toBe(true);
+
+    const oversized = [...groups, null];
+    const rejected = WorkspaceUiState.safeParse({
+      ...validState,
+      editorGroups: oversized,
+      activeEditorGroup: groups[0].id,
+    });
+    expect(rejected.success).toBe(false);
+    if (!rejected.success) {
+      expect(rejected.error.issues.map((issue) => issue.message)).toEqual([
+        `Editor groups exceed the configured limit of ${MAX_EDITOR_GROUPS} groups (observed ${MAX_EDITOR_GROUPS + 1} groups).`,
+      ]);
+    }
+  });
+
+  it("preserves stale stored focus for the tolerant renderer parser", () => {
+    const stale = {
+      ...validState,
+      editorGroups: [
+        { ...validState.editorGroups[0], activeTab: "missing.md" },
+      ],
+      activeEditorGroup: "missing",
+    };
+    expect(GetWorkspaceUiStateResult.parse(stale)).toEqual(stale);
   });
 });
 

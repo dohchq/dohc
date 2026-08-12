@@ -49,6 +49,7 @@ import {
   SIDEBAR_MIN_WIDTH,
   toggleChats,
   toggleSidebar,
+  MAX_EDITOR_GROUPS,
   MAX_OPEN_TABS,
   MAX_EXPANDED_FOLDERS,
   MAX_PINNED_PATHS,
@@ -536,6 +537,46 @@ describe("ui-state persistence round-trip", () => {
       `f${MAX_OPEN_TABS - 1}.md`,
     );
     expect(activeTabPath(state)).toBe("f0.md");
+  });
+
+  it("parse caps editor groups and repairs focus beyond the retained prefix", () => {
+    const rawGroups = Array.from(
+      { length: MAX_EDITOR_GROUPS + 1 },
+      (_, index) => ({
+        id: `group-${index}`,
+        tabs: [],
+        activeTab: null,
+        size: 1,
+      }),
+    );
+    const state = parseUiState({
+      version: 2,
+      editorGroups: rawGroups,
+      activeEditorGroup: rawGroups[MAX_EDITOR_GROUPS].id,
+    });
+
+    expect(state.editorGroups).toHaveLength(MAX_EDITOR_GROUPS);
+    expect(state.editorGroups.at(-1)?.id).toBe(
+      `group-${MAX_EDITOR_GROUPS - 1}`,
+    );
+    expect(state.activeEditorGroup).toBe("group-0");
+  });
+
+  it("parse never reads editor-group entries after the raw-entry cap", () => {
+    const rawGroups = Array<unknown>(MAX_EDITOR_GROUPS + 1).fill(null);
+    Object.defineProperty(rawGroups, MAX_EDITOR_GROUPS, {
+      get: () => {
+        throw new Error("read past editor-group cap");
+      },
+    });
+
+    expect(
+      parseUiState({
+        version: 2,
+        editorGroups: rawGroups,
+        activeEditorGroup: "missing",
+      }),
+    ).toEqual(defaultWorkbenchState());
   });
 });
 

@@ -94,6 +94,29 @@ describe("EditorTabs strip scrolling", () => {
     expect(strip.scrollLeft).toBe(0);
     expect(wheel.defaultPrevented).toBe(false);
   });
+
+  it("dismisses the overflow menu when the group becomes empty", () => {
+    const { rerender } = renderTabs("a.md");
+    fireEvent.click(screen.getByTestId("tabs-overflow"));
+    expect(screen.getByTestId("tabs-overflow-menu")).toBeTruthy();
+
+    rerender(
+      <EditorTabs
+        groupNumber={1}
+        tabs={[]}
+        activeTab={null}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+
+    expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
+  });
 });
 
 describe("EditorTabs overlay scrollbar", () => {
@@ -190,7 +213,7 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(strip.scrollLeft).toBeCloseTo(120, 1);
   });
 
-  it("labels group-scoped controls and moves the active tab into a new group", () => {
+  it("labels and invokes group-scoped controls", () => {
     const onCreateGroupRight = vi.fn();
     const onCloseGroup = vi.fn();
     render(

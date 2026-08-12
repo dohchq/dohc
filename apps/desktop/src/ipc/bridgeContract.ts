@@ -5,6 +5,7 @@ import {
 import { z } from "zod";
 import {
   MAX_EXPANDED_FOLDERS,
+  MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
@@ -3087,12 +3088,26 @@ const WorkspaceEditorGroup = z
     }
   });
 
+const WorkspaceEditorGroups = z.preprocess(
+  (value, context) => {
+    if (Array.isArray(value) && value.length > MAX_EDITOR_GROUPS) {
+      context.addIssue({
+        code: "custom",
+        message: `Editor groups exceed the configured limit of ${MAX_EDITOR_GROUPS} groups (observed ${value.length} groups).`,
+      });
+      return z.NEVER;
+    }
+    return value;
+  },
+  z.array(WorkspaceEditorGroup).min(1),
+);
+
 export const WorkspaceUiState = z.object({
   version: z.literal(2),
   activeView: z.enum(VIEW_IDS).catch("explorer"),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
-  editorGroups: z.array(WorkspaceEditorGroup).min(1),
+  editorGroups: WorkspaceEditorGroups,
   activeEditorGroup: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS),
   // The right-hand Chats panel. Optional fields degrade independently when a
   // version-2 file is hand-edited or lacks a newer cosmetic setting.
@@ -3144,7 +3159,7 @@ export const WorkspaceUiState = z.object({
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["editorGroups"],
-      message: `Open tabs exceed the configured limit of ${MAX_OPEN_TABS} tabs.`,
+      message: `Open tabs exceed the configured limit of ${MAX_OPEN_TABS} tabs (observed ${tabCount} tabs).`,
     });
   }
   if (!groupIds.has(state.activeEditorGroup)) {
@@ -3164,7 +3179,9 @@ export const WorkspaceUiState = z.object({
 });
 export type WorkspaceUiState = z.infer<typeof WorkspaceUiState>;
 
-export const GetWorkspaceUiStateResult = WorkspaceUiState.nullable();
+// Reads preserve the bounded file's raw fields for parseUiState to repair one
+// field at a time. Writes remain strict through WorkspaceUiState above.
+export const GetWorkspaceUiStateResult = z.object({}).passthrough().nullable();
 export type GetWorkspaceUiStateResult = z.infer<typeof GetWorkspaceUiStateResult>;
 
 export const SetWorkspaceUiStatePayload = z.object({

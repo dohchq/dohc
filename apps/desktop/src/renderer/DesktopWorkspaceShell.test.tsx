@@ -852,6 +852,20 @@ describe("editor groups", () => {
 
     await userEvent.click(fileTreeRow("b.md"));
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    await waitFor(
+      () => {
+        const persisted = bridge.setWorkspaceUiState.mock.calls
+          .map(([payload]) => payload.state)
+          .find(
+            (state) =>
+              state.editorGroups.length === 2 &&
+              state.editorGroups[0]?.tabs.includes("a.md") &&
+              state.editorGroups[1]?.tabs.includes("b.md"),
+          );
+        expect(persisted?.activeEditorGroup).toBe(persisted?.editorGroups[1]?.id);
+      },
+      { timeout: 2_000 },
+    );
     fireEvent.keyDown(window, { key: "w", ctrlKey: true });
     await waitFor(() =>
       expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
@@ -3128,6 +3142,38 @@ describe("workspace shell errors", () => {
 // active row used to mark anyway — no remount/measure follows, so the stale
 // mark corrupts the NEXT open's latency measure.
 describe("file-open-start marking", () => {
+  it("focuses an already-mounted Open Editors tab without marking a file open", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "primary", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-a.md");
+    const openStartCalls = () =>
+      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+    const before = openStartCalls();
+    await user.click(
+      within(screen.getAllByTestId("open-editor-group")[0]!).getByTitle("a.md"),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("region", { name: "Editor group 1" }).dataset.active).toBe(
+        "true",
+      ),
+    );
+    expect(openStartCalls()).toBe(before);
+    mark.mockRestore();
+  });
+
   it("marks on a real open, but NOT on a no-op click on the already-active file", async () => {
     const mark = vi.spyOn(rendererMarks, "mark");
     const bridge = makeBridge(Promise.resolve(null));
@@ -3151,6 +3197,76 @@ describe("file-open-start marking", () => {
     await screen.findByTestId("tab-b.md");
     expect(openStartCalls()).toBe(2);
 
+    mark.mockRestore();
+  });
+
+  it("marks when a close hands a non-focused group to another document", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md", "b.md"], activeTab: "b.md", size: 0.5 },
+          { id: "right", tabs: ["c.md"], activeTab: "c.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-c.md");
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const before = mark.mock.calls.filter(
+      ([name]) => name === "file-open-start",
+    ).length;
+    await userEvent.click(
+      within(left).getByRole("button", { name: "Close b.md" }),
+    );
+
+    await screen.findByTestId("tab-a.md");
+    expect(
+      mark.mock.calls.filter(([name]) => name === "file-open-start"),
+    ).toHaveLength(before + 1);
+    mark.mockRestore();
+  });
+
+  it("does not mark when closing a group reveals an already-mounted neighbor", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-b.md");
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const before = mark.mock.calls.filter(
+      ([name]) => name === "file-open-start",
+    ).length;
+    await userEvent.click(
+      within(left).getByRole("button", { name: "Close a.md" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
+    );
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(
+      mark.mock.calls.filter(([name]) => name === "file-open-start"),
+    ).toHaveLength(before);
     mark.mockRestore();
   });
 });
@@ -3311,6 +3427,120 @@ describe("dirty tab close boundaries", () => {
     });
     await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+  });
+
+  it("does not close a requested tab after it moves to another group", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md", "b.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["c.md"], activeTab: "c.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-c.md");
+    await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(2));
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Draft!");
+    await within(screen.getByTestId("tab-a.md")).findByTestId("tab-dirty");
+    await user.click(
+      within(left).getByRole("button", { name: "Close editor group" }),
+    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+
+    fireEvent.contextMenu(screen.getByTestId("tab-b.md"));
+    await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(3),
+    );
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-c.md")).toBeTruthy();
+  });
+
+  it("flushes an editor again when it changes while another close-all save waits", async () => {
+    const heldSave = deferred<{ status: "written"; contentHash: string }>();
+    let firstPath: string | null = null;
+    let heldPath: string | null = null;
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.writeWorkspaceText = vi.fn(
+      async (payload: { relativePath: string }) => {
+        if (firstPath === null) {
+          firstPath = payload.relativePath;
+          return { status: "written" as const, contentHash: "b".repeat(64) };
+        }
+        if (payload.relativePath !== firstPath && heldPath === null) {
+          heldPath = payload.relativePath;
+          return heldSave.promise;
+        }
+        if (payload.relativePath === firstPath) throw new Error("disk full");
+        return { status: "written" as const, contentHash: "c".repeat(64) };
+      },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(2));
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Left draft");
+    await user.click(within(right).getByTestId("markdown-edit-toggle"));
+    await user.type(within(right).getByTestId("markdown-editor"), "Right draft");
+    await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
+
+    await user.click(screen.getByRole("button", { name: "Close all editors" }));
+    await waitFor(() => expect(heldPath).not.toBeNull());
+    await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(1));
+
+    const firstEditor = firstPath === "a.md"
+      ? within(left).getByTestId("markdown-editor")
+      : within(right).getByTestId("markdown-editor");
+    await user.type(firstEditor, " changed again");
+    await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
+
+    await act(async () => {
+      heldSave.resolve({ status: "written", contentHash: "d".repeat(64) });
+      await heldSave.promise;
+    });
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "disk full",
+    );
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(firstEditor.isConnected).toBe(true);
   });
 
   it("closes an inactive tab synchronously while the active flush is pending", async () => {

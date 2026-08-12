@@ -246,6 +246,9 @@ export function EditorTabs(props: {
   // shown on hover, draggable. Positioned imperatively (scroll fires every
   // frame; no reason to re-render the whole strip per tick).
   const thumbRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (props.tabs.length === 0) setListOpen(false);
+  }, [props.tabs.length]);
   const thumbDrag = useRef<{
     pointerId: number;
     startX: number;
