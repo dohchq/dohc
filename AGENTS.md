@@ -10,6 +10,15 @@ dohc is basically rethinking Notion, Obsidian, Google Docs, spreadsheets, Jira, 
 
 We are currently building the MVP for dohc and haven't launched with users yet.
 
+## How to use these instructions
+
+- If a rule here fights the task in front of you, say so loudly and get a
+  human sign-off before breaking it.
+- The rest of this document is meant to help you navigate the codebase and
+  make changes effectively. Think of these instructions less as "hard rules"
+  and more as "good defaults." The developer's preferences can override
+  anything here.
+
 ## Do not preserve backward compatibility
 
 We have no users yet. Optimize for the best current design, not compatibility
@@ -193,11 +202,11 @@ When external behavior is unclear, inspect source instead of guessing.
 Claude Code and Codex each scan their own directory and neither scans the
 other's, so a shared skill needs one body and two adapters:
 
-| Path | Purpose |
-| --- | --- |
-| `skills/<name>/SKILL.md` | The skill. Canonical, tool-neutral. Edit only here. |
-| `.claude/skills/<name>/SKILL.md` | Generated adapter — the root Claude Code scans |
-| `.agents/skills/<name>/SKILL.md` | Generated adapter — the root Codex scans |
+| Path                             | Purpose                                             |
+| -------------------------------- | --------------------------------------------------- |
+| `skills/<name>/SKILL.md`         | The skill. Canonical, tool-neutral. Edit only here. |
+| `.claude/skills/<name>/SKILL.md` | Generated adapter — the root Claude Code scans      |
+| `.agents/skills/<name>/SKILL.md` | Generated adapter — the root Codex scans            |
 
 Adapters are generated, never hand-edited: `pnpm skills:sync` writes them and
 `pnpm test` fails when one drifts or is missing. They carry the canonical
@@ -221,6 +230,28 @@ Deterministic software should provide the sturdy pieces: permissions, storage, s
 gate (`.github/workflows/pr-checks.yml`) is dispatch-only while we are
 pre-launch; it will be re-enabled when it makes more sense (approaching
 launch / first users). Do not "fix" the missing checks.
+
+### Mark agent-written GitHub prose
+
+When an agent publishes prose through the user's GitHub account, start the body with:
+
+> Written by `<model name>`.
+
+Replace the placeholder with the exact model name that the current harness
+provides. Do not guess the model version or variant. If no exact name is
+available, use:
+
+> Written by an AI agent (model name unavailable).
+
+Apply this rule to:
+
+- pull request and issue descriptions;
+- comments, replies, review bodies, and review summaries;
+- discussion and release descriptions; and
+- other prose that GitHub displays as written by the user.
+
+Leave one blank line after the attribution. Keep the attribution when the user
+edits or approves an agent-written draft.
 
 ### Select local gates
 
@@ -329,9 +360,9 @@ label, error, empty state, or toast — read the copy guide as well; the skill
 alone does not carry those rules.
 
 The one idea worth carrying even without it: **the register decides the
-rules.** Text a reader *executes* (an error, a button, a procedure, an agent
-instruction) gets strict STE. Text a reader *thinks about* (docs, plans) gets
-the same discipline, loosened. Text that *persuades* (the letter above, commit
+rules.** Text a reader _executes_ (an error, a button, a procedure, an agent
+instruction) gets strict STE. Text a reader _thinks about_ (docs, plans) gets
+the same discipline, loosened. Text that _persuades_ (the letter above, commit
 subjects) keeps its voice, and STE applies to it only as a slop filter.
 Flattening editorial prose into compliance-speak is a failure, not compliance.
 
