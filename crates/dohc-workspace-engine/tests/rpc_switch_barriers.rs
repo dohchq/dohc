@@ -341,7 +341,7 @@ async fn version_fence_uses_the_latest_plaintext_settlement_as_its_preimage() {
         json!({ "sessionId": session_id }),
     )
     .await;
-    assert_eq!(first_settle["markdown"], json!("v1"));
+    assert_eq!(first_settle["content"], json!("v1"));
 
     let second = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v2 "));
     call(
