@@ -366,6 +366,7 @@ export const ShowWorkbenchMenuPayload = z.object({
   context: z.enum(["tab", "editor", "status"]),
   path: PATH_STRING.optional(),
   groupId: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS).optional(),
+  canCloseEditorGroup: z.boolean().optional(),
 });
 export type ShowWorkbenchMenuPayload = z.infer<typeof ShowWorkbenchMenuPayload>;
 

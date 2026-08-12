@@ -3889,7 +3889,9 @@ function registerIpcHandlers(
         input.context === "tab"
           ? [
               item("Move into New Group", "move-tab-to-new-group"),
-              item("Close Editor Group", "close-editor-group"),
+              item("Close Editor Group", "close-editor-group", {
+                enabled: input.canCloseEditorGroup === true,
+              }),
               separator,
               item("Close Tab", "close-tab"),
               item("Close Other Tabs", "close-other-tabs"),

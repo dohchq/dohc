@@ -835,7 +835,7 @@ describe("editor groups", () => {
       .find((row) => row.dataset.path === path)!;
   }
 
-  it("moves the active tab right with Ctrl+\\ and collapses the group after its last tab closes", async () => {
+  it("creates an editor group right with Ctrl+\\ and collapses it after its last tab closes", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
@@ -8756,10 +8756,27 @@ describe("native workbench context menus", () => {
         context: "tab",
         path: "a.md",
         groupId: "primary",
+        canCloseEditorGroup: false,
       });
     });
     await waitFor(() => expect(screen.queryByTestId("tab-b.md")).toBeNull());
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+  });
+
+  it("keeps the last editor group when the native menu returns close-editor-group", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
+    );
+    bridge.showWorkbenchMenu.mockResolvedValue("close-editor-group");
+    renderShell(bridge);
+    await screen.findByTestId("tab-a.md");
+
+    fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
+
+    await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalled());
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1);
   });
 
   it("opens the native editor context menu from the inspector area", async () => {

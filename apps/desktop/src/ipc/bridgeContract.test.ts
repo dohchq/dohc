@@ -76,7 +76,7 @@ import { MAX_EDITOR_GROUP_ID_CHARS } from "../renderer/workbench/workbenchState"
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 
 describe("workbench menu IPC contract", () => {
-  it("carries an optional bounded editor group ID", () => {
+  it("carries a bounded editor group ID and the group-close capability", () => {
     const payload = {
       workspaceId: "workspace-1",
       context: "tab" as const,
@@ -84,8 +84,12 @@ describe("workbench menu IPC contract", () => {
     };
 
     expect(
-      ShowWorkbenchMenuPayload.parse({ ...payload, groupId: "primary" }),
-    ).toEqual({ ...payload, groupId: "primary" });
+      ShowWorkbenchMenuPayload.parse({
+        ...payload,
+        groupId: "primary",
+        canCloseEditorGroup: true,
+      }),
+    ).toEqual({ ...payload, groupId: "primary", canCloseEditorGroup: true });
     expect(ShowWorkbenchMenuPayload.parse(payload)).toEqual(payload);
     expect(
       ShowWorkbenchMenuPayload.safeParse({ ...payload, groupId: "" }).success,

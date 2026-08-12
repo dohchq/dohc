@@ -3306,14 +3306,13 @@ export function DesktopWorkspaceShell(props: {
 
   const closeGroupAfterFlush = useCallback(
     (groupId: string) => {
+      if (wbRef.current.editorGroups.length === 1) return;
       const group = wbRef.current.editorGroups.find(
         (candidate) => candidate.id === groupId,
       );
       if (!group) return;
       if (group.tabs.length === 0) {
-        if (wbRef.current.editorGroups.length > 1) {
-          mutateWb((state) => closeEditorGroup(state, groupId));
-        }
+        mutateWb((state) => closeEditorGroup(state, groupId));
         return;
       }
       void closeTabsAfterFlush(group.tabs.map((tab) => ({ groupId, tab })));
@@ -3376,6 +3375,9 @@ export function DesktopWorkspaceShell(props: {
           context,
           ...(path ? { path } : {}),
           ...(groupId ? { groupId } : {}),
+          ...(context === "tab"
+            ? { canCloseEditorGroup: wbRef.current.editorGroups.length > 1 }
+            : {}),
         });
         if (command) runWorkbenchMenuCommand(command, path, groupId);
       } catch (error) {
