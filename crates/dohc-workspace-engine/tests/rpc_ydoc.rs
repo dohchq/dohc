@@ -2,12 +2,14 @@
 //! transport, with real domain writes, materialization, capture, and leases.
 
 use base64::Engine as _;
-use dohc_engine_collab::Ydoc;
+use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, ensure_marker};
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
+use dohc_engine_runtime::NoFaults;
+use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
@@ -461,7 +463,7 @@ async fn default_close_settles_and_releases_a_seeded_image_scene_after_an_edit()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn deleting_a_scene_retires_only_its_owned_assets_and_restore_reseeds_them() {
+async fn deleting_a_scene_retires_only_its_owned_assets_and_rollback_restores_them() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let image_bytes = valid_png_with_text_padding(2048);
@@ -489,10 +491,28 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_restore_reseeds_them
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-scene-asset-delete", 1).await;
+    call(&transport, &handle, 2, "capture.flush", json!({})).await;
+    let deleted_object_id = dohc_engine_domain::derive_capture_object_id(
+        "ws-scene-asset-delete",
+        "main",
+        "drawings/delete.excalidraw",
+    );
+    let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 2)
+        .expect("open marker store");
+    ensure_marker(
+        &mut store,
+        &DocKey::new("ws-scene-asset-delete", "main", &deleted_object_id).expect("drawing key"),
+        ContentKind::Scene,
+        Regime::Replicated,
+        &NoFaults,
+        2,
+    )
+    .expect("ensure replicated drawing marker");
+    drop(store);
     let deleted_drawing = call(
         &transport,
         &handle,
-        2,
+        3,
         "ydoc.open",
         json!({ "versionId": "main", "path": "drawings/delete.excalidraw",
             "contentKind": "scene", "seedFromArtifact": true }),
@@ -505,7 +525,7 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_restore_reseeds_them
     call(
         &transport,
         &handle,
-        3,
+        4,
         "ydoc.close",
         json!({ "sessionId": deleted_drawing["sessionId"] }),
     )
@@ -513,7 +533,7 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_restore_reseeds_them
     let kept_drawing = call(
         &transport,
         &handle,
-        4,
+        5,
         "ydoc.open",
         json!({ "versionId": "main", "path": "drawings/keep.excalidraw",
             "contentKind": "scene", "seedFromArtifact": true }),
@@ -526,7 +546,7 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_restore_reseeds_them
     call(
         &transport,
         &handle,
-        5,
+        6,
         "ydoc.close",
         json!({ "sessionId": kept_drawing["sessionId"] }),
     )
@@ -539,7 +559,7 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_restore_reseeds_them
     call(
         &transport,
         &handle,
-        6,
+        7,
         "versionedBinary.write",
         json!({ "versionId": "main", "path": adjacent_path,
             "bytes": adjacent_bytes, "origin": "api" }),
@@ -549,7 +569,7 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_restore_reseeds_them
     let deleted = call(
         &transport,
         &handle,
-        7,
+        8,
         "versionedText.delete",
         json!({ "versionId": "main", "path": "drawings/delete.excalidraw",
             "origin": "api", "requestId": "delete-drawing-assets" }),
@@ -567,15 +587,15 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_restore_reseeds_them
     std::fs::remove_file(scratch.path().join("drawings/delete.excalidraw"))
         .expect("simulate the desktop trash move");
 
-    call(&transport, &handle, 8, "workspace.close", json!({})).await;
+    call(&transport, &handle, 9, "workspace.close", json!({})).await;
     drop(transport);
     let restarted = InProcessTransport::new(Arc::new(EngineService::new()));
-    let restarted_handle = open_workspace(&restarted, &scratch, "ws-scene-asset-delete", 9).await;
+    let restarted_handle = open_workspace(&restarted, &scratch, "ws-scene-asset-delete", 10).await;
     assert!(!scratch.path().join(&deleted_asset).exists());
     call(
         &restarted,
         &restarted_handle,
-        10,
+        11,
         "versionedText.rollback",
         json!({ "versionId": "main", "path": "drawings/delete.excalidraw",
             "mutationMomentId": deleted["moment"]["momentId"], "origin": "restore" }),
@@ -584,23 +604,152 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_restore_reseeds_them
     let restored = call(
         &restarted,
         &restarted_handle,
-        11,
+        12,
         "ydoc.open",
         json!({ "versionId": "main", "path": "drawings/delete.excalidraw",
-            "contentKind": "scene", "seedFromArtifact": true }),
+            "contentKind": "scene", "seedFromArtifact": false }),
     )
     .await;
+    assert_eq!(restored["lineage"], json!("existing"));
     assert_eq!(restored["artifactAssets"][0]["ref"], json!(deleted_asset));
     assert_eq!(
         std::fs::read(scratch.path().join(&deleted_asset)).expect("restored asset"),
         image_bytes
     );
+    assert_eq!(
+        std::fs::read(scratch.path().join(&kept_asset)).expect("sibling asset after restore"),
+        image_bytes
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join(&adjacent_path))
+            .expect("adjacent user asset after restore"),
+        adjacent_bytes
+    );
     call(
         &restarted,
         &restarted_handle,
-        12,
+        13,
         "ydoc.evict",
         json!({ "sessionId": restored["sessionId"] }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_delete_rollback_stays_closed_over_foreign_disk_bytes_then_recovers() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let image_bytes = valid_png_with_text_padding(2048);
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{ "id": "image", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": "file" }],
+        "appState": {},
+        "files": { "file": { "id": "file", "mimeType": "image/png", "created": 1,
+            "dataURL": format!("data:image/png;base64,{image_base64}") } }
+    }))
+    .expect("portable scene");
+    const WORKSPACE: &str = "ws-scene-rollback-conflict";
+    const PATH: &str = "drawings/conflict.excalidraw";
+    write_file(scratch.path(), PATH, artifact.as_bytes());
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, WORKSPACE, 1).await;
+    call(&transport, &handle, 2, "capture.flush", json!({})).await;
+    let object_id = dohc_engine_domain::derive_capture_object_id(WORKSPACE, "main", PATH);
+    let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 2)
+        .expect("open marker store");
+    ensure_marker(
+        &mut store,
+        &DocKey::new(WORKSPACE, "main", &object_id).expect("drawing key"),
+        ContentKind::Scene,
+        Regime::Replicated,
+        &NoFaults,
+        2,
+    )
+    .expect("ensure replicated drawing marker");
+    drop(store);
+    let opened = call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "scene",
+            "seedFromArtifact": true }),
+    )
+    .await;
+    let asset_path = opened["artifactAssets"][0]["ref"]
+        .as_str()
+        .expect("asset ref")
+        .to_owned();
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+
+    let foreign_bytes = b"foreign disk occupant";
+    std::fs::write(scratch.path().join(&asset_path), foreign_bytes).expect("replace sidecar");
+    let deleted = call(
+        &transport,
+        &handle,
+        5,
+        "versionedText.delete",
+        json!({ "versionId": "main", "path": PATH, "origin": "api",
+            "requestId": "delete-conflicted-scene" }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        6,
+        "versionedText.rollback",
+        json!({ "versionId": "main", "path": PATH,
+            "mutationMomentId": deleted["moment"]["momentId"], "origin": "restore" }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(scratch.path().join(&asset_path)).expect("foreign bytes survive"),
+        foreign_bytes,
+        "rollback must not overwrite an unrelated disk occupant"
+    );
+    let blocked = call_error(
+        &transport,
+        &handle,
+        7,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "scene",
+            "seedFromArtifact": false }),
+    )
+    .await;
+    assert_eq!(blocked.code, ErrorCode::Internal, "{blocked:?}");
+    assert_eq!(blocked.message, "ydoc-artifact-assets-invalid");
+
+    std::fs::remove_file(scratch.path().join(&asset_path)).expect("resolve disk conflict");
+    let reopened = call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "scene",
+            "seedFromArtifact": false }),
+    )
+    .await;
+    assert_eq!(reopened["lineage"], json!("existing"));
+    assert_eq!(
+        std::fs::read(scratch.path().join(&asset_path)).expect("recovered sidecar"),
+        image_bytes
+    );
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.evict",
+        json!({ "sessionId": reopened["sessionId"] }),
     )
     .await;
 }
@@ -740,7 +889,7 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
     )
     .await;
     assert_eq!(inherited["sha256"], opened["artifactAssets"][0]["sha256"]);
-    call(
+    let deleted = call(
         &transport,
         &handle,
         6,
@@ -761,7 +910,54 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
         Value::Null
     );
     assert_eq!(
-        std::fs::read(scratch.path().join(asset_path)).expect("active main asset"),
+        std::fs::read(scratch.path().join(&asset_path)).expect("active main asset"),
+        image_bytes
+    );
+    call(
+        &transport,
+        &handle,
+        8,
+        "versionedText.rollback",
+        json!({ "versionId": feature, "path": "drawings/forked.excalidraw",
+            "mutationMomentId": deleted["moment"]["momentId"], "origin": "restore" }),
+    )
+    .await;
+    let restored = call(
+        &transport,
+        &handle,
+        9,
+        "versionedBinary.read",
+        json!({ "versionId": feature, "path": asset_path }),
+    )
+    .await;
+    assert_eq!(restored["sha256"], opened["artifactAssets"][0]["sha256"]);
+    let pending_restore_jobs: i64 =
+        EngineStore::open(&scratch.engine_db_path().expect("engine database"), 10)
+            .expect("open job store")
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id = ?1 \
+             AND target_path = ?2 AND operation = 'write' AND status = 'pending' \
+             AND job_id LIKE 'moment-scene-asset-rollback-%'",
+                    rusqlite::params![workspace_id, asset_path],
+                    |row| row.get(0),
+                )
+            })
+            .expect("count inactive restore jobs");
+    assert_eq!(
+        pending_restore_jobs, 0,
+        "an inactive asset restore must stay database-only until activation"
+    );
+    call(
+        &transport,
+        &handle,
+        10,
+        "versions.setActive",
+        json!({ "workspaceId": workspace_id, "versionId": feature }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(scratch.path().join(&asset_path)).expect("activated feature asset"),
         image_bytes
     );
 }

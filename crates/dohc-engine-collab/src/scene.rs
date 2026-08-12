@@ -158,25 +158,42 @@ impl FoldedScene {
     }
 }
 
+const SCENE_ASSET_FORMATS: [(&str, &str); 10] = [
+    ("image/svg+xml", "svg"),
+    ("image/png", "png"),
+    ("image/jpeg", "jpg"),
+    ("image/gif", "gif"),
+    ("image/webp", "webp"),
+    ("image/bmp", "bmp"),
+    ("image/x-icon", "ico"),
+    ("image/avif", "avif"),
+    ("image/jfif", "jfif"),
+    ("application/octet-stream", "bin"),
+];
+
 pub fn scene_asset_extension(mime_type: &str) -> Result<&'static str, SceneImportError> {
     // BinaryFileData's validated MIME owns the native dataURL and canonical
     // extension; SHA-256 authenticates the exact bytes. The engine does not
     // sniff or transform provider-owned image formats.
-    match mime_type {
-        "image/svg+xml" => Ok("svg"),
-        "image/png" => Ok("png"),
-        "image/jpeg" => Ok("jpg"),
-        "image/gif" => Ok("gif"),
-        "image/webp" => Ok("webp"),
-        "image/bmp" => Ok("bmp"),
-        "image/x-icon" => Ok("ico"),
-        "image/avif" => Ok("avif"),
-        "image/jfif" => Ok("jfif"),
-        "application/octet-stream" => Ok("bin"),
-        _ => Err(SceneImportError::Invalid {
+    SCENE_ASSET_FORMATS
+        .iter()
+        .find_map(|(mime, extension)| (*mime == mime_type).then_some(*extension))
+        .ok_or(SceneImportError::Invalid {
             reason: "an Excalidraw asset has an unsupported MIME type",
-        }),
-    }
+        })
+}
+
+pub fn scene_asset_ref_is_owned(owner_directory: &str, path: &str, sha256: &str) -> bool {
+    let Some(file_name) = path
+        .strip_prefix(owner_directory)
+        .and_then(|tail| tail.strip_prefix('/'))
+    else {
+        return false;
+    };
+    !file_name.contains('/')
+        && SCENE_ASSET_FORMATS
+            .iter()
+            .any(|(_, extension)| file_name == format!("{sha256}.{extension}"))
 }
 
 pub fn scene_asset_ref(
@@ -1843,6 +1860,13 @@ mod tests {
         assert_eq!(parts[2].len(), 64);
         assert!(parts[2].bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(parts[3], format!("{sha}.png"));
+        let owner_directory = asset_ref.rsplit_once('/').expect("owner directory").0;
+        assert!(scene_asset_ref_is_owned(owner_directory, &asset_ref, &sha));
+        assert!(!scene_asset_ref_is_owned(
+            owner_directory,
+            &format!("{owner_directory}/{sha}.txt"),
+            &sha
+        ));
         assert_eq!(
             asset_ref,
             scene_asset_ref(

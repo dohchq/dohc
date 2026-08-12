@@ -9145,7 +9145,8 @@ fn validate_scene_artifact_assets_on_store(
                 .prepare(
                     "SELECT job_id,status FROM materialization_jobs \
                      WHERE workspace_id = ?1 AND target_path = ?2 \
-                       AND content_sha256 = ?3 AND status != 'complete' \
+                       AND content_sha256 = ?3 AND operation = 'write' \
+                       AND status != 'complete' \
                      ORDER BY job_id",
                 )
                 .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
@@ -10978,10 +10979,9 @@ fn delete_owned_scene_assets_in_tx(
     }
     let mut jobs = Vec::new();
     for (path, sha256) in candidates {
-        if !owner_directories
-            .iter()
-            .any(|directory| is_owned_scene_asset_path(directory, &path, &sha256))
-        {
+        if !owner_directories.iter().any(|directory| {
+            dohc_engine_collab::scene_asset_ref_is_owned(directory, &path, &sha256)
+        }) {
             continue;
         }
         let identity = format!(
@@ -11067,23 +11067,6 @@ fn scene_asset_delete_jobs_in_tx(
     })
 }
 
-fn is_owned_scene_asset_path(owner_directory: &str, path: &str, sha256: &str) -> bool {
-    let Some(file_name) = path
-        .strip_prefix(owner_directory)
-        .and_then(|tail| tail.strip_prefix('/'))
-    else {
-        return false;
-    };
-    if file_name.contains('/') {
-        return false;
-    }
-    [
-        "svg", "png", "jpg", "gif", "webp", "bmp", "ico", "avif", "jfif", "bin",
-    ]
-    .iter()
-    .any(|extension| file_name == format!("{sha256}.{extension}"))
-}
-
 fn materialize_scene_asset_deletes(
     store: &EngineStore,
     root_dir: &std::path::Path,
@@ -11151,15 +11134,18 @@ fn versioned_text_rollback_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    let mut restored_asset_jobs = Vec::new();
     let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
         input,
         faults,
         |tx, object_id, restored_text, compensating_moment_id| {
-            cancel_pending_scene_asset_deletes(
+            restored_asset_jobs = restore_deleted_scene_assets_in_tx(
                 tx,
                 &input.workspace_id,
                 &input.version_id,
                 &input.mutation_moment_id,
+                compensating_moment_id,
+                input.author_json.as_deref(),
             )?;
             delete_file_search_index(tx, &input.workspace_id, &input.version_id, object_id)
                 .map_err(search_domain)?;
@@ -11179,6 +11165,28 @@ fn versioned_text_rollback_on_store(
             Ok(())
         },
     )?;
+    if deduped && restored_asset_jobs.is_empty() {
+        restored_asset_jobs = match restored_scene_asset_jobs_on_store(
+            store,
+            &input.workspace_id,
+            &input.version_id,
+            &input.path,
+        ) {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                eprintln!(
+                    "engine: rollback committed but loading its drawing asset restore jobs failed: \
+                     {error}"
+                );
+                return Ok(RollbackExecutionResult {
+                    deduped,
+                    materialize_enqueued: true,
+                    materialized: false,
+                    materialize_outcome: PostCommitMaterializeOutcome::Error,
+                });
+            }
+        };
+    }
     let job_id = binary_rollback_job_identity(
         &input.workspace_id,
         &input.version_id,
@@ -11300,17 +11308,39 @@ fn versioned_text_rollback_on_store(
         }
         return Ok(RollbackExecutionResult {
             deduped,
-            materialize_enqueued: has_jobs,
+            materialize_enqueued: has_jobs || !restored_asset_jobs.is_empty(),
             materialized: false,
             materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+    let asset_materialize_outcome = materialize_restored_scene_assets(
+        store,
+        root_dir,
+        &input.workspace_id,
+        &restored_asset_jobs,
+        self_writes,
+        faults,
+    );
+    if asset_materialize_outcome != PostCommitMaterializeOutcome::Applied
+        && !restored_asset_jobs.is_empty()
+    {
+        return Ok(RollbackExecutionResult {
+            deduped,
+            materialize_enqueued: true,
+            materialized: false,
+            materialize_outcome: asset_materialize_outcome,
         });
     }
     if !has_jobs {
         return Ok(RollbackExecutionResult {
             deduped,
-            materialize_enqueued: false,
-            materialized: false,
-            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            materialize_enqueued: !restored_asset_jobs.is_empty(),
+            materialized: !restored_asset_jobs.is_empty(),
+            materialize_outcome: if restored_asset_jobs.is_empty() {
+                PostCommitMaterializeOutcome::Skipped
+            } else {
+                PostCommitMaterializeOutcome::Applied
+            },
         });
     }
 
@@ -11434,25 +11464,171 @@ fn versioned_text_rollback_on_store(
     })
 }
 
-fn cancel_pending_scene_asset_deletes(
+fn restore_deleted_scene_assets_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     version_id: &str,
     drawing_delete_moment_id: &str,
-) -> Result<(), DomainError> {
-    tx.execute(
-        "UPDATE materialization_jobs SET status = 'cancelled', completed_at_ms = ( \
-             SELECT recorded_at_ms FROM moments WHERE workspace_id = ?1 AND moment_id = ?3 \
-         ) WHERE status = 'pending' AND operation = 'delete' AND workspace_id = ?1 \
-         AND job_id IN (SELECT 'binary-delete-mat_' || moment_id FROM moments \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND operation = 'delete' \
-             AND before_content_kind = 'binary' AND metadata_origin = 'ydoc' \
-             AND metadata_summary = 'Deleted drawing asset' \
-             AND metadata_correlation_id = ?3)",
-        params![workspace_id, version_id, drawing_delete_moment_id],
-    )
-    .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
-    Ok(())
+    drawing_rollback_moment_id: &str,
+    author_json: Option<&str>,
+) -> Result<Vec<String>, DomainError> {
+    let deleted_assets: Vec<(String, String, String, i64)> = {
+        let mut statement = tx
+            .prepare(
+                "SELECT moment_id,path,before_binary_sha256,recorded_at_ms \
+                 FROM moments WHERE workspace_id = ?1 AND version_id = ?2 \
+                   AND operation = 'delete' AND before_content_kind = 'binary' \
+                   AND metadata_origin = 'ydoc' AND metadata_summary = 'Deleted drawing asset' \
+                   AND metadata_correlation_id = ?3 ORDER BY moment_order",
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        let rows = statement
+            .query_map(
+                params![workspace_id, version_id, drawing_delete_moment_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?
+    };
+    let mut jobs = Vec::with_capacity(deleted_assets.len());
+    for (delete_moment_id, path, sha256, recorded_at_ms) in deleted_assets {
+        let occupied: bool = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM path_aliases \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3)",
+                params![workspace_id, version_id, path],
+                |row| row.get(0),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        if occupied {
+            return Err(DomainError::TargetPathExists);
+        }
+        let identity = format!(
+            "{workspace_id}\0{version_id}\0{drawing_rollback_moment_id}\0{delete_moment_id}"
+        );
+        let restore_moment_id = format!(
+            "moment-scene-asset-rollback-{}",
+            hex_sha256(identity.as_bytes())
+        );
+        // The retained delete moment owns the old object id. The compensating
+        // head needs a new stable id because object ids are globally unique.
+        let restore_object_id = format!(
+            "scene-asset-rollback-object-{}",
+            hex_sha256(format!("{identity}\0{path}").as_bytes())
+        );
+        dohc_engine_domain::write_binary_file_in_tx(
+            tx,
+            &dohc_engine_domain::WriteBinaryFile {
+                workspace_id: workspace_id.to_owned(),
+                version_id: version_id.to_owned(),
+                object_id: restore_object_id,
+                path: path.clone(),
+                binary_sha256: sha256.clone(),
+                moment_id: restore_moment_id.clone(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: Some("Restored drawing asset".to_owned()),
+                metadata_correlation_id: Some(drawing_rollback_moment_id.to_owned()),
+                author_json: author_json.map(str::to_owned),
+                materialize: Some(Preimage::Absent),
+                now_ms: recorded_at_ms,
+            },
+        )?;
+        tx.execute(
+            "DELETE FROM materialization_jobs WHERE job_id = ?1 AND operation = 'delete' \
+             AND workspace_id = ?2 AND target_path = ?3 AND content_sha256 = ?4 \
+             AND status = 'pending'",
+            params![
+                binary_delete_job_id(&delete_moment_id),
+                workspace_id,
+                path,
+                sha256
+            ],
+        )
+        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+        journal_moment_outbound_in_tx(tx, workspace_id, &restore_moment_id, false)?;
+        let materializes: bool = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM materialization_jobs WHERE job_id = ?1)",
+                [&restore_moment_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        if materializes {
+            jobs.push(restore_moment_id);
+        }
+    }
+    Ok(jobs)
+}
+
+fn materialize_restored_scene_assets(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    job_ids: &[String],
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+) -> PostCommitMaterializeOutcome {
+    let mut outcome = PostCommitMaterializeOutcome::Applied;
+    for job_id in job_ids {
+        let Some(job) = store.load_materialization_job(job_id).ok().flatten() else {
+            return PostCommitMaterializeOutcome::Error;
+        };
+        let current = match job.status {
+            JobStatus::Complete => PostCommitMaterializeOutcome::Applied,
+            JobStatus::Pending => {
+                materialize_pending_job(
+                    store,
+                    root_dir,
+                    workspace_id,
+                    &job,
+                    self_writes,
+                    job.created_at_ms,
+                    faults,
+                )
+                .1
+            }
+            JobStatus::Conflict | JobStatus::Cancelled => PostCommitMaterializeOutcome::Conflict,
+        };
+        if current != PostCommitMaterializeOutcome::Applied {
+            outcome = current;
+        }
+    }
+    outcome
+}
+
+fn restored_scene_asset_jobs_on_store(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    drawing_path: &str,
+) -> Result<Vec<String>, DomainError> {
+    store.read_with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT j.job_id FROM path_aliases a JOIN snapshots s \
+                 ON s.workspace_id = a.workspace_id AND s.version_id = a.version_id \
+                 AND s.object_id = a.object_id JOIN moments m \
+                 ON m.workspace_id = s.workspace_id \
+                 AND m.version_id = s.version_id \
+                 AND m.metadata_correlation_id = s.latest_moment_id \
+                 JOIN materialization_jobs j ON j.workspace_id = m.workspace_id \
+                 AND j.job_id = m.moment_id \
+                 WHERE a.workspace_id = ?1 AND a.version_id = ?2 AND a.path = ?3 \
+                 AND m.operation = 'write' AND m.after_content_kind = 'binary' \
+                 AND m.metadata_origin = 'ydoc' \
+                 AND m.metadata_summary = 'Restored drawing asset' \
+                 AND j.operation = 'write' ORDER BY j.job_id",
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        let rows = statement
+            .query_map(params![workspace_id, version_id, drawing_path], |row| {
+                row.get(0)
+            })
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))
+    })
 }
 
 fn versioned_text_merge_on_store(

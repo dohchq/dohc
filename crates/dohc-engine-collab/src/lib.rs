@@ -51,8 +51,8 @@ pub use replication::{
 };
 pub use scene::{
     encode_scene_asset_records, fold_scene, import_portable_scene, scene_asset_directory,
-    scene_asset_extension, scene_asset_ref, FoldedScene, ImportedScene, ImportedSceneFile,
-    SceneAsset, SceneImportError,
+    scene_asset_extension, scene_asset_ref, scene_asset_ref_is_owned, FoldedScene, ImportedScene,
+    ImportedSceneFile, SceneAsset, SceneImportError,
 };
 pub use ydoc::{
     merge_updates, ContentKind, OffsetMode, Projection, Ydoc, ROOT_BODY, ROOT_FRONTMATTER,

@@ -22,6 +22,12 @@ use std::sync::Arc;
 
 struct NoRecorder;
 
+const ONE_PIXEL_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0,
+    0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15, 0, 1, 5, 1, 1,
+    39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
 impl SelfWriteRecorder for NoRecorder {
     fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
     fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
@@ -1924,7 +1930,7 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
     drop(source_store);
 
     let actor = supervisor.open(&source_db, 4).expect("reopen actor").actor;
-    let bytes = b"scene-owned-image".to_vec();
+    let bytes = ONE_PIXEL_PNG.to_vec();
     let sha256 = hex_sha256(&bytes);
     let asset_path = scene_asset_ref(
         workspace_id,
@@ -2005,6 +2011,74 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
         })
         .expect("count peer snapshots");
     assert_eq!(remaining, 0, "peer retained the drawing or its owned asset");
+
+    drop(peer_store);
+    let actor = supervisor.open(&source_db, 8).expect("reopen source").actor;
+    actor
+        .versioned_text_rollback(
+            RollbackTextFileMutation {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                path: "drawings/board.excalidraw".to_owned(),
+                mutation_moment_id: "drawing-delete".to_owned(),
+                request_id: None,
+                legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
+            },
+            source.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rollback drawing delete");
+    supervisor.close(&source_db).expect("close restored source");
+
+    let restored_ops = local_ops(&source_db);
+    assert_eq!(restored_ops.len(), 6);
+    let source_store = EngineStore::open(&source_db, 9).expect("reopen source store");
+    let mut peer_store = EngineStore::open(&peer_db, 10).expect("reopen peer store");
+    for op in &restored_ops[ops.len()..] {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    let restored: i64 = peer_store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("count restored peer snapshots");
+    assert_eq!(restored, 2, "peer did not restore the drawing and asset");
+    let restored_asset = VersionedTextStore::new(&mut peer_store)
+        .read_binary(workspace_id, "main", &asset_path)
+        .expect("read restored peer asset")
+        .expect("restored peer asset head");
+    assert_eq!(restored_asset.bytes, ONE_PIXEL_PNG);
+    let delete_and_restore_moments: Vec<(String, String)> = peer_store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT operation,metadata_summary FROM moments WHERE workspace_id = ?1 \
+                 AND path = ?2 ORDER BY moment_order",
+            )?;
+            statement
+                .query_map(params![workspace_id, asset_path], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("read asset provenance");
+    assert_eq!(
+        delete_and_restore_moments,
+        vec![
+            ("write".to_owned(), "Imported drawing asset".to_owned()),
+            ("delete".to_owned(), "Deleted drawing asset".to_owned()),
+            ("write".to_owned(), "Restored drawing asset".to_owned()),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -2045,7 +2119,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
     .expect("scene marker");
     drop(store);
     let actor = supervisor.open(&db, 4).expect("reopen actor").actor;
-    let bytes = b"rollback-scene-asset".to_vec();
+    let bytes = ONE_PIXEL_PNG.to_vec();
     let asset_path = scene_asset_ref(
         workspace_id,
         "main",
@@ -2139,25 +2213,39 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         std::fs::read(scratch.path().join(&asset_path)).expect("asset pending"),
         bytes
     );
-    actor
+    let rollback = RollbackTextFileMutation {
+        workspace_id: workspace_id.to_owned(),
+        version_id: "main".to_owned(),
+        path: "drawings/rollback.excalidraw".to_owned(),
+        mutation_moment_id: drawing_delete.moment.moment_id,
+        request_id: Some("rollback-scene-delete".to_owned()),
+        legacy_before_text: None,
+        metadata_origin: "restore".to_owned(),
+        author_json: None,
+    };
+    let committed = actor
         .versioned_text_rollback(
-            RollbackTextFileMutation {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                path: "drawings/rollback.excalidraw".to_owned(),
-                mutation_moment_id: drawing_delete.moment.moment_id,
-                request_id: None,
-                legacy_before_text: None,
-                metadata_origin: "restore".to_owned(),
-                author_json: None,
-            },
+            rollback.clone(),
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("commit drawing delete rollback");
+    assert!(!committed.materialized);
+    let retried = actor
+        .versioned_text_rollback(
+            rollback,
             scratch.path().to_path_buf(),
             Arc::new(NoRecorder),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
         .await
-        .expect("rollback drawing delete");
+        .expect("retry committed drawing delete rollback");
+    assert!(retried.deduped);
+    assert!(retried.materialized);
     supervisor.close(&db).expect("close before replay");
     let restarted = WorkspaceSupervisor::new();
     let actor = restarted.open(&db, 10).expect("restart actor").actor;
@@ -2166,9 +2254,27 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .await
         .expect("replay pending");
     assert_eq!(
-        std::fs::read(scratch.path().join(asset_path)).expect("asset preserved"),
+        std::fs::read(scratch.path().join(&asset_path)).expect("asset preserved"),
         bytes
     );
+    restarted.close(&db).expect("close restarted actor");
+    let mut store = EngineStore::open(&db, 11).expect("open restored store");
+    let restored = VersionedTextStore::new(&mut store)
+        .read_binary(workspace_id, "main", &asset_path)
+        .expect("read restored asset")
+        .expect("restored asset head");
+    assert_eq!(restored.bytes, bytes);
+    let provenance_count: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 AND path = ?2 \
+                 AND metadata_summary IN ('Deleted drawing asset','Restored drawing asset')",
+                params![workspace_id, asset_path],
+                |row| row.get(0),
+            )
+        })
+        .expect("read asset provenance");
+    assert_eq!(provenance_count, 2);
 }
 
 #[tokio::test]
