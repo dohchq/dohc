@@ -47,7 +47,7 @@ function apply(doc: Y.Doc, elements: readonly unknown[]) {
       scrollX: 400,
     },
     files: {},
-    remoteEchoes: new Map(),
+    remoteEchoes: new Set(),
   });
 }
 
@@ -80,7 +80,7 @@ describe("Excalidraw scene adapter", () => {
     const doc = new Y.Doc();
     const remote = rectangle(2, 7, 30);
     insertElementRevision(doc, remote);
-    const echoes = new Map<string, string>();
+    const echoes = new Set<string>();
     rememberRemoteScene(sceneForCanvas(doc).elements, echoes);
     const before = Y.encodeStateVector(doc);
 
@@ -94,6 +94,62 @@ describe("Excalidraw scene adapter", () => {
 
     expect(result.changed).toBe(false);
     expect(Y.encodeStateAsUpdate(doc, before)).toHaveLength(2);
+  });
+
+  it("consumes a normalized callback for the same remote revision tuple", () => {
+    const doc = new Y.Doc();
+    const sparseRemote = {
+      id: "legacy-shape",
+      type: "rectangle",
+      version: 1,
+      versionNonce: 7,
+      isDeleted: false,
+    };
+    insertElementRevision(doc, sparseRemote);
+    const echoes = new Set<string>();
+    rememberRemoteScene(sceneForCanvas(doc).elements, echoes);
+    const before = Y.encodeStateVector(doc);
+
+    // Excalidraw v0.18's restoreElementWithProperties supplies these defaults
+    // before its updateScene callback. The revision identity does not change.
+    const normalizedByExcalidraw = {
+      ...sparseRemote,
+      index: null,
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+      strokeColor: "#1b1b1f",
+    };
+    expect(() =>
+      applyCanvasSceneChange({
+        doc,
+        elements: [normalizedByExcalidraw],
+        appState: {},
+        files: {},
+        remoteEchoes: echoes,
+      }),
+    ).not.toThrow();
+
+    expect(Y.encodeStateAsUpdate(doc, before)).toHaveLength(2);
+    expect(foldScene(doc).elements).toEqual([sparseRemote]);
+
+    const localEdit = {
+      ...normalizedByExcalidraw,
+      version: 2,
+      versionNonce: 8,
+      x: 20,
+    };
+    expect(
+      applyCanvasSceneChange({
+        doc,
+        elements: [localEdit],
+        appState: {},
+        files: {},
+        remoteEchoes: echoes,
+      }),
+    ).toEqual({ changed: true, assetsRefused: false });
+    expect(foldScene(doc).elements).toEqual([localEdit]);
   });
 
   it("converges after two mirrors edit offline", () => {
@@ -118,7 +174,7 @@ describe("Excalidraw scene adapter", () => {
       files: {
         image: { dataURL: `data:image/png;base64,${secret}` },
       },
-      remoteEchoes: new Map(),
+      remoteEchoes: new Set(),
     });
 
     expect(result).toEqual({ changed: true, assetsRefused: true });
@@ -150,7 +206,7 @@ describe("Excalidraw scene adapter", () => {
       files: {
         image: { dataURL: `data:image/png;base64,${secret}` },
       },
-      remoteEchoes: new Map(),
+      remoteEchoes: new Set(),
       hydratedFileIds: new Set(["image"]),
     });
 

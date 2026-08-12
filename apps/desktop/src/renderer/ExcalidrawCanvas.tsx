@@ -78,7 +78,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   const mountedRef = useRef(false);
   const [readyApi, setReadyApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [presenceBound, setPresenceBound] = useState(false);
-  const remoteEchoes = useRef<SceneRemoteEchoes>(new Map());
+  const remoteEchoes = useRef<SceneRemoteEchoes>(new Set());
   const hydratedFileIds = useRef<Set<string>>(new Set());
   const presenceBinding = useRef<ExcalidrawPresenceBinding | null>(null);
   const boundSceneDoc = useRef(props.sceneDoc);

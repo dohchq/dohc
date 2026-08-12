@@ -15,7 +15,12 @@ export const LOCAL_EXCALIDRAW_ORIGIN: unique symbol = Symbol(
   "dohc.localExcalidrawChange",
 );
 
-export type SceneRemoteEchoes = Map<string, string>;
+// Excalidraw restores legacy/sparse elements before it calls `onChange`.
+// Consequently, the callback for a remote revision can contain normalized
+// JSON even though it still carries the same immutable revision identity.
+// Consume that identity once; a real local edit always bumps the version and
+// nonce, so it cannot be mistaken for the remote callback.
+export type SceneRemoteEchoes = Set<string>;
 
 export function sceneForCanvas(doc: Y.Doc): {
   elements: ElementSnapshot[];
@@ -31,10 +36,7 @@ export function rememberRemoteScene(
 ): void {
   echoes.clear();
   for (const element of elements) {
-    echoes.set(
-      revisionKey(element.id, element.version, element.versionNonce),
-      stableJson(element),
-    );
+    echoes.add(revisionKey(element.id, element.version, element.versionNonce));
   }
 }
 
@@ -72,7 +74,7 @@ export function applyCanvasSceneChange(input: {
         element.versionNonce,
       );
       const encoded = stableJson(element);
-      if (input.remoteEchoes.get(key) === encoded) {
+      if (input.remoteEchoes.has(key)) {
         input.remoteEchoes.delete(key);
         continue;
       }

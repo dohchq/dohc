@@ -389,6 +389,33 @@ describe("FileInspector Excalidraw view", () => {
     });
   });
 
+  it.each([
+    [
+      "a null element",
+      '{"type":"excalidraw","elements":[null],"appState":{},"files":{}}',
+      "The drawing has an invalid element.",
+    ],
+    [
+      "a null active tool",
+      '{"type":"excalidraw","elements":[],"appState":{"activeTool":null},"files":{}}',
+      "The drawing has an invalid active tool.",
+    ],
+  ])("contains %s before mounting Excalidraw", async (_label, text, message) => {
+    const bridge = bridgeFor(text);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="broken.excalidraw" />);
+
+    expect(
+      (await screen.findByTestId("view-drawing-error")).textContent,
+    ).toContain(message);
+    expect(screen.queryByTestId("mock-excalidraw-canvas")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open externally" }));
+    expect(bridge.openFileExternally).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "broken.excalidraw",
+    });
+  });
+
   it("does not let a late read repaint a different drawing", async () => {
     let resolveFirst!: (value: {
       text: string;
