@@ -8,13 +8,11 @@ import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
 // action logic of its own. Pure template builder so the structure is
 // unit-testable without Electron.
 //
-// registerAccelerator:false on renderer-owned shortcuts: the shell already
-// binds Ctrl+N/P/Shift+P/B in keydown handlers; the menu DISPLAYS the
-// accelerator but must not register it, or one keypress would fire twice
-// (menu command + renderer toggle = net no-op). The option is Windows/Linux
-// only — on macOS the accelerators register as key equivalents regardless,
-// which is the correct single-fire path there (the menu consumes the
-// keystroke before the renderer keydown ever sees it).
+// registerAccelerator:false on renderer-owned shortcuts lets Windows/Linux
+// display the accelerator without registering a second owner. Electron treats
+// the option as Windows/Linux-only. On macOS the same accelerator becomes the
+// native unhandled fallback: a focused editor can keep the chord with
+// preventDefault, and the menu routes only a chord the renderer did not claim.
 export function buildMenuTemplate(options: {
   isDev: boolean;
   platform: NodeJS.Platform;
@@ -27,6 +25,7 @@ export function buildMenuTemplate(options: {
   ) => void;
   showAbout: () => void;
 }): MenuItemConstructorOptions[] {
+  const isMac = options.platform === "darwin";
   const command = (
     label: string,
     name: MenuCommand,
@@ -43,7 +42,6 @@ export function buildMenuTemplate(options: {
   // macOS renders the FIRST template entry as the application menu (label
   // replaced by the app name); without an explicit appMenu role, "File"
   // would be swallowed into it and Quit/Hide/Services would be missing.
-  const isMac = options.platform === "darwin";
   const recentWorkspaces = (options.recentWorkspaces ?? []).slice(0, 10);
   const recentLabel = (workspace: WorkspaceSummary): string => {
     const leaf = basename(workspace.rootPath);
@@ -78,9 +76,8 @@ export function buildMenuTemplate(options: {
         command("Export Workspace as Zip…", "export-workspace"),
         { type: "separator" },
         command("Close Tab", "close-tab", "CommandOrControl+W"),
-        // VS Code convention: Ctrl+W closes the TAB (renderer-owned above),
-        // so the close role must not keep its DEFAULT Ctrl+W accelerator —
-        // it would close the whole window on every tab close.
+        // VS Code convention: CommandOrControl+W closes the tab in the
+        // renderer. The close role uses a separate window shortcut.
         { role: "close", label: "Close Window", accelerator: "CommandOrControl+Shift+W" },
       ],
     },
@@ -100,9 +97,22 @@ export function buildMenuTemplate(options: {
       label: "View",
       submenu: [
         command("Command Palette", "command-palette", "CommandOrControl+Shift+P"),
+        {
+          ...command(
+            "Command Palette (Alternate)",
+            "command-palette",
+            "CommandOrControl+K",
+          ),
+          visible: false,
+        },
         command("Quick Open", "quick-open", "CommandOrControl+P"),
         { type: "separator" },
         command("Toggle Sidebar", "toggle-sidebar", "CommandOrControl+B"),
+        command(
+          "Toggle Chats Panel",
+          "toggle-chats",
+          "CommandOrControl+Alt+B",
+        ),
         command("Toggle Theme", "toggle-theme"),
         { type: "separator" },
         { role: "resetZoom" },

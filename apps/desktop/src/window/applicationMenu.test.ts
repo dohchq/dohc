@@ -115,12 +115,42 @@ describe("application menu template", () => {
       ["View", "Command Palette", "CommandOrControl+Shift+P"],
       ["View", "Quick Open", "CommandOrControl+P"],
       ["View", "Toggle Sidebar", "CommandOrControl+B"],
+      ["View", "Toggle Chats Panel", "CommandOrControl+Alt+B"],
       ["Go", "Settings", "CommandOrControl+,"],
     ] as const) {
       const item = items(template, menu).find((i) => i.label === label);
       expect(item?.accelerator, label).toBe(accelerator);
       expect(item?.registerAccelerator, label).toBe(false);
     }
+  });
+
+  it("routes Toggle Chats through the native application menu", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    const fakeWindow = { id: 6 };
+    const toggleChats = items(template, "View").find(
+      (entry) => entry.label === "Toggle Chats Panel",
+    );
+    (toggleChats?.click as (a: unknown, b: unknown) => void)(
+      undefined,
+      fakeWindow,
+    );
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "toggle-chats");
+  });
+
+  it("keeps a hidden CommandOrControl+K command-palette alias active", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    const alias = items(template, "View").find(
+      (entry) => entry.label === "Command Palette (Alternate)",
+    );
+
+    expect(alias).toMatchObject({
+      accelerator: "CommandOrControl+K",
+      visible: false,
+    });
+
+    const fakeWindow = { id: 7 };
+    (alias?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "command-palette");
   });
 
   it("Edit menu is pure clipboard roles so copy/paste works everywhere", () => {
@@ -136,9 +166,9 @@ describe("application menu template", () => {
     ]);
   });
 
-  it("Ctrl+W belongs to Close Tab; Close Window moved to Ctrl+Shift+W", () => {
-    // The close ROLE's default accelerator is Ctrl+W — left in place it would
-    // close the window on every tab close.
+  it("keeps separate CommandOrControl shortcuts for Close Tab and Close Window", () => {
+    // The close role defaults to CommandOrControl+W. That shortcut belongs to
+    // Close Tab, so Close Window must use a different accelerator.
     const { template } = build();
     const closeWindow = items(template, "File").find((i) => i.role === "close");
     expect(closeWindow?.accelerator).toBe("CommandOrControl+Shift+W");
