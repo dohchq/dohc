@@ -61,7 +61,6 @@ export default defineConfig({
     build: {
       target: electronRendererTarget,
       outDir: "dist/renderer",
-      rollupOptions: { input: "src/renderer/index.html" },
     },
   },
 });

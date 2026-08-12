@@ -297,6 +297,7 @@ import { buildMenuTemplate } from "./window/applicationMenu";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
   allowSitePreviewOrigin,
+  createMainWindow,
   navigationPolicy,
   rememberChromeTheme,
   titleBarOverlayOptions,
@@ -2982,7 +2983,6 @@ async function showOrCreateMainWindow(): Promise<void> {
     existing.focus();
     return;
   }
-  const { createMainWindow } = await import("./window/createMainWindow");
   const window = trackWorkspaceWindow(
     createMainWindow({ beforeRendererReload: prepareForRendererReload }),
   );
@@ -8926,7 +8926,6 @@ if (!app.requestSingleInstanceLock()) {
     const initialActivatedWorkspace = pendingWorkspace ?? launchWorkspace;
     refreshNativeWorkspaceSurfaces();
 
-    const { createMainWindow } = await import("./window/createMainWindow");
     // A path the handlers queued during the bootstrap is a later intent than the
     // launch arguments, so it wins. Drain before the window exists: creating it
     // starts the load, so a listener registered after any further await can miss
