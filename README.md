@@ -20,14 +20,14 @@ tools                  repository gates and Rust engine evidence tools
 
 ## Local development
 
-Install the JavaScript dependencies and build the development engine once:
+Install the JavaScript dependencies and start the desktop app:
 
 ```bash
 pnpm install
-cargo build -p dohc-workspace-engine --bin dohc-workspace-engine
 pnpm dev:desktop
 ```
 
+The dev command builds the current Rust workspace engine before Electron starts.
 The desktop app does not need a server or environment file.
 
 ## Opt-in sync services

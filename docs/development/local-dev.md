@@ -11,12 +11,11 @@
 
 ```bash
 pnpm install
-cargo build -p dohc-workspace-engine --bin dohc-workspace-engine
 pnpm dev:desktop
 ```
 
-The desktop app uses `target/debug/dohc-workspace-engine` during development.
-It does not need a server or environment file.
+The dev command builds `target/debug/dohc-workspace-engine` before Electron starts.
+The desktop app does not need a server or environment file.
 
 ## Sync stack
 

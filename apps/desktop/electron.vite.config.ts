@@ -1,6 +1,7 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import { resolve } from "node:path";
 
 // Electron 42 ships Chromium 148 and Node 24.15. electron-vite 5.0.0
 // currently only maps Electron targets through major 39, so keep these
@@ -61,7 +62,9 @@ export default defineConfig({
     build: {
       target: electronRendererTarget,
       outDir: "dist/renderer",
-      rollupOptions: { input: "src/renderer/index.html" },
+      rollupOptions: {
+        input: resolve(import.meta.dirname, "src/renderer/index.html"),
+      },
     },
   },
 });
