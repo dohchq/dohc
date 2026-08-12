@@ -67,8 +67,8 @@ use dohc_engine_domain::{
     enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_secret_moment_keyless,
     has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
     list_secret_files_keyless_page, list_secret_moments_page_keyless,
-    restore_secret_file_verbatim_with_metadata_and_after, secret_file_len_keyless,
-    select_snapshot_by_path_in_tx, validate_addressable_plaintext_path,
+    restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
+    secret_file_len_keyless, select_snapshot_by_path_in_tx, validate_addressable_plaintext_path,
     validate_plaintext_storable_path, write_binary_in_tx, write_projected_text_in_tx,
     write_text_in_tx,
 };
@@ -11170,7 +11170,11 @@ fn versioned_text_rollback_on_store(
             store,
             &input.workspace_id,
             &input.version_id,
-            &input.path,
+            &rollback_compensating_moment_id(
+                &input.workspace_id,
+                &input.version_id,
+                &input.mutation_moment_id,
+            ),
         ) {
             Ok(jobs) => jobs,
             Err(error) => {
@@ -11590,41 +11594,58 @@ fn materialize_restored_scene_assets(
             }
             JobStatus::Conflict | JobStatus::Cancelled => PostCommitMaterializeOutcome::Conflict,
         };
-        if current != PostCommitMaterializeOutcome::Applied {
-            outcome = current;
-        }
+        outcome = worse_materialize_outcome(outcome, current);
     }
     outcome
+}
+
+fn worse_materialize_outcome(
+    left: PostCommitMaterializeOutcome,
+    right: PostCommitMaterializeOutcome,
+) -> PostCommitMaterializeOutcome {
+    if materialize_outcome_severity(right) > materialize_outcome_severity(left) {
+        right
+    } else {
+        left
+    }
+}
+
+const fn materialize_outcome_severity(outcome: PostCommitMaterializeOutcome) -> u8 {
+    match outcome {
+        PostCommitMaterializeOutcome::Applied => 0,
+        PostCommitMaterializeOutcome::Superseded => 1,
+        PostCommitMaterializeOutcome::Skipped => 2,
+        PostCommitMaterializeOutcome::Conflict => 3,
+        PostCommitMaterializeOutcome::Error => 4,
+    }
 }
 
 fn restored_scene_asset_jobs_on_store(
     store: &EngineStore,
     workspace_id: &str,
     version_id: &str,
-    drawing_path: &str,
+    rollback_moment_id: &str,
 ) -> Result<Vec<String>, DomainError> {
     store.read_with(|conn| {
         let mut statement = conn
             .prepare(
-                "SELECT j.job_id FROM path_aliases a JOIN snapshots s \
-                 ON s.workspace_id = a.workspace_id AND s.version_id = a.version_id \
-                 AND s.object_id = a.object_id JOIN moments m \
-                 ON m.workspace_id = s.workspace_id \
-                 AND m.version_id = s.version_id \
-                 AND m.metadata_correlation_id = s.latest_moment_id \
+                "SELECT j.job_id FROM moments m \
                  JOIN materialization_jobs j ON j.workspace_id = m.workspace_id \
                  AND j.job_id = m.moment_id \
-                 WHERE a.workspace_id = ?1 AND a.version_id = ?2 AND a.path = ?3 \
+                 WHERE m.workspace_id = ?1 AND m.version_id = ?2 \
+                 AND m.metadata_correlation_id = ?3 \
                  AND m.operation = 'write' AND m.after_content_kind = 'binary' \
                  AND m.metadata_origin = 'ydoc' \
                  AND m.metadata_summary = 'Restored drawing asset' \
+                 AND m.moment_id LIKE 'moment-scene-asset-rollback-%' \
                  AND j.operation = 'write' ORDER BY j.job_id",
             )
             .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
         let rows = statement
-            .query_map(params![workspace_id, version_id, drawing_path], |row| {
-                row.get(0)
-            })
+            .query_map(
+                params![workspace_id, version_id, rollback_moment_id],
+                |row| row.get(0),
+            )
             .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))
@@ -12280,6 +12301,41 @@ fn snapshot(store: &EngineStore) -> Result<StoreSnapshot, StorageError> {
 mod scene_seed_transaction_tests {
     use super::*;
     use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+
+    #[test]
+    fn restored_asset_outcomes_keep_the_worst_failure_in_any_order() {
+        for outcomes in [
+            [
+                PostCommitMaterializeOutcome::Conflict,
+                PostCommitMaterializeOutcome::Skipped,
+            ],
+            [
+                PostCommitMaterializeOutcome::Skipped,
+                PostCommitMaterializeOutcome::Conflict,
+            ],
+        ] {
+            assert_eq!(
+                outcomes.into_iter().fold(
+                    PostCommitMaterializeOutcome::Applied,
+                    worse_materialize_outcome,
+                ),
+                PostCommitMaterializeOutcome::Conflict
+            );
+        }
+        assert_eq!(
+            [
+                PostCommitMaterializeOutcome::Error,
+                PostCommitMaterializeOutcome::Skipped,
+                PostCommitMaterializeOutcome::Conflict,
+            ]
+            .into_iter()
+            .fold(
+                PostCommitMaterializeOutcome::Applied,
+                worse_materialize_outcome,
+            ),
+            PostCommitMaterializeOutcome::Error
+        );
+    }
 
     #[test]
     fn scene_seed_rolls_back_lineage_assets_and_outbound_work_as_one_unit() {

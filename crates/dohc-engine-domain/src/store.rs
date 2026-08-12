@@ -546,13 +546,10 @@ impl<'a> VersionedTextStore<'a> {
             }
             Ok(RollbackPrep { moment, before })
         })?;
-        let compensating_moment_id = format!(
-            "rollback-{}",
-            hash_fields(&[
-                input.workspace_id.as_bytes(),
-                input.version_id.as_bytes(),
-                input.mutation_moment_id.as_bytes(),
-            ])
+        let compensating_moment_id = rollback_compensating_moment_id(
+            &input.workspace_id,
+            &input.version_id,
+            &input.mutation_moment_id,
         );
 
         let outcome = self.store.write_with(faults, |tx| {
@@ -4524,6 +4521,24 @@ pub fn binary_rollback_job_identity(
     format!(
         "{}{mutation_moment_id}",
         binary_rollback_job_version_prefix(workspace_id, version_id)
+    )
+}
+
+/// Derive the moment that records a text mutation rollback's compensating
+/// state. Callers use this identity to find only work owned by that rollback.
+#[doc(hidden)]
+pub fn rollback_compensating_moment_id(
+    workspace_id: &str,
+    version_id: &str,
+    mutation_moment_id: &str,
+) -> String {
+    format!(
+        "rollback-{}",
+        hash_fields(&[
+            workspace_id.as_bytes(),
+            version_id.as_bytes(),
+            mutation_moment_id.as_bytes(),
+        ])
     )
 }
 

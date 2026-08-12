@@ -6,6 +6,7 @@ use dohc_engine_domain::{
     DeleteTextFile, MergeTextFileFromVersion, RenameTextFile, ResolveConflictKind,
     ResolveTextConflict, RollbackTextFileMutation, SecretDelete, SecretDiskIntent, SecretWrite,
     TextConflict, TextSnapshot, VersionedTextStore, WriteBinary, WriteText,
+    rollback_compensating_moment_id,
 };
 use dohc_engine_runtime::{
     ActorHandle, CancellationToken, NoFaults, RuntimeError, SelfWriteRecorder, WorkspaceSupervisor,
@@ -2223,6 +2224,11 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         metadata_origin: "restore".to_owned(),
         author_json: None,
     };
+    let rollback_moment_id = rollback_compensating_moment_id(
+        &rollback.workspace_id,
+        &rollback.version_id,
+        &rollback.mutation_moment_id,
+    );
     let committed = actor
         .versioned_text_rollback(
             rollback.clone(),
@@ -2234,6 +2240,72 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .await
         .expect("commit drawing delete rollback");
     assert!(!committed.materialized);
+    let original_restore_job_id: String = EngineStore::open(&db, 7)
+        .expect("inspect original restore job")
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT j.job_id FROM moments m JOIN materialization_jobs j \
+                 ON j.workspace_id = m.workspace_id AND j.job_id = m.moment_id \
+                 WHERE m.workspace_id = ?1 AND m.version_id = ?2 \
+                 AND m.metadata_correlation_id = ?3 \
+                 AND m.metadata_summary = 'Restored drawing asset'",
+                params![workspace_id, "main", rollback_moment_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("original restore job exists");
+    assert_eq!(
+        EngineStore::open(&db, 7)
+            .expect("inspect pending original restore job")
+            .load_materialization_job(&original_restore_job_id)
+            .expect("load original restore job")
+            .expect("original restore job exists")
+            .status,
+        dohc_engine_storage::JobStatus::Pending
+    );
+    let later_rollback_moment_id =
+        rollback_compensating_moment_id(workspace_id, "main", "later-drawing-delete");
+    actor
+        .versioned_text_write(
+            write_path_input(
+                workspace_id,
+                "main",
+                "drawings/rollback.excalidraw",
+                "ignored-existing-drawing-object",
+                &later_rollback_moment_id,
+                r#"{"type":"excalidraw","elements":[],"appState":{"theme":"dark"},"files":{}}"#,
+                8,
+            ),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("advance drawing head after committed rollback");
+    let later_path = "assets/later-rollback.png";
+    actor
+        .versioned_binary_write(
+            WriteBinary {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "later-rollback-asset-object".to_owned(),
+                path: later_path.to_owned(),
+                bytes: ONE_PIXEL_PNG.to_vec(),
+                moment_id: "moment-scene-asset-rollback-later".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: Some("Restored drawing asset".to_owned()),
+                metadata_correlation_id: Some(later_rollback_moment_id),
+                author_json: None,
+                now_ms: 9,
+                request_id: None,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("commit a later rollback-shaped asset job");
+    assert!(!scratch.path().join(later_path).exists());
     let retried = actor
         .versioned_text_rollback(
             rollback,
@@ -2246,6 +2318,27 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .expect("retry committed drawing delete rollback");
     assert!(retried.deduped);
     assert!(retried.materialized);
+    assert_eq!(
+        EngineStore::open(&db, 9)
+            .expect("inspect completed original restore job")
+            .load_materialization_job(&original_restore_job_id)
+            .expect("load original restore job")
+            .expect("original restore job exists")
+            .status,
+        dohc_engine_storage::JobStatus::Complete,
+        "retry must finish the restore job owned by the original rollback"
+    );
+    assert_eq!(
+        EngineStore::open(&db, 9)
+            .expect("inspect later job")
+            .load_materialization_job("moment-scene-asset-rollback-later")
+            .expect("load later job")
+            .expect("later job exists")
+            .status,
+        dohc_engine_storage::JobStatus::Pending,
+        "retry must not run a different rollback's asset job"
+    );
+    assert!(!scratch.path().join(later_path).exists());
     supervisor.close(&db).expect("close before replay");
     let restarted = WorkspaceSupervisor::new();
     let actor = restarted.open(&db, 10).expect("restart actor").actor;
