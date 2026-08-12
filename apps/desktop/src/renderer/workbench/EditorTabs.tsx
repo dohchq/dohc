@@ -1,4 +1,4 @@
-import { ChevronDown, X } from "lucide-react";
+import { ChevronDown, Columns2, X } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
 import {
@@ -214,6 +214,7 @@ function thumbWidth(strip: HTMLElement): number {
 // reports its save state). h-9: ONE header band height with the side panel
 // and Chats panel, so the three hairlines meet at the vertical seams.
 export function EditorTabs(props: {
+  groupNumber: number;
   tabs: Array<{ path: string }>;
   activeTab: string | null;
   activeTabDirty: boolean;
@@ -225,6 +226,8 @@ export function EditorTabs(props: {
   onClose: (path: string) => void;
   onContextMenu: (path: string) => void;
   onMove: (path: string, toIndex: number) => void;
+  onCreateGroupRight: () => void;
+  onCloseGroup?: () => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
   const [dragPreview, setDragPreview] = useState<{
@@ -243,6 +246,9 @@ export function EditorTabs(props: {
   // shown on hover, draggable. Positioned imperatively (scroll fires every
   // frame; no reason to re-render the whole strip per tick).
   const thumbRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (props.tabs.length === 0) setListOpen(false);
+  }, [props.tabs.length]);
   const thumbDrag = useRef<{
     pointerId: number;
     startX: number;
@@ -302,7 +308,6 @@ export function EditorTabs(props: {
       resize?.disconnect();
     };
   }, [empty, props.tabs, props.activeTabDirty]);
-  if (empty) return null;
   return (
     <div
       data-testid="editor-tabs"
@@ -311,7 +316,7 @@ export function EditorTabs(props: {
       <div
         ref={stripRef}
         role="tablist"
-        aria-label="Open files"
+        aria-label={`Editor group ${props.groupNumber} tabs`}
         className="dohc-tab-strip flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
       >
         {props.tabs.map((tab) => (
@@ -340,6 +345,28 @@ export function EditorTabs(props: {
             tab interrupts it. */}
         <div aria-hidden className="min-w-4 flex-1 border-b border-line" />
       </div>
+      {props.onCloseGroup ? (
+        <button
+          type="button"
+          aria-label="Close editor group"
+          title="Close editor group"
+          onClick={props.onCloseGroup}
+          className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-line/50 hover:text-ink"
+        >
+          <X size={14} aria-hidden />
+        </button>
+      ) : null}
+      <button
+        type="button"
+        data-testid="create-editor-group-right"
+        aria-label="New editor group right"
+        title="New editor group right"
+        disabled={empty}
+        onClick={props.onCreateGroupRight}
+        className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtle"
+      >
+        <Columns2 size={14} aria-hidden />
+      </button>
       {/* The overlay scrollbar thumb. Sibling of the scroller (a child would
           scroll away with the content); width/position are set by the
           measure effect, so it only ever paints when the strip overflows.
@@ -400,24 +427,26 @@ export function EditorTabs(props: {
       </div>
       {/* Overflow affordance: every open tab, reachable even when the strip
           scrolls. Lives OUTSIDE the scroller so the menu is never clipped. */}
-      <button
-        type="button"
-        data-testid="tabs-overflow"
-        aria-label="All open tabs"
-        title="All open tabs"
-        aria-expanded={listOpen}
-        onClick={() => setListOpen((open) => !open)}
-        className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:text-ink"
-      >
-        <ChevronDown size={14} aria-hidden />
-      </button>
+      {!empty ? (
+        <button
+          type="button"
+          data-testid="tabs-overflow"
+          aria-label={`All tabs in editor group ${props.groupNumber}`}
+          title={`All tabs in editor group ${props.groupNumber}`}
+          aria-expanded={listOpen}
+          onClick={() => setListOpen((open) => !open)}
+          className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:text-ink"
+        >
+          <ChevronDown size={14} aria-hidden />
+        </button>
+      ) : null}
       {listOpen ? (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setListOpen(false)} />
           <div
             data-testid="tabs-overflow-menu"
             role="menu"
-            aria-label="Open tabs"
+            aria-label={`Tabs in editor group ${props.groupNumber}`}
             className="dohc-popover dohc-pop-in absolute right-1 top-full z-20 mt-1 max-h-72 w-60 overflow-y-auto rounded-lg border border-line bg-panel py-1"
           >
             {props.tabs.map((tab) => (

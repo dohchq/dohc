@@ -78,6 +78,7 @@ import { toggleTheme } from "./theme";
 import { SectionLabel } from "./ui/controls";
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
+import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
@@ -125,8 +126,14 @@ import type {
   ChatsNav,
 } from "./workbench/ChatsView";
 import {
+  activeGroup,
+  activeTabPath,
   activateTab,
+  allTabs,
   closeTab,
+  closeEditorGroup,
+  createEditorGroupRight,
+  focusEditorGroup,
   clampChatsWidth,
   isVersionCompareTabPath,
   parseVersionCompareTabPath,
@@ -146,6 +153,8 @@ import {
   isVirtualTabPath,
   moveTab,
   openTab,
+  resizeEditorGroups,
+  moveTabToNewGroup,
   parseHistoryDiffTabPath,
   parseSiteTabPath,
   parseUiState,
@@ -163,7 +172,9 @@ import {
   togglePinned,
   toggleSidebar,
   VIEW_IDS,
+  type EditorGroup,
   type WorkbenchState,
+  type WorkbenchTab,
 } from "./workbench/workbenchState";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
@@ -600,6 +611,20 @@ function hasBlockingModal() {
 type ActiveUndoHandler = {
   run: () => Promise<void>;
   acceptsEvent: (event: KeyboardEvent) => boolean;
+};
+
+type MountedEditorRegistration = {
+  tab: WorkbenchTab;
+  flush?: DraftFlush;
+  sourceToggle?: () => void;
+  undo?: ActiveUndoHandler;
+};
+
+type EditorRegistrationCallbacks = {
+  onSaveStateChange: (state: FileSaveState) => void;
+  registerDraftFlush: (flush: DraftFlush | null) => void;
+  registerSourceToggle: (toggle: (() => void) | null) => void;
+  registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
 };
 
 // Engine history diff page (PR 0M-5, flagged workspaces): one MOMENT's
@@ -1263,17 +1288,16 @@ export function DesktopWorkspaceShell(props: {
   const [wb, setWb] = useState<WorkbenchState>(defaultWorkbenchState);
   const wbRef = useRef(wb);
 
-  // Runtime-only dirty flag for the ACTIVE tab (the one mounted inspector
-  // reports its markdown save state) — never persisted.
-  const [activeTabDirty, setActiveTabDirty] = useState(false);
-  const onSaveStateChange = useCallback(
-    (state: FileSaveState) =>
-      setActiveTabDirty(state !== "saved" && state !== "deleted"),
-    [],
+  // Mounted editors are group-scoped. A split keeps every active surface
+  // mounted, so a singleton flush/source/undo slot would let either pane
+  // overwrite the other and could discard the surviving pane during cleanup.
+  const mountedEditorsRef = useRef(new Map<string, MountedEditorRegistration>());
+  const editorCallbacksRef = useRef(
+    new WeakMap<WorkbenchTab, Map<string, EditorRegistrationCallbacks>>(),
   );
-  useEffect(() => {
-    setActiveTabDirty(false);
-  }, [wb.activeTab]);
+  const dirtyTabsRef = useRef(new WeakSet<WorkbenchTab>());
+  const dirtyEpochsRef = useRef(new WeakMap<WorkbenchTab, number>());
+  const [dirtyRevision, setDirtyRevision] = useState(0);
   const openSettings = useCallback(
     (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
     [],
@@ -1306,60 +1330,115 @@ export function DesktopWorkspaceShell(props: {
     };
   }, [props.workspace.workspaceId, settingsSection]);
 
-  // The active editor owns the current closure. An Explorer operation also
-  // retains every closure that is current while its disk mutation is active.
-  // This keeps late drafts tied to the path and editor that created them.
-  const draftFlushRef = useRef<DraftFlush | null>(null);
+  // An Explorer operation retains every closure that is current while its
+  // disk mutation is active. This keeps late drafts tied to the editor that
+  // created them, including editors in inactive groups.
   const draftOperationScopesRef = useRef(
     new Set<{ flushes: Set<DraftFlush> }>(),
   );
-  const registerDraftFlush = useCallback(
-    (flush: DraftFlush | null) => {
-      draftFlushRef.current = flush;
-      if (flush) {
-        for (const scope of draftOperationScopesRef.current) {
-          scope.flushes.add(flush);
-        }
+  const callbacksForEditor = useCallback(
+    (groupId: string, tab: WorkbenchTab): EditorRegistrationCallbacks => {
+      let byGroup = editorCallbacksRef.current.get(tab);
+      if (!byGroup) {
+        byGroup = new Map();
+        editorCallbacksRef.current.set(tab, byGroup);
       }
-    },
-    [],
-  );
-  const flushStableActiveDraft = useCallback(
-    async (
-      shouldFlush: (
-        activeTab: WorkbenchState["tabs"][number] | undefined,
-      ) => boolean = () => true,
-    ) => {
-      while (true) {
-        const current = wbRef.current;
-        const activeTab = current.tabs.find(
-          (tab) => tab.path === current.activeTab,
-        );
-        if (!shouldFlush(activeTab)) return;
-        const flush = draftFlushRef.current;
-        await flush?.();
-        const live = wbRef.current;
-        if (
-          live.tabs.find((tab) => tab.path === live.activeTab) === activeTab &&
-          draftFlushRef.current === flush
-        ) {
+      const cached = byGroup.get(groupId);
+      if (cached) return cached;
+
+      const updateRegistration = <K extends keyof Omit<MountedEditorRegistration, "tab">>(
+        key: K,
+        value: MountedEditorRegistration[K] | null,
+      ) => {
+        const current = mountedEditorsRef.current.get(groupId);
+        if (value === null) {
+          if (current?.tab !== tab) return;
+          const next = { ...current };
+          delete next[key];
+          if (!next.flush && !next.sourceToggle && !next.undo) {
+            mountedEditorsRef.current.delete(groupId);
+          } else {
+            mountedEditorsRef.current.set(groupId, next);
+          }
           return;
         }
+        const next = current?.tab === tab ? { ...current } : { tab };
+        next[key] = value;
+        mountedEditorsRef.current.set(groupId, next);
+      };
+      const callbacks: EditorRegistrationCallbacks = {
+        onSaveStateChange: (state) => {
+          const dirty = state !== "saved" && state !== "deleted";
+          if (dirty === dirtyTabsRef.current.has(tab)) return;
+          if (dirty) {
+            dirtyTabsRef.current.add(tab);
+            dirtyEpochsRef.current.set(
+              tab,
+              (dirtyEpochsRef.current.get(tab) ?? 0) + 1,
+            );
+          } else {
+            dirtyTabsRef.current.delete(tab);
+          }
+          setDirtyRevision((revision) => revision + 1);
+        },
+        registerDraftFlush: (flush) => {
+          if (flush === null && dirtyTabsRef.current.delete(tab)) {
+            setDirtyRevision((revision) => revision + 1);
+          }
+          updateRegistration("flush", flush);
+          if (flush) {
+            for (const scope of draftOperationScopesRef.current) {
+              scope.flushes.add(flush);
+            }
+          }
+        },
+        registerSourceToggle: (toggle) => updateRegistration("sourceToggle", toggle),
+        registerActiveUndo: (handler) => updateRegistration("undo", handler),
+      };
+      byGroup.set(groupId, callbacks);
+      return callbacks;
+    },
+    [],
+  );
+  const flushStableDrafts = useCallback(
+    async (
+      shouldFlush: (groupId: string, tab: WorkbenchTab) => boolean = () => true,
+    ) => {
+      const flushedAtEpoch = new Map<DraftFlush, number>();
+      while (true) {
+        const batch = [...mountedEditorsRef.current.entries()]
+          .filter(
+            ([groupId, registration]) =>
+              registration.flush &&
+              (flushedAtEpoch.get(registration.flush) ?? -1) <
+                (dirtyEpochsRef.current.get(registration.tab) ?? 0) &&
+              shouldFlush(groupId, registration.tab),
+          )
+          .map(([, registration]) => ({
+            flush: registration.flush as DraftFlush,
+            epoch: dirtyEpochsRef.current.get(registration.tab) ?? 0,
+          }));
+        if (batch.length === 0) return;
+        for (const { flush, epoch } of batch) {
+          flushedAtEpoch.set(flush, epoch);
+          await flush();
+        }
       }
     },
     [],
   );
-  const flushActiveDraft = useCallback(
-    () => flushStableActiveDraft(),
-    [flushStableActiveDraft],
-  );
+  // Version and restore operations are workspace-wide, so every mounted
+  // draft must settle before the workspace lineage changes.
+  const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
   const beginDraftOperation = useCallback(async (): Promise<DraftFlush> => {
     const scope = { flushes: new Set<DraftFlush>() };
-    if (draftFlushRef.current) scope.flushes.add(draftFlushRef.current);
+    for (const registration of mountedEditorsRef.current.values()) {
+      if (registration.flush) scope.flushes.add(registration.flush);
+    }
     draftOperationScopesRef.current.add(scope);
 
     try {
-      await flushStableActiveDraft();
+      await flushStableDrafts();
     } catch (error) {
       draftOperationScopesRef.current.delete(scope);
       throw error;
@@ -1397,19 +1476,7 @@ export function DesktopWorkspaceShell(props: {
       })();
       return settlement;
     };
-  }, [flushStableActiveDraft]);
-  const activeUndoRef = useRef<ActiveUndoHandler | null>(null);
-  const registerActiveUndo = useCallback((handler: ActiveUndoHandler | null) => {
-    activeUndoRef.current = handler;
-  }, []);
-
-  // The mounted markdown view's "view source" toggle (registered like the
-  // draft flush above) — the palette's toggle-markdown-source command routes
-  // through it. Null whenever the active tab is not a mounted markdown doc.
-  const sourceToggleRef = useRef<(() => void) | null>(null);
-  const registerSourceToggle = useCallback((toggle: (() => void) | null) => {
-    sourceToggleRef.current = toggle;
-  }, []);
+  }, [flushStableDrafts]);
 
   const workspaceId = props.workspace.workspaceId;
   // Set-aside recovery markers (#567): every path holding a draft marks its
@@ -1573,8 +1640,22 @@ export function DesktopWorkspaceShell(props: {
       ].join("\0"),
     [files],
   );
-  const activeDocumentPath = isVirtualTabPath(wb.activeTab) ? null : wb.activeTab;
-  const activeSiteRoot = parseSiteTabPath(wb.activeTab);
+  const focusedGroup = activeGroup(wb);
+  const focusedTabPath = activeTabPath(wb);
+  const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
+  const dirtyPaths = useMemo(
+    () =>
+      new Set(
+        openTabs
+          .filter((tab) => dirtyTabsRef.current.has(tab))
+          .map((tab) => tab.path),
+      ),
+    [dirtyRevision, openTabs],
+  );
+  const anyTabDirty = dirtyPaths.size > 0;
+  const activeDocumentPath = isVirtualTabPath(focusedTabPath)
+    ? null
+    : focusedTabPath;
 
   // A clicked search result: open the file AND land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
@@ -1586,7 +1667,9 @@ export function DesktopWorkspaceShell(props: {
     target: HeadingTarget;
   } | null>(null);
   const scrollNonce = useRef(0);
-  const consumeScrollTarget = useCallback(() => setSearchScrollTarget(null), []);
+  const consumeSearchScrollTarget = useCallback((nonce: number) => {
+    setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
+  }, []);
 
   // Restore per-workspace workbench state from .dohc/ui-state.json. Defaults
   // render immediately (launch budgets key off shell visibility); the stored
@@ -1624,7 +1707,12 @@ export function DesktopWorkspaceShell(props: {
       // and closeFileTab already use for their marks (updaters are
       // side-effect-free by contract, so probing one is safe).
       const current = wbRef.current;
-      if (updater(current).activeTab !== current.activeTab) {
+      const next = updater(current);
+      if (next === current) return;
+      if (
+        next.activeEditorGroup !== current.activeEditorGroup ||
+        activeTabPath(next) !== activeTabPath(current)
+      ) {
         invalidateDmNavigation(dmNavigationRequest);
       }
       userTouchedWb.current = true;
@@ -1646,7 +1734,7 @@ export function DesktopWorkspaceShell(props: {
           // must flush the restored state, never the stale default.
           wbRef.current = parsed;
           setWb(parsed);
-          setRestoredTabPaths(new Set(parsed.tabs.map((tab) => tab.path)));
+          setRestoredTabPaths(new Set(allTabs(parsed).map((tab) => tab.path)));
         }
         uiStateLoaded.current = true;
         if (userTouchedWb.current) {
@@ -1783,17 +1871,18 @@ export function DesktopWorkspaceShell(props: {
     // exists; the write fails, the failure is swallowed, and the draft is
     // gone with no error and no way back. Waiting costs nothing: this re-runs
     // when the draft settles, and closes the tab then.
-    const dirtyPath = activeTabDirty ? wb.activeTab : null;
-    const closable =
-      dirtyPath !== null && restoredTabPaths.has(dirtyPath)
-        ? new Set([...restoredTabPaths].filter((path) => path !== dirtyPath))
-        : restoredTabPaths;
+    const closable = new Set(
+      [...restoredTabPaths].filter((path) => !dirtyPaths.has(path)),
+    );
     const present = new Set(files.map((file) => file.path));
     const fileExists = (path: string) => present.has(path);
     const current = wbRef.current;
     const next = pruneMissingRestoredTabs(current, closable, fileExists);
     if (next === current) return;
-    if (next.activeTab !== current.activeTab) {
+    if (
+      next.activeEditorGroup !== current.activeEditorGroup ||
+      activeTabPath(next) !== activeTabPath(current)
+    ) {
       // This commits through the direct setter, on purpose: reconciling is not
       // a user action and must not set the touched flag. But it moves the
       // active tab exactly as mutateWb does, so it owes the same invalidation
@@ -1803,7 +1892,8 @@ export function DesktopWorkspaceShell(props: {
       // Activating a neighbour remounts the keyed inspector — that is an OPEN
       // (closeFileTab idiom). Without the mark, the inspector's mount measure
       // brackets whatever stale mark came before it.
-      if (next.activeTab !== null && !isVirtualTabPath(next.activeTab)) {
+      const nextActiveTab = activeTabPath(next);
+      if (nextActiveTab !== null && !isVirtualTabPath(nextActiveTab)) {
         rendererMarks.mark("file-open-start");
       }
     }
@@ -1813,8 +1903,9 @@ export function DesktopWorkspaceShell(props: {
     filesLoaded,
     listingsSettled,
     restoredTabPaths,
-    activeTabDirty,
-    wb.activeTab,
+    dirtyPaths,
+    wb.activeEditorGroup,
+    focusedTabPath,
   ]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
@@ -2757,14 +2848,25 @@ export function DesktopWorkspaceShell(props: {
     [refreshFiles, refreshHistory, reportShellError],
   );
   const activateEditorTab = useCallback(
-    (path: string) => {
+    (groupId: string, path: string) => {
       if (isVirtualTabPath(path)) {
-        mutateWb((state) => activateTab(state, path));
+        mutateWb((state) => activateTab(state, groupId, path));
         return;
       }
-      openFile(path);
+      setHeadingTarget(null);
+      if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
+      const group = wbRef.current.editorGroups.find(
+        (candidate) => candidate.id === groupId,
+      );
+      if (!group?.tabs.some((tab) => tab.path === path)) return;
+      if (group.activeTab !== path) {
+        rendererMarks.mark("file-open-start");
+      }
+      mutateWb((state) =>
+        recordRecentFile(activateTab(state, groupId, path), path),
+      );
     },
-    [mutateWb, openFile],
+    [mutateWb],
   );
 
   // Chats view "Files" grouping cross-link: a file-linked Chat opens where
@@ -2807,93 +2909,127 @@ export function DesktopWorkspaceShell(props: {
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
   // re-render the whole strip on every shell render, incl. each 800ms dirty
-  // flip while typing). Capture the requested tab objects before the flush:
-  // closing and reopening the same path creates a later tab that must stay.
+  // flip while typing). Capture the requested tab objects and their owners
+  // before the flush: a reopened tab or a tab moved later must stay.
   const closeTabsAfterFlush = useCallback(
-    async (tabs: readonly WorkbenchState["tabs"][number][]) => {
-      const requested = new Set(tabs);
+    (targets: ReadonlyArray<{ groupId: string; tab: WorkbenchTab }>) => {
+      const requested = new Map(
+        targets.map(({ groupId, tab }) => [tab, groupId] as const),
+      );
       if (requested.size === 0) return;
+
+      const closeRequestedTabs = (state: WorkbenchState): WorkbenchState => {
+        let next = state;
+        for (const group of state.editorGroups) {
+          for (const tab of group.tabs) {
+            if (requested.get(tab) !== group.id) continue;
+            next = closeTab(next, group.id, tab.path);
+            const liveGroup = next.editorGroups.find(
+              (candidate) => candidate.id === group.id,
+            );
+            if (liveGroup?.tabs.length === 0 && next.editorGroups.length > 1) {
+              next = closeEditorGroup(next, group.id);
+            }
+          }
+        }
+        return next;
+      };
+      const commitClose = () => {
+        const current = wbRef.current;
+        const next = closeRequestedTabs(current);
+        const mountsNewDocument = current.editorGroups.some((before) => {
+          const after = next.editorGroups.find((group) => group.id === before.id);
+          return (
+            after !== undefined &&
+            after.activeTab !== before.activeTab &&
+            after.activeTab !== null &&
+            !isVirtualTabPath(after.activeTab)
+          );
+        });
+        if (mountsNewDocument) {
+          rendererMarks.mark("file-open-start");
+        }
+        mutateWb(closeRequestedTabs);
+      };
+      const needsFlush = [...mountedEditorsRef.current.entries()].some(
+        ([groupId, registration]) =>
+          registration.flush && requested.get(registration.tab) === groupId,
+      );
+      if (!needsFlush) {
+        commitClose();
+        return;
+      }
 
       // The active tab can change while a flush waits. If the new active tab
       // object was also in the original close request, flush its own mounted
       // editor before closing it. A reopened tab has a new object identity.
-      const shouldFlush = (
-        activeTab: WorkbenchState["tabs"][number] | undefined,
-      ) => activeTab !== undefined && requested.has(activeTab);
-      const currentActiveTab = wbRef.current.tabs.find(
-        (tab) => tab.path === wbRef.current.activeTab,
-      );
-      if (shouldFlush(currentActiveTab)) {
-        try {
-          await flushStableActiveDraft(shouldFlush);
-        } catch (error) {
+      void flushStableDrafts(
+        (groupId, tab) => requested.get(tab) === groupId,
+      )
+        .then(commitClose)
+        .catch((error) => {
           reportShellError(
-            "Could not save the active draft, so the tab stays open.",
+            "Could not save the draft, so the tab stays open.",
             error,
           );
-          return;
-        }
-      }
-
-      // Closing the active tab activates its neighbor, which remounts the
-      // keyed inspector. Mark that real open before committing the state.
-      const current = wbRef.current;
-      const currentTabs = current.tabs.filter((tab) => requested.has(tab));
-      const next = currentTabs.reduce(
-        (state, tab) => closeTab(state, tab.path),
-        current,
-      );
-      if (
-        next.activeTab !== current.activeTab &&
-        next.activeTab !== null &&
-        !isVirtualTabPath(next.activeTab)
-      ) {
-        rendererMarks.mark("file-open-start");
-      }
-      mutateWb((state) => {
-        const tabsToClose = state.tabs.filter((tab) => requested.has(tab));
-        return tabsToClose.reduce(
-          (nextState, tab) => closeTab(nextState, tab.path),
-          state,
-        );
-      });
+        });
     },
-    [flushStableActiveDraft, mutateWb, reportShellError],
+    [flushStableDrafts, mutateWb, reportShellError],
   );
 
   const closeFileTab = useCallback(
-    (path: string) => {
-      const tab = wbRef.current.tabs.find((candidate) => candidate.path === path);
-      if (tab) void closeTabsAfterFlush([tab]);
+    (groupId: string, path: string) => {
+      const group = wbRef.current.editorGroups.find(
+        (candidate) => candidate.id === groupId,
+      );
+      const tab = group?.tabs.find((candidate) => candidate.path === path);
+      if (tab) void closeTabsAfterFlush([{ groupId, tab }]);
     },
     [closeTabsAfterFlush],
   );
 
   const closeActiveTab = useCallback(() => {
     const current = wbRef.current;
-    const tab = current.tabs.find((candidate) => candidate.path === current.activeTab);
-    if (tab) void closeTabsAfterFlush([tab]);
-  }, [closeTabsAfterFlush]);
+    const group = activeGroup(current);
+    const tab = group.tabs.find((candidate) => candidate.path === group.activeTab);
+    if (tab) {
+      void closeTabsAfterFlush([{ groupId: group.id, tab }]);
+    } else if (current.editorGroups.length > 1) {
+      mutateWb((state) => closeEditorGroup(state, group.id));
+    }
+  }, [closeTabsAfterFlush, mutateWb]);
 
   const closeAllTabs = useCallback(() => {
-    void closeTabsAfterFlush(wbRef.current.tabs);
+    void closeTabsAfterFlush(
+      wbRef.current.editorGroups.flatMap((group) =>
+        group.tabs.map((tab) => ({ groupId: group.id, tab })),
+      ),
+    );
   }, [closeTabsAfterFlush]);
 
   const closeOtherTabs = useCallback(
-    (path: string) => {
+    (groupId: string, path: string) => {
       const current = wbRef.current;
-      if (!current.tabs.some((tab) => tab.path === path)) return;
-      void closeTabsAfterFlush(current.tabs.filter((tab) => tab.path !== path));
+      const group = current.editorGroups.find((candidate) => candidate.id === groupId);
+      if (!group?.tabs.some((tab) => tab.path === path)) return;
+      void closeTabsAfterFlush(
+        group.tabs
+          .filter((tab) => tab.path !== path)
+          .map((tab) => ({ groupId, tab })),
+      );
     },
     [closeTabsAfterFlush],
   );
 
   const moveFileTab = useCallback(
-    (path: string, toIndex: number) => {
+    (groupId: string, path: string, toIndex: number) => {
       mutateWb((state) =>
         moveTab(
           state,
-          state.tabs.findIndex((tab) => tab.path === path),
+          groupId,
+          state.editorGroups
+            .find((group) => group.id === groupId)
+            ?.tabs.findIndex((tab) => tab.path === path) ?? -1,
           toIndex,
         ),
       );
@@ -2930,7 +3066,10 @@ export function DesktopWorkspaceShell(props: {
       const next = remapWorkbenchPaths(current, (path) =>
         projectTreePath(path, changes),
       );
-      if (next.activeTab !== current.activeTab && next.activeTab !== null) {
+      if (
+        activeTabPath(next) !== activeTabPath(current) &&
+        activeTabPath(next) !== null
+      ) {
         rendererMarks.mark("file-open-start");
       }
       mutateWb((state) =>
@@ -3160,12 +3299,79 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [reportShellError]);
 
+  const moveTabIntoNewGroup = useCallback(
+    (groupId: string = wbRef.current.activeEditorGroup, path?: string) => {
+      const current = wbRef.current;
+      const group = current.editorGroups.find((candidate) => candidate.id === groupId);
+      const tabPath = path ?? group?.activeTab;
+      if (!group || !tabPath) return;
+      const tab = group.tabs.find((candidate) => candidate.path === tabPath);
+      if (!tab) return;
+      // Mint outside mutateWb: that seam probes the updater before React calls
+      // it, so generating inside would produce two IDs for one command.
+      const newGroupId = crypto.randomUUID();
+      const commitMove = () => {
+        const live = wbRef.current.editorGroups
+          .find((candidate) => candidate.id === groupId)
+          ?.tabs.find((candidate) => candidate.path === tabPath);
+        if (live !== tab) return;
+        mutateWb((state) => moveTabToNewGroup(state, groupId, tabPath, newGroupId));
+      };
+      const registration = mountedEditorsRef.current.get(groupId);
+      if (registration?.tab !== tab || !registration.flush) {
+        commitMove();
+        return;
+      }
+      void flushStableDrafts(
+        (candidateGroupId, candidateTab) =>
+          candidateGroupId === groupId && candidateTab === tab,
+      )
+        .then(commitMove)
+        .catch((error) =>
+          reportShellError(
+            "Could not save the draft, so the tab stays in this group.",
+            error,
+          ),
+        );
+    },
+    [flushStableDrafts, mutateWb, reportShellError],
+  );
+
+  const openEditorGroupRight = useCallback(
+    (groupId: string = wbRef.current.activeEditorGroup) => {
+      const newGroupId = crypto.randomUUID();
+      mutateWb((state) => createEditorGroupRight(state, groupId, newGroupId));
+    },
+    [mutateWb],
+  );
+
+  const closeGroupAfterFlush = useCallback(
+    (groupId: string) => {
+      if (wbRef.current.editorGroups.length === 1) return;
+      const group = wbRef.current.editorGroups.find(
+        (candidate) => candidate.id === groupId,
+      );
+      if (!group) return;
+      if (group.tabs.length === 0) {
+        mutateWb((state) => closeEditorGroup(state, groupId));
+        return;
+      }
+      void closeTabsAfterFlush(group.tabs.map((tab) => ({ groupId, tab })));
+    },
+    [closeTabsAfterFlush, mutateWb],
+  );
+
   const runWorkbenchMenuCommand = useCallback(
-    (command: WorkbenchMenuCommand, path?: string) => {
+    (command: WorkbenchMenuCommand, path?: string, groupId?: string) => {
+      const targetGroupId = groupId ?? wbRef.current.activeEditorGroup;
       if (command === "close-tab" && path) {
-        closeFileTab(path);
+        closeFileTab(targetGroupId, path);
       } else if (command === "close-other-tabs" && path) {
-        closeOtherTabs(path);
+        closeOtherTabs(targetGroupId, path);
+      } else if (command === "move-tab-to-new-group") {
+        moveTabIntoNewGroup(targetGroupId, path);
+      } else if (command === "close-editor-group") {
+        closeGroupAfterFlush(targetGroupId);
       } else if (command === "copy-path" && path && !isVirtualTabPath(path)) {
         void navigator.clipboard?.writeText(path);
       } else if (command === "show-in-explorer" && path && !isVirtualTabPath(path)) {
@@ -3186,25 +3392,35 @@ export function DesktopWorkspaceShell(props: {
     },
     [
       activeDocumentPath,
+      closeGroupAfterFlush,
       closeFileTab,
       closeOtherTabs,
       checkForDesktopUpdates,
       installDesktopUpdate,
       openHistoryView,
       openSettings,
+      moveTabIntoNewGroup,
       showPathInExplorer,
     ],
   );
 
   const showWorkbenchMenu = useCallback(
-    async (context: "tab" | "editor" | "status", path?: string) => {
+    async (
+      context: "tab" | "editor" | "status",
+      path?: string,
+      groupId?: string,
+    ) => {
       try {
         const command = await bridge().showWorkbenchMenu({
           workspaceId,
           context,
           ...(path ? { path } : {}),
+          ...(groupId ? { groupId } : {}),
+          ...(context === "tab"
+            ? { canCloseEditorGroup: wbRef.current.editorGroups.length > 1 }
+            : {}),
         });
-        if (command) runWorkbenchMenuCommand(command, path);
+        if (command) runWorkbenchMenuCommand(command, path, groupId);
       } catch (error) {
         reportShellError("Could not open the workbench menu.", error);
       }
@@ -3299,7 +3515,9 @@ export function DesktopWorkspaceShell(props: {
         !event.shiftKey &&
         !event.altKey
       ) {
-        const activeUndo = activeUndoRef.current;
+        const activeUndo = mountedEditorsRef.current.get(
+          wbRef.current.activeEditorGroup,
+        )?.undo;
         if (activeUndo?.acceptsEvent(event)) {
           event.preventDefault();
           void activeUndo.run().catch((error) =>
@@ -3338,11 +3556,21 @@ export function DesktopWorkspaceShell(props: {
         // CommandOrControl+Shift+W native accelerator.
         event.preventDefault();
         closeActiveTab();
+      } else if (key === "\\") {
+        event.preventDefault();
+        openEditorGroupRight();
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeActiveTab, engineSurfacesExist, mutateWb, openSettings, reportShellError]);
+  }, [
+    closeActiveTab,
+    engineSurfacesExist,
+    openEditorGroupRight,
+    mutateWb,
+    openSettings,
+    reportShellError,
+  ]);
 
   const openWorkspaceFolder = useCallback(async () => {
     try {
@@ -3402,6 +3630,11 @@ export function DesktopWorkspaceShell(props: {
         label: "Close tab",
         run: closeActiveTab,
       },
+      {
+        id: "new-editor-group-right",
+        label: "New editor group right",
+        run: () => openEditorGroupRight(),
+      },
       // Only offered while a markdown document is the active tab — on every
       // other tab the toggle has nothing to act on, so the palette hides it.
       ...(activeDocumentPath && classifyForView(activeDocumentPath) === "markdown"
@@ -3409,7 +3642,9 @@ export function DesktopWorkspaceShell(props: {
             {
               id: "toggle-markdown-source",
               label: "Toggle markdown source view",
-              run: () => sourceToggleRef.current?.(),
+              run: () =>
+                mountedEditorsRef.current.get(wbRef.current.activeEditorGroup)
+                  ?.sourceToggle?.(),
             },
           ]
         : []),
@@ -3477,6 +3712,7 @@ export function DesktopWorkspaceShell(props: {
       checkForDesktopUpdates,
       installDesktopUpdate,
       engineSurfacesExist,
+      openEditorGroupRight,
       openSettings,
       reportShellError,
       workspaceId,
@@ -3650,9 +3886,9 @@ export function DesktopWorkspaceShell(props: {
         workspaceId={workspaceId}
         files={files}
         folders={folders}
-        activeTab={wb.activeTab}
-        openTabs={wb.tabs}
-        dirtyTab={activeTabDirty ? wb.activeTab : null}
+        editorGroups={wb.editorGroups}
+        activeEditorGroup={wb.activeEditorGroup}
+        dirtyPaths={dirtyPaths}
         recoveryPaths={recoveryPaths}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
@@ -3730,7 +3966,9 @@ export function DesktopWorkspaceShell(props: {
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
-    collaboration: isChatsTabPath(wb.activeTab) ? null : chatCollaboration,
+    collaboration: wb.editorGroups.some((group) => isChatsTabPath(group.activeTab))
+      ? null
+      : chatCollaboration,
     agentSetup,
     onSetupAgent: () => openSettings("agents"),
   } as const;
@@ -3982,33 +4220,14 @@ export function DesktopWorkspaceShell(props: {
           </SidePanel>
         ) : null}
 
-        {/* Editor area: tab strip + the active tab's inspector. When the
-            workspace-engine alpha flag is on, the version selector shares the
-            tab-strip band (right side); unflagged workspaces render the strip
-            exactly as before. */}
+        {/* Editor area: workspace-wide version controls above independently
+            active editor groups. Each group can host any tab surface. */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
           {captureAvailable ? (
-            <div className="flex shrink-0 bg-panel-2">
-              <div
-                className={`min-w-0 flex-1 ${
-                  wb.tabs.length === 0 ? "border-b border-line" : ""
-                }`}
-              >
-                <EditorTabs
-                  tabs={wb.tabs}
-                  activeTab={wb.activeTab}
-                  activeTabDirty={activeTabDirty}
-                  recoveryPaths={recoveryPaths}
-                  onActivate={activateEditorTab}
-                  onClose={closeFileTab}
-                  onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
-                  onMove={moveFileTab}
-                />
-              </div>
-              <div className="flex h-9 shrink-0 items-center border-b border-l border-line pl-1 pr-1.5">
+            <div className="flex h-9 shrink-0 items-center justify-end border-b border-line bg-panel-2 px-1.5">
                 <VersionMenu
                   workspaceId={workspaceId}
-                  activeTabDirty={activeTabDirty}
+                  activeTabDirty={anyTabDirty}
                   flushActiveDraft={flushActiveDraft}
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
@@ -4027,20 +4246,8 @@ export function DesktopWorkspaceShell(props: {
                   // this menu) — the selector re-reads instead of going stale.
                   refreshKey={versionEpoch}
                 />
-              </div>
             </div>
-          ) : (
-            <EditorTabs
-              tabs={wb.tabs}
-              activeTab={wb.activeTab}
-              activeTabDirty={activeTabDirty}
-              recoveryPaths={recoveryPaths}
-              onActivate={activateEditorTab}
-              onClose={closeFileTab}
-              onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
-              onMove={moveFileTab}
-            />
-          )}
+          ) : null}
           {/* "Try it in a version" (PR 0N-2): honest run status while the
               agent works, then the review card when the run ends. Flagged
               workspaces only (tryState never exists otherwise). */}
@@ -4051,33 +4258,70 @@ export function DesktopWorkspaceShell(props: {
             <TryInVersionReviewCard
               workspaceId={workspaceId}
               state={tryState}
-              activeTabDirty={activeTabDirty}
+              activeTabDirty={anyTabDirty}
               flushActiveDraft={flushActiveDraft}
               onOpenCompare={openVersionCompareTab}
               onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
               onDismissed={onTryReviewDismissed}
             />
           ) : null}
-          <div
-            className="flex min-h-0 flex-1 flex-col"
-            onContextMenu={(event) => {
-              event.preventDefault();
-              void showWorkbenchMenu("editor");
-            }}
-          >
+          <EditorGroupLayout
+            groups={wb.editorGroups.map((editorGroup, groupIndex) => {
+              const tabPath = editorGroup.activeTab;
+              const tab = editorGroup.tabs.find(
+                (candidate) => candidate.path === tabPath,
+              );
+              const editorCallbacks = tab
+                ? callbacksForEditor(editorGroup.id, tab)
+                : null;
+              const groupDocumentPath = isVirtualTabPath(tabPath) ? null : tabPath;
+              const groupSiteRoot = parseSiteTabPath(tabPath);
+              const groupScrollTarget =
+                searchScrollTarget?.path === tabPath ? searchScrollTarget : undefined;
+              return {
+                id: editorGroup.id,
+                size: editorGroup.size,
+                content: (
+                  <>
+                    <EditorTabs
+                      tabs={editorGroup.tabs}
+                      activeTab={tabPath}
+                      activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
+                      recoveryPaths={recoveryPaths}
+                      groupNumber={groupIndex + 1}
+                      onActivate={(path) => activateEditorTab(editorGroup.id, path)}
+                      onClose={(path) => closeFileTab(editorGroup.id, path)}
+                      onContextMenu={(path) =>
+                        void showWorkbenchMenu("tab", path, editorGroup.id)
+                      }
+                      onMove={(path, toIndex) =>
+                        moveFileTab(editorGroup.id, path, toIndex)
+                      }
+                      onCreateGroupRight={() => openEditorGroupRight(editorGroup.id)}
+                      {...(wb.editorGroups.length > 1
+                        ? { onCloseGroup: () => closeGroupAfterFlush(editorGroup.id) }
+                        : {})}
+                    />
+                    <div
+                      className="flex min-h-0 flex-1 flex-col"
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        void showWorkbenchMenu("editor", tabPath ?? undefined, editorGroup.id);
+                      }}
+                    >
             {/* The editor island: a document/tab view that throws (hostile
                 markdown tripping the WYSIWYG parse, a failed editor chunk, a
                 view bug) contains to this pane — tabs, explorer, and rail
                 stay alive, and switching or closing the tab recovers. */}
             <ErrorBoundary
               scope="editor"
-              resetKeys={[wb.activeTab, workspaceId, versionEpoch]}
+              resetKeys={[tabPath, workspaceId, versionEpoch]}
             >
-            {isGraphTabPath(wb.activeTab) ? (
+            {isGraphTabPath(tabPath) ? (
               <Suspense fallback={<PanelLoading label="graph" />}>
                 <LazyGraphView
                   workspaceId={workspaceId}
-                  activePath={activeDocumentPath}
+                  activePath={groupDocumentPath}
                   refreshKey={graphKey}
                   onOpenPath={openPathWithHeading}
                   onOpenChatThread={openGraphChatThread}
@@ -4085,14 +4329,14 @@ export function DesktopWorkspaceShell(props: {
                   variant="page"
                 />
               </Suspense>
-            ) : isHistoryTabPath(wb.activeTab) ? (
+            ) : isHistoryTabPath(tabPath) ? (
               <div
                 data-testid="history-page"
                 className="flex min-h-0 flex-1 flex-col bg-bg"
               >
                 {historyTimeline}
               </div>
-            ) : isMomentDiffTabPath(wb.activeTab) ? (
+            ) : isMomentDiffTabPath(tabPath) ? (
               // A persisted moment-diff tab reads THE capture capability,
               // like every other surface main's capture serves. Gating it on
               // the share fact alone left the failed-build cause open: the
@@ -4136,14 +4380,14 @@ export function DesktopWorkspaceShell(props: {
               ) : (
                 <EngineMomentDiffPage
                   workspaceId={workspaceId}
-                  tabPath={wb.activeTab ?? ""}
+                  tabPath={tabPath ?? ""}
                   onBeforeRestore={flushActiveDraft}
                   onOpenFile={openFile}
-                  registerActiveUndo={registerActiveUndo}
+                  registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
                   onRestored={refreshAfterHistoryRestore}
                 />
               )
-            ) : isHistoryDiffTabPath(wb.activeTab) ? (
+            ) : isHistoryDiffTabPath(tabPath) ? (
               // A persisted pre-flip tab (legacy change-set diff). The legacy
               // history store is retired; the tab stays closeable but renders
               // an honest note instead of a broken page.
@@ -4154,7 +4398,7 @@ export function DesktopWorkspaceShell(props: {
                 This history diff came from the retired legacy history and is
                 no longer available. Current history lives in the History rail.
               </div>
-            ) : isVersionCompareTabPath(wb.activeTab) ? (
+            ) : isVersionCompareTabPath(tabPath) ? (
               // A persisted compare tab reads THE version capability, like
               // every other version entry point. Gating it on the share fact
               // alone left the whole #620 cause open: on a workspace whose
@@ -4196,12 +4440,12 @@ export function DesktopWorkspaceShell(props: {
                 <VersionComparePage
                   // Remount per version AND per state change so the diff
                   // always reflects the latest disk/engine state.
-                  key={`${wb.activeTab}:${versionEpoch}`}
+                  key={`${tabPath}:${versionEpoch}`}
                   workspaceId={workspaceId}
-                  versionId={parseVersionCompareTabPath(wb.activeTab) ?? "main"}
+                  versionId={parseVersionCompareTabPath(tabPath) ?? "main"}
                 />
               )
-            ) : isChatsTabPath(wb.activeTab) ? (
+            ) : isChatsTabPath(tabPath) ? (
               captureAvailable ? (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
                   <LazyChatsView
@@ -4238,12 +4482,12 @@ export function DesktopWorkspaceShell(props: {
                   {chatsOffCopy(syncStatus)}
                 </div>
               )
-            ) : isSiteTabPath(wb.activeTab) ? (
-              activeSiteRoot ? (
+            ) : isSiteTabPath(tabPath) ? (
+              groupSiteRoot ? (
                 <Suspense fallback={<PanelLoading label="site" />}>
                   <LazySitePreviewPage
                     workspaceId={workspaceId}
-                    siteRoot={activeSiteRoot}
+                    siteRoot={groupSiteRoot}
                     sharedView={!!shareView}
                     onOpenPath={openFile}
                     {...(shareView
@@ -4253,15 +4497,17 @@ export function DesktopWorkspaceShell(props: {
                 </Suspense>
               ) : (
                 <InvalidSitePathFallback
-                  activeTab={wb.activeTab}
-                  onClose={closeActiveTab}
+                  activeTab={tabPath}
+                  onClose={() => {
+                    if (tabPath) closeFileTab(editorGroup.id, tabPath);
+                  }}
                 />
               )
-            ) : wb.activeTab ? (
+            ) : tabPath && tab && editorCallbacks ? (
               <FileInspector
-                key={wb.activeTab}
+                key={tabPath}
                 workspaceId={workspaceId}
-                path={wb.activeTab}
+                path={tabPath}
                 // History growth, version switches, AND share-mount pulls all
                 // re-read the open file (every counter only ever increases).
                 refreshKey={historyRefreshCounter + versionEpoch + mountContentEpoch}
@@ -4275,19 +4521,20 @@ export function DesktopWorkspaceShell(props: {
                 // is a Chats call like any other (#615) — same gate as the
                 // panel, the tab and the graph's toggle.
                 chatMentionsAvailable={captureAvailable}
-                scrollTarget={searchScrollTarget ?? undefined}
+                scrollTarget={groupScrollTarget}
                 headingTarget={
-                  headingTarget?.path === wb.activeTab
+                  headingTarget?.path === tabPath
                     ? headingTarget.target
                     : undefined
                 }
-                onScrollConsumed={consumeScrollTarget}
-                onSaveStateChange={onSaveStateChange}
-                registerDraftFlush={registerDraftFlush}
-                registerSourceToggle={registerSourceToggle}
+                onScrollConsumed={consumeSearchScrollTarget}
+                onSaveStateChange={editorCallbacks.onSaveStateChange}
+                registerDraftFlush={editorCallbacks.registerDraftFlush}
+                registerSourceToggle={editorCallbacks.registerSourceToggle}
+                autoFocus={wb.activeEditorGroup === editorGroup.id}
                 knownMarkdownFiles={markdownWikilinkFiles}
-                readOnly={!!shareView || isMountedSharePath(wb.activeTab)}
-                {...(shareView || isMountedSharePath(wb.activeTab)
+                readOnly={!!shareView || isMountedSharePath(tabPath)}
+                {...(shareView || isMountedSharePath(tabPath)
                   ? {}
                   : { onSharePath: (path: string) => setShareTarget({ path }) })}
               />
@@ -4323,7 +4570,21 @@ export function DesktopWorkspaceShell(props: {
               </div>
             )}
             </ErrorBoundary>
-          </div>
+                    </div>
+                  </>
+                ),
+              };
+            })}
+            activeGroupId={wb.activeEditorGroup}
+            onFocusGroup={(groupId) =>
+              mutateWb((state) => focusEditorGroup(state, groupId))
+            }
+            onResizeGroups={(leftGroupId, rightGroupId, leftSize) =>
+              mutateWb((state) =>
+                resizeEditorGroups(state, leftGroupId, rightGroupId, leftSize),
+              )
+            }
+          />
         </main>
 
         {/* Chats panel — the right-hand secondary sidebar (flagged
@@ -4341,7 +4602,7 @@ export function DesktopWorkspaceShell(props: {
             actions={
               captureAvailable &&
               chatsPanelTab === "all" &&
-              !isChatsTabPath(wb.activeTab) ? (
+              !isChatsTabPath(focusedTabPath) ? (
                 <button
                   type="button"
                   data-testid="chats-open-tab"
@@ -4359,7 +4620,7 @@ export function DesktopWorkspaceShell(props: {
                 switching panel mode or workspace tab clears the failure. */}
             <ErrorBoundary
               scope="rail"
-              resetKeys={[chatsPanelTab, wb.activeTab]}
+              resetKeys={[chatsPanelTab, focusedTabPath]}
             >
               {!captureAvailable ? (
                 // Main's capture cannot serve chats here, so mounting either

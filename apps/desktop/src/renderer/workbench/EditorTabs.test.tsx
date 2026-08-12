@@ -17,6 +17,7 @@ const tabs = [{ path: "a.md" }, { path: "b.md" }, { path: "c.md" }];
 function renderTabs(activeTab: string) {
   return render(
     <EditorTabs
+      groupNumber={1}
       tabs={tabs}
       activeTab={activeTab}
       activeTabDirty={false}
@@ -25,6 +26,7 @@ function renderTabs(activeTab: string) {
       onClose={noop}
       onContextMenu={noop}
       onMove={noop}
+      onCreateGroupRight={noop}
     />,
   );
 }
@@ -47,6 +49,7 @@ describe("EditorTabs strip scrolling", () => {
 
     rerender(
       <EditorTabs
+        groupNumber={1}
         tabs={tabs}
         activeTab="c.md"
         activeTabDirty={false}
@@ -55,6 +58,7 @@ describe("EditorTabs strip scrolling", () => {
         onClose={noop}
         onContextMenu={noop}
         onMove={noop}
+        onCreateGroupRight={noop}
       />,
     );
     expect(scroll).toHaveBeenCalledTimes(2);
@@ -89,6 +93,29 @@ describe("EditorTabs strip scrolling", () => {
     strip.dispatchEvent(wheel);
     expect(strip.scrollLeft).toBe(0);
     expect(wheel.defaultPrevented).toBe(false);
+  });
+
+  it("dismisses the overflow menu when the group becomes empty", () => {
+    const { rerender } = renderTabs("a.md");
+    fireEvent.click(screen.getByTestId("tabs-overflow"));
+    expect(screen.getByTestId("tabs-overflow-menu")).toBeTruthy();
+
+    rerender(
+      <EditorTabs
+        groupNumber={1}
+        tabs={[]}
+        activeTab={null}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+
+    expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
   });
 });
 
@@ -156,6 +183,7 @@ describe("EditorTabs overlay scrollbar", () => {
 
     rerender(
       <EditorTabs
+        groupNumber={1}
         tabs={tabs}
         activeTab="a.md"
         activeTabDirty
@@ -164,6 +192,7 @@ describe("EditorTabs overlay scrollbar", () => {
         onClose={noop}
         onContextMenu={noop}
         onMove={noop}
+        onCreateGroupRight={noop}
       />,
     );
     expect(thumb.style.display).toBe("");
@@ -182,5 +211,36 @@ describe("EditorTabs overlay scrollbar", () => {
     // Released: plain pointer travel no longer scrolls.
     fireEvent.pointerMove(thumb, { pointerId: 1, buttons: 1, clientX: 90 });
     expect(strip.scrollLeft).toBeCloseTo(120, 1);
+  });
+
+  it("labels and invokes group-scoped controls", () => {
+    const onCreateGroupRight = vi.fn();
+    const onCloseGroup = vi.fn();
+    render(
+      <EditorTabs
+        groupNumber={2}
+        tabs={tabs}
+        activeTab="a.md"
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onCreateGroupRight={onCreateGroupRight}
+        onCloseGroup={onCloseGroup}
+      />,
+    );
+
+    expect(screen.getByRole("tablist", { name: "Editor group 2 tabs" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "All tabs in editor group 2" }),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "New editor group right" }),
+    );
+    expect(onCreateGroupRight).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Close editor group" }));
+    expect(onCloseGroup).toHaveBeenCalledOnce();
   });
 });

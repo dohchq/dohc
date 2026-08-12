@@ -114,6 +114,7 @@ describe("application menu template", () => {
       ["File", "Close Tab", "CommandOrControl+W"],
       ["View", "Command Palette", "CommandOrControl+Shift+P"],
       ["View", "Quick Open", "CommandOrControl+P"],
+      ["View", "New Editor Group Right", "CommandOrControl+\\"],
       ["View", "Toggle Sidebar", "CommandOrControl+B"],
       ["View", "Toggle Chats Panel", "CommandOrControl+Alt+B"],
       ["Go", "Settings", "CommandOrControl+,"],
@@ -122,6 +123,22 @@ describe("application menu template", () => {
       expect(item?.accelerator, label).toBe(accelerator);
       expect(item?.registerAccelerator, label).toBe(false);
     }
+  });
+
+  it("routes New Editor Group Right through the native application menu", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    const fakeWindow = { id: 8 };
+    const moveToGroup = items(template, "View").find(
+      (entry) => entry.label === "New Editor Group Right",
+    );
+    (moveToGroup?.click as (a: unknown, b: unknown) => void)(
+      undefined,
+      fakeWindow,
+    );
+    expect(sendCommand).toHaveBeenCalledWith(
+      fakeWindow,
+      "new-editor-group-right",
+    );
   });
 
   it("routes Toggle Chats through the native application menu", () => {
