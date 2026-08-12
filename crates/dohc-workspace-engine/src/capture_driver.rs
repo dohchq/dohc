@@ -24,6 +24,7 @@
 
 use crate::capture_sink::{CaptureProvenance, SelfWriteSuppression, StoreCaptureSink};
 use crate::{CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
+use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_files::{
     CancellationToken, CaptureApplyResult, FilesActor, FilesError, FilesHandle, ManifestEntry,
     NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest,
@@ -1540,6 +1541,7 @@ impl CaptureDriver {
         root: PathBuf,
         actor: ActorHandle,
         workspace_id: String,
+        leases: LeaseRegistry,
         self_writes: SelfWriteSuppression,
         apply_gate: ApplyGate,
         initial_author_json: Option<String>,
@@ -1558,6 +1560,7 @@ impl CaptureDriver {
             root,
             actor,
             workspace_id,
+            leases,
             self_writes,
             cancel.clone(),
             Arc::clone(&status),
@@ -2279,6 +2282,7 @@ struct RealEnv {
     root: PathBuf,
     actor: ActorHandle,
     workspace_id: String,
+    leases: LeaseRegistry,
     status: Arc<DriverStatus>,
     author_json: Arc<Mutex<Option<String>>>,
     self_writes: SelfWriteSuppression,
@@ -2308,6 +2312,7 @@ impl RealEnv {
             root: &self.root,
             actor: &self.actor,
             workspace_id: &self.workspace_id,
+            leases: &self.leases,
             status: &self.status,
             self_writes: &self.self_writes,
             author_json: self.capture_author(),
@@ -2497,6 +2502,7 @@ async fn drive(
     root: PathBuf,
     actor: ActorHandle,
     workspace_id: String,
+    leases: LeaseRegistry,
     self_writes: SelfWriteSuppression,
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
@@ -2512,6 +2518,7 @@ async fn drive(
         root,
         actor,
         workspace_id,
+        leases,
         status: Arc::clone(&status),
         author_json,
         self_writes,
@@ -2534,6 +2541,7 @@ pub(crate) async fn reconcile_full_for_switch(
     root: &Path,
     actor: &ActorHandle,
     workspace_id: &str,
+    leases: &LeaseRegistry,
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
     author_json: Option<String>,
@@ -2582,6 +2590,7 @@ pub(crate) async fn reconcile_full_for_switch(
                 root,
                 actor,
                 workspace_id,
+                leases,
                 status,
                 self_writes,
                 author_json,
@@ -2650,6 +2659,7 @@ struct ApplyRunContext<'a> {
     root: &'a Path,
     actor: &'a ActorHandle,
     workspace_id: &'a str,
+    leases: &'a LeaseRegistry,
     status: &'a Arc<DriverStatus>,
     self_writes: &'a SelfWriteSuppression,
     author_json: Option<String>,
@@ -2723,6 +2733,7 @@ async fn apply_run_with_handle(
         root,
         actor,
         workspace_id,
+        leases,
         status,
         self_writes,
         author_json,
@@ -2752,6 +2763,7 @@ async fn apply_run_with_handle(
     let apply_actor = actor.clone();
     let apply_root = root.to_path_buf();
     let apply_workspace = workspace_id.to_owned();
+    let apply_leases = leases.clone();
     let apply_self_writes = self_writes.clone();
     let version_for_retire = version_id.clone();
     let now_ms = wall_now_ms();
@@ -2781,6 +2793,7 @@ async fn apply_run_with_handle(
                 apply_root,
                 now_ms,
                 apply_author_json,
+                apply_leases,
                 apply_self_writes,
                 apply_provenance,
             );
@@ -2836,6 +2849,7 @@ async fn apply_run_with_handle(
             let retire_actor = actor.clone();
             let retire_workspace = workspace_id.to_owned();
             let retire_version = version_for_retire.clone();
+            let retire_leases = leases.clone();
             let retire_path = path.clone();
             let retire_root = root.to_path_buf();
             let retire_self_writes = self_writes.clone();
@@ -2855,6 +2869,7 @@ async fn apply_run_with_handle(
                         retire_root,
                         now_ms,
                         retire_author_json,
+                        retire_leases,
                         retire_self_writes,
                         retire_pass_provenance,
                     );

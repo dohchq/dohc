@@ -74,7 +74,6 @@ class MockDaemon implements EngineDaemonClient {
             nextCursor: null,
             pendingCursor: null,
             changedPaths: [],
-            pendingResolves: [],
             sharingDeclined: [],
           };
         case "sync.pull":
@@ -93,14 +92,6 @@ class MockDaemon implements EngineDaemonClient {
                 path: "notes/plan.md",
                 operation: "write",
                 contentKind: "text",
-              },
-            ],
-            pendingResolves: [
-              {
-                remoteConflictId: "remote-conflict",
-                localConflictId: "local-conflict",
-                path: "notes/plan.md",
-                reason: "stale-head",
               },
             ],
             sharingDeclined: [],
@@ -231,12 +222,6 @@ describe("EngineRelayClient", () => {
           contentKind: "text",
         },
       ],
-      pendingResolves: [
-        {
-          remoteConflictId: "remote-conflict",
-          localConflictId: "local-conflict",
-        },
-      ],
     });
     await pull.commitFetchCursor();
     await expect(client.recoverOrigin()).resolves.toEqual({
@@ -309,7 +294,6 @@ describe("EngineRelayClient", () => {
         nextCursor: pulls,
         pendingCursor: { kind: "relay", token: `cursor-${pulls}` },
         changedPaths: [],
-        pendingResolves: [],
         refusals: [],
         sharingDeclined: [
           {
@@ -415,7 +399,6 @@ describe("EngineRelayClient", () => {
           nextCursor: 0,
           pendingCursor: { kind: "relay", token: "cursor-enrollment" },
           changedPaths: [],
-          pendingResolves: [],
           sharingDeclined: [],
         };
       }
@@ -1125,7 +1108,6 @@ describe("EngineRelayClient", () => {
               contentKind: "text",
             },
           ],
-          pendingResolves: [],
           sharingDeclined: [],
         };
       }

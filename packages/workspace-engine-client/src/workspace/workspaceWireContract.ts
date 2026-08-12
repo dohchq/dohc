@@ -140,13 +140,6 @@ export type ConflictListPage = WorkspaceJsonObject & {
   nextAfterConflictId: string | null;
 };
 
-export type PendingConflictResolve = WorkspaceJsonObject & {
-  remoteConflictId: string;
-  localConflictId: string | null;
-  path: string | null;
-  reason: string;
-};
-
 export type ReplicatedConflictResult =
   | (WorkspaceJsonObject & {
       replicated: true;
@@ -154,8 +147,6 @@ export type ReplicatedConflictResult =
       conflictId: string;
       inserted: boolean | null;
       matched: boolean;
-      deferred: boolean;
-      pendingResolve: PendingConflictResolve | null;
     })
   | (WorkspaceJsonObject & {
       replicated: true;
@@ -535,24 +526,6 @@ export function decodeConflictRecord(
   };
 }
 
-function decodePendingResolve(
-  value: JsonValue,
-  label: string,
-): PendingConflictResolve {
-  const object = objectValue(value, label, [
-    "remoteConflictId",
-    "localConflictId",
-    "path",
-    "reason",
-  ]);
-  return {
-    remoteConflictId: stringValue(object, "remoteConflictId", label),
-    localConflictId: nullableString(object, "localConflictId", label),
-    path: nullableString(object, "path", label),
-    reason: stringValue(object, "reason", label),
-  };
-}
-
 function decodeReplicatedConflict(
   value: JsonValue,
   label: string,
@@ -586,8 +559,6 @@ function decodeReplicatedConflict(
     "conflictId",
     "inserted",
     "matched",
-    "deferred",
-    "pendingResolve",
   ]);
   const inserted = object.inserted;
   if (inserted !== null && typeof inserted !== "boolean") {
@@ -601,14 +572,6 @@ function decodeReplicatedConflict(
     conflictId: stringValue(object, "conflictId", label),
     inserted,
     matched: booleanValue(object, "matched", label),
-    deferred: booleanValue(object, "deferred", label),
-    pendingResolve:
-      object.pendingResolve === null
-        ? null
-        : decodePendingResolve(
-            object.pendingResolve ?? null,
-            `${label}.pendingResolve`,
-          ),
   };
 }
 

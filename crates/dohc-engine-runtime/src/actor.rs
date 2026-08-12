@@ -36,7 +36,8 @@ use crate::search::{
 };
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
-    AppendOutcome, CloseOutcome, ContentKind, DocKey, LeaseRegistry, Projection, Regime, Ydoc,
+    AppendOutcome, CloseOutcome, ContentKind, DocKey, LeaseRegistry, LineageClaimStatus,
+    Projection, Regime, Ydoc,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -59,8 +60,9 @@ use dohc_engine_domain::{
     TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
     VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
     apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
-    binary_rename_write_job_id, binary_rollback_job_identity, capture_ingest_binary_in_tx,
-    capture_ingest_in_tx, capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
+    binary_rename_write_job_id, binary_rollback_job_identity,
+    capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
+    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
     compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
     delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
     enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_secret_moment_keyless,
@@ -893,12 +895,14 @@ enum Command {
     CaptureIngest {
         input: CaptureIngest,
         root_dir: Option<PathBuf>,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
     },
     CaptureIngestBinary {
         input: CaptureIngestBinary,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureIngestBinaryResult, RuntimeError>>,
@@ -923,6 +927,7 @@ enum Command {
     },
     CaptureRetire {
         input: CaptureRetire,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureRetireResult, RuntimeError>>,
@@ -1247,6 +1252,7 @@ enum Command {
     ConflictApplyReplicated {
         envelope: ReplicationEnvelope,
         faults: Arc<dyn FaultInjector>,
+        leases: LeaseRegistry,
         token: CancellationToken,
         reply: oneshot::Sender<Result<ApplyOutcome<ConflictApplyResult>, RuntimeError>>,
     },
@@ -1981,9 +1987,10 @@ impl ActorHandle {
     pub fn capture_ingest_blocking(
         &self,
         input: CaptureIngest,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_root(input, None, faults)
+        self.capture_ingest_blocking_with_root(input, None, leases, faults)
     }
 
     /// Capture and index a text file when the owning workspace session can
@@ -1992,15 +1999,17 @@ impl ActorHandle {
         &self,
         input: CaptureIngest,
         root_dir: PathBuf,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_root(input, Some(root_dir), faults)
+        self.capture_ingest_blocking_with_root(input, Some(root_dir), leases, faults)
     }
 
     fn capture_ingest_blocking_with_root(
         &self,
         input: CaptureIngest,
         root_dir: Option<PathBuf>,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
         debug_assert_sync_context();
@@ -2009,6 +2018,7 @@ impl ActorHandle {
             .blocking_send(Command::CaptureIngest {
                 input,
                 root_dir,
+                leases,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2023,6 +2033,7 @@ impl ActorHandle {
     pub fn capture_ingest_binary_blocking(
         &self,
         input: CaptureIngestBinary,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
         debug_assert_sync_context();
@@ -2030,6 +2041,7 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::CaptureIngestBinary {
                 input,
+                leases,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2123,6 +2135,7 @@ impl ActorHandle {
     pub fn capture_retire_blocking(
         &self,
         input: CaptureRetire,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
         debug_assert_sync_context();
@@ -2130,6 +2143,7 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::CaptureRetire {
                 input,
+                leases,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2393,10 +2407,11 @@ impl ActorHandle {
     pub async fn capture_ingest(
         &self,
         input: CaptureIngest,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_with_root(input, None, faults, token)
+        self.capture_ingest_with_root(input, None, leases, faults, token)
             .await
     }
 
@@ -2406,10 +2421,11 @@ impl ActorHandle {
         &self,
         input: CaptureIngest,
         root_dir: PathBuf,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_with_root(input, Some(root_dir), faults, token)
+        self.capture_ingest_with_root(input, Some(root_dir), leases, faults, token)
             .await
     }
 
@@ -2417,6 +2433,7 @@ impl ActorHandle {
         &self,
         input: CaptureIngest,
         root_dir: Option<PathBuf>,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
@@ -2425,6 +2442,7 @@ impl ActorHandle {
             .send(Command::CaptureIngest {
                 input,
                 root_dir,
+                leases,
                 faults,
                 token,
                 reply,
@@ -2438,6 +2456,7 @@ impl ActorHandle {
     pub async fn capture_ingest_binary(
         &self,
         input: CaptureIngestBinary,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
@@ -2445,6 +2464,7 @@ impl ActorHandle {
         self.tx
             .send(Command::CaptureIngestBinary {
                 input,
+                leases,
                 faults,
                 token,
                 reply,
@@ -3172,6 +3192,7 @@ impl ActorHandle {
     pub async fn capture_retire(
         &self,
         input: CaptureRetire,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<CaptureRetireResult, RuntimeError> {
@@ -3179,6 +3200,7 @@ impl ActorHandle {
         self.tx
             .send(Command::CaptureRetire {
                 input,
+                leases,
                 faults,
                 token,
                 reply,
@@ -3524,15 +3546,15 @@ impl ActorHandle {
         &self,
         envelope: ReplicationEnvelope,
         faults: Arc<dyn FaultInjector>,
+        leases: LeaseRegistry,
         token: CancellationToken,
     ) -> Result<ApplyOutcome<ConflictApplyResult>, RuntimeError> {
-        // Keep the complete typed result on the actor boundary: callers need
-        // the structured `pending_resolve`, not only its derived boolean view.
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ConflictApplyReplicated {
                 envelope,
                 faults,
+                leases,
                 token,
                 reply,
             })
@@ -6696,6 +6718,7 @@ fn worker_main(
             Command::CaptureIngest {
                 input,
                 root_dir,
+                leases,
                 faults,
                 token,
                 reply,
@@ -6704,6 +6727,7 @@ fn worker_main(
                     &mut store,
                     &input,
                     root_dir.as_deref(),
+                    &leases,
                     faults.as_ref(),
                     &token,
                 );
@@ -6711,12 +6735,18 @@ fn worker_main(
             }
             Command::CaptureIngestBinary {
                 input,
+                leases,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    capture_ingest_binary_on_store(&mut store, &input, faults.as_ref(), &token);
+                let outcome = capture_ingest_binary_on_store(
+                    &mut store,
+                    &input,
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::CaptureSecret {
@@ -7249,11 +7279,13 @@ fn worker_main(
             }
             Command::CaptureRetire {
                 input,
+                leases,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome = capture_retire_on_store(&mut store, &input, faults.as_ref(), &token);
+                let outcome =
+                    capture_retire_on_store(&mut store, &input, &leases, faults.as_ref(), &token);
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextRead {
@@ -7501,13 +7533,14 @@ fn worker_main(
             Command::ConflictApplyReplicated {
                 envelope,
                 faults,
+                leases,
                 token,
                 reply,
             } => {
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    match apply_conflict_envelope(&mut store, &envelope, faults.as_ref()) {
+                    match apply_conflict_envelope(&mut store, &envelope, faults.as_ref(), &leases) {
                         Ok(outcome @ ApplyOutcome::Refused(_)) => {
                             retain_refusal_for_direct_retry(&mut store, &envelope, faults.as_ref())
                                 .map(|()| outcome)
@@ -8636,11 +8669,13 @@ fn worker_main(
 /// it absent and settles refuse it (an empty projection must never clobber
 /// the artifact).
 fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
-    // base_claimed covers the replicated base-only lineage: claim_base inserts
+    // The claim status covers the replicated base-only lineage: claim_base inserts
     // the base snapshot at up_to_seq 0 WITHOUT advancing head_snapshot_seq, so
     // the seq pair alone would misread a claimed base as absent (double-seed +
     // NoMarker settle refusals on a valid lineage).
-    marker.head_update_seq > 0 || marker.head_snapshot_seq > 0 || marker.base_claimed
+    marker.head_update_seq > 0
+        || marker.head_snapshot_seq > 0
+        || marker.lineage_claim_status.has_claimed_base()
 }
 
 fn ydoc_version_unsettled_content_kind_on_store(
@@ -8665,7 +8700,7 @@ fn ydoc_version_unsettled_content_kind_on_store(
                   FROM ydoc_docs AS docs \
                   WHERE docs.workspace_id = ?1 AND docs.version_id = ?2 \
                     AND (docs.head_update_seq > 0 OR docs.head_snapshot_seq > 0 \
-                         OR docs.base_claimed = 1 OR EXISTS ( \
+                         OR docs.lineage_claim_status <> 'unclaimed' OR EXISTS ( \
                             SELECT 1 FROM ydoc_deferred_updates AS deferred \
                             WHERE deferred.workspace_id = docs.workspace_id \
                               AND deferred.version_id = docs.version_id \
@@ -8925,7 +8960,7 @@ fn ydoc_open_state_on_store(
                 && requested != marker.content_kind
                 && !lineage_existing
                 && marker.regime == Regime::LocalOnly
-                && !marker.base_claimed
+                && marker.lineage_claim_status == LineageClaimStatus::Unclaimed
             {
                 match dohc_engine_collab::rewrite_bare_marker_content_kind(
                     store, &key, requested, &NoFaults, now_ms,
@@ -8993,10 +9028,10 @@ fn ydoc_record_update_on_store(
     // after it commits, so a decline reported to the caller is one that
     // actually survived the commit.
     let mut sharing_declined: Option<SharingDeclined> = None;
-    // A replicated, base-claimed lineage journals the ydoc.update DELTA in
-    // the SAME transaction as the append (blob-before-log holds; TS parity:
-    // ydocEngineDriver journals inside the recordUpdate write). Local-only
-    // lineages journal nothing — their markdown is the artifact.
+    // An exact replicated lineage journals the ydoc.update delta in the same
+    // transaction as the append. This keeps blob-before-log order and TS
+    // parity. Local-only lineages journal nothing; their Markdown is the
+    // artifact.
     let update_sha = dohc_engine_storage::hex_sha256(update);
     let journal_key = key.clone();
     let journal_path = path.to_owned();
@@ -9055,7 +9090,7 @@ fn ydoc_record_update_on_store(
                     now_ms,
                 )
                 .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                    // Named explicitly: a base-claimed replicated lineage
+                    // Named explicitly: an exact replicated lineage
                     // with NO sync identity is a half-initialized state
                     // (every real replicated flow runs sync init first —
                     // pulls require the identity and the TS driver creates
@@ -9087,6 +9122,39 @@ fn ydoc_record_update_on_store(
 pub struct YdocAppend {
     pub outcome: AppendOutcome,
     pub sharing_declined: Option<dohc_engine_sync::SharingDeclined>,
+}
+
+fn ydoc_settle_disk_preimage(
+    root_dir: &std::path::Path,
+    path: &str,
+    expected_sha256: Option<&str>,
+    projected_sha256: &str,
+) -> Result<Option<Preimage>, RuntimeError> {
+    let state = probe_projection_target(root_dir, path, ProjectionTargetKind::Plaintext);
+    match state {
+        ProjectionTargetState::Absent if expected_sha256.is_none() => Ok(Some(Preimage::Absent)),
+        ProjectionTargetState::Text { sha256 }
+            if sha256 == projected_sha256 || expected_sha256 == Some(sha256.as_str()) =>
+        {
+            Ok(Some(Preimage::Present(sha256)))
+        }
+        // New File creates an empty artifact without a domain head. It is the
+        // only untracked file a headless session can adopt without losing data.
+        ProjectionTargetState::Text { sha256 }
+            if expected_sha256.is_none() && sha256 == dohc_engine_storage::hex_sha256(b"") =>
+        {
+            Ok(Some(Preimage::Present(sha256)))
+        }
+        // Containment and transient-read failures retain the durable pending
+        // job contract. Materialization classifies them without following an
+        // unsafe path; a later settle replays the same committed job.
+        ProjectionTargetState::UntrackedContent | ProjectionTargetState::Unreadable => Ok(None),
+        ProjectionTargetState::Absent
+        | ProjectionTargetState::Text { .. }
+        | ProjectionTargetState::Binary { .. } => {
+            Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into())
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9311,13 +9379,19 @@ fn ydoc_settle_on_store(
             }
         }
     }
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+    // Classify the exact disk preimage through the same contained projection
+    // probe that materialization uses. This must precede the settle transaction:
+    // compensating only the marker after a rival is found would leave the new
+    // head, moment, search row, and materialization job committed.
+    let disk_preimage =
+        ydoc_settle_disk_preimage(root_dir, path, expected_head_sha.as_deref(), &projected_sha)?;
     // Idempotent no-op: when the lineage's last settled content is exactly
     // this projection, re-settling would mint a duplicate moment (the
     // fingerprint's previous-moment input changed) and a redundant
     // materialization job — the TS driver only settles when the projection
     // differs. Answer with the current head instead (its pending job, if
     // any, was replayed above).
-    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
     if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
         == Some(projected_sha.as_str())
     {
@@ -9360,12 +9434,10 @@ fn ydoc_settle_on_store(
         if current_sha != expected_head_sha {
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget);
         }
-        let preimage = current
-            .snapshot
-            .as_ref()
-            .map_or(Preimage::Absent, |snapshot| {
-                Preimage::Present(snapshot.blob_sha256.clone())
-            });
+        let preimage = current.snapshot.as_ref().map_or_else(
+            || disk_preimage.clone().unwrap_or(Preimage::Absent),
+            |snapshot| Preimage::Present(snapshot.blob_sha256.clone()),
+        );
         let previous_moment = current
             .snapshot
             .as_ref()
@@ -9666,6 +9738,19 @@ fn versioned_text_write_on_store(
     dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
     let outcome = store.write_with(faults, |tx| {
         let result = write_text_in_tx(tx, input).map_err(RuntimeError::from)?;
+        if !result.deduped {
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                dohc_engine_sync::ResultingHead::Text {
+                    path: &result.snapshot.path,
+                    text: &result.snapshot.text,
+                },
+                input.now_ms,
+            )?;
+        }
         if !result.deduped
             && let Some(root_dir) = root_dir
         {
@@ -9716,6 +9801,14 @@ fn versioned_binary_write_on_store(
     let outcome = store.write_with(faults, |tx| {
         let result = write_binary_in_tx(tx, input).map_err(RuntimeError::from)?;
         if !result.deduped {
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object_id,
+                dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                input.now_ms,
+            )?;
             delete_file_search_index(
                 tx,
                 &input.workspace_id,
@@ -9982,6 +10075,25 @@ fn versioned_text_rename_on_store(
     }
     let result = VersionedTextStore::new(store)
         .rename_text_file_with(input, faults, |tx, result| {
+            if !result.deduped {
+                let resulting = if result.moment.after_content_kind == "text" {
+                    dohc_engine_sync::ResultingHead::Text {
+                        path: &result.after.path,
+                        text: &result.after.text,
+                    }
+                } else {
+                    dohc_engine_sync::ResultingHead::BinaryOrAbsent
+                };
+                dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &result.object.object_id,
+                    resulting,
+                    input.now_ms,
+                )
+                .map_err(map_fold_error)?;
+            }
             delete_file_search_index(
                 tx,
                 &input.workspace_id,
@@ -10146,7 +10258,20 @@ fn versioned_text_rollback_on_store(
     let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
         input,
         faults,
-        |tx, object_id, restored_text, compensating_moment_id| {
+        |tx, object_id, restored_text, compensating_moment_id, recorded_at_ms| {
+            let resulting = restored_text.map_or(
+                dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                |(path, text)| dohc_engine_sync::ResultingHead::Text { path, text },
+            );
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                object_id,
+                resulting,
+                recorded_at_ms,
+            )
+            .map_err(map_fold_error)?;
             delete_file_search_index(tx, &input.workspace_id, &input.version_id, object_id)
                 .map_err(search_domain)?;
             if let Some((path, text)) = restored_text {
@@ -10439,30 +10564,70 @@ fn versioned_text_merge_on_store(
     let result = VersionedTextStore::new(store)
         .merge_text_file_from_version_with(input, faults, |tx, result| {
             match result {
-                MergeTextFileResult::Write { write, .. } => upsert_file_search_index(
-                    tx,
-                    root_dir,
-                    &input.workspace_id,
-                    &input.target_version_id,
-                    &write.object.object_id,
-                    &write.snapshot.path,
-                    &write.snapshot.text,
-                )
-                .map_err(search_domain)?,
-                MergeTextFileResult::Delete { delete, .. } => delete_file_search_index(
-                    tx,
-                    &input.workspace_id,
-                    &input.target_version_id,
-                    &delete.object.object_id,
-                )
-                .map_err(search_domain)?,
+                MergeTextFileResult::Write { write, .. } => {
+                    if !write.deduped {
+                        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                            tx,
+                            &input.workspace_id,
+                            &input.target_version_id,
+                            &write.object.object_id,
+                            dohc_engine_sync::ResultingHead::Text {
+                                path: &write.snapshot.path,
+                                text: &write.snapshot.text,
+                            },
+                            input.now_ms,
+                        )
+                        .map_err(map_fold_error)?;
+                    }
+                    upsert_file_search_index(
+                        tx,
+                        root_dir,
+                        &input.workspace_id,
+                        &input.target_version_id,
+                        &write.object.object_id,
+                        &write.snapshot.path,
+                        &write.snapshot.text,
+                    )
+                    .map_err(search_domain)?;
+                }
+                MergeTextFileResult::Delete { delete, .. } => {
+                    delete_file_search_index(
+                        tx,
+                        &input.workspace_id,
+                        &input.target_version_id,
+                        &delete.object.object_id,
+                    )
+                    .map_err(search_domain)?;
+                    if !delete.deduped {
+                        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                            tx,
+                            &input.workspace_id,
+                            &input.target_version_id,
+                            &delete.object.object_id,
+                            dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                            input.now_ms,
+                        )
+                        .map_err(map_fold_error)?;
+                    }
+                }
                 // A fast-forwarded BINARY head needs no index work: the file
                 // search reader drops any candidate whose live head is binary
                 // (`search::query::live_head_is_binary`), so the text this path
                 // used to hold is already unreachable.
-                MergeTextFileResult::BinaryWrite { .. }
-                | MergeTextFileResult::Unchanged { .. }
-                | MergeTextFileResult::Conflict { .. } => {}
+                MergeTextFileResult::BinaryWrite { write, .. } => {
+                    if !write.deduped {
+                        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                            tx,
+                            &input.workspace_id,
+                            &input.target_version_id,
+                            &write.object.object_id,
+                            dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                            input.now_ms,
+                        )
+                        .map_err(map_fold_error)?;
+                    }
+                }
+                MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {}
             }
             let Some((moment_id, deduped)) = merge_moment_outbound_identity(result) else {
                 return Ok(());
@@ -10568,6 +10733,7 @@ fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
     root_dir: Option<&std::path::Path>,
+    leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
@@ -10585,7 +10751,29 @@ fn capture_ingest_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
-        let result = capture_ingest_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let mut admitted = false;
+        let result = capture_ingest_with_admission_in_tx(
+            tx,
+            input,
+            |workspace_id, version_id, object_id| {
+                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                admitted = true;
+                Ok::<_, RuntimeError>(())
+            },
+        )?;
+        if admitted {
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                dohc_engine_sync::ResultingHead::Text {
+                    path: &result.snapshot.path,
+                    text: &result.snapshot.text,
+                },
+                input.now_ms,
+            )?;
+        }
         if !result.deduped
             && let Some(root_dir) = root_dir
         {
@@ -10618,6 +10806,7 @@ fn capture_ingest_on_store(
 fn capture_ingest_binary_on_store(
     store: &mut EngineStore,
     input: &CaptureIngestBinary,
+    leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
@@ -10635,7 +10824,26 @@ fn capture_ingest_binary_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
-        let result = capture_ingest_binary_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let mut admitted = false;
+        let result = capture_ingest_binary_with_admission_in_tx(
+            tx,
+            input,
+            |workspace_id, version_id, object_id| {
+                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                admitted = true;
+                Ok::<_, RuntimeError>(())
+            },
+        )?;
+        if admitted {
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object_id,
+                dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                input.now_ms,
+            )?;
+        }
         if !result.deduped {
             delete_file_search_index(
                 tx,
@@ -10653,6 +10861,23 @@ fn capture_ingest_binary_on_store(
         TxnOutcome::Committed(result) => Ok(result),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
+}
+
+fn ensure_capture_target_not_leased(
+    leases: &LeaseRegistry,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<(), RuntimeError> {
+    let key = DocKey::new(workspace_id, version_id, object_id)?;
+    if leases.is_held(&key) {
+        return Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "ydoc-session-live",
+            },
+        ));
+    }
+    Ok(())
 }
 
 fn capture_secret_on_store(
@@ -10708,6 +10933,7 @@ fn capture_secret_retire_on_store(
 fn capture_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureRetire,
+    leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureRetireResult, RuntimeError> {
@@ -10729,7 +10955,26 @@ fn capture_retire_on_store(
         if !result.deduped
             && let Some(retired) = result.retired.as_ref()
         {
+            let key = DocKey::new(
+                &input.workspace_id,
+                &input.version_id,
+                &retired.object.object_id,
+            )?;
+            if leases.is_held(&key) {
+                return Err(RuntimeError::Sync(
+                    dohc_engine_sync::SyncError::RetryableState {
+                        reason: "ydoc-session-live",
+                    },
+                ));
+            }
             delete_file_search_index(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &retired.object.object_id,
+            )
+            .map_err(RuntimeError::from)?;
+            dohc_engine_sync::retire_ydoc_lineage_in_tx(
                 tx,
                 &input.workspace_id,
                 &input.version_id,
@@ -10812,161 +11057,71 @@ fn conflict_resolve_on_store(
     // lease would turn a lost response into a different answer. Only a
     // resolution that has not committed can still rewrite a held document,
     // and only that one is refused.
-    let held_object: Option<(String, String)> = store.read_with(|conn| {
+    let held_target: Option<(String, String, Option<String>)> = store.read_with(|conn| {
         conn.query_row(
-            "SELECT target_version_id, current_object_id FROM conflicts              WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
+            "SELECT c.target_version_id, c.path, \
+                    (SELECT a.object_id FROM path_aliases a \
+                      WHERE a.workspace_id=c.workspace_id \
+                        AND a.version_id=c.target_version_id AND a.path=c.path) \
+             FROM conflicts c \
+             WHERE c.workspace_id=?1 AND c.conflict_id=?2 AND c.status='open'",
             params![input.workspace_id, input.conflict_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
-        .map(|row| row.and_then(|(version, object)| object.map(|object| (version, object))))
         .map_err(StorageError::corrupt_public)
     })?;
-    if let Some((version_id, object_id)) = held_object
-        && let Ok(key) = DocKey::new(input.workspace_id.clone(), version_id, object_id)
-        && leases.is_held(&key)
-    {
-        return Err(dohc_engine_domain::DomainError::InvalidInput {
-            reason: "ydoc-session-live",
+    if let Some((version_id, path, object_id)) = held_target {
+        let canonical_path = validate_addressable_plaintext_path(&path)?;
+        let object_id = object_id.unwrap_or_else(|| {
+            derive_capture_object_id(&input.workspace_id, &version_id, &canonical_path)
+        });
+        let key = DocKey::new(&input.workspace_id, &version_id, &object_id)?;
+        if leases.is_held(&key) {
+            return Err(dohc_engine_domain::DomainError::InvalidInput {
+                reason: "ydoc-session-live",
+            }
+            .into());
         }
-        .into());
     }
-    let result = VersionedTextStore::new(store)
-        .resolve_text_conflict_with(input, faults, |tx, result| {
-            if let Some(delete) = result.delete.as_ref() {
-                delete_file_search_index(
-                    tx,
-                    &input.workspace_id,
-                    &delete.before.version_id,
-                    &delete.object.object_id,
-                )
-                .map_err(search_domain)?;
-                // A deletion is a reviewed outcome carrying no bytes to
-                // fold, so the write path skipped it and the canonical rows
-                // survived — the next `ydoc.update` found the path absent,
-                // accepted it, and projected the retained lineage back into
-                // a snapshot, reversing the deletion the user approved.
-                // Retire the lineage so the reviewed outcome is what remains.
-                dohc_engine_sync::retire_ydoc_lineage_in_tx(
-                    tx,
-                    &input.workspace_id,
-                    &delete.before.version_id,
-                    &delete.object.object_id,
-                )
-                .map_err(map_fold_error)?;
-            }
-            if let Some(write) = result.write.as_ref()
-                && let Some(root_dir) = root_dir
-            {
-                upsert_file_search_index(
-                    tx,
-                    root_dir,
-                    &input.workspace_id,
-                    &write.snapshot.version_id,
-                    &write.snapshot.object_id,
-                    &write.snapshot.path,
-                    &write.snapshot.text,
-                )
-                .map_err(search_domain)?;
-            }
-            if let Some(delete) = result.delete.as_ref() {
-                journal_moment_outbound_in_tx(
-                    tx,
-                    &input.workspace_id,
-                    &delete.moment.moment_id,
-                    delete.deduped,
-                )?;
-            }
-            if let Some(write) = result.write.as_ref() {
-                journal_moment_outbound_in_tx(
-                    tx,
-                    &input.workspace_id,
-                    &write.moment.moment_id,
-                    write.deduped,
-                )?;
-            }
-            if let Some(write) = result.binary_write.as_ref() {
-                journal_moment_outbound_in_tx(tx, &input.workspace_id, &write.moment_id, false)?;
-            }
-            // A resolution onto BYTES needs no index work here. The write
-            // reuses the object already aliased to the path, and the search
-            // READER drops any candidate whose live head is binary
-            // (`search::query::live_head_is_binary`), which is the same
-            // freeze-then-filter contract every other binary overwrite uses.
-            //
-            // A TEXT resolution on a Y.Doc-backed object must also become
-            // canonical in the lineage, in this same transaction, or the
-            // next inbound delta silently reverses the user's choice.
-            // Keep-current writes nothing, so its chosen text is the
-            // conflict's own current side. A delete resolution is not
-            // folded: deleting a replicated Y.Doc path is its own machinery,
-            // and the projection guard plus the settle freeze already keep
-            // an open conflict's head safe.
-            if let Some(write) = result.write.as_ref() {
-                dohc_engine_sync::fold_resolution_into_ydoc_in_tx(
-                    tx,
-                    &input.workspace_id,
-                    &write.snapshot.version_id,
-                    &write.snapshot.object_id,
-                    &write.snapshot.path,
-                    &write.snapshot.text,
-                    input.now_ms,
-                )
-                .map_err(map_fold_error)?;
-            } else if matches!(
-                result.conflict.resolution,
-                Some(dohc_engine_domain::ConflictResolution::KeptCurrent)
-            ) && let Some(snapshot) = result.conflict.current.snapshot.as_ref()
-            {
-                dohc_engine_sync::fold_resolution_into_ydoc_in_tx(
-                    tx,
-                    &input.workspace_id,
-                    &result.conflict.target_version_id,
-                    &snapshot.object_id,
-                    &snapshot.path,
-                    &snapshot.text,
-                    input.now_ms,
-                )
-                .map_err(map_fold_error)?;
-            }
-            Ok(())
-        })
-        .map_err(RuntimeError::from)?;
-    // The fold appends full-document rewrites; give it the append path's
-    // self-bounding (`self_bound_log`), or repeated conflicts grow
-    // `ydoc_updates` without bound. Best-effort exactly like the append: the
-    // fold is already durable, a skipped or crashed compaction folds next
-    // time, and `maybe_compact` no-ops below threshold and while updates are
-    // pending.
-    let folded_object = result.write.as_ref().map_or_else(
-        || {
-            result.conflict.current.snapshot.as_ref().map(|snapshot| {
-                (
-                    result.conflict.target_version_id.clone(),
-                    snapshot.object_id.clone(),
-                )
-            })
-        },
-        |write| {
-            Some((
-                write.snapshot.version_id.clone(),
-                write.snapshot.object_id.clone(),
-            ))
-        },
-    );
-    if let Some((version_id, object_id)) = folded_object
-        && let Ok(key) = DocKey::new(input.workspace_id.clone(), version_id, object_id)
-        && dohc_engine_collab::read_marker(store, &key)?.is_some()
-    {
-        let _ = dohc_engine_collab::maybe_compact(
-            store,
-            &key,
-            dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD,
+    VersionedTextStore::new(store)
+        .resolve_text_conflict_with(
+            input,
             faults,
-            input.now_ms,
-        )?;
-    }
-    Ok(result)
+            |tx, conflict, _live| {
+                dohc_engine_sync::prepare_local_conflict_resolve_v1_in_tx(tx, input, conflict)
+                    .map_err(map_fold_error)
+            },
+            |tx, result, plan| {
+                if let Some(delete) = result.delete.as_ref() {
+                    delete_file_search_index(
+                        tx,
+                        &input.workspace_id,
+                        &delete.before.version_id,
+                        &delete.object.object_id,
+                    )
+                    .map_err(search_domain)?;
+                }
+                if let Some(write) = result.write.as_ref()
+                    && let Some(root_dir) = root_dir
+                {
+                    upsert_file_search_index(
+                        tx,
+                        root_dir,
+                        &input.workspace_id,
+                        &write.snapshot.version_id,
+                        &write.snapshot.object_id,
+                        &write.snapshot.path,
+                        &write.snapshot.text,
+                    )
+                    .map_err(search_domain)?;
+                }
+                dohc_engine_sync::commit_local_conflict_resolve_v1_in_tx(tx, &plan, result)
+                    .map_err(map_fold_error)?;
+                Ok(())
+            },
+        )
+        .map_err(RuntimeError::from)
 }
 
 /// Map a resolution-fold failure into the resolving transaction's error
@@ -10976,6 +11131,15 @@ fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::Dom
         dohc_engine_sync::SyncError::InvalidInput { reason } => {
             dohc_engine_domain::DomainError::InvalidInput { reason }
         }
+        dohc_engine_sync::SyncError::InputTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        } => dohc_engine_domain::DomainError::PayloadTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        },
         // The fold's size refusal carries its measurements; wrapping it as
         // state-corrupt would throw them away and misreport a bounded input
         // as corruption.
@@ -10990,6 +11154,9 @@ fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::Dom
         },
         dohc_engine_sync::SyncError::Storage(storage) => {
             dohc_engine_domain::DomainError::Storage(storage)
+        }
+        dohc_engine_sync::SyncError::RetryableState { reason } => {
+            dohc_engine_domain::DomainError::InvalidInput { reason }
         }
         other => dohc_engine_domain::DomainError::Storage(
             dohc_engine_storage::StorageError::corrupt_public(other),

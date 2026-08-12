@@ -32,16 +32,11 @@ pub enum ApplyOutcome<T> {
     Crashed {
         committed: bool,
     },
-    /// The envelope has the nested primary disposition, and applying it also
-    /// surfaced refusals for older coordinates that were durably deferred.
-    WithRefusals {
+    /// The envelope has the nested primary disposition plus diagnostics
+    /// surfaced while draining older durable work.
+    WithDiagnostics {
         outcome: Box<ApplyOutcome<T>>,
         refusals: Vec<ReplicationRefusal>,
-    },
-    /// The envelope has the nested primary disposition, and applying it also
-    /// surfaced actionable Y.Doc base-origination declines.
-    WithSharingDeclined {
-        outcome: Box<ApplyOutcome<T>>,
         sharing_declined: Vec<crate::SharingDeclined>,
     },
 }
@@ -53,15 +48,13 @@ impl<T> ApplyOutcome<T> {
             Self::Refused(refusal) => ApplyOutcome::Refused(refusal),
             Self::Skipped => ApplyOutcome::Skipped,
             Self::Crashed { committed } => ApplyOutcome::Crashed { committed },
-            Self::WithRefusals { outcome, refusals } => ApplyOutcome::WithRefusals {
+            Self::WithDiagnostics {
+                outcome,
+                refusals,
+                sharing_declined,
+            } => ApplyOutcome::WithDiagnostics {
                 outcome: Box::new(outcome.map(map)),
                 refusals,
-            },
-            Self::WithSharingDeclined {
-                outcome,
-                sharing_declined,
-            } => ApplyOutcome::WithSharingDeclined {
-                outcome: Box::new(outcome.map(map)),
                 sharing_declined,
             },
         }
@@ -69,12 +62,26 @@ impl<T> ApplyOutcome<T> {
 
     pub(crate) fn with_refusals(self, refusals: Vec<ReplicationRefusal>) -> Self {
         if refusals.is_empty() {
-            self
-        } else {
-            Self::WithRefusals {
-                outcome: Box::new(self),
-                refusals,
+            return self;
+        }
+        match self {
+            Self::WithDiagnostics {
+                outcome,
+                refusals: mut existing,
+                sharing_declined,
+            } => {
+                existing.extend(refusals);
+                Self::WithDiagnostics {
+                    outcome,
+                    refusals: existing,
+                    sharing_declined,
+                }
             }
+            outcome => Self::WithDiagnostics {
+                outcome: Box::new(outcome),
+                refusals,
+                sharing_declined: Vec::new(),
+            },
         }
     }
 
@@ -83,12 +90,26 @@ impl<T> ApplyOutcome<T> {
         sharing_declined: Vec<crate::SharingDeclined>,
     ) -> Self {
         if sharing_declined.is_empty() {
-            self
-        } else {
-            Self::WithSharingDeclined {
-                outcome: Box::new(self),
-                sharing_declined,
+            return self;
+        }
+        match self {
+            Self::WithDiagnostics {
+                outcome,
+                refusals,
+                sharing_declined: mut existing,
+            } => {
+                existing.extend(sharing_declined);
+                Self::WithDiagnostics {
+                    outcome,
+                    refusals,
+                    sharing_declined: existing,
+                }
             }
+            outcome => Self::WithDiagnostics {
+                outcome: Box::new(outcome),
+                refusals: Vec::new(),
+                sharing_declined,
+            },
         }
     }
 
@@ -96,19 +117,16 @@ impl<T> ApplyOutcome<T> {
         self,
     ) -> (Self, Vec<ReplicationRefusal>, Vec<crate::SharingDeclined>) {
         match self {
-            Self::WithRefusals { outcome, refusals } => {
-                let (primary, mut nested, sharing_declined) =
-                    outcome.into_primary_and_diagnostics();
-                nested.extend(refusals);
-                (primary, nested, sharing_declined)
-            }
-            Self::WithSharingDeclined {
+            Self::WithDiagnostics {
                 outcome,
+                refusals,
                 sharing_declined,
             } => {
-                let (primary, refusals, mut nested) = outcome.into_primary_and_diagnostics();
-                nested.extend(sharing_declined);
-                (primary, refusals, nested)
+                let (primary, mut nested_refusals, mut nested_declines) =
+                    outcome.into_primary_and_diagnostics();
+                nested_refusals.extend(refusals);
+                nested_declines.extend(sharing_declined);
+                (primary, nested_refusals, nested_declines)
             }
             primary => (primary, Vec::new(), Vec::new()),
         }
@@ -137,7 +155,7 @@ mod diagnostic_tests {
     }
 
     #[test]
-    fn nested_refusal_and_sharing_decline_both_survive_unwrapping() {
+    fn map_preserves_nested_refusal_and_sharing_decline_through_unwrapping() {
         let refusal = ReplicationRefusal {
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
@@ -154,12 +172,13 @@ mod diagnostic_tests {
             observed_bytes: 21,
         };
 
-        let (primary, refusals, declines) = ApplyOutcome::<()>::Applied(())
+        let (primary, refusals, declines) = ApplyOutcome::Applied("mapped value")
             .with_refusals(vec![refusal.clone()])
             .with_sharing_declined(vec![declined.clone()])
+            .map(str::len)
             .into_primary_and_diagnostics();
 
-        assert!(matches!(primary, ApplyOutcome::Applied(())));
+        assert!(matches!(primary, ApplyOutcome::Applied(12)));
         assert_eq!(refusals, [refusal]);
         assert_eq!(declines, [declined]);
     }
@@ -353,6 +372,15 @@ fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
     match error {
         SyncError::InvalidInput { reason } => Some(RefusalReason::InvalidInput {
             reason: (*reason).to_owned(),
+        }),
+        SyncError::InputTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        } => Some(RefusalReason::InvalidInput {
+            reason: format!(
+                "replication input exceeds {constraint}: limit {limit_bytes} bytes, observed {observed_bytes} bytes"
+            ),
         }),
         SyncError::UnsupportedOperation => Some(RefusalReason::InvalidInput {
             reason: "operation kind is not supported by this client".to_owned(),

@@ -1,4 +1,4 @@
-use dohc_engine_collab::Ydoc;
+use dohc_engine_collab::{ContentKind as YdocContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
 use dohc_engine_domain::{
     CreateNamedVersion, ListMomentsQuery, MomentOp, RollbackTextFileMutation, VersionedTextStore,
     WriteText,
@@ -10,8 +10,7 @@ use serde_json::{Value, json};
 
 use crate::{
     ApplyOutcome, NoLiveLeases, RefusalReason, ReplicationEnvelope, ReplicationRefusal, SyncError,
-    apply_moment_envelope, apply_replication_envelope, apply_ydoc_envelope,
-    read_replication_acked_seq,
+    apply_replication_envelope, apply_ydoc_envelope, read_replication_acked_seq,
 };
 
 fn test_store() -> (ScratchDir, EngineStore) {
@@ -22,6 +21,14 @@ fn test_store() -> (ScratchDir, EngineStore) {
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
     (scratch, store)
+}
+
+fn apply_moment_envelope(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn dohc_engine_storage::FaultInjector,
+) -> Result<ApplyOutcome<i64>, SyncError> {
+    crate::apply_moment_envelope(store, envelope, faults, &NoLiveLeases)
 }
 
 fn envelope(origin: &str, seq: i64, workspace_id: &str, payload: Value) -> ReplicationEnvelope {
@@ -298,6 +305,31 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
     assert!(peer_head.starts_with("moment-ydoc-apply-"));
     assert_ne!(peer_head, local_settle_id);
 
+    let rewrite = [
+        doc.plaintext_delete(0, "settled text".len() as u32),
+        doc.plaintext_insert(0, "next edit"),
+    ];
+    for (index, update) in rewrite.into_iter().enumerate() {
+        let update_sha = peer.put_binary_blob(&update).expect("Y.Doc rewrite blob");
+        let delta = ReplicationEnvelope {
+            workspace_id: "ws".to_owned(),
+            origin_id: "ydoc-origin".to_owned(),
+            origin_seq: index as i64 + 1,
+            op_kind: "ydoc.update".to_owned(),
+            payload: json!({
+                "versionId": "main",
+                "objectId": "ydoc-settle-object",
+                "path": "notes/settled.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": update_sha,
+                "isBaseState": false
+            }),
+            recorded_at_ms: 1_600 + index as i64,
+        };
+        apply_ydoc_envelope(&mut peer, &delta, &NoFaults, &NoLiveLeases)
+            .expect("peer Y.Doc rewrite");
+    }
+
     hydrate_texts(&mut peer, &["next edit"]);
     let next = envelope(
         "moment-origin",
@@ -425,6 +457,265 @@ fn conflict_ids(store: &EngineStore) -> Vec<String> {
             .collect()
         })
         .expect("conflict ids")
+}
+
+#[test]
+fn moment_delete_retires_the_receiver_ydoc_lineage() {
+    let (_scratch, mut peer) = test_store();
+    let local_settle_id = format!("moment-ydoc-{}", "b".repeat(64));
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "gone");
+    let base_sha = peer
+        .put_binary_blob(&doc.encode_full_state())
+        .expect("Y.Doc base blob");
+    apply_ydoc_envelope(
+        &mut peer,
+        &ReplicationEnvelope {
+            workspace_id: "ws".to_owned(),
+            origin_id: "ydoc-origin".to_owned(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".to_owned(),
+            payload: json!({
+                "versionId": "main",
+                "objectId": "ydoc-delete-object",
+                "path": "notes/deleted.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": base_sha,
+                "isBaseState": true
+            }),
+            recorded_at_ms: 1_500,
+        },
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("project Y.Doc base");
+
+    let delete = envelope(
+        "moment-origin",
+        0,
+        "ws",
+        present_text_payload(
+            "moment-delete-ydoc",
+            "ydoc-delete-object",
+            "delete",
+            "notes/deleted.md",
+            "notes/deleted.md",
+            "gone",
+            &local_settle_id,
+            "gone",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut peer, &delete, &NoFaults).expect("apply delete"),
+        ApplyOutcome::Applied(0)
+    );
+    let (snapshots, markers): (i64, i64) = peer
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='ydoc-delete-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='ydoc-delete-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("inspect deleted object");
+    assert_eq!(
+        (snapshots, markers),
+        (0, 0),
+        "the inbound delete must remove the snapshot and canonical lineage together"
+    );
+}
+
+#[test]
+fn moment_delete_with_unsettled_lineage_stays_unacked() {
+    let (_scratch, mut store) = test_store();
+    store
+        .read_with(|tx| {
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('ws','unsettled-delete-object',1)",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("seed unsettled object");
+    let key = DocKey::new("ws", "main", "unsettled-delete-object").expect("Y.Doc key");
+    let doc = Ydoc::wire();
+    let update = doc.plaintext_insert(0, "only durable draft");
+    dohc_engine_collab::record_local_update_creating_marker(
+        &mut store,
+        &key,
+        Some("notes/unsettled.md"),
+        YdocContentKind::Plaintext,
+        Regime::LocalOnly,
+        &update,
+        None,
+        &NoFaults,
+        1_500,
+    )
+    .expect("seed unsettled lineage");
+    hydrate_texts(&mut store, &["remote head", ""]);
+    let delete = envelope(
+        "unsettled-delete-peer",
+        0,
+        "ws",
+        present_text_payload(
+            "moment-delete-unsettled",
+            "unsettled-delete-object",
+            "delete",
+            "notes/unsettled.md",
+            "notes/unsettled.md",
+            "remote head",
+            "remote-head",
+            "",
+        ),
+    );
+
+    let outcome = apply_replication_envelope(&mut store, &delete, &NoFaults, &NoLiveLeases);
+    assert!(
+        matches!(
+            outcome,
+            Err(SyncError::RetryableState {
+                reason: "ydoc-lineage-unsettled"
+            })
+        ),
+        "unexpected delete outcome: {outcome:?}"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "unsettled-delete-peer").expect("ack"),
+        -1
+    );
+    let (moments, log, updates, snapshots, deferred, docs): (i64, i64, i64, i64, i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' \
+                         AND moment_id='moment-delete-unsettled'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE workspace_id='ws' \
+                         AND origin_id='unsettled-delete-peer'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates WHERE workspace_id='ws' \
+                         AND version_id='main' AND object_id='unsettled-delete-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_snapshots WHERE workspace_id='ws' \
+                         AND version_id='main' AND object_id='unsettled-delete-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE workspace_id='ws' \
+                         AND version_id='main' AND object_id='unsettled-delete-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id='ws' \
+                         AND version_id='main' AND object_id='unsettled-delete-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("inspect retryable delete");
+    assert_eq!((moments, log), (0, 0));
+    assert_eq!(
+        (updates, snapshots, deferred, docs),
+        (1, 0, 0, 1),
+        "the only durable draft must remain byte-for-byte reachable"
+    );
+}
+
+#[test]
+fn moment_delete_from_absent_sender_head_preserves_unsettled_lineage() {
+    let (_scratch, mut store) = test_store();
+    store
+        .read_with(|tx| {
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('ws','absent-delete-object',1)",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("seed unsettled object");
+    let key = DocKey::new("ws", "main", "absent-delete-object").expect("Y.Doc key");
+    let doc = Ydoc::wire();
+    let update = doc.plaintext_insert(0, "only durable draft");
+    dohc_engine_collab::record_local_update_creating_marker(
+        &mut store,
+        &key,
+        Some("notes/absent.md"),
+        YdocContentKind::Plaintext,
+        Regime::LocalOnly,
+        &update,
+        None,
+        &NoFaults,
+        1_500,
+    )
+    .expect("seed unsettled lineage");
+    hydrate_texts(&mut store, &[""]);
+    let mut payload = absent_text_payload(
+        "moment-delete-absent",
+        "absent-delete-object",
+        "notes/absent.md",
+        "",
+    );
+    payload["operation"] = json!("delete");
+    let delete = envelope("absent-delete-peer", 0, "ws", payload);
+
+    assert!(matches!(
+        apply_replication_envelope(&mut store, &delete, &NoFaults, &NoLiveLeases),
+        Err(SyncError::RetryableState {
+            reason: "ydoc-lineage-unsettled"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "absent-delete-peer").expect("ack"),
+        -1
+    );
+    let (moments, updates, docs): (i64, i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' \
+                     AND moment_id='moment-delete-absent'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='absent-delete-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='absent-delete-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("preserved unsettled lineage");
+    assert_eq!((moments, updates, docs), (0, 1, 1));
 }
 
 #[test]
@@ -608,6 +899,169 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
         indexed(&rename_store, "object-rename"),
         [("new.md".to_owned(), "same".to_owned())]
     );
+}
+
+#[test]
+fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrite() {
+    for (operation, after_path, after_text) in [
+        ("write", "head.md", "changed"),
+        ("rename", "renamed.md", "before"),
+        ("delete", "head.md", "before"),
+    ] {
+        let (_scratch, mut store) = test_store();
+        let object_id = format!("live-{operation}-object");
+        let origin_id = format!("live-{operation}-peer");
+        let moment_id = format!("live-{operation}-moment");
+        seed_text_moment(
+            &mut store,
+            &object_id,
+            "head.md",
+            "before",
+            "local-head",
+            None,
+            true,
+        );
+        hydrate_texts(&mut store, &[after_text]);
+        let key = DocKey::new("ws", "main", &object_id).expect("Y.Doc key");
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "before");
+        dohc_engine_collab::record_local_update_creating_marker(
+            &mut store,
+            &key,
+            Some("head.md"),
+            YdocContentKind::Plaintext,
+            Regime::LocalOnly,
+            &update,
+            None,
+            &NoFaults,
+            1_500,
+        )
+        .expect("seed live lineage");
+        let op = envelope(
+            &origin_id,
+            0,
+            "ws",
+            present_text_payload(
+                &moment_id,
+                &object_id,
+                operation,
+                "head.md",
+                after_path,
+                "before",
+                "local-head",
+                after_text,
+            ),
+        );
+        let before = (
+            snapshot(&store, &object_id),
+            aliases(&store, &object_id),
+            indexed(&store, &object_id),
+            store
+                .read_with(|conn| {
+                    Ok::<_, rusqlite::Error>((
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM moments WHERE workspace_id='ws'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM replication_log WHERE workspace_id='ws'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM ydoc_updates WHERE workspace_id='ws' \
+                             AND version_id='main' AND object_id=?1",
+                            [&object_id],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id='ws' \
+                             AND version_id='main' AND object_id=?1",
+                            [&object_id],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                    ))
+                })
+                .expect("state before live apply"),
+        );
+        let leases = LeaseRegistry::new();
+        let held = leases.acquire(&key).expect("hold document live");
+
+        assert!(matches!(
+            apply_replication_envelope(&mut store, &op, &NoFaults, &leases),
+            Err(SyncError::RetryableState {
+                reason: "ydoc-session-live"
+            })
+        ));
+        assert_eq!(
+            read_replication_acked_seq(&store, "ws", &origin_id).expect("live ack"),
+            -1,
+            "{operation} must remain unacknowledged while its document is live"
+        );
+        let after_live = (
+            snapshot(&store, &object_id),
+            aliases(&store, &object_id),
+            indexed(&store, &object_id),
+            store
+                .read_with(|conn| {
+                    Ok::<_, rusqlite::Error>((
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM moments WHERE workspace_id='ws'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM replication_log WHERE workspace_id='ws'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM ydoc_updates WHERE workspace_id='ws' \
+                             AND version_id='main' AND object_id=?1",
+                            [&object_id],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id='ws' \
+                             AND version_id='main' AND object_id=?1",
+                            [&object_id],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                    ))
+                })
+                .expect("state after live apply"),
+        );
+        assert_eq!(after_live, before, "live {operation} mutated durable state");
+
+        drop(held);
+        let closed = apply_replication_envelope(&mut store, &op, &NoFaults, &leases);
+        if operation == "write" {
+            assert!(matches!(
+                closed,
+                Err(SyncError::RetryableState {
+                    reason: "ydoc-resulting-head-pending"
+                })
+            ));
+            assert_eq!(
+                read_replication_acked_seq(&store, "ws", &origin_id).expect("write ack"),
+                -1,
+                "the write must wait unacknowledged for its canonical Y.Doc rewrite"
+            );
+            assert_eq!(
+                snapshot(&store, &object_id).unwrap().3,
+                "local-head",
+                "the premature write must roll back"
+            );
+            continue;
+        }
+        assert!(matches!(closed, Ok(ApplyOutcome::Applied(_))));
+        match operation {
+            "delete" => assert_eq!(snapshot(&store, &object_id), None),
+            "rename" => assert_eq!(snapshot(&store, &object_id).unwrap().0, "renamed.md"),
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[test]
@@ -1352,7 +1806,6 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
                 operation: "write",
                 content_kind: "text",
             }],
-            sharing_declined: Vec::new(),
         })
     );
     store

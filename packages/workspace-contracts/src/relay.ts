@@ -1,10 +1,3 @@
-import type { PendingConflictResolve } from "./engine";
-
-// PendingConflictResolve is defined in ./engine and re-exported here so the whole
-// relay surface can be imported from one subpath. It was never in the legacy
-// package — that package only re-exported it.
-export type { PendingConflictResolve };
-
 export interface SyncRelayConnection {
   baseUrl: string;
   token: string;
@@ -29,11 +22,6 @@ export interface PullWorkspaceFromRelayResult {
   applied: number;
   skipped: number;
   conflictsOpened: number;
-  pendingConflictResolves: number;
-  // Identities behind pendingConflictResolves (0P-C gate fix): the sync
-  // engine tracks these so its "a choice needs a look" notice clears when
-  // the referenced conflict is later resolved, instead of accumulating.
-  pendingResolves: PendingConflictResolve[];
   sharingDeclined: SharingDeclined[];
   fastForwardedPaths: RelayMaterializedPath[];
   // The relay cursor this pull reached. NOT persisted by the pull itself:

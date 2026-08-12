@@ -84,7 +84,6 @@ import {
   CloudLoginStartResult,
   CloudStatusPayload,
   CloudStatusResult,
-  DismissSyncReviewNoticePayload,
   OpenExternalUrlPayload,
   DatabaseSnapshotResult,
   ImportToDatabasePayload,
@@ -1828,10 +1827,7 @@ function engineForWorkspace(
     // the periodic worker remains only a crash/retry backstop.
     afterSuccessfulPull: () =>
       projectPendingChatBookmarksAfterPull(workspace.workspaceId),
-    // Post-pass open-conflict truth: pulled peer resolutions and local
-    // resolutions both clear the status-bar/notice conflict state, and the
-    // ids lifecycle the pending remote-resolve notice (0P-C gate fix).
-    listOpenConflictIds: async () => await capture.listOpenConflictIds(),
+    countOpenConflicts: async () => await capture.countOpenConflicts(),
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
     ...(engineOptions.joinBootstrap ? { joinBootstrap: true } : {}),
@@ -5502,16 +5498,6 @@ function registerIpcHandlers(
       workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
     });
     });
-  });
-
-  // Explicit dismissal of the "a choice made on another machine needs a
-  // look" notice (0P-C gate fix): the pending remote-resolve set otherwise
-  // clears itself when the referenced conflict resolves or converges.
-  ipcMain.handle(CHANNELS.dismissSyncReviewNotice, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = DismissSyncReviewNoticePayload.parse(payload);
-    activity.dismissUnmatchedRemoteResolves(input.workspaceId);
-    notifyRenderer();
   });
 
   ipcMain.handle(CHANNELS.readWorkspaceDatabase, async (event, payload) => {

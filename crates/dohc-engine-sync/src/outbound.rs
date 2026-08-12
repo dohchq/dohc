@@ -46,6 +46,15 @@ pub fn journal_moment_append_in_tx(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<(), SyncError> {
+    let (payload, recorded_at_ms) = moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
+    journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+}
+
+pub(crate) fn moment_append_payload_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<(serde_json::Value, i64), SyncError> {
     let row = tx
         .query_row(
             "SELECT m.moment_id, m.version_id, m.object_id, o.created_at_ms, m.path, \
@@ -161,14 +170,7 @@ pub fn journal_moment_append_in_tx(
     if measured_json_len(&payload)? > PAYLOAD_PACKING_TARGET_BYTES {
         payload["beforeMetadata"] = serde_json::Value::Null;
     }
-    journal_local_op_in_tx(
-        tx,
-        workspace_id,
-        "moment.append",
-        &payload,
-        row.recorded_at_ms,
-    )
-    .map(|_| ())
+    Ok((payload, row.recorded_at_ms))
 }
 
 /// Project one committed named-version fork into the relay-visible log.

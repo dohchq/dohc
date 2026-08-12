@@ -1948,6 +1948,405 @@ UPDATE secret_moments
 
 pub(crate) const SECRET_MOMENT_SOURCE_MIGRATION_ID: &str = "v1-secret-moment-source";
 
+/// Ordinal 29. Replace the legacy base-claimed bit with one typed lineage
+/// state. A surviving seq-0 snapshot proves the exact base claim. Once
+/// compaction removes that snapshot, a matching base envelope in the
+/// replication log is evidence only that a candidate existed: a refused
+/// envelope can name a different base from the active lineage. Such rows are
+/// `ambiguous`; compacted rows with no candidate are `missing`.
+///
+/// The migration rebuilds the marker and every child table in one transaction.
+/// This removes the obsolete column, re-validates all foreign keys, and keeps
+/// every path, settle field, update, snapshot, and deferred coordinate.
+/// Inactive lineages are compact roots under the stable file object. Their
+/// RESTRICT references prevent GC or file deletion from silently discarding a
+/// retained branch.
+const V1_YDOC_LINEAGE_CLAIMS_DDL: &str = "\
+CREATE TABLE ydoc_docs_v29 (
+    workspace_id            TEXT    NOT NULL,
+    version_id              TEXT    NOT NULL,
+    object_id               TEXT    NOT NULL,
+    content_kind            TEXT    NOT NULL DEFAULT 'richdoc'
+                                    CHECK (content_kind IN ('plaintext', 'richdoc')),
+    regime                  TEXT    NOT NULL DEFAULT 'local-only'
+                                    CHECK (regime IN ('local-only', 'replicated')),
+    head_update_seq         INTEGER NOT NULL DEFAULT 0
+                                    CHECK (head_update_seq >= 0),
+    head_snapshot_seq       INTEGER NOT NULL DEFAULT 0
+                                    CHECK (head_snapshot_seq >= 0),
+    settle_seq              INTEGER NOT NULL DEFAULT 0
+                                    CHECK (settle_seq >= 0),
+    last_settled_sha        TEXT,
+    updated_at_ms           INTEGER NOT NULL,
+    path                    TEXT,
+    lineage_claim_status    TEXT    NOT NULL DEFAULT 'unclaimed'
+                                    CHECK (lineage_claim_status IN (
+                                      'unclaimed', 'exact', 'missing', 'ambiguous'
+                                    )),
+    lineage_claim_id        TEXT
+      CHECK (lineage_claim_id IS NULL OR (
+        length(lineage_claim_id) = 64
+        AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'
+      )),
+    lineage_parent_claim_id TEXT
+      CHECK (lineage_parent_claim_id IS NULL OR (
+        length(lineage_parent_claim_id) = 64
+        AND lineage_parent_claim_id NOT GLOB '*[^0-9a-f]*'
+      )),
+    lineage_epoch_tag       TEXT
+      CHECK (lineage_epoch_tag IS NULL OR (
+        length(lineage_epoch_tag) = 64
+        AND lineage_epoch_tag NOT GLOB '*[^0-9a-f]*'
+      )),
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    CHECK (head_snapshot_seq <= head_update_seq),
+    CHECK (
+      (lineage_claim_status = 'unclaimed'
+       AND lineage_claim_id IS NULL
+       AND lineage_parent_claim_id IS NULL
+       AND lineage_epoch_tag IS NULL)
+      OR
+      (regime = 'replicated'
+       AND lineage_claim_status IN ('missing', 'ambiguous')
+       AND lineage_claim_id IS NULL
+       AND lineage_parent_claim_id IS NULL
+       AND lineage_epoch_tag IS NULL)
+      OR
+      (regime = 'replicated'
+       AND lineage_claim_status = 'exact'
+       AND lineage_claim_id IS NOT NULL
+       AND (
+         (lineage_parent_claim_id IS NULL AND lineage_epoch_tag IS NULL)
+         OR
+         (lineage_parent_claim_id IS NOT NULL AND lineage_epoch_tag IS NOT NULL)
+       ))
+    ),
+    CHECK (
+      lineage_parent_claim_id IS NULL
+      OR lineage_parent_claim_id <> lineage_claim_id
+    ),
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+    FOREIGN KEY (lineage_claim_id)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (lineage_parent_claim_id)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE ydoc_updates_v29 (
+    workspace_id       TEXT    NOT NULL,
+    version_id         TEXT    NOT NULL,
+    object_id          TEXT    NOT NULL,
+    seq                INTEGER NOT NULL CHECK (seq > 0),
+    update_blob_sha256 TEXT    NOT NULL,
+    actor_origin_id    TEXT,
+    recorded_at_ms     INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id, seq),
+    FOREIGN KEY (update_blob_sha256)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs_v29(workspace_id, version_id, object_id)
+      ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE ydoc_snapshots_v29 (
+    workspace_id             TEXT    NOT NULL,
+    version_id               TEXT    NOT NULL,
+    object_id                TEXT    NOT NULL,
+    up_to_seq                INTEGER NOT NULL CHECK (up_to_seq >= 0),
+    snapshot_blob_sha256     TEXT    NOT NULL,
+    state_vector_blob_sha256 TEXT    NOT NULL,
+    recorded_at_ms           INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id, up_to_seq),
+    FOREIGN KEY (snapshot_blob_sha256)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (state_vector_blob_sha256)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs_v29(workspace_id, version_id, object_id)
+      ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE ydoc_deferred_updates_v29 (
+    workspace_id     TEXT    NOT NULL,
+    version_id       TEXT    NOT NULL,
+    object_id        TEXT    NOT NULL,
+    origin_id        TEXT    NOT NULL,
+    origin_seq       INTEGER NOT NULL CHECK (origin_seq >= 0),
+    recorded_at_ms   INTEGER NOT NULL,
+    lineage_claim_id TEXT
+      CHECK (lineage_claim_id IS NULL OR (
+        length(lineage_claim_id) = 64
+        AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'
+      )),
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+
+INSERT INTO ydoc_docs_v29 (
+    workspace_id, version_id, object_id, content_kind, regime,
+    head_update_seq, head_snapshot_seq, settle_seq, last_settled_sha,
+    updated_at_ms, path, lineage_claim_status, lineage_claim_id,
+    lineage_parent_claim_id, lineage_epoch_tag
+)
+SELECT
+    d.workspace_id, d.version_id, d.object_id, d.content_kind,
+    CASE WHEN d.base_claimed <> 0 OR EXISTS (
+      SELECT 1 FROM ydoc_snapshots s
+       WHERE s.workspace_id = d.workspace_id
+         AND s.version_id = d.version_id
+         AND s.object_id = d.object_id
+         AND s.up_to_seq = 0
+    ) THEN 'replicated' ELSE d.regime END,
+    d.head_update_seq, d.head_snapshot_seq, d.settle_seq, d.last_settled_sha,
+    d.updated_at_ms, d.path,
+    CASE
+      WHEN EXISTS (
+        SELECT 1 FROM ydoc_snapshots s
+         WHERE s.workspace_id = d.workspace_id
+           AND s.version_id = d.version_id
+           AND s.object_id = d.object_id
+           AND s.up_to_seq = 0
+      ) THEN 'exact'
+      WHEN d.base_claimed = 0 THEN 'unclaimed'
+      WHEN EXISTS (
+        SELECT 1 FROM replication_log r
+         WHERE r.workspace_id = d.workspace_id
+           AND r.op_kind = 'ydoc.update'
+           AND CASE WHEN json_valid(r.payload_json) THEN
+             COALESCE(
+               json_type(r.payload_json, '$.versionId') = 'text'
+               AND json_extract(r.payload_json, '$.versionId') = d.version_id
+               AND json_type(r.payload_json, '$.objectId') = 'text'
+               AND json_extract(r.payload_json, '$.objectId') = d.object_id
+               AND json_type(r.payload_json, '$.updateBlobSha256') = 'text'
+               AND length(json_extract(r.payload_json, '$.updateBlobSha256')) = 64
+               AND json_extract(r.payload_json, '$.updateBlobSha256')
+                     NOT GLOB '*[^0-9a-f]*'
+               AND json_type(r.payload_json, '$.isBaseState') = 'true',
+               0
+             )
+           ELSE 0 END
+      ) THEN 'ambiguous'
+      ELSE 'missing'
+    END,
+    (
+      SELECT s.snapshot_blob_sha256 FROM ydoc_snapshots s
+       WHERE s.workspace_id = d.workspace_id
+         AND s.version_id = d.version_id
+         AND s.object_id = d.object_id
+         AND s.up_to_seq = 0
+    ),
+    NULL,
+    NULL
+  FROM ydoc_docs d;
+
+INSERT INTO ydoc_updates_v29 (
+    workspace_id, version_id, object_id, seq, update_blob_sha256,
+    actor_origin_id, recorded_at_ms
+)
+SELECT workspace_id, version_id, object_id, seq, update_blob_sha256,
+       actor_origin_id, recorded_at_ms
+  FROM ydoc_updates;
+
+INSERT INTO ydoc_snapshots_v29 (
+    workspace_id, version_id, object_id, up_to_seq, snapshot_blob_sha256,
+    state_vector_blob_sha256, recorded_at_ms
+)
+SELECT workspace_id, version_id, object_id, up_to_seq, snapshot_blob_sha256,
+       state_vector_blob_sha256, recorded_at_ms
+  FROM ydoc_snapshots;
+
+INSERT INTO ydoc_deferred_updates_v29 (
+    workspace_id, version_id, object_id, origin_id, origin_seq,
+    recorded_at_ms, lineage_claim_id
+)
+SELECT workspace_id, version_id, object_id, origin_id, origin_seq,
+       recorded_at_ms, NULL
+  FROM ydoc_deferred_updates;
+
+DROP TABLE ydoc_updates;
+DROP TABLE ydoc_snapshots;
+DROP TABLE ydoc_deferred_updates;
+DROP TABLE ydoc_docs;
+
+ALTER TABLE ydoc_docs_v29 RENAME TO ydoc_docs;
+ALTER TABLE ydoc_updates_v29 RENAME TO ydoc_updates;
+ALTER TABLE ydoc_snapshots_v29 RENAME TO ydoc_snapshots;
+ALTER TABLE ydoc_deferred_updates_v29 RENAME TO ydoc_deferred_updates;
+
+CREATE INDEX idx_ydoc_updates_doc_seq
+    ON ydoc_updates(workspace_id, version_id, object_id, seq);
+CREATE INDEX idx_ydoc_updates_doc_blob
+    ON ydoc_updates(workspace_id, version_id, object_id, update_blob_sha256);
+CREATE INDEX idx_ydoc_snapshots_doc_uptoseq
+    ON ydoc_snapshots(workspace_id, version_id, object_id, up_to_seq DESC);
+CREATE INDEX ydoc_deferred_updates_by_doc
+    ON ydoc_deferred_updates(workspace_id, version_id, object_id);
+CREATE INDEX ydoc_deferred_updates_by_lineage
+    ON ydoc_deferred_updates(
+      workspace_id, version_id, object_id, lineage_claim_id, origin_id, origin_seq
+    ) WHERE lineage_claim_id IS NOT NULL;
+
+CREATE TABLE ydoc_inactive_lineages (
+    workspace_id                           TEXT    NOT NULL,
+    version_id                             TEXT    NOT NULL,
+    object_id                              TEXT    NOT NULL,
+    lineage_claim_id                       TEXT    NOT NULL
+      CHECK (length(lineage_claim_id) = 64
+             AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
+    parent_claim_id                        TEXT
+      CHECK (parent_claim_id IS NULL OR (
+        length(parent_claim_id) = 64
+        AND parent_claim_id NOT GLOB '*[^0-9a-f]*'
+      )),
+    disposition                            TEXT    NOT NULL CHECK (disposition IN (
+      'superseded-predecessor', 'conflicting-successor', 'rejected-base'
+    )),
+    content_kind                           TEXT    NOT NULL
+      CHECK (content_kind IN ('plaintext', 'richdoc')),
+    path                                   TEXT,
+    epoch_tag                              TEXT
+      CHECK (epoch_tag IS NULL OR (
+        length(epoch_tag) = 64 AND epoch_tag NOT GLOB '*[^0-9a-f]*'
+      )),
+    full_state_blob_sha256                 TEXT    NOT NULL,
+    state_vector_blob_sha256               TEXT    NOT NULL,
+    last_surfaced_state_vector_blob_sha256 TEXT,
+    last_surfaced_projection_sha256        TEXT
+      CHECK (last_surfaced_projection_sha256 IS NULL OR (
+        length(last_surfaced_projection_sha256) = 64
+        AND last_surfaced_projection_sha256 NOT GLOB '*[^0-9a-f]*'
+      )),
+    open_conflict_id                       TEXT,
+    recorded_at_ms                         INTEGER NOT NULL,
+    updated_at_ms                          INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id, lineage_claim_id),
+    CHECK (parent_claim_id IS NULL OR parent_claim_id <> lineage_claim_id),
+    CHECK (
+      (parent_claim_id IS NULL AND epoch_tag IS NULL)
+      OR (parent_claim_id IS NOT NULL AND epoch_tag IS NOT NULL)
+    ),
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES file_objects(workspace_id, object_id) ON DELETE RESTRICT,
+    FOREIGN KEY (lineage_claim_id)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (parent_claim_id)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (full_state_blob_sha256)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (state_vector_blob_sha256)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (last_surfaced_state_vector_blob_sha256)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (last_surfaced_projection_sha256)
+      REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (workspace_id, open_conflict_id)
+      REFERENCES conflicts(workspace_id, conflict_id) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX ydoc_inactive_lineages_by_disposition
+    ON ydoc_inactive_lineages(
+      workspace_id, version_id, object_id, disposition, lineage_claim_id
+    );
+CREATE INDEX ydoc_inactive_lineages_by_parent
+    ON ydoc_inactive_lineages(
+      workspace_id, version_id, object_id, parent_claim_id, lineage_claim_id
+    ) WHERE parent_claim_id IS NOT NULL;
+CREATE INDEX ydoc_inactive_lineages_by_open_conflict
+    ON ydoc_inactive_lineages(workspace_id, open_conflict_id)
+    WHERE open_conflict_id IS NOT NULL;
+
+-- A local reviewed resolution must retain one exact, ordered wire bundle until
+-- the workspace has a relay position. The parent stores its causal cut. Child
+-- rows preserve raw payload bytes, emitted moment identities, and every blob
+-- that the pending envelopes reference.
+CREATE TABLE replication_pending_conflict_bundles (
+    bundle_order            INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id            TEXT    NOT NULL,
+    conflict_id             TEXT    NOT NULL,
+    format_version          INTEGER NOT NULL CHECK (format_version = 1),
+    pre_effect_moment_order INTEGER NOT NULL CHECK (pre_effect_moment_order >= 0),
+    created_at_ms           INTEGER NOT NULL,
+    UNIQUE (workspace_id, conflict_id),
+    UNIQUE (bundle_order, workspace_id),
+    FOREIGN KEY (workspace_id)
+      REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX replication_pending_conflict_bundles_by_cut
+    ON replication_pending_conflict_bundles(
+      workspace_id, pre_effect_moment_order, bundle_order
+    );
+
+CREATE TABLE replication_pending_conflict_ops (
+    bundle_order  INTEGER NOT NULL,
+    op_index      INTEGER NOT NULL CHECK (op_index BETWEEN 0 AND 2),
+    op_kind       TEXT    NOT NULL,
+    payload_json  TEXT    NOT NULL
+      CHECK (json_valid(payload_json) AND json_type(payload_json) = 'object'),
+    recorded_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (bundle_order, op_index),
+    CHECK (
+      (op_index = 0 AND op_kind = 'conflict.resolve')
+      OR (op_index IN (1, 2) AND op_kind = 'moment.append')
+    ),
+    FOREIGN KEY (bundle_order)
+      REFERENCES replication_pending_conflict_bundles(bundle_order)
+      ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE replication_pending_conflict_moments (
+    workspace_id TEXT    NOT NULL,
+    bundle_order INTEGER NOT NULL,
+    op_index     INTEGER NOT NULL CHECK (op_index IN (1, 2)),
+    moment_id    TEXT    NOT NULL,
+    PRIMARY KEY (workspace_id, moment_id),
+    UNIQUE (bundle_order, op_index),
+    FOREIGN KEY (bundle_order, workspace_id)
+      REFERENCES replication_pending_conflict_bundles(bundle_order, workspace_id)
+      ON DELETE CASCADE,
+    FOREIGN KEY (bundle_order, op_index)
+      REFERENCES replication_pending_conflict_ops(bundle_order, op_index)
+      ON DELETE CASCADE
+) STRICT;
+CREATE INDEX replication_pending_conflict_moments_by_bundle
+    ON replication_pending_conflict_moments(bundle_order, op_index);
+
+CREATE TABLE replication_pending_conflict_text_blobs (
+    bundle_order INTEGER NOT NULL,
+    blob_sha256  TEXT    NOT NULL,
+    PRIMARY KEY (bundle_order, blob_sha256),
+    FOREIGN KEY (bundle_order)
+      REFERENCES replication_pending_conflict_bundles(bundle_order)
+      ON DELETE CASCADE,
+    FOREIGN KEY (blob_sha256)
+      REFERENCES blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE replication_pending_conflict_binary_blobs (
+    bundle_order INTEGER NOT NULL,
+    blob_sha256  TEXT    NOT NULL,
+    PRIMARY KEY (bundle_order, blob_sha256),
+    FOREIGN KEY (bundle_order)
+      REFERENCES replication_pending_conflict_bundles(bundle_order)
+      ON DELETE CASCADE,
+    FOREIGN KEY (blob_sha256)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+";
+
+pub(crate) const YDOC_LINEAGE_CLAIMS_MIGRATION_ID: &str = "v1-ydoc-lineage-claims";
+
+/// Ordinal 30. Strict `conflict.resolve` v1 no longer defers or surfaces the
+/// legacy mirrored-resolution outcomes stored in this table. Delete the dead
+/// rows and schema instead of retaining a second, unreachable settlement path.
+const V1_DROP_REPLICATION_PENDING_RESOLVES_DDL: &str = "\
+DROP TABLE replication_pending_resolves;
+";
+
+pub(crate) const DROP_REPLICATION_PENDING_RESOLVES_MIGRATION_ID: &str =
+    "v1-drop-replication-pending-resolves";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -2156,6 +2555,20 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SECRET_MOMENT_SOURCE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SECRET_MOMENT_SOURCE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 29,
+        id: YDOC_LINEAGE_CLAIMS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_YDOC_LINEAGE_CLAIMS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 30,
+        id: DROP_REPLICATION_PENDING_RESOLVES_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_DROP_REPLICATION_PENDING_RESOLVES_DDL,
         sets_user_version: None,
     },
 ];
@@ -3517,6 +3930,807 @@ mod tests {
             )
             .expect("repaired FK parent");
         assert_eq!(repaired_parent, "file_objects");
+    }
+
+    fn ydoc_lineage_claim_migration_index() -> usize {
+        BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == YDOC_LINEAGE_CLAIMS_MIGRATION_ID)
+            .expect("Y.Doc lineage claim migration is registered")
+    }
+
+    #[test]
+    fn strict_conflict_resolve_migration_deletes_the_legacy_pending_table() {
+        let dir = tempdir();
+        let path = dir.join("drop-pending-resolves.db");
+        let ctx = MigrationContext::current(2_899);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let migration_index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == DROP_REPLICATION_PENDING_RESOLVES_MIGRATION_ID)
+            .expect("pending-resolve drop migration is registered");
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("migrate through ordinal 29");
+
+        conn.execute_batch(
+            "INSERT INTO replication_log (
+                 workspace_id, origin_id, origin_seq, op_kind, payload_json,
+                 recorded_at_ms, imported
+             ) VALUES ('ws','peer',7,'conflict.resolve','{}',100,1);
+             INSERT INTO replication_pending_resolves (
+                 workspace_id, origin_id, origin_seq, remote_conflict_id,
+                 local_conflict_id, path, reason
+             ) VALUES ('ws','peer',7,'remote','local','doc.md','merged');",
+        )
+        .expect("seed obsolete pending resolution");
+
+        let outcome = run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("drop obsolete pending-resolution state");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema \
+                 WHERE type='table' AND name='replication_pending_resolves'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect current schema");
+        assert_eq!(table_count, 0);
+        let retained_log: i64 = conn
+            .query_row("SELECT COUNT(*) FROM replication_log", [], |row| row.get(0))
+            .expect("read retained replication log");
+        assert_eq!(
+            retained_log, 1,
+            "the migration deletes only the dead sidecar"
+        );
+
+        let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("rerun current migrations");
+        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
+    }
+
+    fn seed_hex_binary_blobs(conn: &Connection) {
+        for digit in b"0123456789abcdef" {
+            let digest = char::from(*digit).to_string().repeat(64);
+            conn.execute(
+                "INSERT INTO binary_blobs (sha256, byte_length, bytes) VALUES (?1, 1, ?2)",
+                rusqlite::params![digest, vec![*digit]],
+            )
+            .expect("seed binary blob");
+        }
+    }
+
+    fn legacy_base_payload(object_id: &str, digest: &str, is_base_state: &str) -> String {
+        format!(
+            "{{\"versionId\":\"main\",\"objectId\":\"{object_id}\",\
+             \"updateBlobSha256\":\"{digest}\",\"isBaseState\":{is_base_state}}}"
+        )
+    }
+
+    #[test]
+    fn ydoc_lineage_claim_migration_classifies_strict_candidates_and_preserves_rows() {
+        let dir = tempdir();
+        let path = dir.join("ydoc-lineage-matrix.db");
+        let ctx = MigrationContext::current(2_900);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let migration_index = ydoc_lineage_claim_migration_index();
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("migrate through ordinal 28");
+
+        conn.execute(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+             VALUES ('ws', 'main')",
+            [],
+        )
+        .expect("seed workspace");
+        for (offset, object_id) in [
+            "unclaimed",
+            "exact",
+            "exact-false-bit",
+            "missing",
+            "ambiguous-refused",
+            "ambiguous-multiple",
+            "malformed-only",
+            "prebase-only",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws', ?1, ?2)",
+                rusqlite::params![object_id, 100 + offset as i64],
+            )
+            .expect("seed file object");
+        }
+        seed_hex_binary_blobs(&conn);
+        conn.execute_batch(
+            "INSERT INTO ydoc_docs (
+                 workspace_id, version_id, object_id, content_kind, regime,
+                 head_update_seq, head_snapshot_seq, base_claimed, settle_seq,
+                 last_settled_sha, updated_at_ms, path
+             ) VALUES
+                 ('ws','main','unclaimed','plaintext','local-only',
+                  1,0,0,7,'settled-unclaimed',201,'unclaimed.md'),
+                 ('ws','main','exact','richdoc','replicated',
+                  0,0,1,8,'settled-exact',202,'exact.md'),
+                 ('ws','main','exact-false-bit','plaintext','local-only',
+                  0,0,0,9,NULL,203,'exact-false.md'),
+                 ('ws','main','missing','plaintext','replicated',
+                  4,4,1,10,'settled-missing',204,'missing.md'),
+                 ('ws','main','ambiguous-refused','plaintext','replicated',
+                  5,5,1,11,NULL,205,'refused.md'),
+                 ('ws','main','ambiguous-multiple','richdoc','replicated',
+                  6,6,1,12,NULL,206,'multiple.md'),
+                 ('ws','main','malformed-only','plaintext','replicated',
+                  7,7,1,13,NULL,207,'malformed.md');
+
+             INSERT INTO ydoc_updates (
+                 workspace_id, version_id, object_id, seq, update_blob_sha256,
+                 actor_origin_id, recorded_at_ms
+             ) VALUES
+                 ('ws','main','unclaimed',1,
+                  'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                  'local-origin',301);
+
+             INSERT INTO ydoc_snapshots (
+                 workspace_id, version_id, object_id, up_to_seq,
+                 snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms
+             ) VALUES
+                 ('ws','main','exact',0,
+                  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',401),
+                 ('ws','main','exact-false-bit',0,
+                  'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                  'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',402),
+                 ('ws','main','missing',4,
+                  'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                  '0000000000000000000000000000000000000000000000000000000000000000',403),
+                 ('ws','main','ambiguous-refused',5,
+                  '1111111111111111111111111111111111111111111111111111111111111111',
+                  '2222222222222222222222222222222222222222222222222222222222222222',404),
+                 ('ws','main','ambiguous-multiple',6,
+                  '3333333333333333333333333333333333333333333333333333333333333333',
+                  '4444444444444444444444444444444444444444444444444444444444444444',405),
+                 ('ws','main','malformed-only',7,
+                  '5555555555555555555555555555555555555555555555555555555555555555',
+                  '6666666666666666666666666666666666666666666666666666666666666666',406);
+
+             INSERT INTO ydoc_deferred_updates (
+                 workspace_id, version_id, object_id, origin_id, origin_seq,
+                 recorded_at_ms
+             ) VALUES
+                 ('ws','main','exact','deferred-active',1,501),
+                 ('ws','main','prebase-only','deferred-prebase',2,502);",
+        )
+        .expect("seed legacy Y.Doc rows");
+
+        let strict_refused_digest = "7".repeat(64);
+        conn.execute(
+            "INSERT INTO replication_log (
+                 workspace_id, origin_id, origin_seq, op_kind, payload_json,
+                 recorded_at_ms, imported
+             ) VALUES ('ws','peer-refused',1,'ydoc.update',?1,601,1)",
+            [legacy_base_payload(
+                "ambiguous-refused",
+                &strict_refused_digest,
+                "true",
+            )],
+        )
+        .expect("seed refused base candidate");
+        conn.execute(
+            "INSERT INTO replication_pending_refusals (
+                 workspace_id, origin_id, origin_seq, op_kind, reason_code,
+                 reason_message, report_id
+             ) VALUES (
+                 'ws','peer-refused',1,'ydoc.update','invalid-input',
+                 'base was refused','report-refused'
+             )",
+            [],
+        )
+        .expect("mark candidate refused");
+        for (seq, digit) in [(2_i64, '8'), (3_i64, '9')] {
+            conn.execute(
+                "INSERT INTO replication_log (
+                     workspace_id, origin_id, origin_seq, op_kind, payload_json,
+                     recorded_at_ms, imported
+                 ) VALUES ('ws','peer-multiple',?1,'ydoc.update',?2,?3,1)",
+                rusqlite::params![
+                    seq,
+                    legacy_base_payload(
+                        "ambiguous-multiple",
+                        &digit.to_string().repeat(64),
+                        "true",
+                    ),
+                    610 + seq,
+                ],
+            )
+            .expect("seed multiple base candidates");
+        }
+        for (seq, payload) in [
+            (4_i64, "{".to_owned()),
+            (
+                5_i64,
+                legacy_base_payload("malformed-only", &"7".repeat(64), "1"),
+            ),
+            (
+                6_i64,
+                legacy_base_payload("malformed-only", &"A".repeat(64), "true"),
+            ),
+            (
+                7_i64,
+                format!(
+                    "{{\"versionId\":1,\"objectId\":\"malformed-only\",\
+                     \"updateBlobSha256\":\"{}\",\"isBaseState\":true}}",
+                    "7".repeat(64)
+                ),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO replication_log (
+                     workspace_id, origin_id, origin_seq, op_kind, payload_json,
+                     recorded_at_ms, imported
+                 ) VALUES ('ws','peer-malformed',?1,'ydoc.update',?2,?3,1)",
+                rusqlite::params![seq, payload, 620 + seq],
+            )
+            .expect("seed non-candidate payload");
+        }
+
+        let child_counts_before: (i64, i64, i64) = (
+            conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
+                .expect("update count"),
+            conn.query_row("SELECT COUNT(*) FROM ydoc_snapshots", [], |row| row.get(0))
+                .expect("snapshot count"),
+            conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                row.get(0)
+            })
+            .expect("deferred count"),
+        );
+
+        let outcome = run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("apply typed lineage migration");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+
+        let claim = |object_id: &str| -> (String, Option<String>, String) {
+            conn.query_row(
+                "SELECT lineage_claim_status, lineage_claim_id, regime \
+                 FROM ydoc_docs WHERE workspace_id='ws' AND object_id=?1",
+                [object_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read migrated claim")
+        };
+        assert_eq!(
+            claim("unclaimed"),
+            ("unclaimed".to_owned(), None, "local-only".to_owned())
+        );
+        assert_eq!(
+            claim("exact"),
+            (
+                "exact".to_owned(),
+                Some("a".repeat(64)),
+                "replicated".to_owned()
+            )
+        );
+        assert_eq!(
+            claim("exact-false-bit"),
+            (
+                "exact".to_owned(),
+                Some("c".repeat(64)),
+                "replicated".to_owned()
+            ),
+            "the surviving seq-0 snapshot is stronger evidence than the false legacy bit"
+        );
+        assert_eq!(
+            claim("missing"),
+            ("missing".to_owned(), None, "replicated".to_owned())
+        );
+        assert_eq!(
+            claim("ambiguous-refused"),
+            ("ambiguous".to_owned(), None, "replicated".to_owned()),
+            "a refused envelope is a candidate, never proof of the active base"
+        );
+        assert_eq!(
+            claim("ambiguous-multiple"),
+            ("ambiguous".to_owned(), None, "replicated".to_owned())
+        );
+        assert_eq!(
+            claim("malformed-only"),
+            ("missing".to_owned(), None, "replicated".to_owned()),
+            "malformed JSON, wrong JSON types, and non-lowerhex digests are not candidates"
+        );
+
+        let preserved: (i64, i64, i64, Option<String>, i64, String) = conn
+            .query_row(
+                "SELECT head_update_seq, head_snapshot_seq, settle_seq,
+                        last_settled_sha, updated_at_ms, path
+                 FROM ydoc_docs WHERE workspace_id='ws' AND object_id='unclaimed'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("read preserved marker fields");
+        assert_eq!(
+            preserved,
+            (
+                1,
+                0,
+                7,
+                Some("settled-unclaimed".to_owned()),
+                201,
+                "unclaimed.md".to_owned()
+            )
+        );
+        let child_counts_after: (i64, i64, i64) = (
+            conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
+                .expect("update count after"),
+            conn.query_row("SELECT COUNT(*) FROM ydoc_snapshots", [], |row| row.get(0))
+                .expect("snapshot count after"),
+            conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                row.get(0)
+            })
+            .expect("deferred count after"),
+        );
+        assert_eq!(child_counts_after, child_counts_before);
+        let prebase: (String, Option<String>) = conn
+            .query_row(
+                "SELECT object_id, lineage_claim_id FROM ydoc_deferred_updates \
+                 WHERE origin_id='deferred-prebase'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("pre-base deferred row survives");
+        assert_eq!(prebase, ("prebase-only".to_owned(), None));
+
+        let legacy_column_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('ydoc_docs') \
+                 WHERE name='base_claimed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect marker columns");
+        assert_eq!(legacy_column_count, 0, "the dual-truth bit is removed");
+        let deferred_parent: String = conn
+            .query_row(
+                "SELECT \"table\" FROM pragma_foreign_key_list('ydoc_deferred_updates')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("deferred root");
+        assert_eq!(deferred_parent, "file_objects");
+        let fk_violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .expect("foreign key check");
+        assert_eq!(fk_violations, 0);
+
+        let fingerprint = (
+            dump_table_rows(&conn, "ydoc_docs"),
+            dump_table_rows(&conn, "ydoc_updates"),
+            dump_table_rows(&conn, "ydoc_snapshots"),
+            dump_table_rows(&conn, "ydoc_deferred_updates"),
+        );
+        let rerun = run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("rerun typed lineage migration");
+        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
+        assert_eq!(
+            fingerprint,
+            (
+                dump_table_rows(&conn, "ydoc_docs"),
+                dump_table_rows(&conn, "ydoc_updates"),
+                dump_table_rows(&conn, "ydoc_snapshots"),
+                dump_table_rows(&conn, "ydoc_deferred_updates"),
+            ),
+            "a checksum-matching rerun is a strict no-op"
+        );
+    }
+
+    #[test]
+    fn ydoc_lineage_claim_schema_enforces_roots_constraints_and_indexes() {
+        let dir = tempdir();
+        let path = dir.join("ydoc-lineage-constraints.db");
+        let ctx = MigrationContext::current(2_901);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("migrate fresh store");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+                 VALUES ('ws', 'object', 1), ('ws', 'prebase', 2);
+             INSERT INTO binary_blobs (sha256, byte_length, bytes) VALUES
+                 ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1,x'01'),
+                 ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',1,x'02'),
+                 ('cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',1,x'03'),
+                 ('dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',1,x'04');
+             INSERT INTO blobs (sha256, byte_length, text)
+                 VALUES ('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',1,'x');
+             INSERT INTO ydoc_docs (
+                 workspace_id, version_id, object_id, content_kind, regime,
+                 head_update_seq, head_snapshot_seq, settle_seq, updated_at_ms,
+                 path, lineage_claim_status, lineage_claim_id
+             ) VALUES (
+                 'ws','main','object','plaintext','replicated',0,0,0,3,NULL,
+                 'exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+             );
+             INSERT INTO ydoc_inactive_lineages (
+                 workspace_id, version_id, object_id, lineage_claim_id,
+                 disposition, content_kind, path, full_state_blob_sha256,
+                 state_vector_blob_sha256,
+                 last_surfaced_state_vector_blob_sha256,
+                 last_surfaced_projection_sha256, recorded_at_ms, updated_at_ms
+             ) VALUES (
+                 'ws','main','object',
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 'rejected-base','plaintext',NULL,
+                 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',4,4
+             );
+             INSERT INTO ydoc_deferred_updates (
+                 workspace_id, version_id, object_id, origin_id, origin_seq,
+                 recorded_at_ms, lineage_claim_id
+             ) VALUES (
+                 'ws','main','prebase','peer',1,5,
+                 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
+             );",
+        )
+        .expect("seed valid latest-shape rows");
+
+        for invalid in [
+            "INSERT INTO ydoc_docs (
+                 workspace_id,version_id,object_id,content_kind,regime,
+                 head_update_seq,head_snapshot_seq,settle_seq,updated_at_ms,
+                 lineage_claim_status,lineage_claim_id
+             ) VALUES (
+                 'ws','other','object','plaintext','local-only',0,0,0,1,
+                 'exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+             )",
+            "UPDATE ydoc_docs SET head_update_seq=-1 WHERE workspace_id='ws' AND object_id='object'",
+            "UPDATE ydoc_docs SET head_snapshot_seq=1 WHERE workspace_id='ws' AND object_id='object'",
+            "UPDATE ydoc_docs SET lineage_parent_claim_id=
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+             WHERE workspace_id='ws' AND object_id='object'",
+        ] {
+            conn.execute(invalid, [])
+                .expect_err("latest marker constraint must fail closed");
+        }
+        for (invalid, constraint) in [
+            (
+                "INSERT INTO ydoc_updates (
+                     workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms
+                 ) VALUES (
+                     'ws','main','object',0,
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',6
+                 )",
+                "update sequence zero",
+            ),
+            (
+                "INSERT INTO ydoc_snapshots (
+                     workspace_id,version_id,object_id,up_to_seq,
+                     snapshot_blob_sha256,state_vector_blob_sha256,recorded_at_ms
+                 ) VALUES (
+                     'ws','main','object',-1,
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',6
+                 )",
+                "negative snapshot sequence",
+            ),
+            (
+                "INSERT INTO ydoc_deferred_updates (
+                     workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms
+                 ) VALUES ('ws','main','prebase','invalid-peer',-1,6)",
+                "negative deferred origin sequence",
+            ),
+        ] {
+            conn.execute(invalid, []).expect_err(constraint);
+        }
+        conn.execute(
+            "DELETE FROM binary_blobs WHERE sha256=
+             'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'",
+            [],
+        )
+        .expect_err("inactive full state is a RESTRICT root");
+        conn.execute(
+            "DELETE FROM blobs WHERE sha256=
+             'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'",
+            [],
+        )
+        .expect_err("surfaced projection is a RESTRICT root");
+        conn.execute(
+            "DELETE FROM file_objects WHERE workspace_id='ws' AND object_id='object'",
+            [],
+        )
+        .expect_err("inactive lineage prevents cascading away its file object");
+
+        let partial_indexes: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM pragma_index_list('ydoc_inactive_lineages') \
+                 WHERE partial=1 ORDER BY name",
+            )
+            .expect("prepare inactive indexes")
+            .query_map([], |row| row.get(0))
+            .expect("read inactive indexes")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect inactive indexes");
+        assert_eq!(
+            partial_indexes,
+            [
+                "ydoc_inactive_lineages_by_open_conflict".to_owned(),
+                "ydoc_inactive_lineages_by_parent".to_owned(),
+            ]
+        );
+        let deferred_partial: i64 = conn
+            .query_row(
+                "SELECT partial FROM pragma_index_list('ydoc_deferred_updates') \
+                 WHERE name='ydoc_deferred_updates_by_lineage'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("claim-aware deferred index");
+        assert_eq!(deferred_partial, 1);
+        let fk_violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .expect("foreign key check");
+        assert_eq!(fk_violations, 0);
+    }
+
+    #[test]
+    fn ydoc_lineage_claim_migration_rolls_back_atomically_on_invalid_legacy_rows() {
+        let dir = tempdir();
+        let path = dir.join("ydoc-lineage-rollback.db");
+        let ctx = MigrationContext::current(2_902);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let migration_index = ydoc_lineage_claim_migration_index();
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("migrate through ordinal 28");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+                 VALUES ('ws', 'object', 1);
+             INSERT INTO binary_blobs (sha256, byte_length, bytes)
+                 VALUES (
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                   1,x'01'
+                 );
+             INSERT INTO ydoc_docs (
+                 workspace_id,version_id,object_id,content_kind,regime,
+                 head_update_seq,head_snapshot_seq,base_claimed,updated_at_ms,path
+             ) VALUES ('ws','main','object','plaintext','local-only',0,0,0,2,'a.md');
+             INSERT INTO ydoc_updates (
+                 workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms
+             ) VALUES (
+                 'ws','main','object',-1,
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',3
+             );",
+        )
+        .expect("seed legacy row rejected by the new checks");
+
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect_err("invalid legacy child must roll back the rebuild");
+        let old_column_present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('ydoc_docs') \
+                 WHERE name='base_claimed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect rolled-back marker");
+        assert_eq!(old_column_present, 1);
+        let staged_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema \
+                 WHERE name GLOB 'ydoc_*_v29'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect staged rebuild tables");
+        assert_eq!(staged_tables, 0);
+        let legacy_row: i64 = conn
+            .query_row(
+                "SELECT seq FROM ydoc_updates WHERE object_id='object'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy child survives rollback");
+        assert_eq!(legacy_row, -1);
+        let max_ordinal: i64 = conn
+            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("ledger remains at ordinal 28");
+        assert_eq!(max_ordinal, 28);
+
+        conn.execute("DELETE FROM ydoc_updates WHERE object_id='object'", [])
+            .expect("remove invalid legacy child");
+        let repaired = run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("retry clean rebuild");
+        assert_eq!(repaired, MigrationOutcome::Applied { newly_applied: 1 });
+        let status: String = conn
+            .query_row(
+                "SELECT lineage_claim_status FROM ydoc_docs WHERE object_id='object'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read repaired marker");
+        assert_eq!(status, "unclaimed");
+    }
+
+    #[test]
+    fn ydoc_lineage_claim_migration_adds_a_rooted_pending_conflict_bundle() {
+        let dir = tempdir();
+        let path = dir.join("pending-conflict-bundle.db");
+        let ctx = MigrationContext::current(2_903);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("current migrations");
+
+        const TEXT_BLOB: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        const BINARY_BLOB: &str =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        conn.execute_batch(&format!(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO blobs (sha256, byte_length, text)
+                 VALUES ('{TEXT_BLOB}', 4, 'text');
+             INSERT INTO binary_blobs (sha256, byte_length, bytes)
+                 VALUES ('{BINARY_BLOB}', 1, x'01');"
+        ))
+        .expect("bundle roots");
+        conn.execute(
+            "INSERT INTO replication_pending_conflict_bundles
+                 (workspace_id, conflict_id, format_version,
+                  pre_effect_moment_order, created_at_ms)
+             VALUES ('ws', 'conflict-1', 1, 7, 20)",
+            [],
+        )
+        .expect("pending conflict bundle");
+        let bundle_order = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO replication_pending_conflict_ops
+                 (bundle_order, op_index, op_kind, payload_json, recorded_at_ms)
+             VALUES (?1, 0, 'conflict.resolve',
+                     '{\"formatVersion\":1,\"conflictId\":\"conflict-1\"}', 20)",
+            [bundle_order],
+        )
+        .expect("resolve op");
+        conn.execute(
+            "INSERT INTO replication_pending_conflict_ops
+                 (bundle_order, op_index, op_kind, payload_json, recorded_at_ms)
+             VALUES (?1, 1, 'moment.append',
+                     '{\"momentId\":\"moment-1\"}', 21)",
+            [bundle_order],
+        )
+        .expect("moment op");
+        conn.execute(
+            "INSERT INTO replication_pending_conflict_moments
+                 (workspace_id, bundle_order, op_index, moment_id)
+             VALUES ('ws', ?1, 1, 'moment-1')",
+            [bundle_order],
+        )
+        .expect("moment identity");
+        conn.execute(
+            "INSERT INTO replication_pending_conflict_text_blobs
+                 (bundle_order, blob_sha256) VALUES (?1, ?2)",
+            rusqlite::params![bundle_order, TEXT_BLOB],
+        )
+        .expect("text blob root");
+        conn.execute(
+            "INSERT INTO replication_pending_conflict_binary_blobs
+                 (bundle_order, blob_sha256) VALUES (?1, ?2)",
+            rusqlite::params![bundle_order, BINARY_BLOB],
+        )
+        .expect("binary blob root");
+
+        assert!(
+            conn.execute("DELETE FROM blobs WHERE sha256=?1", [TEXT_BLOB])
+                .is_err(),
+            "the pending bundle must keep text blobs alive"
+        );
+        assert!(
+            conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [BINARY_BLOB])
+                .is_err(),
+            "the pending bundle must keep binary and Y.Doc blobs alive"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO replication_pending_conflict_ops
+                     (bundle_order, op_index, op_kind, payload_json, recorded_at_ms)
+                 VALUES (?1, 2, 'conflict.resolve', '{}', 22)",
+                [bundle_order],
+            )
+            .is_err(),
+            "only op zero may be conflict.resolve"
+        );
+
+        conn.execute(
+            "DELETE FROM replication_pending_conflict_bundles WHERE bundle_order=?1",
+            [bundle_order],
+        )
+        .expect("delete pending bundle");
+        for table in [
+            "replication_pending_conflict_ops",
+            "replication_pending_conflict_moments",
+            "replication_pending_conflict_text_blobs",
+            "replication_pending_conflict_binary_blobs",
+        ] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("pending child count"),
+                0,
+                "{table} must cascade with its bundle"
+            );
+        }
+        conn.execute("DELETE FROM blobs WHERE sha256=?1", [TEXT_BLOB])
+            .expect("text root released");
+        conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [BINARY_BLOB])
+            .expect("binary root released");
     }
 
     #[test]

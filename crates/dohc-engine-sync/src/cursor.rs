@@ -109,14 +109,6 @@ pub fn commit_relay_cursor(
             .map_err(SyncError::persist)?;
             let sharing_declined =
                 backfill_after_first_position(tx, workspace_id, was_enrolled, now_ms)?;
-            // A committed cursor means the stream never replays coordinates
-            // at or before this pull, so persisted pending-resolve decisions
-            // kept for retry reconstruction are dead.
-            tx.execute(
-                "DELETE FROM replication_pending_resolves WHERE workspace_id=?1",
-                params![workspace_id],
-            )
-            .map_err(SyncError::persist)?;
             // Refusals can also be created OUTSIDE a pull when open/resync/
             // close drains an already-ACKed Y.Doc coordinate. Delete only the
             // rows that this exact pull claimed and surfaced. A later drain is

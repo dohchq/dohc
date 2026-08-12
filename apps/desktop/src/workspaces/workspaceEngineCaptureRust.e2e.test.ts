@@ -9,6 +9,10 @@ import {
   EngineDaemonLifecycle,
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
+import {
+  VersionedLiveAdapter,
+  YdocReleasedWithSettleFailureError,
+} from "@dohc/workspace-engine-client";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   createWorkspaceEngineCapture,
@@ -16,7 +20,6 @@ import {
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
 import { createWorkspaceActivity } from "./workspaceActivity";
-import { YdocReleasedWithSettleFailureError } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -26,6 +29,41 @@ import { waitForPathMoments } from "./waitForPathMoments";
 // `cargo build` (#390). The shared gate also checks apps/desktop/target/debug,
 // which is where the app under test and the staged-binary harnesses put it.
 const engine = requireEngineBinaryOrSkip();
+
+async function waitForDaemonCaptureDeferral(
+  sessions: EngineWorkspaceSessions,
+  workspaceId: string,
+  rootPath: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const outcome = await sessions.run(
+      { workspaceId, rootPath },
+      async ({ client, workspace }) =>
+        await new VersionedLiveAdapter(client, workspace, {
+          workspaceId,
+        }).flushCapture(),
+    );
+    if (!outcome.settled) return;
+    await delay(25);
+  }
+  throw new Error("Daemon capture did not report its live-session deferral.");
+}
+
+async function listDaemonPathMoments(
+  sessions: EngineWorkspaceSessions,
+  workspaceId: string,
+  rootPath: string,
+  path: string,
+) {
+  const page = await sessions.run(
+    { workspaceId, rootPath },
+    async ({ client, workspace }) =>
+      await new VersionedLiveAdapter(client, workspace, {
+        workspaceId,
+      }).listMoments({ workspaceId, limit: 100 }),
+  );
+  return page.moments.filter((moment) => moment.path === path);
+}
 
 it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
@@ -326,13 +364,12 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
-// #496, staged deterministically instead of by hoping the scheduler
-// interleaves: the daemon's capture is FLUSHED past the outside edit (proved
-// by the new moment) before the close runs, so the close-settle is guaranteed
-// to meet a head that already moved. That is the ordering PR #495's drift e2e
-// deliberately left unasserted because it could not pin which side won.
+// #496 under the live-session capture gate: the daemon observes the outside
+// edit but cannot ingest it while the Y.Doc lease is live. The unsettled flush
+// is the ordering proof. A clean close releases the lease, after which the
+// queued disk edit becomes a capture moment.
 it.skipIf(engine.missing)(
-  "closes clean when the daemon's capture reached an outside edit first",
+  "closes clean, then captures an outside edit deferred by its live lease",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-race-");
     const markerDirectory = join(root, ".dohc", "engine");
@@ -357,6 +394,7 @@ it.skipIf(engine.missing)(
       onError: (context) => errors.push(context),
     });
     const outside = "written outside dohc\n";
+    const workspaceId = "capture-rust-race";
     try {
       await writeFile(join(root, "note.md"), "base\n", "utf8");
       await waitForPathMoments(capture, "note.md", 1);
@@ -373,14 +411,26 @@ it.skipIf(engine.missing)(
       editor.getText("plainText").insert(0, "typed in dohc\n");
       await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
       await session.settleNow();
-      const settledMoments = await waitForPathMoments(capture, "note.md", 1);
+      const settledMoments = await listDaemonPathMoments(
+        sessions,
+        workspaceId,
+        root,
+        "note.md",
+      );
+      expect(settledMoments).toHaveLength(2);
+      expect(
+        settledMoments.some((moment) =>
+          moment.afterText?.includes("typed in dohc"),
+        ),
+      ).toBe(true);
 
-      // The outside writer replaces the file, and the daemon's capture INGESTS
-      // it — the new moment is the proof. The path's head is now the outside
-      // author's text, so the close-settle below cannot be answered from this
-      // session's lineage.
+      // The outside writer replaces the file. Capture observes it, but the
+      // live Y.Doc lease keeps the head at the last settled projection.
       await writeFile(join(root, "note.md"), outside, "utf8");
-      await waitForPathMoments(capture, "note.md", settledMoments.length + 1);
+      await waitForDaemonCaptureDeferral(sessions, workspaceId, root);
+      expect(
+        await listDaemonPathMoments(sessions, workspaceId, root, "note.md"),
+      ).toHaveLength(2);
       states.length = 0;
       errors.length = 0;
 
@@ -395,17 +445,17 @@ it.skipIf(engine.missing)(
 
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
 
-      const moments = await capture.listMoments({ limit: 100 });
-      const texts = await Promise.all(
-        moments.moments
-          .filter((moment) => moment.path === "note.md")
-          .map(async (moment) => {
-            const detail = await capture.readMoment(moment.id);
-            const payload = detail?.protected === false ? detail.moment.payload : undefined;
-            return payload?.after.text ?? "";
-          }),
+      // Reopening the workspace rebuilds the capture layer from its durable
+      // manifest. That is the deterministic retry seam for the path the
+      // live-lease refusal parked.
+      await sessions.closeWorkspace(workspaceId);
+      const capturedMoments = await waitForPathMoments(
+        capture,
+        "note.md",
+        settledMoments.length + 1,
       );
-      expect(texts.some((text) => text.includes("typed in dohc"))).toBe(true);
+      expect(capturedMoments).toHaveLength(3);
+      expect(capturedMoments[0]?.id).not.toBe(settledMoments[0]?.id);
     } finally {
       await capture.stop().catch(() => undefined);
       await sessions.closeAll().catch(() => undefined);
@@ -547,9 +597,9 @@ it.skipIf(engine.missing || process.platform !== "win32")(
   120_000,
 );
 
-// The half a refusal cannot answer, driven against the real daemon. Same race
-// as above, but the user has UNSETTLED edits when the close runs: the
-// close-settle refuses ConflictStaleTarget exactly as before, and then the
+// The half a refusal cannot answer, driven against the real daemon. Same
+// deferred outside edit as above, but the user has UNSETTLED edits when the
+// close runs: the close-settle refuses ConflictStaleTarget, and then the
 // release refuses too — a local-only prune needs the CRDT projection to equal
 // `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and the
 // daemon REINSERTS the session entry on that refusal
@@ -558,7 +608,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
 // at the refusal instead of after the release reported "changed on disk" over
 // exactly this state.
 it.skipIf(engine.missing)(
-  "keeps the close loud when unsettled edits meet an already-moved head",
+  "keeps the close loud when unsettled edits meet a deferred outside edit",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-loud-");
     const markerDirectory = join(root, ".dohc", "engine");
@@ -583,6 +633,7 @@ it.skipIf(engine.missing)(
       onError: (context) => errors.push(context),
     });
     const outside = "written outside dohc\n";
+    const workspaceId = "capture-rust-loud";
     try {
       await writeFile(join(root, "note.md"), "base\n", "utf8");
       await waitForPathMoments(capture, "note.md", 1);
@@ -602,10 +653,19 @@ it.skipIf(engine.missing)(
       };
       await type("typed in dohc\n");
       await session.settleNow();
-      const settledMoments = await waitForPathMoments(capture, "note.md", 1);
+      const settledMoments = await listDaemonPathMoments(
+        sessions,
+        workspaceId,
+        root,
+        "note.md",
+      );
+      expect(settledMoments).toHaveLength(2);
 
       await writeFile(join(root, "note.md"), outside, "utf8");
-      await waitForPathMoments(capture, "note.md", settledMoments.length + 1);
+      await waitForDaemonCaptureDeferral(sessions, workspaceId, root);
+      expect(
+        await listDaemonPathMoments(sessions, workspaceId, root, "note.md"),
+      ).toHaveLength(2);
 
       // The difference from the clean case: text the engine has journaled but
       // never settled, so the projection no longer equals `last_settled_sha`
@@ -631,8 +691,25 @@ it.skipIf(engine.missing)(
       expect(states).not.toContain("changed-on-disk");
       expect(errors).toContain("ydoc settle of note.md");
 
+      // The refused close kept the session usable and its lease held. A
+      // second settle reaches the same stale target, and no capture moment
+      // can appear over that still-unsaved Y.Doc state.
+      await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+      expect(
+        await listDaemonPathMoments(sessions, workspaceId, root, "note.md"),
+      ).toHaveLength(2);
+
       // The outside author still owns the file, and the unsettled text is not
       // in it — which is why "changed on disk" would have been a lie.
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+
+      // Workspace teardown is the safe eviction boundary after the caller
+      // has observed the loud refusal. Reopening rebuilds capture and ingests
+      // the queued disk edit without letting the failed Y.Doc close overwrite
+      // it.
+      await sessions.closeWorkspace(workspaceId);
+      const capturedMoments = await waitForPathMoments(capture, "note.md", 3);
+      expect(capturedMoments).toHaveLength(3);
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
     } finally {
       await capture.stop().catch(() => undefined);

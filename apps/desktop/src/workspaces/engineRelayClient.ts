@@ -7,7 +7,6 @@ import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   type CommitRelayCursorResult,
-  type PendingConflictResolve,
   type ProbeRelayWorkspaceResult,
   type RelayWorkspaceBootstrapResult,
   type RelayWorkspaceIdentity,
@@ -449,36 +448,6 @@ function sharingDeclined(
   });
 }
 
-function pendingResolves(
-  value: JsonValue | undefined,
-): PendingConflictResolve[] {
-  if (!Array.isArray(value)) {
-    throw new Error("Rust engine sync.pull.pendingResolves must be an array.");
-  }
-  return value.map((entry, index) => {
-    const record = resultRecord(
-      entry,
-      `sync.pull.pendingResolves[${index}]`,
-    );
-    const remoteConflictId = stringField(
-      record,
-      "remoteConflictId",
-      `sync.pull.pendingResolves[${index}]`,
-    );
-    const localConflictId =
-      typeof record.localConflictId === "string"
-        ? record.localConflictId
-        : null;
-    const path = typeof record.path === "string" ? record.path : null;
-    const reason = stringField(
-      record,
-      "reason",
-      `sync.pull.pendingResolves[${index}]`,
-    );
-    return { remoteConflictId, localConflictId, path, reason };
-  });
-}
-
 function pendingCursor(
   value: JsonValue | undefined,
   label: string,
@@ -734,7 +703,6 @@ export class EngineRelayClient {
         let nextCursor = 0;
         let previousCursor: number | null = null;
         let finalCursor: Record<string, JsonValue | undefined> | null = null;
-        const resolves: PendingConflictResolve[] = [];
         const declines: SharingDeclined[] = [];
         const changed = new Map<
           string,
@@ -768,7 +736,6 @@ export class EngineRelayClient {
             "conflictsOpened",
             "sync.pull",
           );
-          resolves.push(...pendingResolves(result.pendingResolves));
           appendDeclines(
             declines,
             sharingDeclined(result.sharingDeclined, "sync.pull"),
@@ -790,8 +757,6 @@ export class EngineRelayClient {
           applied,
           skipped,
           conflictsOpened,
-          pendingConflictResolves: resolves.length,
-          pendingResolves: resolves,
           sharingDeclined: declines,
           fastForwardedPaths: [...changed.values()],
           nextCursor,

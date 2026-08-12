@@ -49,8 +49,18 @@ pub fn originate_ydoc_base_in_tx(
     else {
         return Ok(BaseOrigination::NothingToDo);
     };
-    if marker.base_claimed {
-        return Ok(BaseOrigination::NothingToDo);
+    match marker.lineage_claim_status {
+        dohc_engine_collab::LineageClaimStatus::Unclaimed => {}
+        dohc_engine_collab::LineageClaimStatus::Exact => {
+            return Ok(BaseOrigination::NothingToDo);
+        }
+        unresolved => {
+            return Err(SyncError::corrupt(
+                dohc_engine_collab::CollabError::LineageClaimUnresolved {
+                    status: unresolved.as_str().to_owned(),
+                },
+            ));
+        }
     }
     // Check replication before the claim. A later refusal in the caller's
     // append or backfill transaction would otherwise roll back real work with

@@ -165,17 +165,12 @@ async fn an_open_base_conflict_freezes_the_settle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn resolving_keep_current_folds_the_choice_into_the_lineage() {
-    // MUTATION: drop the fold call in `conflict_resolve_on_store`'s hook —
-    // the delta below projects the sender-only lineage and the "local truth"
-    // assertions fail.
+async fn positioned_keep_current_rotates_the_lineage_and_journals_one_compound_resolve() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
-    let (key, winner_base, winner_doc, conflict_id) = {
+    let (key, conflict_id, predecessor_claim) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
-        let seeded = seed_divergent_base(&mut store);
-        // The workspace replicates (identity + a relay position), so the
-        // fold must journal its delta for the peer.
+        let (key, _winner_base, _winner_doc, conflict_id) = seed_divergent_base(&mut store);
         dohc_engine_sync::journal_local_replication_op(
             &mut store,
             WS,
@@ -192,7 +187,7 @@ async fn resolving_keep_current_folds_the_choice_into_the_lineage() {
             .write_with(&NoFaults, |tx| {
                 tx.execute(
                     "INSERT INTO sync_relay_cursors \
-                     (workspace_id, cursor, replication_epoch, stream_identity) \
+                     (workspace_id,cursor,replication_epoch,stream_identity) \
                      VALUES (?1,'0','epoch-1','stream-1')",
                     [WS],
                 )
@@ -200,27 +195,31 @@ async fn resolving_keep_current_folds_the_choice_into_the_lineage() {
                 Ok::<_, dohc_engine_storage::StorageError>(())
             })
             .expect("relay position");
-        seeded
+        let predecessor_claim = dohc_engine_collab::read_marker(&store, &key)
+            .expect("read marker")
+            .expect("claimed marker")
+            .lineage_claim_id
+            .expect("exact predecessor claim");
+        (key, conflict_id, predecessor_claim)
     };
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 10).expect("open actor").actor;
-    let resolved = handle
+    handle
         .conflict_resolve(
             ResolveTextConflict {
                 workspace_id: WS.to_owned(),
-                conflict_id,
+                conflict_id: conflict_id.clone(),
                 resolution: ResolveConflictKind::KeepCurrent,
                 object_id: "resolution-fresh-object".to_owned(),
                 write_moment_id: "m-resolve-write".to_owned(),
                 delete_moment_id: "m-resolve-delete".to_owned(),
-                metadata_origin: "test".to_owned(),
+                metadata_origin: "api".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 author_json: None,
                 now_ms: 11,
-                request_id: None,
-                // This caller builds no wire answer, so nothing bounds the row here.
+                request_id: Some("request-keep-current".to_owned()),
                 conflict_answer_budget_bytes: usize::MAX,
             },
             dohc_engine_collab::LeaseRegistry::new(),
@@ -229,94 +228,108 @@ async fn resolving_keep_current_folds_the_choice_into_the_lineage() {
         )
         .await
         .expect("keep-current resolves");
-    assert!(resolved.write.is_none(), "keep-current writes no new head");
     supervisor.close(&db).expect("close actor");
 
-    // The choice is durable in the lineage, and journaled for the peer.
     let store = EngineStore::open(&db, 12).expect("inspect");
-    let persisted = dohc_engine_collab::load_persisted(&store, &key)
-        .expect("load")
-        .expect("lineage");
-    let folded = persisted
+    let marker = dohc_engine_collab::read_marker(&store, &key)
+        .expect("read marker")
+        .expect("successor marker");
+    let successor_claim = marker
+        .lineage_claim_id
+        .clone()
+        .expect("exact successor claim");
+    assert_ne!(successor_claim, predecessor_claim);
+    assert_eq!(
+        marker.lineage_parent_claim_id.as_deref(),
+        Some(predecessor_claim.as_str())
+    );
+    assert_eq!(marker.path.as_deref(), Some(PATH));
+    let projection = dohc_engine_collab::load_persisted(&store, &key)
+        .expect("load successor")
+        .expect("successor lineage")
         .doc
         .project(ContentKind::Plaintext)
-        .expect("projection");
-    assert_eq!(
-        folded.markdown, "local truth",
-        "resolution must rewrite the lineage to the chosen text"
-    );
-    let fold_deltas: Vec<String> = store
+        .expect("project successor");
+    assert_eq!(projection.markdown, "local truth");
+
+    let (local_ops, inactive, pending, dead_resolve): (
+        Vec<(i64, String, serde_json::Value)>,
+        i64,
+        i64,
+        i64,
+    ) = store
         .read_with(|conn| {
-            let mut stmt = conn
+            let local_ops = conn
                 .prepare(
-                    "SELECT payload_json FROM replication_log \
-                     WHERE workspace_id=?1 AND op_kind='ydoc.update' AND imported=0",
-                )
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-            let rows = stmt
-                .query_map([WS], |row| row.get::<_, String>(0))
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+                    "SELECT origin_seq,op_kind,payload_json FROM replication_log \
+                     WHERE workspace_id=?1 AND origin_id='local' AND origin_seq>0 \
+                     ORDER BY origin_seq",
+                )?
+                .query_map([WS], |row| {
+                    let payload: String = row.get(2)?;
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        serde_json::from_str(&payload).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                payload.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>((
+                local_ops,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_inactive_lineages \
+                     WHERE workspace_id=?1 AND version_id='main' AND object_id='object-plan' \
+                       AND lineage_claim_id=?2 AND disposition='superseded-predecessor'",
+                    rusqlite::params![WS, predecessor_claim],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_conflict_bundles \
+                     WHERE workspace_id=?1",
+                    [WS],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_journal \
+                     WHERE doc_id=?1 AND op_kind='conflict.resolve'",
+                    [&conflict_id],
+                    |row| row.get(0),
+                )?,
+            ))
         })
-        .expect("journal");
-    assert_eq!(fold_deltas.len(), 1, "the fold journals exactly one delta");
-    let fold_payload: serde_json::Value =
-        serde_json::from_str(&fold_deltas[0]).expect("fold payload");
-    assert_eq!(fold_payload["isBaseState"], serde_json::json!(false));
-    let fold_sha = fold_payload["updateBlobSha256"]
-        .as_str()
-        .expect("fold sha")
-        .to_owned();
-
-    // A later inbound delta MERGES with the choice instead of reversing it.
-    drop(store);
-    let mut store = EngineStore::open(&db, 13).expect("reopen");
-    let delta = winner_doc.plaintext_insert(0, "more ");
-    let delta_sha = store.put_binary_blob(&delta).expect("delta blob");
-    let delta_op = ReplicationEnvelope {
-        workspace_id: WS.to_owned(),
-        origin_id: "winner-origin".to_owned(),
-        origin_seq: 1,
-        op_kind: "ydoc.update".to_owned(),
-        payload: serde_json::json!({
-            "versionId": "main",
-            "objectId": "object-plan",
-            "path": PATH,
-            "contentKind": "plaintext",
-            "updateBlobSha256": delta_sha,
-            "isBaseState": false
-        }),
-        recorded_at_ms: 14,
-    };
-    apply_ydoc_envelope(&mut store, &delta_op, &NoFaults, &NoLiveLeases).expect("delta applies");
-    let head = head_text(&db);
-    assert!(
-        head.contains("local truth"),
-        "the resolved choice survives the next delta, got {head:?}"
-    );
-
-    // A clean peer converges to the same content from the winner's base plus
-    // the journaled fold delta plus the later delta.
-    let fold_bytes = EngineStore::open(&db, 15)
-        .expect("open")
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT bytes FROM binary_blobs WHERE sha256=?1",
-                [&fold_sha],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("fold blob");
-    let peer = dohc_engine_collab::Ydoc::wire();
-    peer.apply(&winner_base).expect("peer base");
-    peer.apply(&fold_bytes).expect("peer fold");
-    peer.apply(&delta).expect("peer delta");
+        .expect("inspect compound resolution");
+    assert_eq!(inactive, 1, "the predecessor remains addressable");
+    assert_eq!(pending, 0, "a positioned bundle drains in its transaction");
     assert_eq!(
-        peer.plaintext_string(),
-        head,
-        "the peer reads the same resolved content"
+        dead_resolve, 0,
+        "the old payload-free journal is not transport"
+    );
+    assert_eq!(local_ops.len(), 1);
+    assert_eq!(local_ops[0].0, 1);
+    assert_eq!(local_ops[0].1, "conflict.resolve");
+    let payload = &local_ops[0].2;
+    assert_eq!(payload["formatVersion"], 1);
+    assert_eq!(payload["workspaceId"], WS);
+    assert_eq!(payload["conflictId"], conflict_id);
+    assert_eq!(payload["status"], "resolved");
+    assert_eq!(payload["effects"], serde_json::json!([]));
+    assert_eq!(
+        payload["lineageTransition"]["predecessorClaimId"],
+        predecessor_claim
+    );
+    assert_eq!(
+        payload["lineageTransition"]["successor"]["lineageClaimId"],
+        successor_claim
+    );
+    assert!(
+        local_ops.iter().all(|(_, kind, _)| kind != "ydoc.update"),
+        "a compound resolution must not leak a standalone Y.Doc rewrite"
     );
 }
 
@@ -351,7 +364,7 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
                 object_id: "resolution-fresh-object".to_owned(),
                 write_moment_id: "m-resolve-merged".to_owned(),
                 delete_moment_id: "m-resolve-delete".to_owned(),
-                metadata_origin: "test".to_owned(),
+                metadata_origin: "api".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 author_json: None,
@@ -439,12 +452,12 @@ async fn an_open_base_conflict_freezes_the_open_too() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_oversized_resolution_hits_the_text_limit_before_the_fold() {
-    // #656: every plaintext write runs `validate_text` first, so an oversized
-    // resolution trips the store's 10 MiB text cap before it can ever reach
-    // the fold's 20 MiB update cap — the refusal names MAX_TEXT_BYTES, the
-    // constraint actually enforced (Codex #596 round 4: it must carry the
-    // constraint, limit, and observed usage, not collapse to state-corrupt).
+async fn an_oversized_resolution_hits_the_successor_projection_limit_before_effects() {
+    // Strict conflict.resolve v1 prepares the successor before domain effects.
+    // An oversized resolution therefore reaches the projector's 16 MiB cap
+    // before any plaintext write or Y.Doc fold can run. The refusal names the
+    // constraint, limit, and observed usage instead of collapsing to
+    // state-corrupt.
     //
     // MUTATION: return the old bare `InvalidText { reason: "text exceeds the
     // size cap" }` from `validate_text` - the PayloadTooLarge match fails.
@@ -466,7 +479,7 @@ async fn an_oversized_resolution_hits_the_text_limit_before_the_fold() {
                 object_id: "resolution-fresh-object".to_owned(),
                 write_moment_id: "m-resolve-oversized".to_owned(),
                 delete_moment_id: "m-resolve-delete".to_owned(),
-                metadata_origin: "test".to_owned(),
+                metadata_origin: "api".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 author_json: None,
@@ -489,10 +502,11 @@ async fn an_oversized_resolution_hits_the_text_limit_before_the_fold() {
                 observed_bytes,
             },
         ) => {
-            // The cap this path actually reaches: the store's text cap, which
-            // every plaintext write is validated against before any fold runs.
-            assert_eq!(constraint, "MAX_TEXT_BYTES");
-            assert_eq!(limit_bytes, dohc_engine_domain::MAX_TEXT_BYTES);
+            assert_eq!(constraint, "MAX_YDOC_PROJECTION_BYTES (conflict successor)");
+            assert_eq!(
+                limit_bytes,
+                dohc_engine_collab::limits::MAX_PROJECTION_BYTES
+            );
             assert!(observed_bytes > limit_bytes);
         }
         other => panic!("the measurements must survive the mapping: {other:?}"),
@@ -550,7 +564,7 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
                 object_id: "resolution-fresh-object".to_owned(),
                 write_moment_id: "m-resolve-compact".to_owned(),
                 delete_moment_id: "m-resolve-delete".to_owned(),
-                metadata_origin: "test".to_owned(),
+                metadata_origin: "api".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 author_json: None,
@@ -630,7 +644,7 @@ async fn a_resolution_refuses_while_a_session_holds_the_document() {
                 object_id: "resolution-fresh-object".to_owned(),
                 write_moment_id: "m-resolve-live".to_owned(),
                 delete_moment_id: "m-resolve-delete".to_owned(),
-                metadata_origin: "test".to_owned(),
+                metadata_origin: "api".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 author_json: None,
@@ -677,6 +691,124 @@ async fn a_resolution_refuses_while_a_session_holds_the_document() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_absent_path_resolution_uses_the_derived_live_lease() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let conflict_id = {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        let (_, _, _, conflict_id) = seed_divergent_base(&mut store);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "DELETE FROM path_aliases WHERE workspace_id=?1 \
+                     AND version_id='main' AND path=?2",
+                    rusqlite::params![WS, PATH],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "DELETE FROM snapshots WHERE workspace_id=?1 \
+                     AND version_id='main' AND path=?2",
+                    rusqlite::params![WS, PATH],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "UPDATE conflicts SET current_exists=0, current_object_id=NULL, \
+                     current_blob_sha256=NULL, current_binary_sha256=NULL, \
+                     current_updated_at_ms=NULL, current_latest_moment_id=NULL \
+                     WHERE workspace_id=?1 AND conflict_id=?2",
+                    rusqlite::params![WS, conflict_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("make the reviewed path absent");
+        conflict_id
+    };
+    let state = || {
+        let store = EngineStore::open(&db, 2).expect("inspect state");
+        store
+            .read_with(|conn| {
+                Ok::<_, dohc_engine_storage::StorageError>((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1 \
+                         AND version_id='main' AND path=?2",
+                        rusqlite::params![WS, PATH],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+                    conn.query_row(
+                        "SELECT status FROM conflicts WHERE workspace_id=?1 AND conflict_id=?2",
+                        rusqlite::params![WS, conflict_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM moments WHERE workspace_id=?1",
+                        [WS],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+                    conn.query_row("SELECT COUNT(*) FROM replication_journal", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+                ))
+            })
+            .expect("durable state")
+    };
+    let before = state();
+    let derived = dohc_engine_domain::derive_capture_object_id(WS, "main", PATH);
+    let key = DocKey::new(WS, "main", derived).expect("derived absent-path key");
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let held = leases.acquire(&key).expect("hold absent path live");
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 10).expect("open actor").actor;
+    let input = ResolveTextConflict {
+        workspace_id: WS.to_owned(),
+        conflict_id: conflict_id.clone(),
+        resolution: ResolveConflictKind::ApplyIncoming,
+        object_id: "resolved-absent-object".to_owned(),
+        write_moment_id: "m-resolve-absent-write".to_owned(),
+        delete_moment_id: "m-resolve-absent-delete".to_owned(),
+        metadata_origin: "api".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 11,
+        request_id: None,
+        conflict_answer_budget_bytes: usize::MAX,
+    };
+
+    let refused = handle
+        .conflict_resolve(
+            input.clone(),
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the derived live lease must block an absent-path resolution");
+    assert!(matches!(
+        refused,
+        RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "ydoc-session-live"
+        })
+    ));
+    assert_eq!(state(), before, "the refused resolution must roll back");
+
+    drop(held);
+    handle
+        .conflict_resolve(input, leases, Arc::new(NoFaults), CancellationToken::new())
+        .await
+        .expect("the resolution retries after the absent-path lease closes");
+    supervisor.close(&db).expect("close actor");
+    let after = state();
+    assert_eq!(after.0, 1);
+    assert_eq!(after.1, "resolved");
+    assert_eq!(after.2, before.2 + 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
     // The fourth face of the property: the reviewed OUTCOME is what ends up
     // in the lineage. A deletion is the one resolution carrying no bytes to
@@ -707,42 +839,116 @@ async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
                     rusqlite::params![WS, conflict_id],
                 )
                 .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO ydoc_deferred_updates \
+                     (workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms) \
+                     VALUES (?1, ?2, ?3, 'deferred-delete-peer', 0, 10)",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
                 Ok::<_, dohc_engine_storage::StorageError>(())
             })
-            .expect("make the incoming side absent");
+            .expect("make the incoming side absent with a deferred Y.Doc update");
     }
 
+    let state = || {
+        let store = EngineStore::open(&db, 9).expect("inspect state");
+        store
+            .read_with(|conn| {
+                let count = |table: &str| -> Result<i64, dohc_engine_storage::StorageError> {
+                    conn.query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE workspace_id=?1"),
+                        [WS],
+                        |row| row.get(0),
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
+                };
+                Ok::<_, dohc_engine_storage::StorageError>((
+                    conn.query_row(
+                        "SELECT status FROM conflicts WHERE workspace_id=?1 AND conflict_id=?2",
+                        rusqlite::params![WS, conflict_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+                    count("snapshots")?,
+                    count("moments")?,
+                    count("replication_log")?,
+                    count("ydoc_docs")?,
+                    count("ydoc_updates")?,
+                    count("ydoc_snapshots")?,
+                    count("ydoc_deferred_updates")?,
+                ))
+            })
+            .expect("read state")
+    };
+    let before = state();
+    let resolve_input = || ResolveTextConflict {
+        workspace_id: WS.to_owned(),
+        conflict_id: conflict_id.clone(),
+        resolution: ResolveConflictKind::ApplyIncoming,
+        object_id: "resolution-fresh-object".to_owned(),
+        write_moment_id: "m-resolve-del-write".to_owned(),
+        delete_moment_id: "m-resolve-del".to_owned(),
+        metadata_origin: "api".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 11,
+        request_id: None,
+        conflict_answer_budget_bytes: usize::MAX,
+    };
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 10).expect("open actor").actor;
-    handle
+    let refused = handle
         .conflict_resolve(
-            ResolveTextConflict {
-                workspace_id: WS.to_owned(),
-                conflict_id,
-                resolution: ResolveConflictKind::ApplyIncoming,
-                object_id: "resolution-fresh-object".to_owned(),
-                write_moment_id: "m-resolve-del-write".to_owned(),
-                delete_moment_id: "m-resolve-del".to_owned(),
-                metadata_origin: "test".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 11,
-                request_id: None,
-                // This caller builds no wire answer, so nothing bounds the row here.
-                conflict_answer_budget_bytes: usize::MAX,
-            },
+            resolve_input(),
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
         .await
-        .expect("the deletion resolves");
+        .expect_err("the deferred Y.Doc update must block the deletion");
+    assert!(matches!(
+        refused,
+        RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "ydoc-deferred-updates-pending"
+        })
+    ));
     supervisor.close(&db).expect("close actor");
+    assert_eq!(
+        state(),
+        before,
+        "the mapped retry refusal must roll back the conflict, snapshot, history, and lineage"
+    );
+    let mut store = EngineStore::open(&db, 11).expect("clear deferred row");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 \
+                 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("clear deferred row");
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 12).expect("reopen actor").actor;
+    handle
+        .conflict_resolve(
+            resolve_input(),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the deletion resolves after the deferred row clears");
+    supervisor.close(&db).expect("close actor after retry");
 
     // Nothing is left that could project the deleted content back.
     let store = EngineStore::open(&db, 12).expect("inspect");
-    let (updates, snapshots, markers): (i64, i64, i64) = store
+    let (updates, snapshots, markers, deferred): (i64, i64, i64, i64) = store
         .read_with(|conn| {
             let count = |table: &str| -> Result<i64, dohc_engine_storage::StorageError> {
                 conn.query_row(
@@ -756,14 +962,232 @@ async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
                 count("ydoc_updates")?,
                 count("ydoc_snapshots")?,
                 count("ydoc_docs")?,
+                count("ydoc_deferred_updates")?,
             ))
         })
         .expect("lineage state");
     assert_eq!(
-        (updates, snapshots, markers),
-        (0, 0, 0),
+        (updates, snapshots, markers, deferred),
+        (0, 0, 0, 0),
         "the reviewed deletion retires the lineage: nothing can project it back"
     );
+    let (full_state_sha, state_vector_sha, disposition, successor_rows): (
+        String,
+        String,
+        String,
+        i64,
+    ) = store
+        .read_with(|conn| {
+            let archived = conn.query_row(
+                "SELECT full_state_blob_sha256,state_vector_blob_sha256,disposition \
+                 FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 \
+                   AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            let successor_rows = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_inactive_lineages WHERE workspace_id=?1 \
+                   AND version_id=?2 AND object_id=?3 AND parent_claim_id IS NOT NULL",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((archived.0, archived.1, archived.2, successor_rows))
+        })
+        .expect("archived predecessor");
+    assert_eq!(disposition, "superseded-predecessor");
+    assert_eq!(successor_rows, 0, "a deletion has no successor lineage");
+    let full_state = store
+        .get_binary_blob(&full_state_sha)
+        .expect("read archived full state")
+        .expect("archived full state blob");
+    let state_vector = store
+        .get_binary_blob(&state_vector_sha)
+        .expect("read archived state vector")
+        .expect("archived state-vector blob");
+    let archived = dohc_engine_collab::Ydoc::wire();
+    archived
+        .apply(&full_state)
+        .expect("decode archived full state");
+    assert!(!archived.has_pending_dependencies());
+    assert_eq!(archived.encode_state_vector(), state_vector);
+    assert_eq!(
+        archived
+            .project(ContentKind::Plaintext)
+            .expect("project archived predecessor")
+            .markdown,
+        "remote truth"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn moved_text_and_binary_results_archive_the_full_predecessor_without_a_successor() {
+    for (case, moved_path, binary_bytes) in [
+        ("moved", Some("notes/moved.md"), None),
+        ("binary", None, Some(b"\x89BIN\0reviewed".as_slice())),
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = scratch.engine_db_path().expect("db");
+        let (key, conflict_id) = {
+            let mut store = EngineStore::open(&db, 1).expect("open store");
+            let (key, _winner_base, _winner_doc, conflict_id) = seed_divergent_base(&mut store);
+            if let Some(path) = moved_path {
+                store
+                    .write_with(&NoFaults, |tx| {
+                        tx.execute(
+                            "UPDATE conflicts SET incoming_path=?3 WHERE workspace_id=?1 \
+                             AND conflict_id=?2",
+                            rusqlite::params![WS, conflict_id, path],
+                        )
+                        .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                        Ok::<_, dohc_engine_storage::StorageError>(())
+                    })
+                    .expect("move incoming side");
+            }
+            if let Some(bytes) = binary_bytes {
+                let sha = store.put_binary_blob(bytes).expect("incoming binary blob");
+                store
+                    .write_with(&NoFaults, |tx| {
+                        tx.execute(
+                            "UPDATE conflicts SET incoming_content_kind='binary', \
+                             incoming_blob_sha256=NULL,incoming_binary_sha256=?3 \
+                             WHERE workspace_id=?1 AND conflict_id=?2",
+                            rusqlite::params![WS, conflict_id, sha],
+                        )
+                        .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                        Ok::<_, dohc_engine_storage::StorageError>(())
+                    })
+                    .expect("replace incoming side with binary");
+            }
+            (key, conflict_id)
+        };
+
+        let supervisor = WorkspaceSupervisor::new();
+        let handle = supervisor.open(&db, 10).expect("open actor").actor;
+        handle
+            .conflict_resolve(
+                ResolveTextConflict {
+                    workspace_id: WS.to_owned(),
+                    conflict_id,
+                    resolution: ResolveConflictKind::ApplyIncoming,
+                    object_id: format!("resolved-{case}-object"),
+                    write_moment_id: format!("m-resolve-{case}-write"),
+                    delete_moment_id: format!("m-resolve-{case}-delete"),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: Some(format!("reviewed {case}")),
+                    metadata_correlation_id: Some(format!("correlation-{case}")),
+                    author_json: Some(
+                        r#"{"kind":"agent","agentId":"agent-1","onBehalfOf":"user-1"}"#.to_owned(),
+                    ),
+                    now_ms: 11,
+                    request_id: Some(format!("request-{case}")),
+                    conflict_answer_budget_bytes: usize::MAX,
+                },
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("resolve {case}: {error:?}"));
+        supervisor.close(&db).expect("close actor");
+
+        let mut store = EngineStore::open(&db, 12).expect("inspect");
+        if let Some(path) = moved_path {
+            assert!(
+                VersionedTextStore::new(&mut store)
+                    .read_text(WS, "main", PATH)
+                    .expect("read old path")
+                    .is_none()
+            );
+            assert_eq!(
+                VersionedTextStore::new(&mut store)
+                    .read_text(WS, "main", path)
+                    .expect("read moved path")
+                    .expect("moved result")
+                    .text,
+                "remote truth"
+            );
+            let effect_ids = store
+                .read_with(|conn| {
+                    conn.prepare(
+                        "SELECT moment_id FROM moments WHERE workspace_id=?1 \
+                         AND moment_id IN (?2,?3) ORDER BY moment_order",
+                    )?
+                    .query_map(
+                        rusqlite::params![
+                            WS,
+                            format!("m-resolve-{case}-delete"),
+                            format!("m-resolve-{case}-write")
+                        ],
+                        |row| row.get::<_, String>(0),
+                    )?
+                    .collect::<Result<Vec<_>, _>>()
+                })
+                .expect("ordered move effects");
+            assert_eq!(
+                effect_ids,
+                [
+                    format!("m-resolve-{case}-delete"),
+                    format!("m-resolve-{case}-write")
+                ]
+            );
+        } else {
+            assert_eq!(
+                VersionedTextStore::new(&mut store)
+                    .read_binary(WS, "main", PATH)
+                    .expect("read binary result")
+                    .expect("binary result")
+                    .bytes,
+                binary_bytes.expect("binary case")
+            );
+        }
+
+        let (full_state_sha, state_vector_sha, active_rows, inactive_rows) = store
+            .read_with(|conn| {
+                let archived = conn.query_row(
+                    "SELECT full_state_blob_sha256,state_vector_blob_sha256 \
+                     FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 \
+                       AND object_id=?3 AND disposition='superseded-predecessor'",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )?;
+                Ok::<_, rusqlite::Error>((
+                    archived.0,
+                    archived.1,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id=?1",
+                        [WS],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_inactive_lineages WHERE workspace_id=?1",
+                        [WS],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                ))
+            })
+            .expect("archived lineage rows");
+        assert_eq!(active_rows, 0, "{case} must not install a successor");
+        assert_eq!(inactive_rows, 1, "{case} keeps exactly the predecessor");
+        let full_state = store
+            .get_binary_blob(&full_state_sha)
+            .expect("read archived full state")
+            .expect("archived full state");
+        let state_vector = store
+            .get_binary_blob(&state_vector_sha)
+            .expect("read archived state vector")
+            .expect("archived state vector");
+        let archived = dohc_engine_collab::Ydoc::wire();
+        archived.apply(&full_state).expect("decode archived state");
+        assert!(!archived.has_pending_dependencies());
+        assert_eq!(archived.encode_state_vector(), state_vector);
+        assert_eq!(
+            archived
+                .project(ContentKind::Plaintext)
+                .expect("project predecessor")
+                .markdown,
+            "remote truth"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -799,7 +1223,7 @@ async fn an_idempotent_retry_survives_a_live_session() {
                         object_id: "resolution-fresh-object".to_owned(),
                         write_moment_id: "m-retry-write".to_owned(),
                         delete_moment_id: "m-retry-delete".to_owned(),
-                        metadata_origin: "test".to_owned(),
+                        metadata_origin: "api".to_owned(),
                         metadata_summary: None,
                         metadata_correlation_id: None,
                         author_json: None,

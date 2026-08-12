@@ -4296,11 +4296,6 @@ export function DesktopWorkspaceShell(props: {
         onConnectCloud={() => setCloudOpen(true)}
         onOpenHistory={openHistoryView}
         onOpenConflicts={() => setConflictReviewOpen(true)}
-        onDismissSyncReview={() =>
-          void bridge()
-            .dismissSyncReviewNotice({ workspaceId: props.workspace.workspaceId })
-            .catch(() => undefined)
-        }
         onOpenSettings={() => openSettings()}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}

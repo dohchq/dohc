@@ -443,12 +443,12 @@ impl<'a> VersionedTextStore<'a> {
         input: &RollbackTextFileMutation,
         faults: &dyn FaultInjector,
     ) -> Result<bool, DomainError> {
-        self.rollback_text_file_mutation_with(input, faults, |_, _, _, _| Ok(()))
+        self.rollback_text_file_mutation_with(input, faults, |_, _, _, _, _| Ok(()))
     }
 
     /// Roll back with a caller-supplied same-transaction side effect. The
     /// callback receives the mutated object id, the restored text head, if
-    /// present, and the compensating moment id.
+    /// present, the compensating moment id, and its recorded time.
     pub fn rollback_text_file_mutation_with<F>(
         &mut self,
         input: &RollbackTextFileMutation,
@@ -456,7 +456,13 @@ impl<'a> VersionedTextStore<'a> {
         after: F,
     ) -> Result<bool, DomainError>
     where
-        F: FnOnce(&Transaction<'_>, &str, Option<(&str, &str)>, &str) -> Result<(), DomainError>,
+        F: FnOnce(
+            &Transaction<'_>,
+            &str,
+            Option<(&str, &str)>,
+            &str,
+            i64,
+        ) -> Result<(), DomainError>,
     {
         validate_identifier(&input.workspace_id, "workspace_id")?;
         validate_identifier(&input.version_id, "version_id")?;
@@ -907,6 +913,7 @@ impl<'a> VersionedTextStore<'a> {
                 &prep.moment.object_id,
                 restored_text,
                 &compensating_moment_id,
+                prep.moment.recorded_at_ms,
             )?;
             record_request(
                 tx,
@@ -2158,9 +2165,21 @@ pub fn capture_ingest_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
 ) -> Result<WriteResult, DomainError> {
+    capture_ingest_with_admission_in_tx(tx, input, |_, _, _| Ok::<(), DomainError>(()))
+}
+
+#[doc(hidden)]
+pub fn capture_ingest_with_admission_in_tx<E>(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+    admit: impl FnOnce(&str, &str, &str) -> Result<(), E>,
+) -> Result<WriteResult, E>
+where
+    E: From<DomainError>,
+{
     let input = normalized_capture_ingest(input)?;
     if !version_exists(tx, &input.workspace_id, &input.version_id)? {
-        return Err(DomainError::VersionNotFound);
+        return Err(DomainError::VersionNotFound.into());
     }
     let (author_kind, author_json) = match input.author_json.as_deref() {
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
@@ -2196,10 +2215,17 @@ pub fn capture_ingest_in_tx(
         && let Some(recorded) = lookup_request(tx, request_id)?
     {
         if recorded.payload_hash != payload_hash {
-            return Err(DomainError::IdempotencyKeyReuseMismatch);
+            return Err(DomainError::IdempotencyKeyReuseMismatch.into());
         }
-        return reconstruct_capture_write(tx, &input.workspace_id, recorded.result_seq);
+        return reconstruct_capture_write(tx, &input.workspace_id, recorded.result_seq)
+            .map_err(E::from);
     }
+
+    let target_object_id =
+        alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?.unwrap_or_else(
+            || derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path),
+        );
+    admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
     let (object_id, reserved_moment_order) = resolve_capture_object(
         tx,
@@ -2217,7 +2243,7 @@ pub fn capture_ingest_in_tx(
         && existing.metadata_origin != input.metadata_origin
         && !input.claim_foreign_head
     {
-        return Err(DomainError::CaptureNotOwned);
+        return Err(DomainError::CaptureNotOwned.into());
     }
     let content_sha256 = text_blob_sha256(&input.text);
     if let Some(before) = &before
@@ -2288,7 +2314,8 @@ pub fn capture_ingest_in_tx(
     if result.moment.moment_order != next_order {
         return Err(DomainError::StateCorrupt {
             reason: "capture moment order diverged from reserved order",
-        });
+        }
+        .into());
     }
     record_request(
         tx,
@@ -2479,6 +2506,18 @@ pub fn capture_ingest_binary_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureIngestBinary,
 ) -> Result<CaptureIngestBinaryResult, DomainError> {
+    capture_ingest_binary_with_admission_in_tx(tx, input, |_, _, _| Ok::<(), DomainError>(()))
+}
+
+#[doc(hidden)]
+pub fn capture_ingest_binary_with_admission_in_tx<E>(
+    tx: &Transaction<'_>,
+    input: &CaptureIngestBinary,
+    admit: impl FnOnce(&str, &str, &str) -> Result<(), E>,
+) -> Result<CaptureIngestBinaryResult, E>
+where
+    E: From<DomainError>,
+{
     use crate::conflicts::{PersistBinaryHead, persist_binary_head_in_tx};
 
     validate_identifier(&input.workspace_id, "workspace_id")?;
@@ -2487,10 +2526,11 @@ pub fn capture_ingest_binary_in_tx(
     if input.bytes.len() > MAX_CAPTURE_BINARY_FILE_BYTES {
         return Err(DomainError::InvalidInput {
             reason: "binary bytes exceed the capture cap",
-        });
+        }
+        .into());
     }
     if !version_exists(tx, &input.workspace_id, &input.version_id)? {
-        return Err(DomainError::VersionNotFound);
+        return Err(DomainError::VersionNotFound.into());
     }
     let binary_sha256 = dohc_engine_storage::hex_sha256(&input.bytes);
     let (author_kind, author_json) = match input.author_json.as_deref() {
@@ -2524,10 +2564,15 @@ pub fn capture_ingest_binary_in_tx(
         && let Some(recorded) = lookup_request(tx, request_id)?
     {
         if recorded.payload_hash != payload_hash {
-            return Err(DomainError::IdempotencyKeyReuseMismatch);
+            return Err(DomainError::IdempotencyKeyReuseMismatch.into());
         }
-        return reconstruct_capture_binary(tx, &input.workspace_id, recorded.result_seq);
+        return reconstruct_capture_binary(tx, &input.workspace_id, recorded.result_seq)
+            .map_err(E::from);
     }
+
+    let target_object_id = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?
+        .unwrap_or_else(|| derive_capture_object_id(&input.workspace_id, &input.version_id, &path));
+    admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
     let (object_id, reserved_moment_order) = resolve_capture_object(
         tx,
@@ -2541,7 +2586,7 @@ pub fn capture_ingest_binary_in_tx(
         && existing.metadata_origin != input.metadata_origin
         && !input.claim_foreign_head
     {
-        return Err(DomainError::CaptureNotOwned);
+        return Err(DomainError::CaptureNotOwned.into());
     }
     if let Some(before) = &before {
         // Fail closed on partial head identity, mirroring the binary writer.
@@ -2551,17 +2596,20 @@ pub fn capture_ingest_binary_in_tx(
             "text" => {
                 return Err(DomainError::StateCorrupt {
                     reason: "text snapshot is missing its blob",
-                });
+                }
+                .into());
             }
             "binary" => {
                 return Err(DomainError::StateCorrupt {
                     reason: "binary snapshot is missing its blob",
-                });
+                }
+                .into());
             }
             _ => {
                 return Err(DomainError::StateCorrupt {
                     reason: "snapshot has an unknown content kind",
-                });
+                }
+                .into());
             }
         }
         if before.content_kind == "binary"
@@ -2591,7 +2639,8 @@ pub fn capture_ingest_binary_in_tx(
                     target_generation: moment.moment_order,
                     now_ms: input.now_ms,
                 },
-            )?;
+            )
+            .map_err(DomainError::from)?;
             let result = CaptureIngestBinaryResult {
                 object_id: object_id.clone(),
                 moment_id: moment.moment_id.clone(),
@@ -2610,14 +2659,14 @@ pub fn capture_ingest_binary_in_tx(
         }
     }
 
-    put_binary_blob(tx, &input.bytes)?;
+    put_binary_blob(tx, &input.bytes).map_err(DomainError::from)?;
     let next_order = match reserved_moment_order {
         Some(next_order) => next_order,
         None => next_moment_order(tx)?,
     };
     let moment_id = derive_capture_moment_id(&input.workspace_id, &object_id, next_order);
     if moment_exists(tx, &input.workspace_id, &moment_id)? {
-        return Err(DomainError::DuplicateMomentId);
+        return Err(DomainError::DuplicateMomentId.into());
     }
     // TS `writeIfChanged` parity: pass summary wins; a text-tracked path
     // whose bytes stop round-tripping as UTF-8 keeps its object identity and
@@ -2660,7 +2709,8 @@ pub fn capture_ingest_binary_in_tx(
     if moment_order != next_order {
         return Err(DomainError::StateCorrupt {
             reason: "capture moment order diverged from reserved order",
-        });
+        }
+        .into());
     }
     // Disk ALREADY holds these bytes, so record the materialization as a
     // COMPLETED job (never runnable). The marker is what the materializer's
@@ -2678,7 +2728,8 @@ pub fn capture_ingest_binary_in_tx(
             target_generation: moment_order,
             now_ms: input.now_ms,
         },
-    )?;
+    )
+    .map_err(DomainError::from)?;
     record_request(
         tx,
         input.request_id.as_deref(),
@@ -2924,6 +2975,16 @@ pub fn write_text_in_tx(
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
     write_text_in_tx_with_journal(tx, input, true, false)
+}
+
+/// Apply a text write inside a caller-owned compound replication transaction.
+/// The compound operation owns the relay-visible moment shadow, so this seam
+/// deliberately skips the legacy payload-free diagnostic journal row.
+pub(crate) fn write_text_in_tx_without_diagnostic_journal(
+    tx: &Transaction<'_>,
+    input: &WriteText,
+) -> Result<WriteResult, DomainError> {
+    write_text_in_tx_with_journal(tx, input, false, false)
 }
 
 /// Apply a projected text write without appending `moment.append` to the
@@ -3651,6 +3712,24 @@ pub fn delete_text_in_tx(
     tx: &Transaction<'_>,
     input: &DeleteTextFile,
 ) -> Result<DeleteResult, DomainError> {
+    delete_text_in_tx_with_journal(tx, input, true)
+}
+
+/// Apply a text delete inside a caller-owned compound replication transaction.
+/// The compound operation owns the relay-visible moment shadow, so this seam
+/// deliberately skips the legacy payload-free diagnostic journal row.
+pub(crate) fn delete_text_in_tx_without_diagnostic_journal(
+    tx: &Transaction<'_>,
+    input: &DeleteTextFile,
+) -> Result<DeleteResult, DomainError> {
+    delete_text_in_tx_with_journal(tx, input, false)
+}
+
+fn delete_text_in_tx_with_journal(
+    tx: &Transaction<'_>,
+    input: &DeleteTextFile,
+    journal: bool,
+) -> Result<DeleteResult, DomainError> {
     let normalized_input = normalized_delete_input(input)?;
     let input = &normalized_input;
     let ws = &input.workspace_id;
@@ -3726,12 +3805,14 @@ pub fn delete_text_in_tx(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    tx.execute(
-        "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-         VALUES (?1, 'moment.append', ?2)",
-        params![before.object_id, input.now_ms],
-    )
-    .map_err(DomainError::sql_persist)?;
+    if journal {
+        tx.execute(
+            "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
+             VALUES (?1, 'moment.append', ?2)",
+            params![before.object_id, input.now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
     tx.execute(
         "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
          AND path = ?3 AND object_id = ?4",
@@ -5250,7 +5331,13 @@ fn object_has_references(
              EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id = ?1 AND object_id = ?2) OR \
              EXISTS (SELECT 1 FROM snapshots WHERE workspace_id = ?1 AND object_id = ?2) OR \
              EXISTS (SELECT 1 FROM fork_base_snapshots WHERE workspace_id = ?1 AND object_id = ?2) OR \
-             EXISTS (SELECT 1 FROM moments WHERE workspace_id = ?1 AND object_id = ?2) LIMIT 1",
+             EXISTS (SELECT 1 FROM moments WHERE workspace_id = ?1 AND object_id = ?2) OR \
+             EXISTS (SELECT 1 FROM ydoc_docs \
+                     WHERE workspace_id = ?1 AND object_id = ?2) OR \
+             EXISTS (SELECT 1 FROM ydoc_deferred_updates \
+                     WHERE workspace_id = ?1 AND object_id = ?2) OR \
+             EXISTS (SELECT 1 FROM ydoc_inactive_lineages \
+                     WHERE workspace_id = ?1 AND object_id = ?2) LIMIT 1",
             params![workspace_id, object_id],
             |row| row.get(0),
         )
@@ -5657,7 +5744,7 @@ pub(crate) fn hash_fields(fields: &[&[u8]]) -> String {
     hex(&hasher.finalize())
 }
 
-fn hash_author_fields(author_json: Option<&str>) -> (&'static [u8], &[u8]) {
+pub(crate) fn hash_author_fields(author_json: Option<&str>) -> (&'static [u8], &[u8]) {
     match author_json {
         Some(author_json) => (b"some", author_json.as_bytes()),
         None => (b"none", b""),
@@ -5670,7 +5757,7 @@ fn path_basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-fn hash_optional_text_fields(value: Option<&str>) -> (&'static [u8], &[u8]) {
+pub(crate) fn hash_optional_text_fields(value: Option<&str>) -> (&'static [u8], &[u8]) {
     match value {
         Some(value) => (b"some", value.as_bytes()),
         None => (b"none", b""),
@@ -5684,4 +5771,43 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::object_has_references;
+    use rusqlite::Connection;
+
+    #[test]
+    fn inactive_ydoc_lineage_keeps_file_object_referenced() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE path_aliases (workspace_id TEXT, object_id TEXT); \
+             CREATE TABLE snapshots (workspace_id TEXT, object_id TEXT); \
+             CREATE TABLE fork_base_snapshots (workspace_id TEXT, object_id TEXT); \
+             CREATE TABLE moments (workspace_id TEXT, object_id TEXT); \
+             CREATE TABLE ydoc_docs (workspace_id TEXT, object_id TEXT); \
+             CREATE TABLE ydoc_deferred_updates (workspace_id TEXT, object_id TEXT); \
+             CREATE TABLE ydoc_inactive_lineages (workspace_id TEXT, object_id TEXT);",
+        )
+        .expect("create object-reference tables");
+
+        for table in [
+            "ydoc_docs",
+            "ydoc_deferred_updates",
+            "ydoc_inactive_lineages",
+        ] {
+            conn.execute(
+                &format!("INSERT INTO {table} (workspace_id, object_id) VALUES ('ws', 'obj')"),
+                [],
+            )
+            .expect("seed the sole Y.Doc object reference");
+            assert!(
+                object_has_references(&conn, "ws", "obj").expect("check object references"),
+                "{table} must keep its file object referenced"
+            );
+            conn.execute(&format!("DELETE FROM {table}"), [])
+                .expect("clear the reference before the next case");
+        }
+    }
 }

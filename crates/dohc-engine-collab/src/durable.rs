@@ -22,7 +22,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_YDOC_UPDATE_BYTES};
-use crate::ydoc::{ContentKind, Projection, Ydoc};
+use crate::ydoc::{ContentKind, Projection, SuccessorBase, Ydoc};
 use crate::DocKey;
 
 /// Which durability regime a lineage lives under.
@@ -32,6 +32,49 @@ pub enum Regime {
     LocalOnly,
     /// Durable canonical CRDT lineage; base-once, never pruned on close.
     Replicated,
+}
+
+/// Whether the active base claim is usable as a causal lineage identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineageClaimStatus {
+    /// No replicated base has been claimed.
+    Unclaimed,
+    /// The exact base blob digest is known.
+    Exact,
+    /// A legacy base was compacted and no candidate base envelope remains.
+    Missing,
+    /// A legacy base was compacted and one or more candidate base envelopes
+    /// remain, but none can be proven to be the active base.
+    Ambiguous,
+}
+
+impl LineageClaimStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unclaimed => "unclaimed",
+            Self::Exact => "exact",
+            Self::Missing => "missing",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+
+    /// Whether this marker has already accepted a replicated base, including
+    /// legacy rows whose exact claim cannot be recovered.
+    pub const fn has_claimed_base(self) -> bool {
+        !matches!(self, Self::Unclaimed)
+    }
+
+    fn parse(raw: &str) -> Result<Self, CollabError> {
+        match raw {
+            "unclaimed" => Ok(Self::Unclaimed),
+            "exact" => Ok(Self::Exact),
+            "missing" => Ok(Self::Missing),
+            "ambiguous" => Ok(Self::Ambiguous),
+            _ => Err(CollabError::Corrupt {
+                reason: format!("unknown Y.Doc lineage claim status {raw:?}"),
+            }),
+        }
+    }
 }
 
 impl Regime {
@@ -53,15 +96,18 @@ impl Regime {
     }
 }
 
-/// A doc's marker row: content kind, regime, head pointers, and the base-once
-/// flag.
+/// A document marker with content, regime, head pointers, and lineage identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marker {
     pub content_kind: ContentKind,
     pub regime: Regime,
     pub head_update_seq: i64,
     pub head_snapshot_seq: i64,
-    pub base_claimed: bool,
+    pub lineage_claim_status: LineageClaimStatus,
+    pub lineage_claim_id: Option<String>,
+    pub lineage_parent_claim_id: Option<String>,
+    pub lineage_epoch_tag: Option<String>,
+    pub path: Option<String>,
 }
 
 /// A reconstructed durable doc plus the lineage metadata it was rebuilt from.
@@ -117,6 +163,18 @@ pub enum ClaimOutcome {
     /// A base already existed: the caller resumes the winner and emits NO second
     /// base (base-once). The existing base is left byte-intact.
     Resumed,
+}
+
+/// The result of an exact predecessor-claim/state-vector successor CAS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuccessorInstallOutcome {
+    Installed {
+        predecessor_claim_id: String,
+        successor_claim_id: String,
+    },
+    Replayed {
+        successor_claim_id: String,
+    },
 }
 
 /// The outcome of a settle.
@@ -244,8 +302,8 @@ pub fn ensure_marker(
         tx.execute(
             "INSERT INTO ydoc_docs \
              (workspace_id, version_id, object_id, content_kind, regime, \
-              head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 0, ?6) \
+              head_update_seq, head_snapshot_seq, lineage_claim_status, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 'unclaimed', ?6) \
              ON CONFLICT(workspace_id, version_id, object_id) DO NOTHING",
             rusqlite::params![
                 key.workspace_id,
@@ -283,7 +341,7 @@ pub fn rewrite_bare_marker_content_kind(
                 "UPDATE ydoc_docs SET content_kind = ?4, updated_at_ms = ?5 \
                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                    AND regime = 'local-only' AND head_update_seq = 0 \
-                   AND head_snapshot_seq = 0 AND base_claimed = 0",
+                   AND head_snapshot_seq = 0 AND lineage_claim_status = 'unclaimed'",
                 rusqlite::params![
                     key.workspace_id,
                     key.version_id,
@@ -464,9 +522,13 @@ where
     // re-append the edit (and re-journal an outbound op on a replicated
     // lineage) instead of replaying the original result.
     let request_hash = request_id.map(|_| {
+        let path_identity = match path {
+            Some(path) => format!("some:{}", crate::hex_sha256(path.as_bytes())),
+            None => "none".to_owned(),
+        };
         crate::hex_sha256(
             format!(
-                "ydoc-record{sep}{}{sep}{}{sep}{}{sep}{}",
+                "ydoc-record-v2{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
@@ -477,14 +539,6 @@ where
         )
     });
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
-        if let Some(path) = path {
-            tx.execute(
-                "UPDATE ydoc_docs SET path=?4 \
-                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                rusqlite::params![key.workspace_id, key.version_id, key.object_id, path],
-            )
-            .map_err(map_sql)?;
-        }
         if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
             let recorded: Option<(String, i64)> = tx
                 .query_row(
@@ -507,6 +561,14 @@ where
                     emit_outbound: false,
                 });
             }
+        }
+        if let Some(path) = path {
+            tx.execute(
+                "UPDATE ydoc_docs SET path=?4 \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id, path],
+            )
+            .map_err(map_sql)?;
         }
         if ensure_parent_row {
             tx.execute(
@@ -545,8 +607,8 @@ where
                 tx.execute(
                     "INSERT INTO ydoc_docs \
                      (workspace_id, version_id, object_id, content_kind, regime, \
-                      head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms, path) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 0, ?6, ?7)",
+                      head_update_seq, head_snapshot_seq, lineage_claim_status, updated_at_ms, path) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 'unclaimed', ?6, ?7)",
                     rusqlite::params![
                         key.workspace_id,
                         key.version_id,
@@ -563,7 +625,11 @@ where
                     regime,
                     head_update_seq: 0,
                     head_snapshot_seq: 0,
-                    base_claimed: false,
+                    lineage_claim_status: LineageClaimStatus::Unclaimed,
+                    lineage_claim_id: None,
+                    lineage_parent_claim_id: None,
+                    lineage_epoch_tag: None,
+                    path: path.map(str::to_owned),
                 }
             }
         };
@@ -616,7 +682,8 @@ fn append_local_update(
     Ok(AppendOutcome {
         seq,
         deduped: false,
-        emit_outbound: marker.regime == Regime::Replicated && marker.base_claimed,
+        emit_outbound: marker.regime == Regime::Replicated
+            && marker.lineage_claim_status == LineageClaimStatus::Exact,
     })
 }
 
@@ -644,10 +711,12 @@ pub(crate) fn self_bound_log(
 }
 
 /// Fold the update log into a fresh full-state snapshot once the pending count
-/// reaches `threshold`, prune the folded updates and now-superseded older
-/// snapshots, and advance `head_snapshot_seq`. Convergence-neutral: the snapshot
-/// is a full-state re-encode, so a reconstruct from it yields the same converged
-/// content as the un-compacted log. Below threshold this is a no-op.
+/// reaches `threshold`, prune the folded updates and superseded nonzero
+/// snapshots, and advance `head_snapshot_seq`. Seq 0 remains as the permanent
+/// base-claim proof. This costs at most one constant row. Convergence-neutral:
+/// the new snapshot is a full-state re-encode, so a reconstruct from it yields
+/// the same converged content as the un-compacted log. Below threshold this is
+/// a no-op.
 ///
 /// `threshold` of 0 forces a compaction (used by replicated close).
 pub fn maybe_compact(
@@ -699,7 +768,8 @@ pub fn maybe_compact(
             ],
         )
         .map_err(map_sql)?;
-        // Prune folded updates and now-superseded older snapshots.
+        // Prune folded updates and superseded nonzero snapshots. Seq 0 proves
+        // the exact base identity and state vector during successor replay.
         let pruned = tx
             .execute(
                 "DELETE FROM ydoc_updates \
@@ -709,7 +779,8 @@ pub fn maybe_compact(
             .map_err(map_sql)?;
         tx.execute(
             "DELETE FROM ydoc_snapshots \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 AND up_to_seq < ?4",
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+               AND up_to_seq > 0 AND up_to_seq < ?4",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, up_to],
         )
         .map_err(map_sql)?;
@@ -735,9 +806,9 @@ pub fn maybe_compact(
 
 /// Claim the single BASE snapshot for a replicated lineage (base-once). The base
 /// bytes are a full-state re-encode of the doc seeded from markdown at first
-/// creation. Re-checks `base_claimed` inside the transaction so a cross-process
-/// first-open race resolves to exactly one base: the loser observes the winner's
-/// base and returns [`ClaimOutcome::Resumed`] (emitting no second base).
+/// creation. The transaction rechecks the lineage claim status. In a concurrent
+/// first-open race, the loser observes the winner and returns
+/// [`ClaimOutcome::Resumed`] without a second base.
 pub fn claim_base(
     store: &mut EngineStore,
     key: &DocKey,
@@ -772,6 +843,7 @@ pub fn claim_base_in_tx(
     now_ms: i64,
 ) -> Result<ClaimOutcome, CollabError> {
     validate_update_bytes(base_bytes)?;
+    let incoming_claim_id = crate::hex_sha256(base_bytes);
     (|| {
         // Upsert the marker first (FK parent for the snapshot), stamping the
         // replicated regime + content kind. In the INDIVIDUAL-FIRST flow the
@@ -784,8 +856,8 @@ pub fn claim_base_in_tx(
         tx.execute(
             "INSERT INTO ydoc_docs \
              (workspace_id, version_id, object_id, content_kind, regime, \
-              head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, 'replicated', 0, 0, 0, ?5) \
+              head_update_seq, head_snapshot_seq, lineage_claim_status, updated_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, 'replicated', 0, 0, 'unclaimed', ?5) \
              ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
                regime = 'replicated', content_kind = excluded.content_kind, \
                updated_at_ms = excluded.updated_at_ms",
@@ -804,31 +876,29 @@ pub fn claim_base_in_tx(
         // Silently resuming (and acking) a DIFFERENT base would drop a
         // divergent lineage while the relay cursor advances past it, leaving
         // that peer's later updates missing an unrecoverable dependency.
-        let (_, _, base_claimed) = head_of(tx, key)?;
-        if base_claimed {
-            let stored_sha: Option<String> = tx
-                .query_row(
-                    "SELECT snapshot_blob_sha256 FROM ydoc_snapshots                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3                        AND up_to_seq = 0",
-                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(map_sql)?;
-            return match stored_sha {
-                Some(sha) if sha == crate::hex_sha256(base_bytes) => Ok(ClaimOutcome::Resumed),
-                Some(_) => Err(CollabError::BaseStateDiverged),
-                // Compaction legitimately folds the seq-0 base away once
-                // updates supersede it: divergence is no longer verifiable,
-                // base-once still holds, and refusing would wedge the relay
-                // cursor on a VALID replica. Resume.
-                None => Ok(ClaimOutcome::Resumed),
-            };
+        let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+        match marker.lineage_claim_status {
+            LineageClaimStatus::Unclaimed => {}
+            LineageClaimStatus::Exact => {
+                return match marker.lineage_claim_id {
+                    Some(stored) if stored == incoming_claim_id => Ok(ClaimOutcome::Resumed),
+                    Some(_) => Err(CollabError::BaseStateDiverged),
+                    None => Err(CollabError::Corrupt {
+                        reason: "exact Y.Doc lineage claim is missing its claim id".to_owned(),
+                    }),
+                };
+            }
+            unresolved => {
+                return Err(CollabError::LineageClaimUnresolved {
+                    status: unresolved.as_str().to_owned(),
+                });
+            }
         }
 
         let base_sha = put_binary_blob(tx, base_bytes)?;
         let sv_sha = put_binary_blob(tx, sv_bytes)?;
-        // The base IS the seq-0 snapshot. INSERT (not REPLACE): a genuine second
-        // base at up_to_seq = 0 would conflict, a hard backstop under the flag.
+        // Seq 0 is the base snapshot. INSERT makes the primary key reject a
+        // second base.
         tx.execute(
             "INSERT INTO ydoc_snapshots \
              (workspace_id, version_id, object_id, up_to_seq, \
@@ -845,15 +915,348 @@ pub fn claim_base_in_tx(
         )
         .map_err(map_sql)?;
         tx.execute(
-            "UPDATE ydoc_docs SET base_claimed = 1, updated_at_ms = ?4 \
+            "UPDATE ydoc_docs SET lineage_claim_status='exact', \
+             lineage_claim_id=?4, lineage_parent_claim_id=NULL, lineage_epoch_tag=NULL, \
+             updated_at_ms = ?5 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-            rusqlite::params![key.workspace_id, key.version_id, key.object_id, now_ms],
+            rusqlite::params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                incoming_claim_id,
+                now_ms
+            ],
         )
         .map_err(map_sql)?;
         Ok(ClaimOutcome::Claimed {
             base_snapshot_sha: base_sha,
         })
     })()
+}
+
+/// Atomically archive an exact active predecessor and install a fresh
+/// successor base. The claim and state-vector predicates are both checked in
+/// the write transaction. A retry that finds the same successor is a strict
+/// no-op.
+#[derive(Debug, Clone, Copy)]
+pub struct SuccessorReplacement<'a> {
+    pub key: &'a DocKey,
+    pub expected_predecessor_claim_id: &'a str,
+    pub expected_predecessor_state_vector_sha256: &'a str,
+    pub path: &'a str,
+    pub successor: &'a SuccessorBase,
+    pub now_ms: i64,
+}
+
+pub fn replace_lineage_with_successor(
+    store: &mut EngineStore,
+    replacement: SuccessorReplacement<'_>,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<SuccessorInstallOutcome>, CollabError> {
+    validate_successor_base(replacement.successor)?;
+    store.write_with(faults, |tx| {
+        replace_lineage_with_successor_in_tx(tx, replacement)
+    })
+}
+
+/// Transaction-composable form of [`replace_lineage_with_successor`].
+pub fn replace_lineage_with_successor_in_tx(
+    tx: &Transaction<'_>,
+    replacement: SuccessorReplacement<'_>,
+) -> Result<SuccessorInstallOutcome, CollabError> {
+    let SuccessorReplacement {
+        key,
+        expected_predecessor_claim_id,
+        expected_predecessor_state_vector_sha256,
+        path,
+        successor,
+        now_ms,
+    } = replacement;
+    validate_successor_base(successor)?;
+    if successor.predecessor_state_vector_sha256 != expected_predecessor_state_vector_sha256 {
+        return Err(CollabError::InvalidSuccessorBase {
+            constraint: "predecessor state vector matches the successor CAS",
+            expected: expected_predecessor_state_vector_sha256.to_owned(),
+            observed: successor.predecessor_state_vector_sha256.clone(),
+        });
+    }
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.lineage_claim_status == LineageClaimStatus::Exact
+        && marker.lineage_claim_id.as_deref() == Some(successor.lineage_claim_id.as_str())
+    {
+        if marker.lineage_parent_claim_id.as_deref() != Some(expected_predecessor_claim_id)
+            || marker.lineage_epoch_tag.as_deref() != Some(successor.epoch_tag.as_str())
+            || marker.content_kind != successor.content_kind
+            || marker.path.as_deref() != Some(path)
+        {
+            return Err(CollabError::Corrupt {
+                reason: "replayed Y.Doc successor metadata does not match the active lineage"
+                    .to_owned(),
+            });
+        }
+        let stored_base: Option<(String, String)> = tx
+            .query_row(
+                "SELECT snapshot_blob_sha256, state_vector_blob_sha256 \
+                 FROM ydoc_snapshots \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                   AND up_to_seq=0",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(map_sql)?;
+        let expected_state_vector_sha256 = crate::hex_sha256(&successor.state_vector);
+        if stored_base.as_ref()
+            != Some(&(
+                successor.lineage_claim_id.clone(),
+                expected_state_vector_sha256,
+            ))
+        {
+            return Err(CollabError::Corrupt {
+                reason: "replayed Y.Doc successor snapshot does not match its active claim"
+                    .to_owned(),
+            });
+        }
+        return Ok(SuccessorInstallOutcome::Replayed {
+            successor_claim_id: successor.lineage_claim_id.clone(),
+        });
+    }
+    let (marker, predecessor, predecessor_state_vector) = load_exact_active_lineage(
+        tx,
+        key,
+        expected_predecessor_claim_id,
+        expected_predecessor_state_vector_sha256,
+    )?;
+
+    let predecessor_full_state_sha = put_binary_blob(tx, &predecessor.encode_full_state())?;
+    let predecessor_state_vector_sha = put_binary_blob(tx, &predecessor_state_vector)?;
+    tx.execute(
+        "INSERT INTO ydoc_inactive_lineages (workspace_id, version_id, object_id, \
+         lineage_claim_id, parent_claim_id, disposition, content_kind, path, epoch_tag, \
+         full_state_blob_sha256, state_vector_blob_sha256, recorded_at_ms, updated_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'superseded-predecessor', ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            expected_predecessor_claim_id,
+            marker.lineage_parent_claim_id,
+            marker.content_kind.as_str(),
+            marker.path,
+            marker.lineage_epoch_tag,
+            predecessor_full_state_sha,
+            predecessor_state_vector_sha,
+            now_ms,
+        ],
+    )
+    .map_err(map_sql)?;
+
+    let successor_base_sha = put_binary_blob(tx, &successor.update)?;
+    let successor_state_vector_sha = put_binary_blob(tx, &successor.state_vector)?;
+    tx.execute(
+        "DELETE FROM ydoc_updates \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "DELETE FROM ydoc_snapshots \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "INSERT INTO ydoc_snapshots (workspace_id, version_id, object_id, up_to_seq, \
+         snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms) \
+         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            successor_base_sha,
+            successor_state_vector_sha,
+            now_ms,
+        ],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "UPDATE ydoc_docs SET content_kind=?4, regime='replicated', head_update_seq=0, \
+         head_snapshot_seq=0, lineage_claim_status='exact', \
+         lineage_claim_id=?5, lineage_parent_claim_id=?6, lineage_epoch_tag=?7, \
+         path=?8, last_settled_sha=?9, updated_at_ms=?10 \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            successor.content_kind.as_str(),
+            successor.lineage_claim_id,
+            expected_predecessor_claim_id,
+            successor.epoch_tag,
+            path,
+            successor.result_sha256,
+            now_ms,
+        ],
+    )
+    .map_err(map_sql)?;
+    Ok(SuccessorInstallOutcome::Installed {
+        predecessor_claim_id: expected_predecessor_claim_id.to_owned(),
+        successor_claim_id: successor.lineage_claim_id.clone(),
+    })
+}
+
+/// Archive an exact active lineage without installing a text successor.
+///
+/// Binary, moved-object, and absent reviewed outcomes cannot keep the active
+/// text lineage. The compact inactive row retains its causal branch so a late
+/// delta can be compared with the reviewed head instead of being dropped.
+pub fn archive_active_lineage_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    expected_claim_id: &str,
+    expected_state_vector_sha256: &str,
+    last_surfaced_projection_sha256: Option<&str>,
+    now_ms: i64,
+) -> Result<(), CollabError> {
+    let (marker, doc, state_vector) =
+        load_exact_active_lineage(tx, key, expected_claim_id, expected_state_vector_sha256)?;
+
+    let full_state_sha256 = put_binary_blob(tx, &doc.encode_full_state())?;
+    let state_vector_sha256 = put_binary_blob(tx, &state_vector)?;
+    tx.execute(
+        "INSERT INTO ydoc_inactive_lineages (workspace_id, version_id, object_id, \
+         lineage_claim_id, parent_claim_id, disposition, content_kind, path, epoch_tag, \
+         full_state_blob_sha256, state_vector_blob_sha256, \
+         last_surfaced_state_vector_blob_sha256, last_surfaced_projection_sha256, \
+         recorded_at_ms, updated_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'superseded-predecessor', ?6, ?7, ?8, \
+                 ?9, ?10, ?10, ?11, ?12, ?12)",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            expected_claim_id,
+            marker.lineage_parent_claim_id,
+            marker.content_kind.as_str(),
+            marker.path,
+            marker.lineage_epoch_tag,
+            full_state_sha256,
+            state_vector_sha256,
+            last_surfaced_projection_sha256,
+            now_ms,
+        ],
+    )
+    .map_err(map_sql)?;
+    let deleted = tx
+        .execute(
+            "DELETE FROM ydoc_docs \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+        )
+        .map_err(map_sql)?;
+    if deleted != 1 {
+        return Err(CollabError::Corrupt {
+            reason: "archived Y.Doc lineage marker vanished during its transaction".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn load_exact_active_lineage(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    expected_claim_id: &str,
+    expected_state_vector_sha256: &str,
+) -> Result<(Marker, Ydoc, Vec<u8>), CollabError> {
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.lineage_claim_status != LineageClaimStatus::Exact {
+        return Err(CollabError::LineageClaimUnresolved {
+            status: marker.lineage_claim_status.as_str().to_owned(),
+        });
+    }
+    if marker.lineage_claim_id.as_deref() != Some(expected_claim_id) {
+        return Err(CollabError::LineagePredecessorMismatch {
+            expected: expected_claim_id.to_owned(),
+            observed: marker.lineage_claim_id,
+        });
+    }
+    let deferred: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(map_sql)?;
+    if deferred {
+        return Err(CollabError::LineageIncomplete {
+            reason: "deferred Y.Doc coordinates are pending",
+        });
+    }
+    let doc = load_for_replay_gate(tx, key)?;
+    if doc.has_pending_dependencies() {
+        return Err(CollabError::LineageIncomplete {
+            reason: "the active Y.Doc has pending dependencies",
+        });
+    }
+    let state_vector = doc.encode_state_vector();
+    let observed_state_vector_sha256 = crate::hex_sha256(&state_vector);
+    if observed_state_vector_sha256 != expected_state_vector_sha256 {
+        return Err(CollabError::LineageStateVectorMismatch {
+            expected: expected_state_vector_sha256.to_owned(),
+            observed: observed_state_vector_sha256,
+        });
+    }
+    Ok((marker, doc, state_vector))
+}
+
+fn validate_successor_base(successor: &SuccessorBase) -> Result<(), CollabError> {
+    validate_update_bytes(&successor.update)?;
+    let observed_claim = crate::hex_sha256(&successor.update);
+    if observed_claim != successor.lineage_claim_id {
+        return Err(CollabError::InvalidSuccessorBase {
+            constraint: "lineage claim must equal the base blob SHA-256",
+            expected: successor.lineage_claim_id.clone(),
+            observed: observed_claim,
+        });
+    }
+    let doc = Ydoc::wire();
+    doc.apply(&successor.update)?;
+    if doc.has_pending_dependencies() {
+        return Err(CollabError::InvalidSuccessorBase {
+            constraint: "successor base must be dependency-complete",
+            expected: "no pending dependencies".to_owned(),
+            observed: "pending dependencies".to_owned(),
+        });
+    }
+    let observed_epoch = doc
+        .lineage_epoch_tag()
+        .unwrap_or_else(|| "missing".to_owned());
+    if observed_epoch != successor.epoch_tag {
+        return Err(CollabError::InvalidSuccessorBase {
+            constraint: "reserved lineage epoch tag",
+            expected: successor.epoch_tag.clone(),
+            observed: observed_epoch,
+        });
+    }
+    let observed_state_vector = doc.encode_state_vector();
+    if observed_state_vector != successor.state_vector {
+        return Err(CollabError::InvalidSuccessorBase {
+            constraint: "successor state vector",
+            expected: crate::hex_sha256(&successor.state_vector),
+            observed: crate::hex_sha256(&observed_state_vector),
+        });
+    }
+    let projected = doc.project(successor.content_kind)?.markdown;
+    let observed_result = crate::hex_sha256(projected.as_bytes());
+    if observed_result != successor.result_sha256 {
+        return Err(CollabError::InvalidSuccessorBase {
+            constraint: "successor canonical result",
+            expected: successor.result_sha256.clone(),
+            observed: observed_result,
+        });
+    }
+    Ok(())
 }
 
 /// Read a doc's marker inside the caller's transaction.
@@ -1233,23 +1636,56 @@ fn binary_blob_for_gate(conn: &Connection, sha: &str) -> Result<Vec<u8>, CollabE
     Ok(bytes)
 }
 
+struct MarkerRow {
+    content_kind: String,
+    regime: String,
+    head_update_seq: i64,
+    head_snapshot_seq: i64,
+    lineage_claim_status: String,
+    lineage_claim_id: Option<String>,
+    lineage_parent_claim_id: Option<String>,
+    lineage_epoch_tag: Option<String>,
+    path: Option<String>,
+}
+
 pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Marker>, CollabError> {
-    conn.query_row(
-        "SELECT content_kind, regime, head_update_seq, head_snapshot_seq, base_claimed \
-         FROM ydoc_docs WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-        |r| {
-            Ok(Marker {
-                content_kind: ContentKind::parse(&r.get::<_, String>(0)?),
-                regime: Regime::parse(&r.get::<_, String>(1)?),
-                head_update_seq: r.get(2)?,
-                head_snapshot_seq: r.get(3)?,
-                base_claimed: r.get::<_, i64>(4)? != 0,
-            })
-        },
-    )
-    .optional()
-    .map_err(map_sql)
+    let row = conn
+        .query_row(
+            "SELECT content_kind, regime, head_update_seq, head_snapshot_seq, \
+             lineage_claim_status, lineage_claim_id, lineage_parent_claim_id, \
+             lineage_epoch_tag, path FROM ydoc_docs \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            |row| {
+                Ok(MarkerRow {
+                    content_kind: row.get(0)?,
+                    regime: row.get(1)?,
+                    head_update_seq: row.get(2)?,
+                    head_snapshot_seq: row.get(3)?,
+                    lineage_claim_status: row.get(4)?,
+                    lineage_claim_id: row.get(5)?,
+                    lineage_parent_claim_id: row.get(6)?,
+                    lineage_epoch_tag: row.get(7)?,
+                    path: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(map_sql)?;
+    row.map(|row| {
+        Ok(Marker {
+            content_kind: ContentKind::parse(&row.content_kind),
+            regime: Regime::parse(&row.regime),
+            head_update_seq: row.head_update_seq,
+            head_snapshot_seq: row.head_snapshot_seq,
+            lineage_claim_status: LineageClaimStatus::parse(&row.lineage_claim_status)?,
+            lineage_claim_id: row.lineage_claim_id,
+            lineage_parent_claim_id: row.lineage_parent_claim_id,
+            lineage_epoch_tag: row.lineage_epoch_tag,
+            path: row.path,
+        })
+    })
+    .transpose()
 }
 
 /// The sha of the content the last settle materialized (or `None` if never
@@ -1351,12 +1787,15 @@ fn captured_head_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, 
     .map(Option::flatten)
 }
 
-pub(crate) fn head_of(conn: &Connection, key: &DocKey) -> Result<(i64, i64, bool), CollabError> {
+pub(crate) fn head_of(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<(i64, i64, LineageClaimStatus), CollabError> {
     let marker = query_marker(conn, key)?.ok_or(CollabError::NoMarker)?;
     Ok((
         marker.head_update_seq,
         marker.head_snapshot_seq,
-        marker.base_claimed,
+        marker.lineage_claim_status,
     ))
 }
 

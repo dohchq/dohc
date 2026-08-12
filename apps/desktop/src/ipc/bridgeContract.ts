@@ -748,11 +748,6 @@ export const SyncStatusResult = z.object({
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),
-  // Additive (0P-C): conflict resolutions replicated from another machine
-  // that matched no conflict here (the file had moved on locally before the
-  // resolution arrived). Surfaced as a review notice — never silently
-  // swallowed. Optional so older producers/fixtures keep parsing.
-  unmatchedRemoteResolves: z.number().int().nonnegative().optional(),
 });
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
@@ -2381,15 +2376,6 @@ export const CloudJoinWorkspacePayload = z.object({
 });
 export type CloudJoinWorkspacePayload = z.infer<typeof CloudJoinWorkspacePayload>;
 
-// Explicit dismissal of the "a choice made on another machine needs a look"
-// notice (0P-C gate fix): clears the workspace engine's pending remote-
-// resolve set. The notice otherwise clears itself when the referenced
-// conflict is resolved locally or converged by a later sync pass.
-export const DismissSyncReviewNoticePayload = z.object({
-  workspaceId: WORKSPACE_ID,
-});
-export type DismissSyncReviewNoticePayload = z.infer<typeof DismissSyncReviewNoticePayload>;
-
 export const CloudJoinWorkspaceResult = z.object({
   workspace: WorkspaceSummary,
   // Set when the workspace was added but its first sync did not finish —
@@ -3334,7 +3320,6 @@ export interface DohcDesktopBridge {
   cloudJoinWorkspace(
     payload: CloudJoinWorkspacePayload,
   ): Promise<CloudJoinWorkspaceResult>;
-  dismissSyncReviewNotice(payload: DismissSyncReviewNoticePayload): Promise<void>;
   // Relay shares (PR 18): grant side.
   createRelayShare(payload: CreateRelaySharePayload): Promise<CreateRelayShareResult>;
   listRelayShares(): Promise<ListRelaySharesResult>;

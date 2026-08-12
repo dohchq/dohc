@@ -67,9 +67,6 @@ function renderBar(
       onConnectCloud={() => {}}
       onOpenHistory={props.onOpenHistory ?? (() => {})}
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
-      {...(props.onDismissSyncReview
-        ? { onDismissSyncReview: props.onDismissSyncReview }
-        : {})}
       {...(props.agentNotifications ? { agentNotifications: props.agentNotifications } : {})}
       {...(props.onDismissAgentNotification
         ? { onDismissAgentNotification: props.onDismissAgentNotification }
@@ -380,73 +377,6 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
     expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
     expect(screen.queryByTestId("notice-workspace-settings-unreadable")).toBeNull();
-  });
-
-  it("surfaces an unmatched remote conflict resolution as a review notice (0P-C)", async () => {
-    const onOpenHistory = vi.fn();
-    renderBar({
-      syncStatus: {
-        state: "synced",
-        pendingChangeCount: 0,
-        lastSyncedAtMs: null,
-        historyRecordingUnavailable: false,
-        historyShareView: false,
-        unmatchedRemoteResolves: 1,
-      },
-      onOpenHistory,
-    });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const notice = screen.getByTestId("notice-sync-review");
-    expect(notice.textContent).toContain("A choice made on another machine needs a look");
-    await userEvent.click(within(notice).getByRole("button", { name: "Open History" }));
-    expect(onOpenHistory).toHaveBeenCalledOnce();
-  });
-
-  // 0P-C gate fix: the review notice reflects LIVE state — it disappears
-  // when the pending set clears, and the X acknowledges it explicitly.
-  it("dismisses the sync-review notice explicitly and clears it when the state clears", async () => {
-    const onDismissSyncReview = vi.fn();
-    const { rerender } = renderBar({
-      syncStatus: {
-        state: "synced",
-        pendingChangeCount: 0,
-        lastSyncedAtMs: null,
-        historyRecordingUnavailable: false,
-        historyShareView: false,
-        unmatchedRemoteResolves: 1,
-      },
-      onDismissSyncReview,
-    });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const notice = screen.getByTestId("notice-sync-review");
-    await userEvent.click(within(notice).getByTestId("notice-sync-review-dismiss"));
-    expect(onDismissSyncReview).toHaveBeenCalledOnce();
-
-    // Live state: once main reports the set cleared, the notice is gone.
-    rerender(
-      <StatusBar
-        workspaceId="ws-status-test"
-        workspaceName="my-notes"
-        syncStatus={{
-          state: "synced",
-          pendingChangeCount: 0,
-          lastSyncedAtMs: null,
-          historyRecordingUnavailable: false,
-          historyShareView: false,
-          unmatchedRemoteResolves: 0,
-        }}
-        agentActive={false}
-        conflictSummaries={[]}
-        onConnectCloud={() => {}}
-        onOpenHistory={() => {}}
-        onOpenConflicts={() => {}}
-        onDismissSyncReview={onDismissSyncReview}
-        onOpenSettings={() => {}}
-        onToggleTheme={() => {}}
-        onContextMenu={() => {}}
-      />,
-    );
-    expect(screen.queryByTestId("notice-sync-review")).toBeNull();
   });
 
   it("shows all clear when there are no notices", async () => {

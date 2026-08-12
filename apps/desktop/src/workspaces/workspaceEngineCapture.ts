@@ -475,9 +475,7 @@ export interface WorkspaceEngineCapture {
   listOpenConflictsPage(
     afterConflictId?: string,
   ): Promise<WorkspaceVersionConflictPage>;
-  // Every open conflict id (the sync notice lifecycle needs the full set).
-  // Walks pages; only ids are retained.
-  listOpenConflictIds(): Promise<string[]>;
+  countOpenConflicts(): Promise<number>;
   resolveConflict(
     conflictId: string,
     resolution: WorkspaceVersionConflictResolution,
@@ -5143,23 +5141,22 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    async listOpenConflictIds() {
+    async countOpenConflicts() {
       const engine = await engineStore();
-      const ids: string[] = [];
+      let count = 0;
       let afterConflictId: string | undefined;
       do {
         const page = await engine.listTextConflicts({
           workspaceId,
           status: "open",
-          // Ids only. This drains every page, so hydrating would fetch every
-          // body of every open conflict and keep none of them.
+          // Count only. Do not fetch conflict bodies that the caller will not use.
           bodies: "withheld",
           ...(afterConflictId !== undefined ? { afterConflictId } : {}),
         });
-        ids.push(...page.conflicts.map((conflict) => conflict.id));
+        count += page.conflicts.length;
         afterConflictId = page.nextAfterConflictId ?? undefined;
       } while (afterConflictId !== undefined);
-      return ids;
+      return count;
     },
 
     resolveConflict(conflictId, resolution) {

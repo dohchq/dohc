@@ -1,8 +1,8 @@
 //! Y.Doc base ORIGINATION (#378).
 //!
-//! Journaling an outbound `ydoc.update` needs `regime == Replicated &&
-//! base_claimed`, and before this suite the only thing that ever set
-//! `base_claimed` was the INBOUND apply of a peer's `isBaseState: true`
+//! Journaling an outbound `ydoc.update` needs a replicated exact claim, and
+//! before this suite the only thing that established one was the INBOUND apply
+//! of a peer's `isBaseState: true`
 //! envelope. No production Rust emitted one, so two daemon peers could join a
 //! lineage that already existed and could never start one.
 //!
@@ -12,15 +12,20 @@
 //! that omits rows the origin already held looks perfect from the origin, which
 //! reconstructs them from its own private tables.
 
-use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
-use dohc_engine_domain::{DeleteTextFile, VersionedTextStore};
+use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
+use dohc_engine_domain::{
+    CreateNamedVersion, DeleteTextFile, MergeTextFileFromVersion, MergeTextFileResult,
+    RollbackTextFileMutation, VersionedTextStore, WriteText,
+};
 use dohc_engine_runtime::{
-    CancellationToken, CaptureIngest, NoFaults, SelfWriteRecorder, WorkspaceSupervisor,
+    CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, SelfWriteRecorder,
+    WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_sync::{
-    LeaseProbe, NoLiveLeases, RelayCursor, ReplicationEnvelope, apply_ydoc_envelope,
-    commit_relay_cursor, drain_deferred_ydoc_for_key,
+    LeaseProbe, NoLiveLeases, RelayCursor, ReplicationEnvelope, SyncError,
+    apply_replication_envelope, apply_ydoc_envelope, commit_relay_cursor,
+    drain_deferred_ydoc_for_key,
 };
 use dohc_engine_testkit::ScratchDir;
 use std::path::Path;
@@ -134,7 +139,105 @@ fn marker_state(db: &Path, key: &DocKey) -> (Regime, bool) {
     let marker = dohc_engine_collab::read_marker(&store, key)
         .expect("read marker")
         .expect("marker exists");
-    (marker.regime, marker.base_claimed)
+    (
+        marker.regime,
+        marker.lineage_claim_status.has_claimed_base(),
+    )
+}
+
+fn lineage_exists(db: &Path, key: &DocKey) -> bool {
+    let store = EngineStore::open(db, 9_108).expect("open store");
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_docs \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("read lineage presence")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct YdocSnapshotState {
+    up_to_seq: i64,
+    snapshot_blob_sha256: String,
+    state_vector_blob_sha256: String,
+    recorded_at_ms: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CaptureRetireState {
+    aliases: i64,
+    snapshots: i64,
+    moments: i64,
+    replication_log: i64,
+    ydoc_docs: i64,
+    ydoc_updates: i64,
+    ydoc_snapshots: Vec<YdocSnapshotState>,
+    ydoc_deferred_updates: i64,
+}
+
+fn capture_retire_state(db: &Path, key: &DocKey, path: &str) -> CaptureRetireState {
+    let store = EngineStore::open(db, 9_109).expect("open store");
+    store
+        .read_with(|conn| {
+            let lineage_count = |table: &str| -> Result<i64, rusqlite::Error> {
+                conn.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} \
+                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3"
+                    ),
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+            };
+            let ydoc_snapshots = {
+                let mut statement = conn.prepare(
+                    "SELECT up_to_seq, snapshot_blob_sha256, state_vector_blob_sha256, \
+                     recorded_at_ms FROM ydoc_snapshots \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                     ORDER BY up_to_seq",
+                )?;
+                let rows = statement.query_map(
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| {
+                        Ok(YdocSnapshotState {
+                            up_to_seq: row.get(0)?,
+                            snapshot_blob_sha256: row.get(1)?,
+                            state_vector_blob_sha256: row.get(2)?,
+                            recorded_at_ms: row.get(3)?,
+                        })
+                    },
+                )?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            Ok::<_, rusqlite::Error>(CaptureRetireState {
+                aliases: conn.query_row(
+                    "SELECT COUNT(*) FROM path_aliases \
+                     WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, path],
+                    |row| row.get(0),
+                )?,
+                snapshots: lineage_count("snapshots")?,
+                moments: conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id=?1 AND object_id=?2",
+                    rusqlite::params![key.workspace_id, key.object_id],
+                    |row| row.get(0),
+                )?,
+                replication_log: conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1",
+                    [&key.workspace_id],
+                    |row| row.get(0),
+                )?,
+                ydoc_docs: lineage_count("ydoc_docs")?,
+                ydoc_updates: lineage_count("ydoc_updates")?,
+                ydoc_snapshots,
+                ydoc_deferred_updates: lineage_count("ydoc_deferred_updates")?,
+            })
+        })
+        .expect("read capture-retire durable state")
 }
 
 /// The workspace has an origin identity. This ALONE is not sync: ordinary
@@ -265,6 +368,7 @@ async fn capture_seed(
                 request_id: Some(format!("origination-seed-{now_ms}")),
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -342,8 +446,8 @@ fn seed_unclaimed_oversized_lineage(db: &Path, key: &DocKey, path: &str) {
             tx.execute(
                 "INSERT INTO ydoc_docs \
                  (workspace_id, version_id, object_id, content_kind, regime, \
-                  head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms, path) \
-                 VALUES (?1, ?2, ?3, 'plaintext', 'replicated', 1, 0, 0, 150, ?4)",
+                  head_update_seq, head_snapshot_seq, lineage_claim_status, updated_at_ms, path) \
+                 VALUES (?1, ?2, ?3, 'plaintext', 'replicated', 1, 0, 'unclaimed', 150, ?4)",
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id, path],
             )
             .map_err(StorageError::persist_public)?;
@@ -692,8 +796,7 @@ async fn applying_a_late_predecessor_without_a_lease_retries_origination() {
         .expect("ordinary predecessor apply");
     assert!(matches!(
         applied,
-        dohc_engine_sync::ApplyOutcome::Applied(ref result)
-            if result.sharing_declined.is_none()
+        dohc_engine_sync::ApplyOutcome::Applied(_)
     ));
     drop(store);
 
@@ -729,16 +832,21 @@ async fn applying_an_edit_surfaces_an_oversized_base_decline() {
     let envelope = remote_edit_envelope(&mut store, &key, PATH, 300);
     let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
         .expect("apply remote edit");
-    let dohc_engine_sync::ApplyOutcome::Applied(result) = applied else {
-        panic!("the remote edit must apply");
+    let dohc_engine_sync::ApplyOutcome::WithDiagnostics {
+        outcome,
+        refusals,
+        sharing_declined,
+    } = applied
+    else {
+        panic!("the remote edit must apply and surface its sharing decline");
     };
-    assert_oversized_decline(
-        result
-            .sharing_declined
-            .as_ref()
-            .expect("ordinary apply surfaces the oversized base decline"),
-        PATH,
-    );
+    assert!(matches!(
+        *outcome,
+        dohc_engine_sync::ApplyOutcome::Applied(_)
+    ));
+    assert!(refusals.is_empty());
+    assert_eq!(sharing_declined.len(), 1);
+    assert_oversized_decline(&sharing_declined[0], PATH);
     assert_remote_edit_committed(&store, &key);
 }
 
@@ -1081,13 +1189,362 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_retiring_a_closed_ydoc_head_retires_the_lineage() {
+    const WS: &str = "ws-originate-capture-retire";
+    const PATH: &str = "notes/capture-retired.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+    let doc = Ydoc::wire();
+    let update = doc.plaintext_insert(0, "edited while closed\n");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            false,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record private Y.Doc update");
+    assert!(lineage_exists(&db, &key));
+
+    let retired = handle
+        .capture_retire(
+            CaptureRetire {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 300,
+                request_id: None,
+                only_if_text_head: true,
+                only_if_capture_origin: true,
+                allow_ydoc_origin: true,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture retire");
+    assert!(retired.retired.is_some(), "the Y.Doc-owned head is retired");
+    assert!(
+        !lineage_exists(&db, &key),
+        "capture retirement must remove the canonical lineage with its snapshot"
+    );
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row() {
+    const WS: &str = "ws-originate-capture-live-lease";
+    const PATH: &str = "notes/live-capture-retire.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+    let doc = Ydoc::wire();
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            doc.plaintext_insert(0, "first live edit\n"),
+            None,
+            false,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record first Y.Doc update");
+    supervisor.close(&db).expect("close actor for fixture seed");
+
+    let mut store = EngineStore::open(&db, 9_351).expect("open fixture store");
+    dohc_engine_collab::maybe_compact(&mut store, &key, 0, &NoFaults, 250)
+        .expect("seed a durable Y.Doc snapshot");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates \
+                 (workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms) \
+                 VALUES (?1, ?2, ?3, 'deferred-peer', 0, 260)",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed a deferred Y.Doc update");
+    drop(store);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::Replicated,
+            doc.plaintext_insert(16, "second live edit\n"),
+            None,
+            false,
+            None,
+            270,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record a post-snapshot Y.Doc update");
+
+    let before = capture_retire_state(&db, &key, PATH);
+    assert_eq!(before.aliases, 1, "the captured path is live");
+    assert_eq!(before.snapshots, 1, "the text snapshot is live");
+    assert!(before.moments > 0, "the text history is seeded");
+    assert!(before.replication_log > 0, "the outbound log is seeded");
+    assert_eq!(
+        (
+            before.ydoc_docs,
+            before.ydoc_updates,
+            before.ydoc_deferred_updates,
+        ),
+        (1, 1, 1),
+        "every Y.Doc lineage table has a rollback witness"
+    );
+    assert_eq!(
+        before
+            .ydoc_snapshots
+            .iter()
+            .map(|snapshot| snapshot.up_to_seq)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "the durable lineage has its base snapshot and compacted snapshot"
+    );
+
+    let input = CaptureRetire {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        path: PATH.to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        now_ms: 300,
+        request_id: None,
+        only_if_text_head: true,
+        only_if_capture_origin: true,
+        allow_ydoc_origin: true,
+    };
+    let leases = LeaseRegistry::new();
+    let lease = leases.acquire(&key).expect("hold live session lease");
+    let error = handle
+        .capture_retire(
+            input.clone(),
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a live Y.Doc lease must make capture retirement retryable");
+    assert!(matches!(
+        error,
+        RuntimeError::Sync(SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
+    assert_eq!(
+        capture_retire_state(&db, &key, PATH),
+        before,
+        "the retryable refusal must roll back the snapshot, moment, log, and lineage deletes"
+    );
+
+    drop(lease);
+    let error = handle
+        .capture_retire(
+            input.clone(),
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an unseen deferred update must keep retirement retryable");
+    assert!(matches!(
+        error,
+        RuntimeError::Sync(SyncError::RetryableState {
+            reason: "ydoc-deferred-updates-pending"
+        })
+    ));
+    assert_eq!(
+        capture_retire_state(&db, &key, PATH),
+        before,
+        "the deferred-update refusal must also roll back every delete"
+    );
+
+    supervisor.close(&db).expect("close actor to drain fixture");
+    let mut store = EngineStore::open(&db, 9_352).expect("open fixture store");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM ydoc_deferred_updates \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("resolve the fixture's deferred update");
+    drop(store);
+
+    let handle = supervisor
+        .open(&db, 3)
+        .expect("reopen actor for retry")
+        .actor;
+    let retired = handle
+        .capture_retire(input, leases, Arc::new(NoFaults), CancellationToken::new())
+        .await
+        .expect("capture retire retries after the session closes");
+    assert!(retired.retired.is_some());
+    let after = capture_retire_state(&db, &key, PATH);
+    assert_eq!((after.aliases, after.snapshots), (0, 0));
+    assert_eq!(after.moments, before.moments + 1);
+    assert_eq!(after.replication_log, before.replication_log + 1);
+    assert_eq!(
+        (
+            after.ydoc_docs,
+            after.ydoc_updates,
+            after.ydoc_deferred_updates,
+        ),
+        (0, 0, 0),
+        "the successful retry retires the complete Y.Doc lineage"
+    );
+    assert!(
+        after.ydoc_snapshots.is_empty(),
+        "the successful retry removes every Y.Doc snapshot"
+    );
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn merge_fast_forward_delete_retires_the_target_ydoc_lineage() {
+    const WS: &str = "ws-originate-merge-delete";
+    const PATH: &str = "notes/merge-deleted.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    handle
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "source".to_owned(),
+                name: "Source".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 150,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("create source version");
+
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+    let doc = Ydoc::wire();
+    let update = doc.plaintext_insert(0, "seed\n");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            false,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record target Y.Doc state");
+    handle
+        .versioned_text_delete(
+            DeleteTextFile {
+                workspace_id: WS.to_owned(),
+                version_id: "source".to_owned(),
+                path: PATH.to_owned(),
+                moment_id: "moment-source-delete".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 250,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("delete source path");
+    assert!(lineage_exists(&db, &key));
+
+    let merged = handle
+        .versioned_text_merge(
+            MergeTextFileFromVersion {
+                workspace_id: WS.to_owned(),
+                target_version_id: "main".to_owned(),
+                source_version_id: "source".to_owned(),
+                path: PATH.to_owned(),
+                object_id: "unused-merge-object".to_owned(),
+                moment_id: "moment-merge-delete".to_owned(),
+                request_id: None,
+                conflict_id: "conflict-merge-delete".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 300,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("merge source deletion");
+    assert!(matches!(merged.merge, MergeTextFileResult::Delete { .. }));
+    assert!(
+        !lineage_exists(&db, &key),
+        "merge deletion must retire the target's canonical lineage"
+    );
+    supervisor.close(&db).expect("close actor");
+}
+
 /// COLLISION. When a peer's base for the same lineage lands first, the local
 /// daemon must not mint a second one: it observes the claim and journals its
 /// edit as a delta instead. Within one database SQLite serializes writers, so
 /// the concurrent claim reduces to this ordering, and the claim's re-check
 /// reads the same transaction that would write the second base.
 ///
-/// Mutation check: drop the `marker.base_claimed` guard in
+/// Mutation check: drop the exact-claim guard in
 /// `ydoc_originate_base_in_tx` and a second base appears — both the op-shape
 /// assertion and `base_ops_in_log` fail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1319,13 +1776,346 @@ async fn closing_a_session_that_originated_mid_flight_keeps_the_base() {
     assert_eq!(base_ops_in_log(&db), 1, "and close emits no second base");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() {
+    const WS: &str = "ws-rollback-closed-lineage";
+    const PATH: &str = "notes/rollback.md";
+    const BEFORE: &str = "seed\n";
+    const AFTER: &str = "seed\nafter\n";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    std::fs::create_dir_all(scratch.path().join("notes")).expect("notes directory");
+    std::fs::write(scratch.path().join(PATH), BEFORE).expect("seed disk");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+    let opened = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            150,
+            true,
+            Some(key.clone()),
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open seeded document");
+    let doc = Ydoc::wire();
+    doc.apply(&opened.initial_update)
+        .expect("load seeded state");
+    let seed = opened.seed_markdown.as_deref().expect("Markdown seed");
+    doc.plaintext_insert(0, seed);
+    assert_eq!(doc.plaintext_string(), BEFORE);
+    doc.plaintext_insert(BEFORE.len() as u32, "after\n");
+    let update = doc.encode_full_state();
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            opened.regime,
+            update,
+            None,
+            false,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record later text");
+    let settled = handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            opened.head_blob_sha256,
+            "rollback-source-session".to_owned(),
+            Arc::new(NoRecorder),
+            250,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("settle later text");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("settled disk"),
+        AFTER
+    );
+    handle
+        .ydoc_close_session(
+            key.clone(),
+            300,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("close replicated lineage");
+    assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
+
+    handle
+        .versioned_text_rollback(
+            RollbackTextFileMutation {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                mutation_moment_id: settled.moment_id,
+                request_id: None,
+                legacy_before_text: None,
+                metadata_origin: "test-rollback".to_owned(),
+                author_json: None,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("roll back the settled edit");
+    assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
+    assert_eq!(
+        local_ydoc_ops(&db).len(),
+        2,
+        "rollback must journal one canonical rewrite after the original base"
+    );
+    // Plaintext rollback is DB-only; model its external disk projection so
+    // the follow-up settle isolates the retained CRDT lineage.
+    std::fs::write(scratch.path().join(PATH), BEFORE).expect("project rollback to disk");
+    let reopened = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            350,
+            true,
+            Some(key.clone()),
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("reopen after rollback");
+    let resumed = Ydoc::wire();
+    resumed
+        .apply(&reopened.initial_update)
+        .expect("load rolled-back state");
+    assert_eq!(
+        resumed.plaintext_string(),
+        BEFORE,
+        "a closed replicated lineage must project the restored head"
+    );
+
+    let next = resumed.plaintext_insert(BEFORE.len() as u32, "next\n");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            reopened.regime,
+            next,
+            None,
+            false,
+            None,
+            400,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record edit after rollback");
+    handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key,
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            reopened.head_blob_sha256,
+            "rollback-follow-up-session".to_owned(),
+            Arc::new(NoRecorder),
+            450,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("settle edit after rollback");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("follow-up disk"),
+        "seed\nnext\n",
+        "the next valid delta must build on the restored head"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ordinary_text_write_sends_one_canonical_rewrite_before_its_moment() {
+    const WS: &str = "ws-ordinary-write-order";
+    const PATH: &str = "notes/ordered.md";
+    const OBJECT: &str = "ordered-object";
+    const BEFORE: &str = "before\n";
+    const AFTER: &str = "after\n";
+    let source_scratch = ScratchDir::new().expect("source scratch");
+    let source_db = source_scratch.engine_db_path().expect("source db");
+    let peer_scratch = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer_scratch.engine_db_path().expect("peer db");
+    let base_doc = Ydoc::wire();
+    base_doc.plaintext_insert(0, BEFORE);
+    let base = base_doc.encode_full_state();
+
+    for db in [&source_db, &peer_db] {
+        let mut store = EngineStore::open(db, 1).expect("open replica");
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version(WS, "main", 1, &NoFaults)
+            .expect("main version");
+        versions
+            .write_text(
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: OBJECT.to_owned(),
+                    path: PATH.to_owned(),
+                    text: BEFORE.to_owned(),
+                    moment_id: "ordered-base-moment".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("seed matching head");
+        let key = DocKey::new(WS, "main", OBJECT).expect("key");
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Plaintext,
+            &base,
+            &NoFaults,
+            20,
+        )
+        .expect("claim matching base");
+    }
+    enable_sync(&source_db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor
+        .open(&source_db, 2)
+        .expect("open source actor")
+        .actor;
+    handle
+        .versioned_text_write(
+            WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: OBJECT.to_owned(),
+                path: PATH.to_owned(),
+                text: AFTER.to_owned(),
+                moment_id: "ordered-write-moment".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 30,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("ordinary text write");
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ops(&source_db);
+    assert_eq!(
+        ops.iter().map(|op| op.op_kind.as_str()).collect::<Vec<_>>(),
+        vec!["ydoc.update", "moment.append"],
+        "the canonical CRDT rewrite must precede the artifact moment"
+    );
+
+    let source = EngineStore::open(&source_db, 40).expect("open source store");
+    let text_blobs: Vec<(String, i64, String)> = source
+        .read_with(|conn| {
+            let mut statement = conn.prepare("SELECT sha256, byte_length, text FROM blobs")?;
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("source text blobs");
+    let mut peer = EngineStore::open(&peer_db, 40).expect("open peer store");
+    peer.write_with(&NoFaults, |tx| {
+        for (sha, byte_length, text) in &text_blobs {
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+                rusqlite::params![sha, byte_length, text],
+            )
+            .map_err(StorageError::persist_public)?;
+        }
+        Ok::<_, StorageError>(())
+    })
+    .expect("copy text blobs");
+    for op in &ops {
+        if op.op_kind == "ydoc.update" {
+            let sha = op.blob_sha();
+            let bytes = source
+                .get_binary_blob(&sha)
+                .expect("read update blob")
+                .expect("update blob exists");
+            peer.put_binary_blob(&bytes).expect("copy update blob");
+        }
+        let envelope = ReplicationEnvelope {
+            workspace_id: WS.to_owned(),
+            origin_id: op.origin_id.clone(),
+            origin_seq: op.origin_seq,
+            op_kind: op.op_kind.clone(),
+            payload: op.payload.clone(),
+            recorded_at_ms: op.recorded_at_ms,
+        };
+        apply_replication_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
+            .expect("apply ordered operation");
+    }
+    let peer_local_ydoc_ops: i64 = peer
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE imported=0 AND op_kind='ydoc.update'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("peer local Y.Doc operations");
+    assert_eq!(
+        peer_local_ydoc_ops, 0,
+        "the receiver must not mint a second rewrite"
+    );
+
+    let key = DocKey::new(WS, "main", OBJECT).expect("key");
+    let source_doc = dohc_engine_collab::load_persisted(&source, &key)
+        .expect("load source lineage")
+        .expect("source lineage")
+        .doc;
+    let peer_doc = dohc_engine_collab::load_persisted(&peer, &key)
+        .expect("load peer lineage")
+        .expect("peer lineage")
+        .doc;
+    let source_state = source_doc.encode_full_state();
+    let peer_state = peer_doc.encode_full_state();
+    source_doc.apply(&peer_state).expect("merge peer state");
+    peer_doc.apply(&source_state).expect("merge source state");
+    assert_eq!(source_doc.plaintext_string(), AFTER);
+    assert_eq!(peer_doc.plaintext_string(), AFTER);
+}
+
 /// A lineage that grew LOCAL-ONLY past `MAX_YDOC_UPDATE_BYTES` and then reached
 /// a synced workspace must not lose the edit that tries to promote it.
 ///
 /// `claim_base_in_tx` measures the base against a cap written for one update.
 /// A base is a full state, so a big enough lineage fails that check — and the
 /// claim runs inside the append transaction, so the refusal rolls the user's
-/// valid edit back with it, permanently: `base_claimed` stays false, so every
+/// valid edit back with it, permanently: the claim stays unclaimed, so every
 /// later edit takes the same branch and fails the same way.
 ///
 /// Origination declines instead. The document keeps working and keeps markdown

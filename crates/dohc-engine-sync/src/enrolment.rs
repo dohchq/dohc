@@ -32,7 +32,7 @@
 
 use dohc_engine_collab::DocKey;
 use dohc_engine_domain::{SecretMomentRecord, SecretOp, VersionKind, VersionRecord};
-use rusqlite::{Row, Transaction};
+use rusqlite::{Row, Transaction, params};
 
 use crate::{
     BaseOrigination, SharingDeclined, SyncError, journal_moment_append_in_tx,
@@ -47,7 +47,7 @@ pub(crate) fn backfill_enrolment_window_in_tx(
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     backfill_versions(tx, workspace_id)?;
     let sharing_declined = backfill_ydoc_bases(tx, workspace_id, now_ms)?;
-    backfill_moments(tx, workspace_id)?;
+    backfill_moments_and_conflict_bundles(tx, workspace_id)?;
     backfill_secret_moments(tx, workspace_id)?;
     Ok(sharing_declined)
 }
@@ -57,19 +57,25 @@ fn backfill_ydoc_bases(
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
-    let rows: Vec<(String, String, Option<String>)> = collect_rows(
+    let rows: Vec<(String, String, Option<String>, String)> = collect_rows(
         tx,
-        "SELECT d.version_id, d.object_id, COALESCE(s.path,d.path) \
+        "SELECT d.version_id, d.object_id, COALESCE(s.path,d.path), \
+                d.lineage_claim_status \
          FROM ydoc_docs d LEFT JOIN snapshots s \
            ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
           AND s.object_id=d.object_id \
-         WHERE d.workspace_id=?1 AND d.base_claimed=0 \
+         WHERE d.workspace_id=?1 AND d.lineage_claim_status <> 'exact' \
          ORDER BY d.version_id, d.object_id",
         workspace_id,
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
     let mut sharing_declined = Vec::new();
-    for (version_id, object_id, path) in rows {
+    for (version_id, object_id, path, status) in rows {
+        if status != "unclaimed" {
+            return Err(SyncError::corrupt(
+                dohc_engine_collab::CollabError::LineageClaimUnresolved { status },
+            ));
+        }
         let path = path.ok_or_else(|| {
             SyncError::corrupt(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -90,7 +96,35 @@ fn backfill_ydoc_bases(
     Ok(sharing_declined)
 }
 
-fn backfill_moments(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), SyncError> {
+fn backfill_moments_and_conflict_bundles(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<(), SyncError> {
+    let bundles = crate::conflict_outbox::pending_conflict_bundle_cuts_in_tx(tx, workspace_id)?;
+    let mut after_moment_order = -1;
+    for bundle in bundles {
+        backfill_moments_between(
+            tx,
+            workspace_id,
+            after_moment_order,
+            Some(bundle.pre_effect_moment_order),
+        )?;
+        crate::conflict_outbox::journal_pending_conflict_bundle_in_tx(
+            tx,
+            workspace_id,
+            bundle.bundle_order,
+        )?;
+        after_moment_order = bundle.pre_effect_moment_order;
+    }
+    backfill_moments_between(tx, workspace_id, after_moment_order, None)
+}
+
+fn backfill_moments_between(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    after_moment_order: i64,
+    through_moment_order: Option<i64>,
+) -> Result<(), SyncError> {
     // `metadata_origin` alone cannot tell a locally-authored moment from an
     // imported one: `moment_apply.rs`'s `INSERT INTO moments` stores the
     // WIRE payload's `metadata.origin` verbatim (the sending peer's own
@@ -105,23 +139,37 @@ fn backfill_moments(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), Sync
     // coordinate with no refusal. `'ydoc'` is excluded separately: it is a
     // true local origin (Y.Doc settle-projection), never imported, but its
     // content is superseded by the CRDT stream once a lineage exists.
-    let moment_ids: Vec<String> = collect_rows(
-        tx,
-        "SELECT m.moment_id FROM moments m \
-         WHERE m.workspace_id=?1 AND m.metadata_origin != 'ydoc' \
-           AND NOT EXISTS (SELECT 1 FROM replication_log r \
-              WHERE r.workspace_id=?1 AND r.imported=1 AND r.op_kind='moment.append' \
-                AND json_extract(r.payload_json,'$.momentId')=m.moment_id \
-                AND NOT EXISTS (SELECT 1 FROM replication_pending_refusals p \
-                  WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
-                    AND p.origin_seq=r.origin_seq)) \
-           AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
-             WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
-               AND d.object_id=m.object_id) \
-         ORDER BY m.moment_order",
-        workspace_id,
-        |row| row.get(0),
-    )?;
+    let moment_ids: Vec<String> = {
+        let mut statement = tx
+            .prepare(
+                "SELECT m.moment_id FROM moments m \
+                 WHERE m.workspace_id=?1 AND m.metadata_origin != 'ydoc' \
+                   AND m.moment_order > ?2 \
+                   AND (?3 IS NULL OR m.moment_order <= ?3) \
+                   AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
+                     WHERE p.workspace_id=m.workspace_id AND p.moment_id=m.moment_id) \
+                   AND NOT EXISTS (SELECT 1 FROM replication_log r \
+                     WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
+                       AND json_extract(r.payload_json,'$.momentId')=m.moment_id \
+                       AND (r.imported=0 OR NOT EXISTS ( \
+                         SELECT 1 FROM replication_pending_refusals p \
+                         WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
+                           AND p.origin_seq=r.origin_seq))) \
+                   AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
+                     WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
+                       AND d.object_id=m.object_id) \
+                 ORDER BY m.moment_order",
+            )
+            .map_err(SyncError::corrupt)?;
+        statement
+            .query_map(
+                params![workspace_id, after_moment_order, through_moment_order],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)?
+    };
     for moment_id in moment_ids {
         journal_moment_append_in_tx(tx, workspace_id, &moment_id)?;
     }
@@ -444,6 +492,58 @@ mod tests {
             .expect("local ops")
     }
 
+    fn seed_pending_conflict_bundle(
+        store: &mut EngineStore,
+        conflict_id: &str,
+        pre_effect_moment_order: i64,
+        effect_moment_ids: &[&str],
+        recorded_at_ms: i64,
+    ) {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO replication_pending_conflict_bundles \
+                     (workspace_id,conflict_id,format_version,pre_effect_moment_order,created_at_ms) \
+                     VALUES ('ws',?1,1,?2,?3)",
+                    params![conflict_id, pre_effect_moment_order, recorded_at_ms],
+                )
+                .map_err(SyncError::persist)?;
+                let bundle_order = tx.last_insert_rowid();
+                let resolve = serde_json::json!({
+                    "formatVersion": 1,
+                    "workspaceId": "ws",
+                    "conflictId": conflict_id,
+                    "status": "resolved",
+                });
+                tx.execute(
+                    "INSERT INTO replication_pending_conflict_ops \
+                     (bundle_order,op_index,op_kind,payload_json,recorded_at_ms) \
+                     VALUES (?1,0,'conflict.resolve',?2,?3)",
+                    params![bundle_order, resolve.to_string(), recorded_at_ms],
+                )
+                .map_err(SyncError::persist)?;
+                for (offset, moment_id) in effect_moment_ids.iter().enumerate() {
+                    let op_index = i64::try_from(offset).expect("small effect list") + 1;
+                    let payload = serde_json::json!({"momentId": moment_id});
+                    tx.execute(
+                        "INSERT INTO replication_pending_conflict_ops \
+                         (bundle_order,op_index,op_kind,payload_json,recorded_at_ms) \
+                         VALUES (?1,?2,'moment.append',?3,?4)",
+                        params![bundle_order, op_index, payload.to_string(), recorded_at_ms],
+                    )
+                    .map_err(SyncError::persist)?;
+                    tx.execute(
+                        "INSERT INTO replication_pending_conflict_moments \
+                         (workspace_id,bundle_order,op_index,moment_id) VALUES ('ws',?1,?2,?3)",
+                        params![bundle_order, op_index, moment_id],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed pending conflict bundle");
+    }
+
     fn record_unsettled_ydoc(
         store: &mut EngineStore,
         key: &DocKey,
@@ -590,7 +690,7 @@ mod tests {
             recorded_at_ms: 10,
         };
         assert!(matches!(
-            crate::apply_moment_envelope(&mut store, &refused, &NoFaults),
+            crate::apply_moment_envelope(&mut store, &refused, &NoFaults, &crate::NoLiveLeases),
             Ok(crate::ApplyOutcome::Refused(_))
         ));
 
@@ -606,6 +706,302 @@ mod tests {
             1,
             "a refused import is not successful import provenance"
         );
+    }
+
+    #[test]
+    fn cursor_commit_backfills_a_refused_import_collision_before_clearing_its_report() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        write_text(
+            &mut store,
+            "main",
+            "local",
+            "moment-collision",
+            "local",
+            "capture",
+            10,
+        );
+        let refused = crate::ReplicationEnvelope {
+            workspace_id: "ws".to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 0,
+            op_kind: "moment.append".to_owned(),
+            payload: serde_json::json!({"momentId": "moment-collision"}),
+            recorded_at_ms: 10,
+        };
+        assert!(matches!(
+            crate::apply_moment_envelope(&mut store, &refused, &NoFaults, &crate::NoLiveLeases),
+            Ok(crate::ApplyOutcome::Refused(_))
+        ));
+        let (refusals, refusal_report_id) =
+            crate::apply::claim_pending_refusals(&mut store, "ws", &NoFaults)
+                .expect("claim refusal report");
+        assert_eq!(refusals.len(), 1);
+        let refusal_report_id = refusal_report_id.expect("claimed report id");
+        let cursor = crate::RelayCursor {
+            cursor: 1,
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            refusal_report_id: Some(refusal_report_id),
+        };
+
+        assert!(matches!(
+            crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, 1_000),
+            Ok(dohc_engine_storage::TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        ));
+        assert_eq!(
+            local_ops(&store)
+                .iter()
+                .filter(|(kind, payload)| {
+                    kind == "moment.append" && payload["momentId"] == "moment-collision"
+                })
+                .count(),
+            1,
+            "first-position backfill must see the refusal before its report is cleared"
+        );
+        let pending_refusals: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("pending refusal count");
+        assert_eq!(pending_refusals, 0, "the committed report is cleared");
+
+        crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, 1_001)
+            .expect("repeat cursor commit");
+        assert_eq!(
+            local_ops(&store)
+                .iter()
+                .filter(|(kind, payload)| {
+                    kind == "moment.append" && payload["momentId"] == "moment-collision"
+                })
+                .count(),
+            1,
+            "a repeated cursor commit must not journal the local moment twice"
+        );
+    }
+
+    #[test]
+    fn first_position_interleaves_pending_conflict_bundle_with_moment_backfill() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        write_text(&mut store, "main", "a", "moment-a", "A", "capture", 10);
+        write_text(
+            &mut store,
+            "main",
+            "resolved",
+            "moment-resolved",
+            "resolved",
+            "capture",
+            20,
+        );
+        write_text(&mut store, "main", "c", "moment-c", "C", "capture", 30);
+        let cut: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id='moment-a'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("pre-resolution moment order");
+        seed_pending_conflict_bundle(&mut store, "conflict-r", cut, &["moment-resolved"], 20);
+        let raw_resolve = r#"{ "formatVersion": 1, "workspaceId": "ws", "conflictId": "conflict-r", "status": "resolved" }"#;
+        let raw_shadow = r#"{ "momentId": "moment-resolved" }"#;
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_pending_conflict_ops SET payload_json=?1 \
+                     WHERE bundle_order=(SELECT bundle_order FROM replication_pending_conflict_bundles \
+                       WHERE workspace_id='ws' AND conflict_id='conflict-r') AND op_index=0",
+                    [raw_resolve],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE replication_pending_conflict_ops SET payload_json=?1 \
+                     WHERE bundle_order=(SELECT bundle_order FROM replication_pending_conflict_bundles \
+                       WHERE workspace_id='ws' AND conflict_id='conflict-r') AND op_index=1",
+                    [raw_shadow],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("make stored wire bytes observable");
+
+        enroll(&mut store).expect("first-position enrolment");
+
+        let ordered: Vec<_> = local_ops(&store)
+            .into_iter()
+            .map(|(kind, payload)| {
+                let id = payload
+                    .get("momentId")
+                    .or_else(|| payload.get("conflictId"))
+                    .and_then(serde_json::Value::as_str)
+                    .expect("op identity")
+                    .to_owned();
+                (kind, id)
+            })
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                ("moment.append".to_owned(), "moment-a".to_owned()),
+                ("conflict.resolve".to_owned(), "conflict-r".to_owned()),
+                ("moment.append".to_owned(), "moment-resolved".to_owned(),),
+                ("moment.append".to_owned(), "moment-c".to_owned()),
+            ]
+        );
+        let pending: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_conflict_bundles WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("pending bundle count");
+        assert_eq!(
+            pending, 0,
+            "the exact bundle drains in the enrolment transaction"
+        );
+        let raw_bundle_ops: Vec<String> = store
+            .read_with(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind IN ('conflict.resolve','moment.append') \
+                       AND (json_extract(payload_json,'$.conflictId')='conflict-r' \
+                         OR json_extract(payload_json,'$.momentId')='moment-resolved') \
+                     ORDER BY origin_seq",
+                )?;
+                statement
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("raw drained bundle payloads");
+        assert_eq!(raw_bundle_ops, vec![raw_resolve, raw_shadow]);
+    }
+
+    #[test]
+    fn same_cut_zero_effect_conflict_bundles_keep_bundle_order() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        write_text(&mut store, "main", "a", "moment-a", "A", "capture", 10);
+        write_text(&mut store, "main", "c", "moment-c", "C", "capture", 30);
+        let cut: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id='moment-a'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("shared causal cut");
+        seed_pending_conflict_bundle(&mut store, "conflict-first", cut, &[], 20);
+        seed_pending_conflict_bundle(&mut store, "conflict-second", cut, &[], 21);
+
+        enroll(&mut store).expect("first-position enrolment");
+
+        let ordered: Vec<_> = local_ops(&store)
+            .into_iter()
+            .map(|(kind, payload)| {
+                let id = payload
+                    .get("momentId")
+                    .or_else(|| payload.get("conflictId"))
+                    .and_then(serde_json::Value::as_str)
+                    .expect("op identity")
+                    .to_owned();
+                (kind, id)
+            })
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                ("moment.append".to_owned(), "moment-a".to_owned()),
+                ("conflict.resolve".to_owned(), "conflict-first".to_owned(),),
+                ("conflict.resolve".to_owned(), "conflict-second".to_owned(),),
+                ("moment.append".to_owned(), "moment-c".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_pending_bundle_rolls_back_position_and_every_log_append() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO replication_pending_conflict_bundles \
+                     (workspace_id,conflict_id,format_version,pre_effect_moment_order,created_at_ms) \
+                     VALUES ('ws','conflict-gap',1,0,20)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                let bundle_order = tx.last_insert_rowid();
+                tx.execute(
+                    "INSERT INTO replication_pending_conflict_ops \
+                     (bundle_order,op_index,op_kind,payload_json,recorded_at_ms) VALUES \
+                     (?1,0,'conflict.resolve',?2,20), \
+                     (?1,2,'moment.append',?3,20)",
+                    params![
+                        bundle_order,
+                        serde_json::json!({
+                            "formatVersion": 1,
+                            "workspaceId": "ws",
+                            "conflictId": "conflict-gap",
+                        })
+                        .to_string(),
+                        serde_json::json!({"momentId": "moment-gap"}).to_string(),
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO replication_pending_conflict_moments \
+                     (workspace_id,bundle_order,op_index,moment_id) \
+                     VALUES ('ws',?1,2,'moment-gap')",
+                    [bundle_order],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed corrupt pending bundle");
+
+        let error = enroll(&mut store).expect_err("a child-index gap must abort enrolment");
+        assert!(
+            format!("{error:?}").contains("operation indexes are not contiguous"),
+            "{error:?}"
+        );
+        let fingerprint: (i64, i64, i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM replication_pending_conflict_bundles \
+                         WHERE workspace_id='ws' AND conflict_id='conflict-gap'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM replication_pending_conflict_ops",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM replication_log WHERE workspace_id='ws'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sync_relay_push_state WHERE workspace_id='ws'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("post-refusal fingerprint");
+        assert_eq!(fingerprint, (1, 2, 0, 0));
     }
 
     #[test]
@@ -797,13 +1193,15 @@ mod tests {
 
         enroll(&mut store).expect("enroll");
 
-        let payload = local_ops(&store)
+        let payloads: Vec<_> = local_ops(&store)
             .into_iter()
-            .find_map(|(kind, payload)| {
+            .filter_map(|(kind, payload)| {
                 (kind == "ydoc.update" && payload["objectId"] == "renamed-object")
                     .then_some(payload)
             })
-            .expect("backfilled Y.Doc base");
+            .collect();
+        assert_eq!(payloads.len(), 1, "enrollment emits one Y.Doc base");
+        let payload = &payloads[0];
         assert_eq!(
             payload["path"], "current-name.md",
             "enrollment must derive the current closed-document path from the snapshot"
@@ -872,11 +1270,11 @@ mod tests {
         )
         .expect("first pull applies remote base");
 
-        let (base_claimed, base_sha, local_updates): (i64, String, i64) = local
+        let (claim_status, base_sha, local_updates): (String, String, i64) = local
             .read_with(|conn| {
                 Ok::<_, rusqlite::Error>((
                     conn.query_row(
-                        "SELECT base_claimed FROM ydoc_docs
+                        "SELECT lineage_claim_status FROM ydoc_docs
                          WHERE workspace_id='ws' AND version_id='main'
                            AND object_id='same-coordinate'",
                         [],
@@ -900,7 +1298,7 @@ mod tests {
             })
             .expect("local lineage after remote claim");
         assert_eq!(
-            base_claimed, 1,
+            claim_status, "exact",
             "the remote base consumed the unclaimed slot"
         );
         assert_eq!(base_sha, remote_sha, "the claimed base is the remote base");
@@ -921,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn request_retry_repairs_a_legacy_unsettled_ydoc_path() {
+    fn request_id_reuse_cannot_change_an_unsettled_ydoc_path() {
         let (_scratch, mut store) = store();
         seed_main(&mut store);
         let key = DocKey::new("ws", "main", "legacy-request").expect("key");
@@ -930,7 +1328,7 @@ mod tests {
         assert!(!record_unsettled_ydoc(&mut store, &key, &update, None, Some("request-1")).deduped);
         assert_eq!(ydoc_path(&store, "legacy-request"), None);
 
-        let retry = match dohc_engine_collab::record_local_update_creating_marker_guarded(
+        let error = dohc_engine_collab::record_local_update_creating_marker_guarded(
             &mut store,
             &key,
             Some("legacy-request.md"),
@@ -945,16 +1343,17 @@ mod tests {
             4,
             |_, _| Ok(()),
         )
-        .expect("retry")
-        {
-            dohc_engine_storage::TxnOutcome::Committed(outcome) => outcome,
-            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
-        };
-        assert!(retry.deduped);
+        .expect_err("the same request id cannot name a different path");
+        match error {
+            dohc_engine_collab::CollabError::Corrupt { reason } => {
+                assert_eq!(reason, "idempotency key reused with different content")
+            }
+            other => panic!("unexpected request-id reuse error: {other:?}"),
+        }
         assert_eq!(
-            ydoc_path(&store, "legacy-request").as_deref(),
-            Some("legacy-request.md"),
-            "a request-id retry must repair the path before it returns"
+            ydoc_path(&store, "legacy-request"),
+            None,
+            "a refused request-id reuse must not mutate the marker"
         );
     }
 
@@ -1411,7 +1810,6 @@ mod tests {
                 deferred: false,
                 reason: None,
                 conflicts_opened: 0,
-                sharing_declined: None,
             }),
             "the Y.Doc base must fast-forward its shipped fork ancestor"
         );
@@ -1814,8 +2212,8 @@ mod tests {
             .write_with(&NoFaults, |tx| {
                 tx.execute(
                     "INSERT INTO ydoc_docs \
-                     (workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,base_claimed,updated_at_ms,path) \
-                     VALUES ('ws','main','oversized','plaintext','local-only',1,0,0,11,'oversized.md')",
+                     (workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms,path) \
+                     VALUES ('ws','main','oversized','plaintext','local-only',1,0,'unclaimed',11,'oversized.md')",
                     [],
                 )
                 .map_err(SyncError::persist)?;

@@ -446,10 +446,6 @@ pub enum SyncPassOutcome {
         conflicts_opened: i64,
         pending_cursor: Option<RelayCursor>,
         changed_paths: Vec<crate::MomentMaterializationChange>,
-        /// Replicated resolutions acked in this pass that the receiver
-        /// deliberately did not apply. The cursor advances past them, so they
-        /// only exist here — a caller that drops this loses them.
-        pending_resolves: Vec<crate::PendingResolve>,
         /// Per-operation validation failures that were journaled and acked.
         /// The rejected mutations were rolled back before those coordinates
         /// were retired.
@@ -465,7 +461,6 @@ pub enum SyncPassOutcome {
         conflicts_opened: i64,
         pending_cursor: RelayCursor,
         changed_paths: Vec<crate::MomentMaterializationChange>,
-        pending_resolves: Vec<crate::PendingResolve>,
         refusals: Vec<crate::ReplicationRefusal>,
         sharing_declined: Vec<crate::SharingDeclined>,
     },
@@ -642,7 +637,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             conflicts_opened: 0,
             pending_cursor: None,
             changed_paths: Vec::new(),
-            pending_resolves: Vec::new(),
             refusals: Vec::new(),
             sharing_declined,
         })
@@ -711,7 +705,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut refused = 0_usize;
         let mut skipped = 0_usize;
         let mut conflicts_opened = 0_i64;
-        let mut pending_resolves = Vec::new();
         let mut refusals = Vec::new();
         let mut sharing_declined = Vec::new();
         let mut changed_paths = BTreeMap::new();
@@ -728,7 +721,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     &mut refused,
                     &mut skipped,
                     &mut conflicts_opened,
-                    &mut pending_resolves,
                     &mut changed_paths,
                     &mut refusals,
                     &mut sharing_declined,
@@ -752,7 +744,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             &mut refused,
                             &mut skipped,
                             &mut conflicts_opened,
-                            &mut pending_resolves,
                             &mut changed_paths,
                             &mut refusals,
                             &mut sharing_declined,
@@ -816,7 +807,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 conflicts_opened,
                 pending_cursor,
                 changed_paths: changed_paths.into_values().collect(),
-                pending_resolves,
                 refusals,
                 sharing_declined,
             });
@@ -831,7 +821,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             conflicts_opened,
             pending_cursor: Some(pending_cursor),
             changed_paths: changed_paths.into_values().collect(),
-            pending_resolves,
             refusals,
             sharing_declined,
         })
@@ -1155,11 +1144,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         ApplyOutcome::Crashed { .. } => {
                             return Err(RelayError::Local("injected-crash".to_owned()));
                         }
-                        ApplyOutcome::WithRefusals { .. } => {
-                            unreachable!("refusals were flattened")
-                        }
-                        ApplyOutcome::WithSharingDeclined { .. } => {
-                            unreachable!("sharing declines were flattened")
+                        ApplyOutcome::WithDiagnostics { .. } => {
+                            unreachable!("diagnostics were flattened")
                         }
                     }
                 }
@@ -1431,11 +1417,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         ApplyOutcome::Crashed { .. } => {
                             return Err(RelayError::Local("injected-crash".to_owned()));
                         }
-                        ApplyOutcome::WithRefusals { .. } => {
-                            unreachable!("refusals were flattened")
-                        }
-                        ApplyOutcome::WithSharingDeclined { .. } => {
-                            unreachable!("sharing declines were flattened")
+                        ApplyOutcome::WithDiagnostics { .. } => {
+                            unreachable!("diagnostics were flattened")
                         }
                     }
                 }
@@ -1683,6 +1666,25 @@ fn collect_blob_refs(
                     {
                         insert_optional_ref(&mut refs, state.get("sha256"), BlobKind::Binary)?;
                     }
+                }
+            }
+            "conflict.resolve" => {
+                let validated = crate::conflict_resolve_v1::validate_conflict_resolve_v1(
+                    &op.payload,
+                    crate::conflict_resolve_v1::ConflictResolveEnvelopeContext {
+                        workspace_id: &op.workspace_id,
+                        recorded_at_ms: op.recorded_at_ms,
+                    },
+                )
+                .map_err(local)?;
+                for sha256 in validated.text_blob_sha256s {
+                    refs.entry(sha256).or_default().insert(BlobKind::Text);
+                }
+                for sha256 in validated.binary_blob_sha256s {
+                    refs.entry(sha256).or_default().insert(BlobKind::Binary);
+                }
+                for sha256 in validated.ydoc_blob_sha256s {
+                    refs.entry(sha256).or_default().insert(BlobKind::Ydoc);
                 }
             }
             "version.create" => {
@@ -3455,7 +3457,6 @@ fn accumulate_pull_outcome(
     refused: &mut usize,
     skipped: &mut usize,
     conflicts_opened: &mut i64,
-    pending_resolves: &mut Vec<crate::PendingResolve>,
     changed_paths: &mut BTreeMap<String, crate::MomentMaterializationChange>,
     refusals: &mut Vec<crate::ReplicationRefusal>,
     sharing_declined: &mut Vec<crate::SharingDeclined>,
@@ -3469,12 +3470,6 @@ fn accumulate_pull_outcome(
     }
     match primary {
         ApplyOutcome::Applied(routed) => {
-            for declined in &routed.sharing_declined {
-                push_sharing_declined_once(sharing_declined, declined.clone());
-            }
-            if let Some(pending) = routed.pending_resolve() {
-                pending_resolves.push(pending.clone());
-            }
             *conflicts_opened = conflicts_opened
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
@@ -3499,11 +3494,6 @@ fn accumulate_pull_outcome(
             if let Some(refusal) = crate::apply::read_replayed_refusal(store, op).map_err(local)? {
                 push_refusal_once(refusals, refusal);
             }
-            if let Some(pending) =
-                crate::conflict_apply::read_replayed_pending_resolve(store, op).map_err(local)?
-            {
-                pending_resolves.push(pending);
-            }
             for change in
                 crate::router::redelivered_materialization_changes(store, op).map_err(local)?
             {
@@ -3514,10 +3504,7 @@ fn accumulate_pull_outcome(
         ApplyOutcome::Crashed { .. } => {
             return Err(RelayError::Local("injected-crash".to_owned()));
         }
-        ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
-        ApplyOutcome::WithSharingDeclined { .. } => {
-            unreachable!("sharing declines were flattened")
-        }
+        ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics were flattened"),
     }
     Ok(())
 }
@@ -3605,5 +3592,102 @@ mod sharing_decline_tests {
                 .collect::<Vec<_>>(),
             ["notes/first.md", "notes/second.md"]
         );
+    }
+}
+
+#[cfg(test)]
+mod conflict_resolve_blob_ref_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{BlobKind, ReplicationEnvelope, collect_blob_refs};
+    use crate::conflict_resolve_v1::{
+        ConflictResolveV1, EffectContextV1, HeadContentKindV1, HeadV1, LineageTransitionV1,
+        MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, SuccessorContentKindV1,
+        SuccessorV1, build_conflict_resolve_v1,
+    };
+
+    #[test]
+    fn conflict_resolve_collects_text_binary_and_successor_roots() {
+        let text_sha = dohc_engine_storage::hex_sha256(b"current text");
+        let binary_sha = dohc_engine_storage::hex_sha256(b"incoming binary");
+        let successor_sha = dohc_engine_storage::hex_sha256(b"successor base");
+        let state_vector_sha = dohc_engine_storage::hex_sha256(b"successor state vector");
+        let current = HeadV1::Present(PresentHeadV1 {
+            path_ref: 0,
+            object_id: "object-current".to_owned(),
+            latest_moment_id: "moment-current".to_owned(),
+            content_kind: HeadContentKindV1::Text,
+            blob_sha256: text_sha.clone(),
+            byte_length: 12,
+            updated_at_ms: 10,
+        });
+        let built = build_conflict_resolve_v1(ConflictResolveV1 {
+            workspace_id: "workspace-carrier-roots".to_owned(),
+            conflict_id: "conflict-carrier-roots".to_owned(),
+            chosen_from: ResolveChoiceV1::Current,
+            resolution: ResolutionV1::KeptCurrent,
+            target_version_id: "main".to_owned(),
+            source_version_id: "peer-main".to_owned(),
+            paths: vec![
+                "notes/current.md".to_owned(),
+                "notes/incoming.bin".to_owned(),
+            ],
+            current: current.clone(),
+            incoming: HeadV1::Present(PresentHeadV1 {
+                path_ref: 1,
+                object_id: "object-incoming".to_owned(),
+                latest_moment_id: "moment-incoming".to_owned(),
+                content_kind: HeadContentKindV1::Binary,
+                blob_sha256: binary_sha.clone(),
+                byte_length: 15,
+                updated_at_ms: 11,
+            }),
+            result: current,
+            effect_context: EffectContextV1 {
+                recorded_at_ms: 12,
+                metadata: MetadataV1 {
+                    origin: "api".to_owned(),
+                    summary: None,
+                    correlation_id: None,
+                },
+                author: None,
+                current_object_created_at_ms: Some(1),
+                result_object_created_at_ms: Some(1),
+            },
+            effects: Vec::new(),
+            lineage_transition: Some(LineageTransitionV1 {
+                predecessor_claim_id: dohc_engine_storage::hex_sha256(b"predecessor"),
+                predecessor_state_vector_sha256: dohc_engine_storage::hex_sha256(
+                    b"predecessor state vector",
+                ),
+                artifact_preimage_sha256: text_sha.clone(),
+                successor: Some(SuccessorV1 {
+                    lineage_claim_id: successor_sha.clone(),
+                    epoch_tag: dohc_engine_storage::hex_sha256(b"successor epoch"),
+                    content_kind: SuccessorContentKindV1::Plaintext,
+                    result_sha256: text_sha.clone(),
+                    update_blob_sha256: successor_sha.clone(),
+                    state_vector_blob_sha256: state_vector_sha.clone(),
+                }),
+            }),
+        })
+        .expect("valid conflict.resolve carrier");
+        let envelope = ReplicationEnvelope {
+            workspace_id: "workspace-carrier-roots".to_owned(),
+            origin_id: "origin-a".to_owned(),
+            origin_seq: 0,
+            op_kind: "conflict.resolve".to_owned(),
+            payload: built.value,
+            recorded_at_ms: 12,
+        };
+
+        let refs = collect_blob_refs(&[envelope]).expect("collect carrier roots");
+        let expected = BTreeMap::from([
+            (text_sha, BTreeSet::from([BlobKind::Text])),
+            (binary_sha, BTreeSet::from([BlobKind::Binary])),
+            (successor_sha, BTreeSet::from([BlobKind::Ydoc])),
+            (state_vector_sha, BTreeSet::from([BlobKind::Ydoc])),
+        ]);
+        assert_eq!(refs, expected);
     }
 }

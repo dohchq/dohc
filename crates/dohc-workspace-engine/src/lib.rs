@@ -1699,6 +1699,7 @@ impl EngineService {
                     root.clone(),
                     actor.clone(),
                     params.workspace_id.clone(),
+                    self.leases.scoped(&root),
                     self.self_writes.scoped(&root),
                     Arc::clone(&capture_apply_gate),
                     capture_author_json.flatten(),
@@ -3229,6 +3230,7 @@ impl EngineService {
         let open = open.clone();
         let handle = handle.clone();
         let sessions = Arc::clone(&self.sessions);
+        let leases = self.leases.clone();
         let self_writes = self.self_writes.clone();
         let events = self.events.clone();
         let detached_operation = operation.to_owned();
@@ -3292,10 +3294,12 @@ impl EngineService {
             if let Some(probe) = &probe {
                 probe.record_version_scan();
             }
+            let capture_leases = leases.scoped(&open.root);
             let reconcile = capture_driver::reconcile_full_for_switch(
                 &open.root,
                 &open.actor,
                 &open.workspace_id,
+                &capture_leases,
                 &capture_status,
                 &self_writes.scoped(&open.root),
                 capture_author_json,
@@ -7734,7 +7738,12 @@ impl EngineService {
             enforce_workspace(&open, &envelope.workspace_id)?;
             let result = open
                 .actor
-                .conflict_apply_replicated(envelope, Arc::new(NoFaults), cancellation.token())
+                .conflict_apply_replicated(
+                    envelope,
+                    Arc::new(NoFaults),
+                    self.leases.scoped(&open.root),
+                    cancellation.token(),
+                )
                 .await
                 .map_err(map_runtime)?;
             return Ok(replicated_conflict_json(result));
@@ -7775,7 +7784,12 @@ impl EngineService {
             enforce_workspace(&open, &envelope.workspace_id)?;
             let result = open
                 .actor
-                .conflict_apply_replicated(envelope, Arc::new(NoFaults), cancellation.token())
+                .conflict_apply_replicated(
+                    envelope,
+                    Arc::new(NoFaults),
+                    self.leases.scoped(&open.root),
+                    cancellation.token(),
+                )
                 .await
                 .map_err(map_runtime)?;
             return Ok(replicated_conflict_json(result));
@@ -7856,6 +7870,7 @@ impl EngineService {
                 ));
             }
         };
+        let scoped_leases = self.leases.scoped(&open.root);
         let result = open
             .actor
             .conflict_resolve_indexed(
@@ -7874,7 +7889,7 @@ impl EngineService {
                     request_id,
                     conflict_answer_budget_bytes,
                 },
-                self.leases.clone(),
+                scoped_leases,
                 open.root,
                 Arc::new(NoFaults),
                 cancellation.token(),
@@ -9873,6 +9888,7 @@ impl ConflictStateDto {
             binary_byte_length: None,
             binary_object_id: None,
             binary_latest_moment_id: None,
+            binary_updated_at_ms: None,
             content_kind,
             metadata_summary: self.metadata_summary,
             metadata_correlation_id: self.metadata_correlation_id,
@@ -10810,15 +10826,12 @@ fn conflict_state_json(state: &ConflictFileState) -> Value {
 fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value {
     match outcome {
         ApplyOutcome::Applied(result) => {
-            let deferred = result.deferred();
             json!({
                 "replicated": true,
                 "status": "applied",
                 "conflictId": result.conflict_id,
                 "inserted": result.inserted,
-                "matched": result.matched,
-                "deferred": deferred,
-                "pendingResolve": result.pending_resolve
+                "matched": result.matched
             })
         }
         ApplyOutcome::Refused(refusal) => json!({
@@ -10837,40 +10850,39 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
             "status": "crashed",
             "committed": committed
         }),
-        ApplyOutcome::WithRefusals { outcome, refusals } => {
-            let mut value = replicated_conflict_json(*outcome);
-            if let Some(object) = value.as_object_mut() {
-                object.insert(
-                    "refusals".to_owned(),
-                    Value::Array(
-                        refusals
-                            .into_iter()
-                            .map(|refusal| {
-                                json!({
-                                    "workspaceId": refusal.workspace_id,
-                                    "originId": refusal.origin_id,
-                                    "originSeq": refusal.origin_seq,
-                                    "opKind": refusal.op_kind,
-                                    "code": refusal.reason.code(),
-                                    "reason": refusal.reason.message()
-                                })
-                            })
-                            .collect(),
-                    ),
-                );
-            }
-            value
-        }
-        ApplyOutcome::WithSharingDeclined {
+        ApplyOutcome::WithDiagnostics {
             outcome,
+            refusals,
             sharing_declined,
         } => {
             let mut value = replicated_conflict_json(*outcome);
             if let Some(object) = value.as_object_mut() {
-                object.insert(
-                    "sharingDeclined".to_owned(),
-                    Value::Array(sharing_declined_json(sharing_declined)),
-                );
+                if !refusals.is_empty() {
+                    object.insert(
+                        "refusals".to_owned(),
+                        Value::Array(
+                            refusals
+                                .into_iter()
+                                .map(|refusal| {
+                                    json!({
+                                        "workspaceId": refusal.workspace_id,
+                                        "originId": refusal.origin_id,
+                                        "originSeq": refusal.origin_seq,
+                                        "opKind": refusal.op_kind,
+                                        "code": refusal.reason.code(),
+                                        "reason": refusal.reason.message()
+                                    })
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                if !sharing_declined.is_empty() {
+                    object.insert(
+                        "sharingDeclined".to_owned(),
+                        Value::Array(sharing_declined_json(sharing_declined)),
+                    );
+                }
             }
             value
         }
@@ -10940,7 +10952,6 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             conflicts_opened,
             pending_cursor,
             changed_paths,
-            pending_resolves,
             refusals,
             sharing_declined,
         } => json!({
@@ -10959,7 +10970,6 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
                 "operation": change.operation,
                 "contentKind": change.content_kind,
             })).collect::<Vec<_>>(),
-            "pendingResolves": pending_resolves,
             "refusals": refusals.into_iter().map(|refusal| json!({
                 "workspaceId": refusal.workspace_id,
                 "originId": refusal.origin_id,
@@ -10980,7 +10990,6 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             conflicts_opened,
             pending_cursor,
             changed_paths,
-            pending_resolves,
             refusals,
             sharing_declined,
         } => json!({
@@ -10996,7 +11005,6 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
                 "operation": change.operation,
                 "contentKind": change.content_kind,
             })).collect::<Vec<_>>(),
-            "pendingResolves": pending_resolves,
             "refusals": refusals.into_iter().map(|refusal| json!({
                 "workspaceId": refusal.workspace_id,
                 "originId": refusal.origin_id,
@@ -11512,6 +11520,14 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::ContentKindMismatch
         | CollabError::BaseAlreadyClaimed
         | CollabError::BaseStateDiverged
+        | CollabError::SuccessorProjectionMismatch { .. }
+        | CollabError::SuccessorResultMismatch { .. }
+        | CollabError::LineageEpochChanged { .. }
+        | CollabError::LineageClaimUnresolved { .. }
+        | CollabError::LineagePredecessorMismatch { .. }
+        | CollabError::LineageStateVectorMismatch { .. }
+        | CollabError::InvalidSuccessorBase { .. }
+        | CollabError::LineageIncomplete { .. }
         | CollabError::LeaseHeld
         | CollabError::NoMarker
         | CollabError::MissingDependencies
@@ -11538,7 +11554,9 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         | SyncError::BlobInvalid => ErrorCode::InvalidParams,
         // Same condition as its relay twin, so the same code. A blob over a
         // fixed ceiling is a size refusal on either path.
-        SyncError::BlobTooLarge { .. } => ErrorCode::PayloadTooLarge,
+        SyncError::BlobTooLarge { .. } | SyncError::InputTooLarge { .. } => {
+            ErrorCode::PayloadTooLarge
+        }
     }
 }
 
@@ -12272,32 +12290,6 @@ mod tests {
     }
 
     #[test]
-    fn replicated_conflict_json_keeps_deferred_and_adds_pending_resolve() {
-        let value = replicated_conflict_json(ApplyOutcome::Applied(ConflictApplyResult {
-            conflict_id: "remote-c".to_owned(),
-            inserted: None,
-            matched: false,
-            pending_resolve: Some(dohc_engine_sync::PendingResolve {
-                remote_conflict_id: "remote-c".to_owned(),
-                local_conflict_id: Some("local-c".to_owned()),
-                path: Some("doc.md".to_owned()),
-                reason: dohc_engine_sync::PendingResolveReason::BinaryUnhydrated,
-            }),
-        }));
-
-        assert_eq!(value["deferred"], true);
-        assert_eq!(
-            value["pendingResolve"],
-            json!({
-                "remoteConflictId": "remote-c",
-                "localConflictId": "local-c",
-                "path": "doc.md",
-                "reason": "binary-unhydrated"
-            })
-        );
-    }
-
-    #[test]
     fn replicated_conflict_json_surfaces_an_acked_refusal() {
         let value = replicated_conflict_json(ApplyOutcome::Refused(
             dohc_engine_sync::ReplicationRefusal {
@@ -12354,7 +12346,6 @@ mod tests {
             conflicts_opened: 0,
             pending_cursor: None,
             changed_paths: Vec::new(),
-            pending_resolves: Vec::new(),
             refusals: Vec::new(),
             sharing_declined: vec![dohc_engine_sync::SharingDeclined {
                 path: "notes/oversized.md".to_owned(),

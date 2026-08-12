@@ -11,6 +11,8 @@
 
 mod apply;
 mod conflict_apply;
+mod conflict_outbox;
+mod conflict_resolve_v1;
 mod cursor;
 mod enrolment;
 mod error;
@@ -33,8 +35,10 @@ pub use apply::{
     ApplyOutcome, RefusalReason, ReplicationRefusal, apply_chat_envelope, apply_envelope_with,
     read_replayed_refusal, retain_refusal_for_direct_retry,
 };
-pub use conflict_apply::{
-    ConflictApplyResult, PendingResolve, PendingResolveReason, apply_conflict_envelope,
+pub use conflict_apply::{ConflictApplyResult, apply_conflict_envelope};
+pub use conflict_resolve_v1::{
+    PreparedLocalConflictResolveV1, commit_local_conflict_resolve_v1_in_tx,
+    prepare_local_conflict_resolve_v1_in_tx,
 };
 pub use cursor::{
     CursorKind, RelayCursor, ShareCursor, SharedPeerPosition, commit_relay_cursor,
@@ -82,9 +86,10 @@ pub use share::{
 };
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
-    LeaseProbe, NoLiveLeases, YdocApplyResult, YdocDrainResult, apply_ydoc_envelope,
+    LeaseProbe, NoLiveLeases, ResultingHead, YdocApplyResult, YdocDrainResult, apply_ydoc_envelope,
     drain_deferred_ydoc_for_key, fold_resolution_into_ydoc_in_tx, open_sync_conflict_for_object,
-    project_and_write_in_tx, retire_ydoc_lineage_in_tx,
+    project_and_write_in_tx, reconcile_imported_resulting_head_in_tx,
+    reconcile_local_resulting_head_in_tx, retire_ydoc_lineage_in_tx,
 };
 pub use ydoc_origination::{
     BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx, ydoc_update_payload,

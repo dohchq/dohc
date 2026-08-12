@@ -148,10 +148,6 @@ export function createWorkspaceActivity(
     return {
       ...status,
       conflictCount,
-      // 0P-C honest minimum for conflict-id asymmetry: a peer's resolution
-      // that matched nothing here is surfaced (notice center), never
-      // silently swallowed.
-      unmatchedRemoteResolves: snap?.unmatchedRemoteResolves ?? 0,
       historyCaptureFailed: w?.captureFailed ?? false,
       historyRecordingOff: w?.historyRecordingOff ?? false,
       ...(w?.settingsWarning ? { settingsWarning: w.settingsWarning } : {}),
@@ -328,13 +324,6 @@ export function createWorkspaceActivity(
     notify();
   }
 
-  // Explicit dismissal of the "a choice made on another machine needs a
-  // look" notice: clears the engine's pending remote-resolve set (0P-C gate
-  // fix — the set otherwise clears itself when the matched conflict closes).
-  function dismissUnmatchedRemoteResolves(workspaceId: string): void {
-    watched.get(workspaceId)?.engine?.dismissUnmatchedResolves();
-  }
-
   // After a login completes, attach engines to already-open cloud-enabled
   // workspaces that don't have one yet (they were opened local-only because no
   // session existed). engineFor returns null when the workspace is local-only
@@ -471,7 +460,6 @@ export function createWorkspaceActivity(
     open,
     close,
     enableCloud,
-    dismissUnmatchedRemoteResolves,
     reconcileCloud,
     stopEngines,
     getStatus,
