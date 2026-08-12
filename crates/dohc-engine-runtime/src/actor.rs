@@ -8933,26 +8933,7 @@ fn ydoc_version_unsettled_content_kind_on_store(
             return Ok(Some(content_kind));
         }
         let content_kind = persisted.marker.content_kind;
-        let path: Option<String> = store.read_with(|conn| {
-            conn.query_row(
-                "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
-                 AND object_id=?3 ORDER BY path LIMIT 1",
-                params![workspace_id, version_id, key.object_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StorageError::corrupt_public)
-        })?;
-        if content_kind == ContentKind::Scene && path.is_none() {
-            return Ok(Some(content_kind));
-        }
-        let projected = project_ydoc_on_store(
-            store,
-            &key,
-            path.as_deref().unwrap_or(""),
-            &persisted.doc,
-            content_kind,
-        )?;
+        let projected = project_ydoc_on_store(store, &key, &persisted.doc, content_kind)?;
         let projected_sha = hex_sha256(projected.content.as_bytes());
         let materialized_sha: Option<String> = store.read_with(|conn| {
             conn.query_row(
@@ -9095,18 +9076,18 @@ fn scene_asset_records(
 fn validate_scene_artifact_assets_on_store(
     store: &EngineStore,
     key: &DocKey,
-    drawing_path: &str,
     doc: &Ydoc,
     assets: &[ArtifactAssetDescriptor],
 ) -> Result<Vec<String>, RuntimeError> {
     store.read_with(|conn| {
-        dohc_engine_sync::project_ydoc_with_store(conn, key, drawing_path, doc, ContentKind::Scene)
-            .map_err(|error| match error {
+        dohc_engine_sync::project_ydoc_with_store(conn, key, doc, ContentKind::Scene).map_err(
+            |error| match error {
                 dohc_engine_sync::SyncError::RetryableState { .. } => {
                     RuntimeError::YdocArtifactAssetsPending
                 }
                 _ => RuntimeError::YdocArtifactAssetsInvalid,
-            })?;
+            },
+        )?;
         let mut pending_jobs = Vec::new();
         for asset in assets {
             let mut statement = conn
@@ -9161,12 +9142,11 @@ fn live_scene_asset_descriptors(doc: &Ydoc) -> Vec<ArtifactAssetDescriptor> {
 fn project_ydoc_on_store(
     store: &EngineStore,
     key: &DocKey,
-    path: &str,
     doc: &Ydoc,
     content_kind: ContentKind,
 ) -> Result<Projection, RuntimeError> {
     store.read_with(|conn| {
-        dohc_engine_sync::project_ydoc_with_store(conn, key, path, doc, content_kind)
+        dohc_engine_sync::project_ydoc_with_store(conn, key, doc, content_kind)
             .map_err(RuntimeError::from)
     })
 }
@@ -9520,7 +9500,6 @@ fn ydoc_open_state_on_store(
                     validate_scene_artifact_assets_on_store(
                         store,
                         &key,
-                        path,
                         &persisted.doc,
                         &artifact_assets,
                     )?
@@ -9916,7 +9895,7 @@ fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
-    let projection = project_ydoc_on_store(store, key, path, &doc, content_kind)?;
+    let projection = project_ydoc_on_store(store, key, &doc, content_kind)?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
     // the file from `projection.content` down here, so an over-cap doc

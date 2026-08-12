@@ -601,7 +601,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
             reason: "ydoc-incomplete-lineage",
         });
     }
-    let projection = project_ydoc_with_store(tx, &key, path, &doc, marker.content_kind)?;
+    let projection = project_ydoc_with_store(tx, &key, &doc, marker.content_kind)?;
     if projection.content != chosen_text {
         let update = doc
             .rewrite_content_to_markdown(marker.content_kind, chosen_text)
@@ -630,7 +630,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
                 observed_bytes: update.len(),
             });
         }
-        let refolded = project_ydoc_with_store(tx, &key, path, &doc, marker.content_kind)?;
+        let refolded = project_ydoc_with_store(tx, &key, &doc, marker.content_kind)?;
         if refolded.content != chosen_text {
             return Err(SyncError::InvalidInput {
                 reason: "ydoc-resolution-not-representable",
@@ -703,7 +703,6 @@ fn put_projection_text_blob(
 pub fn project_ydoc_with_store(
     conn: &Connection,
     key: &DocKey,
-    _path: &str,
     doc: &dohc_engine_collab::Ydoc,
     content_kind: dohc_engine_collab::ContentKind,
 ) -> Result<dohc_engine_collab::Projection, SyncError> {
@@ -809,7 +808,7 @@ pub fn project_and_write_in_tx(
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(), SyncError> {
     let current = validate_ydoc_identity(tx, key, path)?;
-    let projection = project_ydoc_with_store(tx, key, path, doc, content_kind)?;
+    let projection = project_ydoc_with_store(tx, key, doc, content_kind)?;
     // While a sync conflict is open on this object, the visible head belongs
     // to the user's review: writing through it would clobber the exact state
     // the conflict preserves. Coalesce the incoming side to the freshest
@@ -1217,8 +1216,7 @@ pub fn apply_ydoc_envelope(
                 head_settled_by_this_lineage.as_deref() == Some(snapshot.blob_sha256.as_str())
             });
             if !head_is_in_the_union && let Some(snapshot) = current.snapshot.as_ref() {
-                let projection =
-                    project_ydoc_with_store(tx, &claim_key, &base_path, &base_doc, kind)?;
+                let projection = project_ydoc_with_store(tx, &claim_key, &base_doc, kind)?;
                 let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
                 if snapshot.blob_sha256 != projected_sha {
                     put_projection_text_blob(tx, &projection.content, &projected_sha)?;
