@@ -28,6 +28,8 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     (event: { sessionId: string; update: Uint8Array }) => void
   >();
   const applied: Array<{ sessionId: string; seq: number }> = [];
+  const applyAttempts: Array<{ sessionId: string; seq: number }> = [];
+  let rejectedApplyAttempts = 0;
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
   if (kind === "scene") {
@@ -64,6 +66,11 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) };
     },
     async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
+      applyAttempts.push({ sessionId: payload.sessionId, seq: payload.seq });
+      if (rejectedApplyAttempts > 0) {
+        rejectedApplyAttempts -= 1;
+        throw new Error("IPC request rejected");
+      }
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
     },
     onEngineYDocRemoteUpdate: (
@@ -127,7 +134,11 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     emitNow,
     emitRemoteEdit,
     applied,
+    applyAttempts,
     sessionId: () => openedSessionId,
+    rejectNextApplyAttempts(count: number) {
+      rejectedApplyAttempts = count;
+    },
     setRemovalInProgress(value: typeof removalInProgress) {
       removalInProgress = value;
     },
@@ -533,6 +544,37 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
   const secondSeq = harness.applied.at(-1)!.seq;
   expect(secondSeq).toBeGreaterThan(firstSeq);
   harness.emit("saved", secondSeq);
+  expect(screen.getByTestId("state").textContent).toBe("saved");
+});
+
+it("stays Saving while a rejected transport head retries ahead of later edits", async () => {
+  harness.rejectNextApplyAttempts(1);
+  await mountBound();
+
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1]);
+  expect(harness.applied).toEqual([]);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  // A later edit advances the same Yjs client clock. Its batch may become
+  // ready, but it cannot pass the rejected head in the provider's send chain.
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1]);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(218);
+  });
+  expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1, 1, 2]);
+  expect(harness.applied.map(({ seq }) => seq)).toEqual([1, 2]);
+
+  // Even after transport recovery, the first batch's settle cannot vouch for
+  // the later edit. Only the acknowledgement covering sequence 2 may clear it.
+  harness.emit("saved", 1);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+  harness.emit("saved", 2);
   expect(screen.getByTestId("state").textContent).toBe("saved");
 });
 

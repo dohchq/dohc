@@ -74,6 +74,9 @@ export interface EngineYDocBatchScheduler {
 }
 
 const LOCAL_UPDATE_BATCH_MS = 32;
+// Local IPC normally answers in one turn. A quarter-second retry avoids a hot
+// loop during an outage while recovering a brief renderer/main handoff quickly.
+const LOCAL_UPDATE_RETRY_MS = 250;
 const timeoutBatchScheduler: EngineYDocBatchScheduler = {
   schedule(callback, delayMs) {
     return globalThis.setTimeout(callback, delayMs);
@@ -136,7 +139,8 @@ export interface EngineYDocBinding {
   // document read-only and offers a fresh open after the interval ends.
   readonly removalInProgress: EngineRemovalInProgress | null;
   // Tear down: stop shipping edits, unsubscribe, close the engine session, and
-  // destroy the mirror doc. Idempotent.
+  // destroy the mirror doc. Idempotent. If main has not acknowledged an edit,
+  // teardown waits and keeps the session open. It completes after recovery.
   destroy(): Promise<void>;
 }
 
@@ -180,6 +184,26 @@ export async function bindEngineYDoc(
   }> = [];
   let sendChain = Promise.resolve();
 
+  const applyLocalUpdateUntilAcknowledged = async (batch: {
+    update: Uint8Array;
+    sequence: number;
+  }): Promise<void> => {
+    for (;;) {
+      try {
+        await transport.applyLocalUpdate(batch.update, batch.sequence);
+        return;
+      } catch {
+        // Yjs increments a client's clock across updates. A later delta can
+        // therefore depend on structs in this one, so the head of the queue
+        // must stay put until main acknowledges it. Retrying the same update
+        // is safe because Yjs updates are idempotent.
+        await new Promise<void>((resolve) => {
+          batchScheduler.schedule(resolve, LOCAL_UPDATE_RETRY_MS);
+        });
+      }
+    }
+  };
+
   const flushPendingLocalUpdates = (): Promise<void> => {
     if (scheduledFlush !== null) {
       batchScheduler.cancel(scheduledFlush);
@@ -191,12 +215,11 @@ export async function bindEngineYDoc(
     const updates = pendingLocalUpdates;
     pendingLocalUpdates = [];
     // Preserve batch order even when the transport is asynchronous. A failed
-    // send keeps the editor usable and unsaved, matching the old best-effort
-    // transport behavior; teardown still waits for the chain before close.
+    // head stays ahead of every later batch until main acknowledges it. The
+    // chain remains pending during retries, so teardown cannot settle and
+    // close a session that still has renderer-only edits.
     for (const batch of mergeYDocUpdatesForTransport(updates)) {
-      sendChain = sendChain
-        .then(() => transport.applyLocalUpdate(batch.update, batch.sequence))
-        .catch(() => undefined);
+      sendChain = sendChain.then(() => applyLocalUpdateUntilAcknowledged(batch));
     }
     return sendChain;
   };
@@ -243,7 +266,9 @@ export async function bindEngineYDoc(
       doc.off("update", onUpdate);
       unsubscribe();
       // A close settles the engine state. Flush and await every accepted local
-      // edit before close so teardown cannot settle behind the mirror.
+      // edit before close so teardown cannot settle behind the mirror. If the
+      // transport stays unavailable, this promise stays pending by design.
+      // Main's sender-destroyed cleanup owns a renderer-process exit.
       destroyPromise = (async () => {
         await flushPendingLocalUpdates();
         await transport.close().catch(() => undefined);

@@ -387,6 +387,127 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
+  it("retries a rejected batch before later dependent updates and converges exactly", async () => {
+    const mainDoc = new Y.Doc();
+    mainDoc.getText("plainText").insert(0, "seed");
+    const attempts: number[] = [];
+    const accepted: number[] = [];
+    let staged = 0;
+    let rejectFirstAttempt = true;
+    const transport: EngineYDocTransport = {
+      async open() {
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(mainDoc),
+        };
+      },
+      stageLocalUpdate() {
+        staged += 1;
+        return staged;
+      },
+      async applyLocalUpdate(update, sequence) {
+        attempts.push(sequence);
+        if (rejectFirstAttempt) {
+          rejectFirstAttempt = false;
+          throw new Error("IPC request rejected");
+        }
+        Y.applyUpdate(mainDoc, update);
+        accepted.push(sequence);
+      },
+      onRemoteUpdate() {
+        return () => undefined;
+      },
+      async close() {},
+    };
+    const batches = manualBatchScheduler();
+    const binding = await bindEngineYDoc(transport, batches.scheduler);
+    const mirror = binding.doc!;
+
+    mirror.getText("plainText").insert(4, "-one");
+    await batches.runNext();
+    expect(attempts).toEqual([1]);
+    expect(accepted).toEqual([]);
+    expect(batches.delays).toEqual([32, 250]);
+
+    // This delta advances the same Yjs client clock and depends on the batch
+    // that just failed. It is staged while that batch is awaiting retry.
+    mirror.getText("plainText").insert(8, "-two");
+    expect(staged).toBe(2);
+
+    await batches.runNext();
+    expect(attempts).toEqual([1, 1]);
+    expect(accepted).toEqual([1]);
+    await batches.runNext();
+    expect(attempts).toEqual([1, 1, 2]);
+    expect(accepted).toEqual([1, 2]);
+    expect(mainDoc.getText("plainText").toString()).toBe("seed-one-two");
+    expect(Array.from(Y.encodeStateVector(mainDoc))).toEqual(
+      Array.from(Y.encodeStateVector(mirror)),
+    );
+    expect(Array.from(Y.encodeStateAsUpdate(mainDoc))).toEqual(
+      Array.from(Y.encodeStateAsUpdate(mirror)),
+    );
+
+    await binding.destroy();
+    mainDoc.destroy();
+  });
+
+  it("keeps teardown pending and the session open while the head cannot be acknowledged", async () => {
+    const seed = new Y.Doc();
+    seed.getText("plainText").insert(0, "seed");
+    const mainDoc = new Y.Doc();
+    Y.applyUpdate(mainDoc, Y.encodeStateAsUpdate(seed));
+    let refuse = true;
+    let attempts = 0;
+    let closed = false;
+    const transport: EngineYDocTransport = {
+      async open() {
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(seed),
+        };
+      },
+      stageLocalUpdate: () => 1,
+      async applyLocalUpdate(update) {
+        attempts += 1;
+        if (refuse) throw new Error("IPC unavailable");
+        Y.applyUpdate(mainDoc, update);
+      },
+      onRemoteUpdate() {
+        return () => undefined;
+      },
+      async close() {
+        closed = true;
+      },
+    };
+    const batches = manualBatchScheduler();
+    const binding = await bindEngineYDoc(transport, batches.scheduler);
+    binding.doc!.getText("plainText").insert(4, "-local");
+    await batches.runNext();
+
+    let destroyed = false;
+    const destroying = binding.destroy().then(() => {
+      destroyed = true;
+    });
+    await batches.runNext();
+    await Promise.resolve();
+    expect(attempts).toBe(2);
+    expect(closed).toBe(false);
+    expect(destroyed).toBe(false);
+    expect(batches.delays).toEqual([32, 250, 250]);
+
+    // Recovery acknowledges the retained head. Only then may close settle the
+    // session and destroy the mirror.
+    refuse = false;
+    await batches.runNext();
+    await destroying;
+    expect(attempts).toBe(3);
+    expect(closed).toBe(true);
+    expect(mainDoc.getText("plainText").toString()).toBe("seed-local");
+    mainDoc.destroy();
+    seed.destroy();
+  });
+
   it("falls back (doc:null) when the transport reports the doc is not engine-backed", async () => {
     const transport: EngineYDocTransport = {
       async open() {

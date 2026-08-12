@@ -292,12 +292,10 @@ function makeTransport(
     },
     async applyLocalUpdate(update, seq) {
       if (writesRefused.current) return;
-      // Main journals + settles. A transient IPC error never tears the editor
-      // down. The seq is not rolled back on that failure: the edit remains
-      // unsaved until a later settle covers it.
-      await bridge()
-        .applyEngineYDocUpdate({ sessionId, update, seq })
-        .catch(() => undefined);
+      // The provider owns ordered retry. Rejecting here keeps this batch at
+      // the head of that queue; resolving is the acknowledgement that main
+      // accepted it. The staged seq is reused on retry, never rolled back.
+      await bridge().applyEngineYDocUpdate({ sessionId, update, seq });
     },
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
