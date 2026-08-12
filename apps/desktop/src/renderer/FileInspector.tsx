@@ -15,6 +15,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ForwardRefExoticComponent,
   type LazyExoticComponent,
   type RefAttributes,
@@ -60,6 +61,11 @@ import {
   extractWorkspaceHeadings,
   resolveWorkspaceHeadingAnchorTarget,
 } from "../workspaces/workspaceHeadings";
+import {
+  getSharedLocalDocument,
+  localDocumentKey,
+  type SharedLocalDocument,
+} from "./sharedLocalDocument";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -763,10 +769,18 @@ function useAutosavedTextDraft(props: {
   onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   refreshAfterConflict: () => void;
+  localBuffer: SharedLocalDocument;
 }) {
   const [draft, setDraft] = useState(props.body);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
+  const localSource = useRef<object>({});
+  const sharedSnapshot = useSyncExternalStore(
+    props.localBuffer.subscribe,
+    props.localBuffer.getSnapshot,
+    props.localBuffer.getSnapshot,
+  );
+  const sharedRevision = useRef(sharedSnapshot.revision);
   const orphanedDrafts = useOrphanedDrafts(props.workspaceId, props.path);
   const latestDraft = useRef(props.body);
   const baseContentHash = useRef(props.contentHash);
@@ -806,6 +820,7 @@ function useAutosavedTextDraft(props: {
   const writersLive = useRef(0);
   const flushBarrier = useRef(false);
   const flushInFlight = useRef<Promise<void> | null>(null);
+
   // Assigned during render, read at call time — `readOnlyRef` precedent.
   const disabledRef = useRef(props.disabled);
   disabledRef.current = props.disabled;
@@ -813,6 +828,29 @@ function useAutosavedTextDraft(props: {
     disabledRef.current === true ||
     props.switchUnresyncedRef.current === true ||
     staleBaseline.current;
+
+  useEffect(() => {
+    if (
+      !sharedSnapshot.initialized ||
+      sharedRevision.current === sharedSnapshot.revision
+    ) {
+      return;
+    }
+    sharedRevision.current = sharedSnapshot.revision;
+    const bodyChanged = latestDraft.current !== sharedSnapshot.body;
+    baseContentHash.current = sharedSnapshot.contentHash;
+    latestDraft.current = sharedSnapshot.body;
+    setSaveState(sharedSnapshot.saveState);
+    if (
+      sharedSnapshot.source === null ||
+      sharedSnapshot.source === localSource.current ||
+      !bodyChanged
+    ) {
+      return;
+    }
+    valueRevision.current += 1;
+    setDraft(sharedSnapshot.body);
+  }, [sharedSnapshot]);
 
   function captureLatestConflictDraft(text = latestDraft.current) {
     if (capturedConflictDraft.current === text) return;
@@ -842,6 +880,16 @@ function useAutosavedTextDraft(props: {
     snapshot: { body: string; contentHash: string | null; requestId: number },
     state: SaveState,
   ) {
+    if (
+      !props.localBuffer.acceptRead(
+        snapshot.body,
+        snapshot.contentHash,
+        localSource.current,
+        state === "error",
+      )
+    ) {
+      return;
+    }
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -952,6 +1000,13 @@ function useAutosavedTextDraft(props: {
     if (unsavedDraft.current) {
       unsavedDraft.current = false;
       captureOrphanedDraft(props.workspaceId, props.path, latestDraft.current);
+      if (refusalLifted) {
+        props.localBuffer.reset(
+          props.body,
+          props.contentHash,
+          localSource.current,
+        );
+      }
       valueRevision.current += 1;
       setSaveState("saved");
       setDraft(props.body);
@@ -981,34 +1036,48 @@ function useAutosavedTextDraft(props: {
     }
     const enteredEditGeneration = editGeneration.current;
     const run = async (): Promise<void> => {
-      if (enteredEditGeneration <= blockedEditGeneration.current) return;
+      if (
+        enteredEditGeneration <= blockedEditGeneration.current &&
+        !props.localBuffer.getSnapshot().dirty
+      ) {
+        return;
+      }
       if (writesBlocked()) {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
         return;
       }
-      const expectedContentHash = baseContentHash.current;
-      if (expectedContentHash === null) {
+      if (options.textSnapshot !== undefined) {
+        props.localBuffer.publishDraft(options.textSnapshot, localSource.current);
+      }
+      if (props.localBuffer.getSnapshot().contentHash === null) {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
         return;
       }
       const issuedBaseRequestId = baseContentRequestId.current;
-      // Read after older writes finish. A queued save therefore carries the
-      // latest draft, not the text that was current when it joined the queue.
-      const text = options.textSnapshot ?? latestDraft.current;
-      latestDraft.current = text;
       unsavedDraft.current = false;
       if (!unmounted.current) setSaveState("saving");
       try {
-        const result = await bridge().writeWorkspaceText({
-          workspaceId: props.workspaceId,
-          relativePath: props.path,
-          text,
-          expectedContentHash,
-        });
+        const result = await props.localBuffer.write(
+          localSource.current,
+          (text, expectedContentHash) =>
+            bridge().writeWorkspaceText({
+              workspaceId: props.workspaceId,
+              relativePath: props.path,
+              text,
+              expectedContentHash,
+            }),
+        );
+        const text = result.body;
+        latestDraft.current = props.localBuffer.getSnapshot().body;
+        if (result.status === "skipped") {
+          baseContentHash.current = result.contentHash;
+          if (!unmounted.current) setSaveState("saved");
+          return;
+        }
         if (result.status === "conflict") {
           if (saveTimer.current) {
             clearTimeout(saveTimer.current);
@@ -1083,6 +1152,7 @@ function useAutosavedTextDraft(props: {
   function scheduleSave(next: string) {
     setDraft(next);
     latestDraft.current = next;
+    props.localBuffer.publishDraft(next, localSource.current);
     editGeneration.current += 1;
     // Deliberately NOT gated on writesBlocked(): swallowing the keystroke here
     // would lose it silently when the reread lands and the sync effect
@@ -1144,13 +1214,18 @@ function useAutosavedTextDraft(props: {
         });
       }
       flushBarrier.current = true;
+      const localWritePending = writersLive.current > 0;
       const flush = (async () => {
         try {
           await writeChain.current;
+          if (!localWritePending) await props.localBuffer.settled();
           if (flushConflict.current) {
             throw new Error("The file changed on disk while dohc saved it.");
           }
-          while (unsavedDraft.current && !writesBlocked()) {
+          while (
+            (unsavedDraft.current || props.localBuffer.getSnapshot().dirty) &&
+            !writesBlocked()
+          ) {
             if (saveTimer.current) {
               clearTimeout(saveTimer.current);
               saveTimer.current = null;
@@ -1303,6 +1378,7 @@ function MarkdownView(props: {
   // `readOnlyRef`, because an engine refusal can arrive in the commit that
   // unmounts this component, with no child render to fold into `readOnly`.
   writesRefusedRef: { current: boolean };
+  localBuffer: SharedLocalDocument;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.truncated || props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
@@ -1315,6 +1391,13 @@ function MarkdownView(props: {
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
+  const localSource = useRef<object>({});
+  const sharedSnapshot = useSyncExternalStore(
+    props.localBuffer.subscribe,
+    props.localBuffer.getSnapshot,
+    props.localBuffer.getSnapshot,
+  );
+  const sharedRevision = useRef(sharedSnapshot.revision);
 
   const engine = props.engine;
   // #533. The engine open runs ON the capture chain, so a document opened
@@ -1436,6 +1519,32 @@ function MarkdownView(props: {
   const flushBarrier = useRef(false);
   const flushInFlight = useRef<Promise<void> | null>(null);
 
+  useEffect(() => {
+    if (
+      engine.available ||
+      !sharedSnapshot.initialized ||
+      sharedRevision.current === sharedSnapshot.revision
+    ) {
+      return;
+    }
+    sharedRevision.current = sharedSnapshot.revision;
+    const bodyChanged = latestDraft.current !== sharedSnapshot.body;
+    baseContentHash.current = sharedSnapshot.contentHash;
+    latestDraft.current = sharedSnapshot.body;
+    setSaveState(sharedSnapshot.saveState);
+    if (
+      sharedSnapshot.source === null ||
+      sharedSnapshot.source === localSource.current ||
+      !bodyChanged
+    ) {
+      return;
+    }
+    draftRevision.current += 1;
+    setDraft(sharedSnapshot.body);
+    setSavedBody(sharedSnapshot.body);
+    if (mode === "wysiwyg") setWysiwygResyncEpoch((epoch) => epoch + 1);
+  }, [engine.available, mode, sharedSnapshot]);
+
   function captureLatestConflictDraft(text?: string) {
     const capturedText =
       text ??
@@ -1467,6 +1576,16 @@ function MarkdownView(props: {
     snapshot: { body: string; contentHash: string | null; requestId: number },
     state: SaveState,
   ) {
+    if (
+      !props.localBuffer.acceptRead(
+        snapshot.body,
+        snapshot.contentHash,
+        localSource.current,
+        state === "error",
+      )
+    ) {
+      return;
+    }
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -1941,6 +2060,11 @@ function MarkdownView(props: {
         );
         setSaveState("saved");
       }
+      props.localBuffer.reset(
+        props.body,
+        props.contentHash,
+        localSource.current,
+      );
       draftRevision.current += 1;
       setDraft(props.body);
       setSavedBody(props.body);
@@ -2171,7 +2295,12 @@ function MarkdownView(props: {
     }
     const enteredRevision = draftRevision.current;
     const run = async (): Promise<void> => {
-      if (enteredRevision <= blockedDraftRevision.current) return;
+      if (
+        enteredRevision <= blockedDraftRevision.current &&
+        !props.localBuffer.getSnapshot().dirty
+      ) {
+        return;
+      }
       // The REFS, not captured values. The 800ms autosave timer holds the
       // closure from the render that armed it, where readOnly was false — so
       // a document that turned read-only after the keystroke still wrote
@@ -2195,8 +2324,9 @@ function MarkdownView(props: {
         if (!unmounted.current) setSaveState("error");
         return;
       }
-      const expectedContentHash = baseContentHash.current;
-      if (expectedContentHash === null) {
+      const requestedText = options.textSnapshot ?? serializeDraftRef.current();
+      props.localBuffer.publishDraft(requestedText, localSource.current);
+      if (props.localBuffer.getSnapshot().contentHash === null) {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
@@ -2207,17 +2337,26 @@ function MarkdownView(props: {
       // newest text, so an older queued write can never land over a newer one
       // (#579 review, r4).
       const issuedRevision = draftRevision.current;
-      const text = options.textSnapshot ?? serializeDraftRef.current();
-      latestDraft.current = text;
       unsavedDraft.current = false;
       if (!unmounted.current) setSaveState("saving");
       try {
-        const result = await bridge().writeWorkspaceText({
-          workspaceId: props.workspaceId,
-          relativePath: props.path,
-          text,
-          expectedContentHash,
-        });
+        const result = await props.localBuffer.write(
+          localSource.current,
+          (text, expectedContentHash) =>
+            bridge().writeWorkspaceText({
+              workspaceId: props.workspaceId,
+              relativePath: props.path,
+              text,
+              expectedContentHash,
+            }),
+        );
+        const text = result.body;
+        latestDraft.current = props.localBuffer.getSnapshot().body;
+        if (result.status === "skipped") {
+          baseContentHash.current = result.contentHash;
+          if (!unmounted.current) setSaveState("saved");
+          return;
+        }
         if (result.status === "conflict") {
           if (saveTimer.current) {
             clearTimeout(saveTimer.current);
@@ -2316,6 +2455,9 @@ function MarkdownView(props: {
 
   function scheduleSave() {
     if (readOnly) return;
+    const serialized = serializeDraftRef.current();
+    latestDraft.current = serialized;
+    props.localBuffer.publishDraft(serialized, localSource.current);
     draftRevision.current += 1;
     unsavedDraft.current = true;
     setSaveState("saving");
@@ -2465,16 +2607,18 @@ function MarkdownView(props: {
       // Arming and reading the tail are one synchronous step, so no writer
       // can slip between them.
       flushBarrier.current = true;
+      const localWritePending = writersLive.current > 0;
       const flush = (async () => {
         try {
           // Everything already enqueued — in flight OR parked behind it — runs
           // to completion ahead of this point, and nothing can join behind.
           await writeChain.current;
+          if (!localWritePending) await props.localBuffer.settled();
           if (flushConflict.current) {
             throw new Error("The file changed on disk while dohc saved it.");
           }
           while (
-            unsavedDraft.current &&
+            (unsavedDraft.current || props.localBuffer.getSnapshot().dirty) &&
             !writesBlocked() &&
             !openingRef.current
           ) {
@@ -2952,6 +3096,7 @@ function CsvView({
   switchUnresyncedRef,
   onSaveStateChange,
   registerDraftFlush,
+  localBuffer,
 }: {
   reopenKey?: number;
   switchReadPending: boolean;
@@ -2967,6 +3112,7 @@ function CsvView({
   truncated?: boolean;
   onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
+  localBuffer: SharedLocalDocument;
 }) {
   const [raw, setRaw] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -2985,6 +3131,7 @@ function CsvView({
     switchUnresyncedRef,
     onSaveStateChange,
     registerDraftFlush,
+    localBuffer,
   });
   const delimiter = delimiterForPath(path);
   const rows = useMemo(
@@ -3436,6 +3583,7 @@ function TextEditorView({
   registerDraftFlush,
   pendingUndo,
   onPendingUndoConsumed,
+  localBuffer,
 }: {
   reopenKey?: number;
   switchReadPending: boolean;
@@ -3454,6 +3602,7 @@ function TextEditorView({
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   pendingUndo?: PendingTextUndo;
   onPendingUndoConsumed?: (token: number) => void;
+  localBuffer: SharedLocalDocument;
   // Search-result landing for read-only text views (Phase E5.0): scroll the
   // pre so the matched line sits in the upper third.
   scrollLine?: number;
@@ -3472,6 +3621,7 @@ function TextEditorView({
     switchUnresyncedRef,
     onSaveStateChange,
     registerDraftFlush,
+    localBuffer,
   });
   return (
     <div
@@ -3689,6 +3839,14 @@ export function FileInspector(props: {
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
+  const localBuffer = useMemo(
+    () =>
+      getSharedLocalDocument(
+        localDocumentKey(props.workspaceId, props.path, props.engineVersionKey),
+      ),
+    [props.workspaceId, props.path, props.engineVersionKey],
+  );
+  useEffect(() => localBuffer.retain(), [localBuffer]);
   // Whether an unsaved draft is pending. Only MarkdownView knows (it owns the
   // draft), so it reports every render and this holds the answer BEFORE the
   // refusal arrives — which is the only way to have it, since the refusal
@@ -3710,6 +3868,20 @@ export function FileInspector(props: {
     isText,
     props.refreshKey ?? 0,
   );
+  const switchReadPending = useRef(false);
+  useEffect(() => {
+    // A version switch keeps the previous read visible until the replacement
+    // answers. Do not seed the new version's shared buffer with that stale
+    // body; the successful replacement read initializes it below instead.
+    if (
+      text === null ||
+      loadedPath !== props.path ||
+      switchReadPending.current
+    ) {
+      return;
+    }
+    localBuffer.initialize(text, contentHash);
+  }, [contentHash, loadedPath, localBuffer, props.path, readSeq, text]);
   // THE ENGINE OPEN LIVES HERE, above every branch that swaps the body out.
   // It used to live in MarkdownView, which the loading/error branch below
   // unmounts — and a version switch that removes the file bumps refreshKey and
@@ -3752,7 +3924,6 @@ export function FileInspector(props: {
   // (#579 adversarial review, F1). True from the switch until a reread
   // SUCCEEDS. A failure leaves the selected version unverified and writes
   // refused until a later read succeeds.
-  const switchReadPending = useRef(false);
   // True from a reopenKey change until the child that owns this surface's
   // resync has actually applied it — not merely until the reread lands.
   // The parent only ever arms this. The resyncing child clears it, so writes
@@ -3932,6 +4103,7 @@ export function FileInspector(props: {
             engine={engine}
             onRetryEngineOpen={retryEngineOpen}
             writesRefusedRef={writesRefusedRef}
+            localBuffer={localBuffer}
           />
         </div>
       );
@@ -3961,6 +4133,7 @@ export function FileInspector(props: {
             switchUnresyncedRef={switchUnresyncedRef}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
+            localBuffer={localBuffer}
           />
         </div>
       );
@@ -3999,6 +4172,7 @@ export function FileInspector(props: {
             }
             pendingUndo={pendingTextUndo}
             onPendingUndoConsumed={props.onPendingUndoConsumed}
+            localBuffer={localBuffer}
           />
         </div>
       );

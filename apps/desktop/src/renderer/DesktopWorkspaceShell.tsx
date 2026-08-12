@@ -1668,6 +1668,16 @@ export function DesktopWorkspaceShell(props: {
     path: string;
     target: HeadingTarget;
   } | null>(null);
+  const fileOpenRequests = useRef({
+    workspaceId,
+    sequenceByGroup: new Map<string, number>(),
+  });
+  if (fileOpenRequests.current.workspaceId !== workspaceId) {
+    fileOpenRequests.current = {
+      workspaceId,
+      sequenceByGroup: new Map<string, number>(),
+    };
+  }
   const scrollNonce = useRef(0);
   const consumeSearchScrollTarget = useCallback((nonce: number) => {
     setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
@@ -2620,8 +2630,22 @@ export function DesktopWorkspaceShell(props: {
   // the mark fires once, OUTSIDE the functional updater — updaters must stay
   // side-effect-free (StrictMode/concurrent replays would re-fire them).
   const openFile = useCallback(
-    (path: string, target?: HeadingTarget) => {
+    (
+      path: string,
+      target?: HeadingTarget,
+      scrollTarget?: Omit<ScrollTarget, "path">,
+    ) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
+      const requestSequence =
+        (fileOpenRequests.current.sequenceByGroup.get(targetGroupId) ?? 0) + 1;
+      fileOpenRequests.current.sequenceByGroup.set(
+        targetGroupId,
+        requestSequence,
+      );
+      const isCurrentRequest = () =>
+        fileOpenRequests.current.workspaceId === workspaceId &&
+        fileOpenRequests.current.sequenceByGroup.get(targetGroupId) ===
+          requestSequence;
       // A heading jump is a destination change mutateWb's tab check cannot
       // see: the file may already BE the active tab, and the user still went
       // somewhere new inside it.
@@ -2633,8 +2657,12 @@ export function DesktopWorkspaceShell(props: {
       setHeadingTarget(
         pendingHeading ? { ...pendingHeading, groupId: targetGroupId } : null,
       );
+      setSearchScrollTarget(
+        scrollTarget ? { ...scrollTarget, path, groupId: targetGroupId } : null,
+      );
       if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
       const commitOpen = () => {
+        if (!isCurrentRequest()) return;
         const current = wbRef.current;
         if (!current.editorGroups.some((group) => group.id === targetGroupId)) return;
         if (openTab(current, path, targetGroupId) !== current) {
@@ -2668,14 +2696,15 @@ export function DesktopWorkspaceShell(props: {
         (groupId, tab) => groupId !== targetGroupId && tab.path === path,
       )
         .then(commitOpen)
-        .catch((error) =>
+        .catch((error) => {
+          if (!isCurrentRequest()) return;
           reportShellError(
             "dohc could not save this file. The file did not open in this editor group.",
             error,
-          ),
-        );
+          );
+        });
     },
-    [flushStableDrafts, mutateWb, reportShellError],
+    [flushStableDrafts, mutateWb, reportShellError, workspaceId],
   );
   const openPathWithHeading = useCallback(
     (path: string, target?: string | HeadingTarget) => {
@@ -2942,13 +2971,10 @@ export function DesktopWorkspaceShell(props: {
       // below cannot see it, because the result may be in the file the user is
       // already reading.
       invalidateDmNavigation(dmNavigationRequest);
-      setSearchScrollTarget({
-        path,
+      openFile(path, undefined, {
         line,
         nonce: ++scrollNonce.current,
-        groupId: wbRef.current.activeEditorGroup,
       });
-      openFile(path);
     },
     [openChatThreadInPanel, openFile],
   );

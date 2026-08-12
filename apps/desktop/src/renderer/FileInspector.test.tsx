@@ -47,6 +47,9 @@ import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import * as orphanedDraftsModule from "./orphanedDrafts";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
+import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
+
+afterEach(() => resetSharedLocalDocumentsForTests());
 
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
@@ -1205,6 +1208,55 @@ describe("markdown editor unmount flush", () => {
       | { text: string }
       | undefined;
     expect(lastWrite?.text).not.toBe("");
+  });
+
+  it("shares a local draft and save baseline across duplicate text inspectors", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "before",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const flushes: DraftFlush[] = [];
+    const register = (flush: DraftFlush | null) => {
+      if (flush) flushes.push(flush);
+    };
+    const user = userEvent.setup();
+    render(
+      <>
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/shared.txt"
+          registerDraftFlush={register}
+        />
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/shared.txt"
+          registerDraftFlush={register}
+        />
+      </>,
+    );
+
+    const editors = await screen.findAllByTestId("view-text-editor");
+    const first = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    const second = editors[1]!.querySelector(".cm-content") as HTMLElement;
+    await user.click(first);
+    await user.keyboard("{End} shared");
+
+    await waitFor(() => expect(second.textContent).toContain("before shared"));
+    await act(async () => flushes[1]!());
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "notes/shared.txt",
+      text: "before shared",
+      expectedContentHash: TEST_CONTENT_HASH,
+    });
+    expect(
+      screen
+        .getAllByTestId("view-text-save-state")
+        .every((state) => state.dataset.state === "saved"),
+    ).toBe(true);
   });
 
   it("does not expose a retained same-path body or hash after switching workspaces", async () => {

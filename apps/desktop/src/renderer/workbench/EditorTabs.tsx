@@ -109,6 +109,9 @@ const Tab = memo(function Tab(props: {
       }}
       onPointerDown={(event) => {
         if (event.button !== 0) return;
+        // Finish the previous pointer's drag before assigning this pointer's
+        // state. Otherwise its stale cancel closure clears the new drag.
+        cancelDrag.current();
         // Activate on PRESS (VS Code behavior) — click can't be relied on
         // after a drag: the live reorder re-inserts the DOM node, which
         // cancels both pointer capture and click synthesis in Chromium.
@@ -191,7 +194,6 @@ const Tab = memo(function Tab(props: {
           if (drag.current?.pointerId !== pointerEvent.pointerId) return;
           finish(null);
         };
-        cancelDrag.current();
         cancelDrag.current = () => finish(null);
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp);

@@ -12,7 +12,6 @@ import {
   createEditorGroupRight,
   defaultWorkbenchState,
   DEFAULT_EDITOR_GROUP_ID,
-  findTab,
   CHATS_DEFAULT_WIDTH,
   historyDiffTabPath,
   CHATS_MAX_WIDTH,
@@ -79,16 +78,6 @@ describe("tabs", () => {
     ]);
     expect(activeGroup(state).id).toBe(DEFAULT_EDITOR_GROUP_ID);
     expect(activeTabPath(state)).toBeNull();
-  });
-
-  it("finds a tab with its group and ordered index", () => {
-    const state = withTabs("a.md", "b.md");
-    expect(findTab(state, "b.md")).toEqual({
-      group: state.editorGroups[0],
-      tab: state.editorGroups[0].tabs[1],
-      index: 1,
-    });
-    expect(findTab(state, "missing.md")).toBeNull();
   });
 
   it("openTab appends and activates; re-opening never duplicates", () => {

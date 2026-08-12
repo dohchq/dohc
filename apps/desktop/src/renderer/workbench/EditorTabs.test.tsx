@@ -225,6 +225,55 @@ describe("EditorTabs pointer drag", () => {
     expect(onMoveToGroup).toHaveBeenCalledOnce();
     expect(onMoveToGroup).toHaveBeenCalledWith("a.md", "right", 0);
   });
+
+  it("starts a new drag after cancelling an unfinished pointer", () => {
+    const onMove = vi.fn();
+    render(
+      <div data-editor-group-id="left">
+        <EditorTabs
+          groupId="left"
+          groupNumber={1}
+          tabs={tabs}
+          activeTab="a.md"
+          activeTabDirty={false}
+          recoveryPaths={new Set<string>()}
+          onActivate={noop}
+          onClose={noop}
+          onContextMenu={noop}
+          onMove={onMove}
+          onMoveToGroup={noop}
+          onCreateGroupRight={noop}
+        />
+      </div>,
+    );
+    const first = screen.getByTestId("tab-a.md");
+    const second = screen.getByTestId("tab-b.md");
+    Object.defineProperty(second, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 100, width: 100 }),
+    });
+    vi.mocked(document.elementFromPoint).mockReturnValue(first);
+
+    fireEvent.pointerDown(first, { button: 0, pointerId: 4, clientX: 10 });
+    fireEvent.pointerMove(first, {
+      pointerId: 4,
+      buttons: 1,
+      clientX: 160,
+      clientY: 10,
+    });
+    onMove.mockClear();
+
+    fireEvent.pointerDown(first, { button: 0, pointerId: 5, clientX: 10 });
+    fireEvent.pointerMove(first, {
+      pointerId: 5,
+      buttons: 1,
+      clientX: 160,
+      clientY: 10,
+    });
+    fireEvent.pointerUp(first, { pointerId: 5, clientX: 160, clientY: 10 });
+
+    expect(onMove).toHaveBeenCalledWith("a.md", 2);
+  });
 });
 
 describe("EditorTabs overlay scrollbar", () => {

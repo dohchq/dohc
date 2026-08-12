@@ -89,6 +89,7 @@ import {
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
 import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { RecoveryList } from "./RecoveryList";
 
 // The close dialog's list, standing on its own: the guard subscribes and hands
@@ -629,6 +630,7 @@ async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
 afterEach(async () => {
   cleanup();
   await disposeEngineDocLeasesForTests();
+  resetSharedLocalDocumentsForTests();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   // The set-aside drafts (#567) live in a module store on purpose; tests
@@ -937,6 +939,113 @@ describe("editor groups", () => {
     expect(within(left).getByTestId("tab-a.md")).toBeTruthy();
     expect(await within(right).findByTestId("tab-a.md")).toBeTruthy();
     expect(right.dataset.active).toBe("true");
+  });
+
+  it("keeps the newest open when two duplicate-file flushes resolve out of order", async () => {
+    const aSave = deferred<{ status: "written"; contentHash: string }>();
+    const bSave = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["race-a.md"],
+            activeTab: "race-a.md",
+            size: 1 / 3,
+          },
+          {
+            id: "middle",
+            tabs: ["race-b.md"],
+            activeTab: "race-b.md",
+            size: 1 / 3,
+          },
+          {
+            id: "right",
+            tabs: ["race-c.md"],
+            activeTab: "race-c.md",
+            size: 1 / 3,
+          },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.md", "race-b.md", "race-c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    // The rich editor's canonical serialization ends a paragraph with a
+    // blank line. Keep this concurrency test's untouched third document in
+    // that form so a delayed editor normalization is not mistaken for a user
+    // edit while the two intended drafts race.
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "# Doc\n\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn((payload: WriteWorkspaceTextPayload) =>
+      payload.relativePath === "race-a.md" ? aSave.promise : bSave.promise,
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(3),
+    );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const middle = screen.getByRole("region", { name: "Editor group 2" });
+    const right = screen.getByRole("region", { name: "Editor group 3" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Left draft");
+    await user.click(within(middle).getByTestId("markdown-edit-toggle"));
+    await user.type(within(middle).getByTestId("markdown-editor"), "Middle draft");
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("tab-dirty")
+          .map((dot) => dot.closest('[role="tab"]')?.getAttribute("data-testid")),
+      ).toEqual(["tab-race-a.md", "tab-race-b.md"]),
+    );
+
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("race-a.md"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText.mock.calls.at(-1)?.[0].relativePath).toBe(
+        "race-a.md",
+      ),
+    );
+    await user.click(fileTreeRow("race-b.md"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    expect(bridge.writeWorkspaceText.mock.calls[1]?.[0].relativePath).toBe(
+      "race-b.md",
+    );
+
+    await act(async () => {
+      bSave.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await bSave.promise;
+    });
+    await waitFor(() =>
+      expect(within(right).getByTestId("tab-race-b.md").dataset.active).toBe(
+        "true",
+      ),
+    );
+
+    await act(async () => {
+      aSave.resolve({ status: "written", contentHash: "a".repeat(64) });
+      await aSave.promise;
+    });
+    await waitFor(() =>
+      expect(within(right).getByTestId("tab-race-b.md").dataset.active).toBe(
+        "true",
+      ),
+    );
+    expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
   });
 
   it("moves a tab into an empty editor group by pointer drag", async () => {

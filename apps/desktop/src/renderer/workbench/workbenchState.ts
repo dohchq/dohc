@@ -249,17 +249,6 @@ export function allTabs(state: WorkbenchState): WorkbenchTab[] {
   return state.editorGroups.flatMap((group) => group.tabs);
 }
 
-export function findTab(
-  state: WorkbenchState,
-  path: string,
-): { group: EditorGroup; tab: WorkbenchTab; index: number } | null {
-  for (const group of state.editorGroups) {
-    const index = group.tabs.findIndex((tab) => tab.path === path);
-    if (index !== -1) return { group, tab: group.tabs[index], index };
-  }
-  return null;
-}
-
 function findTabInGroup(
   state: WorkbenchState,
   groupId: string,
@@ -301,19 +290,15 @@ function normalizeEditorGroupSizes(groups: EditorGroup[]): EditorGroup[] {
 // Make room for one tab instance without unmounting any active editor. Tab
 // identity matters here: the same path can be active in several groups.
 function evictOldestInactiveTab(state: WorkbenchState): WorkbenchState | null {
-  const activeTabs = new Set(
-    state.editorGroups.flatMap((group) =>
-      group.tabs.filter((tab) => tab.path === group.activeTab),
-    ),
-  );
-  const evicted = allTabs(state).find((tab) => !activeTabs.has(tab));
-  if (!evicted) return null;
-  const owner = state.editorGroups.find((group) => group.tabs.includes(evicted));
-  if (!owner) return null;
-  return replaceGroup(state, owner.id, (group) => ({
-    ...group,
-    tabs: group.tabs.filter((tab) => tab !== evicted),
-  }));
+  for (const group of state.editorGroups) {
+    const evicted = group.tabs.find((tab) => tab.path !== group.activeTab);
+    if (!evicted) continue;
+    return replaceGroup(state, group.id, (current) => ({
+      ...current,
+      tabs: current.tabs.filter((tab) => tab !== evicted),
+    }));
+  }
+  return null;
 }
 
 export function focusEditorGroup(

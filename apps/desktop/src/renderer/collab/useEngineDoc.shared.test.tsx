@@ -111,15 +111,49 @@ function Pair(props: {
   showFirst?: boolean;
   reopenKey?: number;
   retryKey?: number;
+  firstRetryKey?: number;
+  secondRetryKey?: number;
 }) {
   const reopenKey = props.reopenKey ?? 0;
   const retryKey = props.retryKey ?? 0;
   return (
     <>
       {props.showFirst === false ? null : (
-        <Consumer id="first" reopenKey={reopenKey} retryKey={retryKey} />
+        <Consumer
+          id="first"
+          reopenKey={reopenKey}
+          retryKey={props.firstRetryKey ?? retryKey}
+        />
       )}
-      <Consumer id="second" reopenKey={reopenKey} retryKey={retryKey} />
+      <Consumer
+        id="second"
+        reopenKey={reopenKey}
+        retryKey={props.secondRetryKey ?? retryKey}
+      />
+    </>
+  );
+}
+
+function SplitAfterRetry(props: {
+  showSecond: boolean;
+  firstRetryKey?: number;
+  secondRetryKey?: number;
+  secondReopenKey?: number;
+}) {
+  return (
+    <>
+      <Consumer
+        id="first"
+        reopenKey={0}
+        retryKey={props.firstRetryKey ?? 1}
+      />
+      {props.showSecond ? (
+        <Consumer
+          id="second"
+          reopenKey={props.secondReopenKey ?? 0}
+          retryKey={props.secondRetryKey ?? 0}
+        />
+      ) : null}
     </>
   );
 }
@@ -199,6 +233,123 @@ it("shares one document lease until the final consumer unmounts", async () => {
   view.unmount();
   await waitFor(() =>
     expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(1),
+  );
+});
+
+it("attaches a newly split consumer to the lease retained after retry", async () => {
+  const view = render(
+    <SplitAfterRetry showSecond={false} firstRetryKey={0} />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available-first").textContent).toBe("true"),
+  );
+  const initialDoc = renderedDocs.get("first");
+
+  view.rerender(
+    <SplitAfterRetry showSecond={false} firstRetryKey={1} />,
+  );
+  await waitFor(() => {
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("available-first").textContent).toBe("true");
+    expect(renderedDocs.get("first")).not.toBe(initialDoc);
+  });
+  const retriedDoc = renderedDocs.get("first");
+  expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(1);
+
+  view.rerender(<SplitAfterRetry showSecond firstRetryKey={1} />);
+  await waitForPair();
+
+  expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(2);
+  expect(renderedDocs.get("second")).toBe(retriedDoc);
+  expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(1);
+
+  view.unmount();
+  await waitFor(() =>
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(2),
+  );
+});
+
+it("reopens one shared lease when only one mounted consumer retries", async () => {
+  const view = render(<Pair />);
+  await waitForPair();
+  const initialDoc = renderedDocs.get("first");
+
+  view.rerender(<Pair firstRetryKey={1} />);
+  await waitFor(() => {
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(2);
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(1);
+    expect(renderedDocs.get("first")).not.toBe(initialDoc);
+    expect(renderedDocs.get("second")).toBe(renderedDocs.get("first"));
+  });
+
+  const closeOrder =
+    harness.api.closeEngineYDocSession.mock.invocationCallOrder[0];
+  const secondOpenOrder =
+    harness.api.openEngineYDocSession.mock.invocationCallOrder[1];
+  expect(closeOrder!).toBeLessThan(secondOpenOrder!);
+
+  view.unmount();
+  await waitFor(() =>
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(2),
+  );
+});
+
+it("treats a later pane's first retry as its own request", async () => {
+  const view = render(
+    <SplitAfterRetry showSecond={false} firstRetryKey={0} />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available-first").textContent).toBe("true"),
+  );
+
+  view.rerender(
+    <SplitAfterRetry showSecond={false} firstRetryKey={1} />,
+  );
+  await waitFor(() => {
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(2);
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(1);
+  });
+
+  view.rerender(
+    <SplitAfterRetry showSecond firstRetryKey={1} secondRetryKey={0} />,
+  );
+  await waitForPair();
+  const firstRetriedDoc = renderedDocs.get("first");
+  expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(2);
+  expect(renderedDocs.get("second")).toBe(firstRetriedDoc);
+
+  view.rerender(
+    <SplitAfterRetry showSecond firstRetryKey={1} secondRetryKey={1} />,
+  );
+  await waitFor(() => {
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(3);
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(2);
+    expect(renderedDocs.get("first")).not.toBe(firstRetriedDoc);
+    expect(renderedDocs.get("second")).toBe(renderedDocs.get("first"));
+  });
+
+  view.unmount();
+  await waitFor(() =>
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(3),
+  );
+});
+
+it("does not reuse a retained lease from another active version", async () => {
+  const view = render(<SplitAfterRetry showSecond={false} />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available-first").textContent).toBe("true"),
+  );
+  const firstVersionDoc = renderedDocs.get("first");
+
+  view.rerender(<SplitAfterRetry showSecond secondReopenKey={1} />);
+  await waitForPair();
+
+  expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(2);
+  expect(renderedDocs.get("second")).not.toBe(firstVersionDoc);
+
+  view.unmount();
+  await waitFor(() =>
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(2),
   );
 });
 
