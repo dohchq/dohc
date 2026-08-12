@@ -153,30 +153,31 @@ async fn pathless_settled_scene_is_not_reported_as_unsettled() {
 
     {
         let mut store = EngineStore::open(&database, 1).expect("store");
-        let mut versions = VersionedTextStore::new(&mut store);
-        versions
-            .ensure_main_version(WS, "main", 1, &NoFaults)
-            .expect("main");
-        versions
-            .write_text(
-                &WriteText {
-                    workspace_id: WS.to_owned(),
-                    version_id: "main".to_owned(),
-                    object_id: OBJECT.to_owned(),
-                    path: PATH.to_owned(),
-                    text: projection,
-                    moment_id: "pathless-scene-head".to_owned(),
-                    metadata_origin: "test".to_owned(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: 2,
-                    request_id: None,
-                },
-                &NoFaults,
-            )
-            .expect("scene head");
-        drop(versions);
+        {
+            let mut versions = VersionedTextStore::new(&mut store);
+            versions
+                .ensure_main_version(WS, "main", 1, &NoFaults)
+                .expect("main");
+            versions
+                .write_text(
+                    &WriteText {
+                        workspace_id: WS.to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: OBJECT.to_owned(),
+                        path: PATH.to_owned(),
+                        text: projection,
+                        moment_id: "pathless-scene-head".to_owned(),
+                        metadata_origin: "test".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .expect("scene head");
+        }
         let key = dohc_engine_collab::DocKey::new(WS, "main", OBJECT).expect("doc key");
         dohc_engine_collab::claim_base(
             &mut store,
