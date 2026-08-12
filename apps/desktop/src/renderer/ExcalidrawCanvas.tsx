@@ -100,6 +100,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
 
   useLayoutEffect(() => {
     mountedRef.current = true;
+    if (apiRef.current) setReadyApi(apiRef.current);
     return () => {
       mountedRef.current = false;
     };

@@ -121,10 +121,49 @@ function trackedPresenceTransport() {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   excalidraw.updateScene.mockReset();
   excalidraw.addFiles.mockReset();
   excalidraw.props = null;
   excalidraw.resetApiDelivery();
+});
+
+it("adopts an API whose ready microtask drains before commit", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  insertElementRevision(doc, rectangle(1, 10, 20));
+  const presence = trackedPresenceTransport();
+  const hydrateAssets = vi.fn(async () => [
+    { id: "image", dataURL: "data:image/png;base64,QQ==" },
+  ] as never);
+  vi.stubGlobal("queueMicrotask", (callback: VoidFunction) => callback());
+
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+      hydrateAssets={hydrateAssets}
+      presence={{
+        topic: "scene-1",
+        clientId: "client-1",
+        displayName: "Alice",
+        transport: presence.transport,
+      }}
+    />,
+  );
+
+  await waitFor(() => {
+    expect(excalidraw.updateScene).toHaveBeenCalledWith(
+      expect.objectContaining({
+        elements: [expect.objectContaining({ id: "shape", x: 20 })],
+      }),
+    );
+    expect(hydrateAssets).toHaveBeenCalledOnce();
+    expect(excalidraw.addFiles).toHaveBeenCalledOnce();
+    expect(excalidraw.props?.isCollaborating).toBe(true);
+    expect(presence.activePolls()).toBe(1);
+  });
 });
 
 it("binds the initial scene after a production-scheduled mount", async () => {
