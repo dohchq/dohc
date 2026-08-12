@@ -7582,7 +7582,6 @@ impl EngineService {
         let actor = open.actor.clone();
         let session_id = params.session_id.clone();
         let session_key = session.key.clone();
-        let session_path = session.path.clone();
         // The TAKE happens synchronously BEFORE the spawn: if this future is
         // dropped right after spawning, `session_ops` releases while the task
         // has not yet run — a concurrent recordUpdate/settle must NOT be able
@@ -7592,7 +7591,6 @@ impl EngineService {
             let close_result = actor
                 .ydoc_close_session(
                     session_key,
-                    session_path,
                     now,
                     Arc::new(NoFaults),
                     CancellationToken::new(),
@@ -8367,7 +8365,6 @@ async fn close_ydoc_session_for_version_fence(
         .actor
         .ydoc_close_session(
             session.key,
-            session.path,
             now,
             Arc::new(NoFaults),
             CancellationToken::new(),
