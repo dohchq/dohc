@@ -1366,24 +1366,8 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
     })
 }
 
-fn conflict_resolve_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>, SyncError> {
+fn present_head_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>, SyncError> {
     let mut keys = Vec::with_capacity(2);
-    if payload.current.present().is_none() {
-        keys.push(
-            DocKey::new(
-                &payload.workspace_id,
-                &payload.target_version_id,
-                derive_capture_object_id(
-                    &payload.workspace_id,
-                    &payload.target_version_id,
-                    &payload.paths[payload.current.path_ref()],
-                ),
-            )
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "conflict.resolve Y.Doc coordinates are invalid",
-            })?,
-        );
-    }
     for head in [&payload.current, &payload.result] {
         let Some(head) = head.present() else {
             continue;
@@ -1398,6 +1382,28 @@ fn conflict_resolve_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>
         })?;
         if !keys.iter().any(|candidate| candidate == &key) {
             keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+fn conflict_resolve_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>, SyncError> {
+    let mut keys = present_head_ydoc_keys(payload)?;
+    if payload.current.present().is_none() {
+        let current_path_key = DocKey::new(
+            &payload.workspace_id,
+            &payload.target_version_id,
+            derive_capture_object_id(
+                &payload.workspace_id,
+                &payload.target_version_id,
+                &payload.paths[payload.current.path_ref()],
+            ),
+        )
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "conflict.resolve Y.Doc coordinates are invalid",
+        })?;
+        if !keys.iter().any(|candidate| candidate == &current_path_key) {
+            keys.push(current_path_key);
         }
     }
     let result_path_key = DocKey::new(
@@ -1437,7 +1443,7 @@ fn unbound_receiver_lineages_match_reviewed_sides(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
 ) -> Result<bool, SyncError> {
-    for key in conflict_resolve_ydoc_keys(payload)? {
+    for key in present_head_ydoc_keys(payload)? {
         let Some(lineage) = crate::ydoc_apply::complete_ydoc_projection_in_tx(tx, &key)? else {
             continue;
         };
@@ -3999,6 +4005,41 @@ mod tests {
         let update = doc.plaintext_insert(0, "current text");
         dohc_engine_collab::record_local_update(&mut store, &key, &update, &NoFaults, 13)
             .expect("unclaimed receiver content");
+        let derived_key = DocKey::new(
+            "ws",
+            "main",
+            derive_capture_object_id("ws", "main", "doc.md"),
+        )
+        .expect("derived orphan key");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES (?1,?2,?3)",
+                    params![derived_key.workspace_id, derived_key.object_id, 14],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("orphan parent object");
+        dohc_engine_collab::ensure_marker(
+            &mut store,
+            &derived_key,
+            ContentKind::Plaintext,
+            dohc_engine_collab::Regime::LocalOnly,
+            &NoFaults,
+            14,
+        )
+        .expect("orphan marker");
+        let orphan = dohc_engine_collab::Ydoc::wire();
+        let orphan_update = orphan.plaintext_insert(0, "orphan edit");
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &derived_key,
+            &orphan_update,
+            &NoFaults,
+            15,
+        )
+        .expect("orphan receiver content");
 
         let mut payload = built.validated.payload;
         payload.lineage_transition = None;
@@ -4009,6 +4050,7 @@ mod tests {
             .expect("apply lineage-unbound parent");
 
         assert_eq!(projected_ydoc_text(&mut store, &key), "resolved text");
+        assert_eq!(projected_ydoc_text(&mut store, &derived_key), "orphan edit");
     }
 
     fn projected_ydoc_text(store: &mut EngineStore, key: &DocKey) -> String {
