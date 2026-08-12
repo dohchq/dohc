@@ -4,7 +4,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
-import { useEngineDoc } from "./useEngineDoc";
+import {
+  disposeEngineDocLeasesForTests,
+  useEngineDoc,
+} from "./useEngineDoc";
 
 // `useEngineDoc` backs every FileInspector. `@dohc/ydoc-projection`
 // statically pulls in the full Tiptap stack and builds its schema at module
@@ -38,8 +41,6 @@ function armProjectionGate(): () => void {
   projectionGate = { promise, release };
   return release;
 }
-
-afterEach(cleanup);
 
 type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 
@@ -123,7 +124,9 @@ beforeEach(() => {
   resetOrphanedDrafts();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  cleanup();
+  await disposeEngineDocLeasesForTests();
   vi.unstubAllGlobals();
   resetOrphanedDrafts();
   projectionGate = null;

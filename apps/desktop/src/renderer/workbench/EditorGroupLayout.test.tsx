@@ -36,6 +36,17 @@ describe("EditorGroupLayout", () => {
     expect(onFocusGroup).toHaveBeenNthCalledWith(3, "right");
   });
 
+  it("exposes each stable group ID for tab drag hit-testing", () => {
+    renderLayout();
+
+    expect(
+      screen.getByRole("region", { name: "Editor group 1" }).dataset.editorGroupId,
+    ).toBe("left");
+    expect(
+      screen.getByRole("region", { name: "Editor group 2" }).dataset.editorGroupId,
+    ).toBe("right");
+  });
+
   it("resizes adjacent groups with pointer movement and stops after a buttons-up move", () => {
     const { onResizeGroups } = renderLayout();
     const layout = screen.getByTestId("editor-group-layout");

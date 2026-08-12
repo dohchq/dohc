@@ -88,6 +88,7 @@ import {
   resetOrphanedDrafts,
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
+import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
 import { RecoveryList } from "./RecoveryList";
 
 // The close dialog's list, standing on its own: the guard subscribes and hands
@@ -625,8 +626,9 @@ async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
   await act(async () => {});
 }
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await disposeEngineDocLeasesForTests();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   // The set-aside drafts (#567) live in a module store on purpose; tests
@@ -835,7 +837,7 @@ describe("editor groups", () => {
       .find((row) => row.dataset.path === path)!;
   }
 
-  it("creates an editor group right with Ctrl+\\ and collapses it after its last tab closes", async () => {
+  it("copies the active tab right with Ctrl+\\ and collapses the group after its last tab closes", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
@@ -849,9 +851,15 @@ describe("editor groups", () => {
     expect(screen.getByRole("region", { name: "Editor group 2" }).dataset.active).toBe(
       "true",
     );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    expect(within(left).getByTestId("tab-a.md")).toBeTruthy();
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(within(left).getByTestId("view-markdown")).toBeTruthy();
+    expect(await within(right).findByTestId("view-markdown")).toBeTruthy();
 
     await userEvent.click(fileTreeRow("b.md"));
-    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    expect(await within(right).findByTestId("tab-b.md")).toBeTruthy();
     await waitFor(
       () => {
         const persisted = bridge.setWorkspaceUiState.mock.calls
@@ -860,12 +868,16 @@ describe("editor groups", () => {
             (state) =>
               state.editorGroups.length === 2 &&
               state.editorGroups[0]?.tabs.includes("a.md") &&
+              state.editorGroups[1]?.tabs.includes("a.md") &&
               state.editorGroups[1]?.tabs.includes("b.md"),
           );
         expect(persisted?.activeEditorGroup).toBe(persisted?.editorGroups[1]?.id);
       },
       { timeout: 2_000 },
     );
+    fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+    await waitFor(() => expect(within(right).queryByTestId("tab-b.md")).toBeNull());
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
     fireEvent.keyDown(window, { key: "w", ctrlKey: true });
     await waitFor(() =>
       expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
@@ -876,11 +888,18 @@ describe("editor groups", () => {
 
   it("closes an empty editor group from its visible control", async () => {
     renderShell(
-      makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md"))),
+      makeBridge(
+        Promise.resolve({
+          ...STORED_STATE,
+          editorGroups: [
+            { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+            { id: "right", tabs: [], activeTab: null, size: 0.5 },
+          ],
+          activeEditorGroup: "right",
+        }),
+      ),
     );
     expect(await screen.findByTestId("view-markdown")).toBeTruthy();
-
-    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
     await waitFor(() =>
       expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(2),
     );
@@ -895,6 +914,99 @@ describe("editor groups", () => {
       expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
     );
     expect(screen.queryByRole("button", { name: "Close editor group" })).toBeNull();
+  });
+
+  it("opens a file in the focused group even when another group already has it", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    renderShell(bridge);
+    await screen.findByRole("region", { name: "Editor group 2" });
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+
+    await userEvent.click(fileTreeRow("a.md"));
+
+    expect(within(left).getByTestId("tab-a.md")).toBeTruthy();
+    expect(await within(right).findByTestId("tab-a.md")).toBeTruthy();
+    expect(right.dataset.active).toBe("true");
+  });
+
+  it("moves a tab into an empty editor group by pointer drag", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: [], activeTab: null, size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    renderShell(bridge);
+    await screen.findByRole("region", { name: "Editor group 2" });
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => right),
+    });
+    const source = within(left).getByTestId("tab-a.md");
+
+    fireEvent.pointerDown(source, { button: 0, pointerId: 7, clientX: 10 });
+    fireEvent.pointerMove(source, {
+      pointerId: 7,
+      buttons: 1,
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(source, { pointerId: 7, clientX: 30, clientY: 40 });
+
+    await waitFor(() => expect(within(left).queryByTestId("tab-a.md")).toBeNull());
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(right.dataset.active).toBe("true");
+  });
+
+  it("shares one live document session when the active Markdown file is split", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    const doc = markdownToYDoc("# Shared\n");
+    const openEngineYDocSession = vi.fn(async () => ({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+    }));
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      applyEngineYDocUpdate: vi.fn(async () => undefined),
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(() => () => undefined),
+    });
+    renderShell(bridge);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    await userEvent.click(screen.getByTestId("create-editor-group-right"));
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("markdown-source-toggle")).toHaveLength(2),
+    );
+    expect(openEngineYDocSession).toHaveBeenCalledTimes(1);
   });
 
   it("keeps different surfaces visible and routes new opens to the focused group", async () => {

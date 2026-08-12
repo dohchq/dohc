@@ -2,7 +2,10 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { useEngineDoc } from "./useEngineDoc";
+import {
+  disposeEngineDocLeasesForTests,
+  useEngineDoc,
+} from "./useEngineDoc";
 
 // #533. `available: false` used to mean two different things — "this document
 // is not engine-backed" and "dohc has not found out yet" — and the editor
@@ -25,8 +28,9 @@ beforeEach(() => {
   rendered = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await disposeEngineDocLeasesForTests();
   vi.unstubAllGlobals();
 });
 

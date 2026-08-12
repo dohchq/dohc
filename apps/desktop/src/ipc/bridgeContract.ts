@@ -3128,7 +3128,6 @@ export const WorkspaceUiState = z.object({
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
 }).superRefine((state, context) => {
   const groupIds = new Set<string>();
-  const tabPaths = new Set<string>();
   let tabCount = 0;
   let totalSize = 0;
   for (let groupIndex = 0; groupIndex < state.editorGroups.length; groupIndex++) {
@@ -3142,18 +3141,7 @@ export const WorkspaceUiState = z.object({
     }
     groupIds.add(group.id);
     totalSize += group.size;
-    for (let tabIndex = 0; tabIndex < group.tabs.length; tabIndex++) {
-      const path = group.tabs[tabIndex];
-      tabCount += 1;
-      if (tabPaths.has(path)) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["editorGroups", groupIndex, "tabs", tabIndex],
-          message: "Open tab paths must be unique across editor groups.",
-        });
-      }
-      tabPaths.add(path);
-    }
+    tabCount += group.tabs.length;
   }
   if (tabCount > MAX_OPEN_TABS) {
     context.addIssue({

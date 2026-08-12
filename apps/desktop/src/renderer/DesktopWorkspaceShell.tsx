@@ -152,6 +152,7 @@ import {
   isSiteTabPath,
   isVirtualTabPath,
   moveTab,
+  moveTabToGroup,
   openTab,
   resizeEditorGroups,
   moveTabToNewGroup,
@@ -1659,10 +1660,11 @@ export function DesktopWorkspaceShell(props: {
 
   // A clicked search result: open the file AND land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
-  const [searchScrollTarget, setSearchScrollTarget] = useState<ScrollTarget | null>(
-    null,
-  );
+  const [searchScrollTarget, setSearchScrollTarget] = useState<
+    (ScrollTarget & { groupId: string }) | null
+  >(null);
   const [headingTarget, setHeadingTarget] = useState<{
+    groupId: string;
     path: string;
     target: HeadingTarget;
   } | null>(null);
@@ -2619,6 +2621,7 @@ export function DesktopWorkspaceShell(props: {
   // side-effect-free (StrictMode/concurrent replays would re-fire them).
   const openFile = useCallback(
     (path: string, target?: HeadingTarget) => {
+      const targetGroupId = wbRef.current.activeEditorGroup;
       // A heading jump is a destination change mutateWb's tab check cannot
       // see: the file may already BE the active tab, and the user still went
       // somewhere new inside it.
@@ -2626,15 +2629,53 @@ export function DesktopWorkspaceShell(props: {
       // Heading jumps are one open command, never durable tab state. Every
       // ordinary explorer/tab open therefore clears a prior jump before the
       // file can become active again.
-      setHeadingTarget(pendingHeadingTargetForOpen(path, target));
+      const pendingHeading = pendingHeadingTargetForOpen(path, target);
+      setHeadingTarget(
+        pendingHeading ? { ...pendingHeading, groupId: targetGroupId } : null,
+      );
       if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
-      if (openTab(wbRef.current, path) !== wbRef.current) {
-        rendererMarks.mark("file-open-start");
+      const commitOpen = () => {
+        const current = wbRef.current;
+        if (!current.editorGroups.some((group) => group.id === targetGroupId)) return;
+        if (openTab(current, path, targetGroupId) !== current) {
+          rendererMarks.mark("file-open-start");
+        }
+        // Every open also records recency (quick-open ranking, Phase E5.0).
+        mutateWb((state) =>
+          recordRecentFile(openTab(state, path, targetGroupId), path),
+        );
+      };
+
+      const targetGroup = wbRef.current.editorGroups.find(
+        (group) => group.id === targetGroupId,
+      );
+      const targetAlreadyOwnsPath = targetGroup?.tabs.some(
+        (tab) => tab.path === path,
+      );
+      const needsFlush =
+        !targetAlreadyOwnsPath &&
+        [...mountedEditorsRef.current.entries()].some(
+          ([groupId, registration]) =>
+            groupId !== targetGroupId &&
+            registration.tab.path === path &&
+            registration.flush,
+        );
+      if (!needsFlush) {
+        commitOpen();
+        return;
       }
-      // Every open also records recency (quick-open ranking, Phase E5.0).
-      mutateWb((state) => recordRecentFile(openTab(state, path), path));
+      void flushStableDrafts(
+        (groupId, tab) => groupId !== targetGroupId && tab.path === path,
+      )
+        .then(commitOpen)
+        .catch((error) =>
+          reportShellError(
+            "dohc could not save this file. The file did not open in this editor group.",
+            error,
+          ),
+        );
     },
-    [mutateWb],
+    [flushStableDrafts, mutateWb, reportShellError],
   );
   const openPathWithHeading = useCallback(
     (path: string, target?: string | HeadingTarget) => {
@@ -2901,7 +2942,12 @@ export function DesktopWorkspaceShell(props: {
       // below cannot see it, because the result may be in the file the user is
       // already reading.
       invalidateDmNavigation(dmNavigationRequest);
-      setSearchScrollTarget({ path, line, nonce: ++scrollNonce.current });
+      setSearchScrollTarget({
+        path,
+        line,
+        nonce: ++scrollNonce.current,
+        groupId: wbRef.current.activeEditorGroup,
+      });
       openFile(path);
     },
     [openChatThreadInPanel, openFile],
@@ -3035,6 +3081,62 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [mutateWb],
+  );
+
+  const moveFileTabToGroup = useCallback(
+    (
+      sourceGroupId: string,
+      targetGroupId: string,
+      path: string,
+      toIndex: number,
+    ) => {
+      if (sourceGroupId === targetGroupId) return;
+      const sourceGroup = wbRef.current.editorGroups.find(
+        (group) => group.id === sourceGroupId,
+      );
+      const tab = sourceGroup?.tabs.find((candidate) => candidate.path === path);
+      if (!tab) return;
+
+      const commitMove = () => {
+        const current = wbRef.current;
+        const live = current.editorGroups
+          .find((group) => group.id === sourceGroupId)
+          ?.tabs.find((candidate) => candidate.path === path);
+        if (
+          live !== tab ||
+          !current.editorGroups.some((group) => group.id === targetGroupId)
+        ) {
+          return;
+        }
+        mutateWb((state) =>
+          moveTabToGroup(
+            state,
+            sourceGroupId,
+            targetGroupId,
+            path,
+            toIndex,
+          ),
+        );
+      };
+
+      const registration = mountedEditorsRef.current.get(sourceGroupId);
+      if (registration?.tab !== tab || !registration.flush) {
+        commitMove();
+        return;
+      }
+      void flushStableDrafts(
+        (groupId, candidateTab) =>
+          groupId === sourceGroupId && candidateTab === tab,
+      )
+        .then(commitMove)
+        .catch((error) =>
+          reportShellError(
+            "dohc could not save this file. The tab stayed in its current editor group.",
+            error,
+          ),
+        );
+    },
+    [flushStableDrafts, mutateWb, reportShellError],
   );
 
   const showPathInExplorer = useCallback(
@@ -3339,10 +3441,42 @@ export function DesktopWorkspaceShell(props: {
 
   const openEditorGroupRight = useCallback(
     (groupId: string = wbRef.current.activeEditorGroup) => {
+      const group = wbRef.current.editorGroups.find(
+        (candidate) => candidate.id === groupId,
+      );
+      const tab = group?.tabs.find(
+        (candidate) => candidate.path === group.activeTab,
+      );
+      if (!group || !tab) return;
       const newGroupId = crypto.randomUUID();
-      mutateWb((state) => createEditorGroupRight(state, groupId, newGroupId));
+      const commitSplit = () => {
+        const liveGroup = wbRef.current.editorGroups.find(
+          (candidate) => candidate.id === groupId,
+        );
+        const liveTab = liveGroup?.tabs.find(
+          (candidate) => candidate.path === liveGroup.activeTab,
+        );
+        if (liveTab !== tab) return;
+        mutateWb((state) => createEditorGroupRight(state, groupId, newGroupId));
+      };
+      const registration = mountedEditorsRef.current.get(groupId);
+      if (registration?.tab !== tab || !registration.flush) {
+        commitSplit();
+        return;
+      }
+      void flushStableDrafts(
+        (candidateGroupId, candidateTab) =>
+          candidateGroupId === groupId && candidateTab === tab,
+      )
+        .then(commitSplit)
+        .catch((error) =>
+          reportShellError(
+            "dohc could not save this file. The editor group was not created.",
+            error,
+          ),
+        );
     },
-    [mutateWb],
+    [flushStableDrafts, mutateWb, reportShellError],
   );
 
   const closeGroupAfterFlush = useCallback(
@@ -4277,13 +4411,17 @@ export function DesktopWorkspaceShell(props: {
               const groupDocumentPath = isVirtualTabPath(tabPath) ? null : tabPath;
               const groupSiteRoot = parseSiteTabPath(tabPath);
               const groupScrollTarget =
-                searchScrollTarget?.path === tabPath ? searchScrollTarget : undefined;
+                searchScrollTarget?.groupId === editorGroup.id &&
+                searchScrollTarget.path === tabPath
+                  ? searchScrollTarget
+                  : undefined;
               return {
                 id: editorGroup.id,
                 size: editorGroup.size,
                 content: (
                   <>
                     <EditorTabs
+                      groupId={editorGroup.id}
                       tabs={editorGroup.tabs}
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
@@ -4296,6 +4434,14 @@ export function DesktopWorkspaceShell(props: {
                       }
                       onMove={(path, toIndex) =>
                         moveFileTab(editorGroup.id, path, toIndex)
+                      }
+                      onMoveToGroup={(path, targetGroupId, toIndex) =>
+                        moveFileTabToGroup(
+                          editorGroup.id,
+                          targetGroupId,
+                          path,
+                          toIndex,
+                        )
                       }
                       onCreateGroupRight={() => openEditorGroupRight(editorGroup.id)}
                       {...(wb.editorGroups.length > 1
@@ -4523,7 +4669,8 @@ export function DesktopWorkspaceShell(props: {
                 chatMentionsAvailable={captureAvailable}
                 scrollTarget={groupScrollTarget}
                 headingTarget={
-                  headingTarget?.path === tabPath
+                  headingTarget?.groupId === editorGroup.id &&
+                  headingTarget.path === tabPath
                     ? headingTarget.target
                     : undefined
                 }

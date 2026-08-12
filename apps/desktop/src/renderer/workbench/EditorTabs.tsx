@@ -39,6 +39,7 @@ function tabTitle(path: string): string {
 // re-render only the active tab, not the whole strip (FileRow precedent —
 // typingLongTaskMs budget). All callbacks must be referentially stable.
 const Tab = memo(function Tab(props: {
+  groupId: string;
   path: string;
   active: boolean;
   dirty: boolean;
@@ -50,15 +51,20 @@ const Tab = memo(function Tab(props: {
   onDragPreview: (path: string, toIndex: number) => void;
   onDragEnd: () => void;
   onMove: (path: string, toIndex: number) => void;
+  onMoveToGroup: (path: string, targetGroupId: string, toIndex: number) => void;
 }) {
   const name = fileName(props.path);
   // Pointer-drag reorder (no dnd dep): a press only becomes a drag after 4px
   // of travel, so plain clicks never reorder. While captured, the tab lives
   // at "how many sibling midpoints sit left of the cursor" (live reorder,
   // VS Code-style); moveTab no-ops same-slot moves so the stream is cheap.
-  const drag = useRef<{ pointerId: number; startX: number; active: boolean } | null>(
-    null,
-  );
+  const drag = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    active: boolean;
+  } | null>(null);
+  const cancelDrag = useRef<() => void>(() => undefined);
   // Reveal on activation, however it happened (sidebar click, open-file,
   // Ctrl+Tab, close-neighbor). `nearest` makes it a no-op when already
   // visible, so plain clicks on visible tabs never nudge the strip.
@@ -71,6 +77,12 @@ const Tab = memo(function Tab(props: {
       inline: "nearest",
     });
   }, [props.active]);
+  useEffect(
+    () => () => {
+      cancelDrag.current();
+    },
+    [],
+  );
   return (
     <div
       ref={ref}
@@ -101,45 +113,89 @@ const Tab = memo(function Tab(props: {
         // after a drag: the live reorder re-inserts the DOM node, which
         // cancels both pointer capture and click synthesis in Chromium.
         if (!props.active) props.onActivate(props.path);
-        drag.current = { pointerId: event.pointerId, startX: event.clientX, active: false };
-      }}
-      onPointerMove={(event) => {
-        const state = drag.current;
-        if (!state || state.pointerId !== event.pointerId) return;
-        // A mouse keeps one pointerId for life: if the release was missed
-        // (capture lost mid-reorder), a buttons-up move must end the drag,
-        // or plain hovering would keep reordering.
-        if ((event.buttons & 1) === 0) {
-          if (state.active) props.onDragEnd();
+        drag.current = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          active: false,
+        };
+
+        const detach = () => {
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          window.removeEventListener("pointercancel", onCancel);
+        };
+        const finish = (pointerEvent: PointerEvent | null) => {
+          const state = drag.current;
+          if (
+            !state ||
+            (pointerEvent !== null && state.pointerId !== pointerEvent.pointerId)
+          ) {
+            return;
+          }
           drag.current = null;
-          return;
-        }
-        if (!state.active) {
-          if (Math.abs(event.clientX - state.startX) < 4) return;
-          state.active = true;
-        }
-        // (Re-)capture each move: every reorder re-insertion drops capture.
-        if (!event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.setPointerCapture(event.pointerId);
-        }
-        const siblings = event.currentTarget.parentElement?.querySelectorAll('[role="tab"]');
-        if (!siblings) return;
-        let toIndex = 0;
-        for (const sibling of siblings) {
-          if (sibling === event.currentTarget) continue;
-          const box = sibling.getBoundingClientRect();
-          if (box.left + box.width / 2 < event.clientX) toIndex += 1;
-        }
-        props.onDragPreview(props.path, toIndex);
-        props.onMove(props.path, toIndex);
-      }}
-      onPointerUp={() => {
-        if (drag.current?.active) props.onDragEnd();
-        drag.current = null;
-      }}
-      onPointerCancel={() => {
-        if (drag.current?.active) props.onDragEnd();
-        drag.current = null;
+          detach();
+          cancelDrag.current = () => undefined;
+          if (!state.active) return;
+          props.onDragEnd();
+          if (pointerEvent === null) return;
+          const target = editorGroupAtPoint(
+            pointerEvent.clientX,
+            pointerEvent.clientY,
+          );
+          if (target && target.groupId !== props.groupId) {
+            props.onMoveToGroup(props.path, target.groupId, target.toIndex);
+          }
+        };
+        const onMove = (pointerEvent: PointerEvent) => {
+          const state = drag.current;
+          if (!state || state.pointerId !== pointerEvent.pointerId) return;
+          // A mouse keeps one pointerId for life. If release was missed, a
+          // buttons-up move must end the drag before hovering can reorder.
+          if ((pointerEvent.buttons & 1) === 0) {
+            finish(null);
+            return;
+          }
+          if (!state.active) {
+            if (
+              Math.hypot(
+                pointerEvent.clientX - state.startX,
+                pointerEvent.clientY - state.startY,
+              ) < 4
+            ) {
+              return;
+            }
+            state.active = true;
+          }
+          const target = editorGroupAtPoint(
+            pointerEvent.clientX,
+            pointerEvent.clientY,
+          );
+          // Crossing into another group is committed on release. Do not keep
+          // shuffling the source strip while the pointer is over its destination.
+          if (target && target.groupId !== props.groupId) return;
+          const current = ref.current;
+          const siblings = current?.parentElement?.querySelectorAll('[role="tab"]');
+          if (!current || !siblings) return;
+          let toIndex = 0;
+          for (const sibling of siblings) {
+            if (sibling === current) continue;
+            const box = sibling.getBoundingClientRect();
+            if (box.left + box.width / 2 < pointerEvent.clientX) toIndex += 1;
+          }
+          props.onDragPreview(props.path, toIndex);
+          props.onMove(props.path, toIndex);
+        };
+        const onUp = (pointerEvent: PointerEvent) => finish(pointerEvent);
+        const onCancel = (pointerEvent: PointerEvent) => {
+          if (drag.current?.pointerId !== pointerEvent.pointerId) return;
+          finish(null);
+        };
+        cancelDrag.current();
+        cancelDrag.current = () => finish(null);
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onCancel);
       }}
       // The strip's bottom hairline is drawn PER TAB so the active one can
       // break it: transparent bottom border + the editor's bg merge the tab
@@ -188,6 +244,24 @@ const Tab = memo(function Tab(props: {
   );
 });
 
+function editorGroupAtPoint(
+  clientX: number,
+  clientY: number,
+): { groupId: string; toIndex: number } | null {
+  const hit = document.elementFromPoint?.(clientX, clientY);
+  const group = hit?.closest<HTMLElement>("[data-editor-group-id]");
+  const groupId = group?.dataset.editorGroupId;
+  if (!group || !groupId) return null;
+
+  let toIndex = 0;
+  const tabs = group.querySelectorAll<HTMLElement>('[role="tab"]');
+  for (const tab of tabs) {
+    const box = tab.getBoundingClientRect();
+    if (box.left + box.width / 2 < clientX) toIndex += 1;
+  }
+  return { groupId, toIndex };
+}
+
 // The overlay thumb never shrinks below a grabbable pill (VS Code's minimum
 // slider size treatment).
 const MIN_THUMB_WIDTH = 32;
@@ -214,6 +288,7 @@ function thumbWidth(strip: HTMLElement): number {
 // reports its save state). h-9: ONE header band height with the side panel
 // and Chats panel, so the three hairlines meet at the vertical seams.
 export function EditorTabs(props: {
+  groupId: string;
   groupNumber: number;
   tabs: Array<{ path: string }>;
   activeTab: string | null;
@@ -226,6 +301,7 @@ export function EditorTabs(props: {
   onClose: (path: string) => void;
   onContextMenu: (path: string) => void;
   onMove: (path: string, toIndex: number) => void;
+  onMoveToGroup: (path: string, targetGroupId: string, toIndex: number) => void;
   onCreateGroupRight: () => void;
   onCloseGroup?: () => void;
 }) {
@@ -322,6 +398,7 @@ export function EditorTabs(props: {
         {props.tabs.map((tab) => (
           <Tab
             key={tab.path}
+            groupId={props.groupId}
             path={tab.path}
             active={tab.path === props.activeTab}
             dirty={
@@ -339,6 +416,7 @@ export function EditorTabs(props: {
             onDragPreview={(path, toIndex) => setDragPreview({ path, toIndex })}
             onDragEnd={() => setDragPreview(null)}
             onMove={props.onMove}
+            onMoveToGroup={props.onMoveToGroup}
           />
         ))}
         {/* Continues the hairline across the empty strip — only the active

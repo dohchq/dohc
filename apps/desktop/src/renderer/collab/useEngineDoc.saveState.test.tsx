@@ -8,7 +8,10 @@ import {
   resetOrphanedDrafts,
   useOrphanedDrafts,
 } from "../orphanedDrafts";
-import { useEngineDoc } from "./useEngineDoc";
+import {
+  disposeEngineDocLeasesForTests,
+  useEngineDoc,
+} from "./useEngineDoc";
 
 // AUDIT-SILENTSAVE. The engine editor's save indicator used to be a 1s timer
 // that flipped to "saved" no matter what the engine did — three dogfood
@@ -16,8 +19,6 @@ import { useEngineDoc } from "./useEngineDoc";
 // only by main's real settle outcomes. These tests own that contract: no
 // timer may resurrect "saved", a failure must show, and a settle that predates
 // the newest keystroke must not claim to cover it.
-
-afterEach(cleanup);
 
 type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 
@@ -171,7 +172,9 @@ beforeEach(() => {
   resetOrphanedDrafts();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  cleanup();
+  await disposeEngineDocLeasesForTests();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   resetOrphanedDrafts();

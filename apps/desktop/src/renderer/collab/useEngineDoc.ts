@@ -270,323 +270,427 @@ function makeTransport(
   };
 }
 
-export function useEngineDoc(input: {
+type EngineDocInput = {
   workspaceId: string;
   path: string;
   // The caller gates: only a rich (markdown) file that is not truncated / read-
   // only opens an engine session. Everything else keeps the local editor.
   enabled: boolean;
-  // Bump to retry after `engineMayHoldDocument` (#564): part of the request
+  // Bump to retry after engineMayHoldDocument (#564): part of the request
   // key, so a retry is a fresh open with the same stale-response guard as any
   // other.
   retryKey?: number;
   // G2-C-3 version-switch re-bind: a monotonic token that changes whenever the
-  // ACTIVE VERSION of this workspace changes while the SAME file stays open
-  // (the shell's versionEpoch). The session keys on it so switching version
-  // flushes+closes the current engine session and reopens it against the
-  // now-active version's Y.Doc lineage — resume-never-reseed for a replicated
-  // doc (the durable lineage), reseed-from-the-new-file for a local-only doc
-  // (switchVersion already materialized the new version onto disk before this
-  // reopens). Undefined/stable => no reopen; ordinary history growth in the
-  // SAME version must NOT bump this (that would churn the live session).
+  // active version of this workspace changes while the same file stays open.
   reopenKey?: number;
-}): UseEngineDoc {
-  const requestKey = engineDocRequestKey(input);
-  const [outcome, setOutcome] = useState<EngineDocOpenOutcome | null>(null);
-  const [saveState, setSaveState] = useState<EngineDocSaveState>("saved");
-  const [deletion, setDeletion] = useState<{
-    token: number;
-    draftId: number | null;
-  } | null>(null);
-  const saveStateRef = useRef<EngineDocSaveState>("saved");
-  // Monotonic per-open token: only the newest open may set state (the async-
-  // state invariant — a stale workspace/path response never repaints).
-  const openTokenRef = useRef(0);
+};
 
-  // DERIVED DURING RENDER, never set by an effect. An effect runs after the
-  // render that scheduled it, so an effect-set flag is one frame late — and
-  // that frame is the whole defect. When the version switches under an open
-  // document (`reopenKey`), the render that carries the new token would
-  // otherwise still report the PREVIOUS version's `available`/`doc`: one
-  // committed frame of an editable, already-closed session, whose keystrokes
-  // go to an obsolete session. A result only counts for the request it
-  // answers, so switching request answers "opening" the instant it happens.
-  const settled = outcome !== null && outcome.key === requestKey ? outcome : null;
-  const available = settled?.kind === "bound";
-  const doc = settled?.kind === "bound" ? settled.doc : null;
-  const opening = input.enabled && settled === null;
-  // Derived from the same settled result, so it is subject to the same
-  // request-identity rule: a refusal for the version the user just LEFT never
-  // repaints the document they just entered.
-  const notInVersion = settled?.kind === "not-in-version";
-  const engineMayHoldDocument = settled?.kind === "engine-may-hold-document";
-  const removalInProgress =
-    settled?.kind === "removal-in-progress" ? settled.removal : null;
-  const deletedWhileEditing =
-    settled?.kind === "bound" && deletion?.token === settled.token;
-  const deletedDraftId = deletedWhileEditing ? deletion.draftId : null;
-  const writesRefused = useRef(false);
-  const writesRefusedKey = useRef(requestKey);
-  if (writesRefusedKey.current !== requestKey) {
-    writesRefusedKey.current = requestKey;
-    writesRefused.current = false;
-  }
-  if (deletedWhileEditing || removalInProgress !== null) {
-    writesRefused.current = true;
-  }
+type EngineDocLeaseSnapshot = {
+  key: string;
+  outcome: EngineDocOpenOutcome | null;
+  saveState: EngineDocSaveState;
+  deletion: { token: number; draftId: number | null } | null;
+};
 
-  useEffect(() => {
-    saveStateRef.current = "saved";
-    setSaveState("saved");
-    if (!input.enabled) return;
-    const { workspaceId, path } = input;
-    // The key of the render that scheduled this effect — the request this open
-    // answers. Stamped onto the result so a render can tell whether the result
-    // it holds is still the one it asked for.
-    const key = requestKey;
-    const token = ++openTokenRef.current;
-    setDeletion(null);
-    let cancelled = false;
-    let binding: EngineYDocBinding | null = null;
-    let detachSaveObserver: (() => void) | null = null;
-    let unsubscribeSaveState: (() => void) | null = null;
-    // The last snapshot taken for this deletion lifecycle (for change dedup)
-    // and the draft it produced, once the async serialize+capture lands.
-    let deletionSnapshotBytes: Uint8Array | null = null;
-    let deletionDraftId: number | null = null;
-    // Serializes deletion snapshots in the order they were taken: a later
-    // snapshot's capture must never be overwritten by an earlier one that
-    // resolves late (the projection import, and each markdown conversion,
-    // are async now).
-    let deletionQueue: Promise<void> = Promise.resolve();
-    let deletionPending = false;
+type EngineDocLease = {
+  documentKey: string;
+  retain: () => void;
+  release: () => void;
+  disposeIfReleased: () => boolean;
+  subscribe: (listener: () => void) => () => void;
+  getSnapshot: () => EngineDocLeaseSnapshot;
+  start: () => void;
+  dispose: () => Promise<void>;
+};
 
-    const sessionId = nextSessionId();
-    const localSeq = { current: 0 };
-    const transport = makeTransport(
-      workspaceId,
-      path,
-      sessionId,
-      localSeq,
-      writesRefused,
-    );
+const engineDocLeases = new Map<string, EngineDocLease>();
+let engineDocLeaseCounter = 0;
 
-    const reportSaveState = (state: EngineDocSaveState): void => {
-      saveStateRef.current = state;
-      setSaveState(state);
-    };
+function createEngineDocLease(
+  input: EngineDocInput,
+  requestKey: string,
+): EngineDocLease {
+  const { workspaceId, path } = input;
+  const documentKey = JSON.stringify([workspaceId, path]);
+  const token = ++engineDocLeaseCounter;
+  const sessionId = nextSessionId();
+  const listeners = new Set<() => void>();
+  const saveStateRef = { current: "saved" as EngineDocSaveState };
+  const writesRefused = { current: false };
+  const localSeq = { current: 0 };
+  const transport = makeTransport(
+    workspaceId,
+    path,
+    sessionId,
+    localSeq,
+    writesRefused,
+  );
 
-    // `forceCreate` false means: nothing was unsettled at the moment this
-    // snapshot was taken (the dominant delete path, settled before removal)
-    // — no draft is worth creating for it. A later snapshot always forces
-    // creation: it only runs because the doc changed since the last one.
-    const enqueueDeletionSnapshot = (
-      bytes: Uint8Array,
-      forceCreate: boolean,
-    ): void => {
-      deletionQueue = deletionQueue
-        .then(async () => {
-          const text = await markdownFromSnapshot(bytes);
-          if (deletionDraftId === null) {
-            if (!forceCreate) return;
-            deletionDraftId = captureOrphanedDraft(workspaceId, path, text);
-          } else {
-            replaceOrphanedDraft(workspaceId, path, deletionDraftId, text);
-          }
-          // Only the LOCAL render state is guarded by the open token — the
-          // draft itself is already durable in the module-level store above,
-          // unmount or not.
-          if (token === openTokenRef.current) {
-            setDeletion({ token, draftId: deletionDraftId });
-          }
-        })
-        .catch((error: unknown) => {
-          // This draft is the last copy of the user's text — a load failure
-          // here must not disappear silently.
-          console.error(
-            `[desktop] could not write a recovery draft for ${workspaceId}:${path} after deletion:`,
-            error,
-          );
-        });
-    };
+  let snapshot: EngineDocLeaseSnapshot = {
+    key: requestKey,
+    outcome: null,
+    saveState: "saved",
+    deletion: null,
+  };
+  let refCount = 0;
+  let started = false;
+  let disposed = false;
+  let binding: EngineYDocBinding | null = null;
+  let bindingDestroyed = false;
+  let detachSaveObserver: (() => void) | null = null;
+  let unsubscribeSaveState: (() => void) | null = null;
+  let deletionSnapshotBytes: Uint8Array | null = null;
+  let deletionDraftId: number | null = null;
+  let deletionQueue: Promise<void> = Promise.resolve();
+  let deletionPending = false;
+  let lifecycle: Promise<void> = Promise.resolve();
+  let disposePromise: Promise<void> | null = null;
+  let releaseToken = 0;
 
-    const captureDeletion = (doc: Y.Doc): void => {
-      writesRefused.current = true;
-      // Snapshot NOW, synchronously: the doc can be destroyed (unmount) or
-      // the caller's reference can go stale before a lazily-loaded
-      // serializer would otherwise get to read it.
-      const bytes = Y.encodeStateAsUpdate(doc);
-      deletionSnapshotBytes = bytes;
-      const forceCreate = saveStateRef.current !== "saved";
-      if (forceCreate) {
-        // Persisted NOW, before the projection module is even guaranteed to
-        // load: a renderer close/reload/crash while that import is still in
-        // flight must not lose text that exists only in this queue's promise
-        // closure, with the file already gone and no draft for the recovery
-        // close guard to find. The queue below upgrades this row to the
-        // faithful markdown a microtask later; it never creates a second one.
-        deletionDraftId = captureOrphanedDraft(
-          workspaceId,
-          path,
-          crudeMarkdownFromDoc(doc),
+  const publish = (
+    update: (current: EngineDocLeaseSnapshot) => EngineDocLeaseSnapshot,
+  ): void => {
+    if (disposed) return;
+    snapshot = update(snapshot);
+    for (const listener of listeners) listener();
+  };
+
+  const setOutcome = (outcome: EngineDocOpenOutcome): void => {
+    publish((current) => ({ ...current, outcome }));
+  };
+
+  const setDeletion = (draftId: number | null): void => {
+    publish((current) => ({
+      ...current,
+      deletion: { token, draftId },
+    }));
+  };
+
+  const reportSaveState = (state: EngineDocSaveState): void => {
+    saveStateRef.current = state;
+    publish((current) => ({ ...current, saveState: state }));
+  };
+
+  // forceCreate false means the file was settled when main removed it. A later
+  // snapshot always creates a draft because the retained document changed.
+  const enqueueDeletionSnapshot = (
+    bytes: Uint8Array,
+    forceCreate: boolean,
+  ): void => {
+    deletionQueue = deletionQueue
+      .then(async () => {
+        const text = await markdownFromSnapshot(bytes);
+        if (deletionDraftId === null) {
+          if (!forceCreate) return;
+          deletionDraftId = captureOrphanedDraft(workspaceId, path, text);
+        } else {
+          replaceOrphanedDraft(workspaceId, path, deletionDraftId, text);
+        }
+        setDeletion(deletionDraftId);
+      })
+      .catch((error: unknown) => {
+        console.error(
+          "[desktop] could not write a recovery draft for " +
+            workspaceId +
+            ":" +
+            path +
+            " after deletion:",
+          error,
         );
-      }
-      setDeletion({ token, draftId: deletionDraftId });
-      reportSaveState("deleted");
-      enqueueDeletionSnapshot(bytes, forceCreate);
-    };
+      });
+  };
 
-    const refreshDeletionDraft = (doc: Y.Doc): void => {
-      if (deletionSnapshotBytes === null) return;
-      const bytes = Y.encodeStateAsUpdate(doc);
-      if (snapshotsEqual(bytes, deletionSnapshotBytes)) return;
-      deletionSnapshotBytes = bytes;
-      enqueueDeletionSnapshot(bytes, true);
-    };
+  const captureDeletion = (doc: Y.Doc): void => {
+    writesRefused.current = true;
+    const bytes = Y.encodeStateAsUpdate(doc);
+    deletionSnapshotBytes = bytes;
+    const forceCreate = saveStateRef.current !== "saved";
+    if (forceCreate) {
+      deletionDraftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        crudeMarkdownFromDoc(doc),
+      );
+    }
+    setDeletion(deletionDraftId);
+    reportSaveState("deleted");
+    enqueueDeletionSnapshot(bytes, forceCreate);
+  };
 
-    const onSaveState = (event: EngineYDocSaveStateEvent): void => {
-      if (cancelled || token !== openTokenRef.current) return;
-      if (event.sessionId !== sessionId) return;
-      if (event.state === "deleted") {
-        const doc = binding?.doc;
-        if (!doc) {
-          deletionPending = true;
-          writesRefused.current = true;
-          return;
-        }
-        if (deletionSnapshotBytes !== null) {
-          refreshDeletionDraft(doc);
-          return;
-        }
-        captureDeletion(doc);
-        return;
-      }
-      // Deletion is terminal for this session. A settle/update already in
-      // flight can report after main's deletion notice, but it no longer
-      // describes a path that exists and must not repaint this state.
-      if (writesRefused.current) return;
-      if (event.state === "file-locked") {
-        if (event.seq >= localSeq.current) reportSaveState(event.state);
-        return;
-      }
-      if (
-        event.state === "error" ||
-        event.state === "read-only" ||
-        event.state === "changed-on-disk"
-      ) {
-        reportSaveState(event.state);
-        return;
-      }
-      if (event.state === "settling") {
-        reportSaveState("saving");
-        return;
-      }
-      if (event.seq >= localSeq.current) reportSaveState("saved");
-    };
+  const refreshDeletionDraft = (doc: Y.Doc): void => {
+    if (deletionSnapshotBytes === null) return;
+    const bytes = Y.encodeStateAsUpdate(doc);
+    if (snapshotsEqual(bytes, deletionSnapshotBytes)) return;
+    deletionSnapshotBytes = bytes;
+    enqueueDeletionSnapshot(bytes, true);
+  };
 
-    const openAttempt = (async (): Promise<EngineYDocBinding> => {
-      // Subscribe before open: main registers the live entry before the IPC
-      // answer returns, so deletion can otherwise notify an empty listener set
-      // in that hand-over window. The async boundary catches an older preload
-      // that does not expose this channel without delaying the open itself.
-      unsubscribeSaveState = bridge().onEngineYDocSaveState(onSaveState);
-      return bindEngineYDoc(transport);
-    })();
-    void openAttempt
-      .then((bound) => {
-        // A newer open (workspace/path switch) superseded this one, or the effect
-        // already cleaned up: never bind the stale doc — close it and bail.
-        if (cancelled || token !== openTokenRef.current) {
-          void bound.destroy();
-          return;
-        }
-        binding = bound;
-        // Preload, don't block: by the time any real deletion can arrive,
-        // the module is very likely already resolved, so a draft's markdown
-        // lands within the same microtask as its snapshot. The snapshot in
-        // captureDeletion/refreshDeletionDraft keeps a genuinely cold start
-        // (import still in flight) correct regardless.
-        void loadProjectionModule();
-        if (!bound.available || !bound.doc) {
-          // Resolved: NOT engine-backed. The caller may offer the plain local
-          // editor again — that is what `opening` was holding back. EXCEPT
-          // when the path is not in this version, where offering it would
-          // write the phantom the engine just refused (#534), and when the
-          // engine may still hold the document, where a plain autosave would
-          // race the session it still binds (#564, #657).
-          if (bound.notInVersion) {
-            setOutcome({ key, kind: "not-in-version" });
-          } else if (bound.engineMayHoldDocument) {
-            setOutcome({ key, kind: "engine-may-hold-document" });
-          } else if (bound.removalInProgress) {
-            setOutcome({
-              key,
-              kind: "removal-in-progress",
-              removal: bound.removalInProgress,
-            });
-          } else {
-            setOutcome({ key, kind: "unavailable" });
-          }
-          return;
-        }
-        // An edit is unsaved the instant it happens. Only main's settle report
-        // may clear it — nothing here guesses "saved". The seed apply happened
-        // before this observer attached, so it never shows a spurious "saving".
-        const doc = bound.doc;
-        const onUpdate = () => {
-          if (cancelled) return;
-          if (writesRefused.current) {
-            refreshDeletionDraft(doc);
+  const onSaveState = (event: EngineYDocSaveStateEvent): void => {
+    if (disposed || event.sessionId !== sessionId) return;
+    if (event.state === "deleted") {
+      const doc = binding?.doc;
+      if (!doc) {
+        deletionPending = true;
+        writesRefused.current = true;
+        return;
+      }
+      if (deletionSnapshotBytes !== null) {
+        refreshDeletionDraft(doc);
+        return;
+      }
+      captureDeletion(doc);
+      return;
+    }
+    if (writesRefused.current) return;
+    if (event.state === "file-locked") {
+      if (event.seq >= localSeq.current) reportSaveState(event.state);
+      return;
+    }
+    if (
+      event.state === "error" ||
+      event.state === "read-only" ||
+      event.state === "changed-on-disk"
+    ) {
+      reportSaveState(event.state);
+      return;
+    }
+    if (event.state === "settling") {
+      reportSaveState("saving");
+      return;
+    }
+    if (event.seq >= localSeq.current) reportSaveState("saved");
+  };
+
+  const destroyBinding = async (): Promise<void> => {
+    if (!binding || bindingDestroyed) return;
+    bindingDestroyed = true;
+    await binding.destroy();
+  };
+
+  let lease: EngineDocLease;
+  const disposeReleasedLease = (): boolean => {
+    if (refCount !== 0 || engineDocLeases.get(requestKey) !== lease) {
+      return false;
+    }
+    engineDocLeases.delete(requestKey);
+    void lease.dispose().catch(() => undefined);
+    return true;
+  };
+  lease = {
+    documentKey,
+    retain() {
+      refCount += 1;
+      releaseToken += 1;
+    },
+    release() {
+      if (refCount === 0) return;
+      refCount -= 1;
+      if (refCount !== 0) return;
+      const pendingRelease = ++releaseToken;
+      queueMicrotask(() => {
+        if (releaseToken !== pendingRelease) return;
+        disposeReleasedLease();
+      });
+    },
+    disposeIfReleased() {
+      releaseToken += 1;
+      return disposeReleasedLease();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    getSnapshot() {
+      return snapshot;
+    },
+    start() {
+      if (started) return;
+      started = true;
+      lifecycle = (async () => {
+        if (disposed) return;
+
+        try {
+          // Main can publish deletion after registering the live session but
+          // before open returns, so subscribe before opening the transport.
+          unsubscribeSaveState = bridge().onEngineYDocSaveState(onSaveState);
+          const bound = await bindEngineYDoc(transport);
+          binding = bound;
+          if (disposed) {
+            await destroyBinding();
             return;
           }
-          reportSaveState("saving");
-        };
-        doc.on("update", onUpdate);
-        detachSaveObserver = () => doc.off("update", onUpdate);
-        if (deletionPending) captureDeletion(doc);
-        setOutcome({ key, token, kind: "bound", doc });
-      })
-      .catch(() => {
-        if (cancelled || token !== openTokenRef.current) return;
-        setOutcome({ key, kind: "unavailable" });
-      });
 
-    return () => {
-      // Belt-and-suspenders, not the sole catcher: `onUpdate` below already
-      // snapshots synchronously for any doc mutation once `writesRefused` is
-      // true, local or remote, ahead of this cleanup in the same tick. This
-      // guards a mutation landing between `cancelled = true` and
-      // `detachSaveObserver()` — narrower than reachable through the public
-      // API today, kept for what a future change to that ordering could open.
+          // Warm the deletion projection without delaying the open result.
+          void loadProjectionModule();
+          if (!bound.available || !bound.doc) {
+            if (bound.notInVersion) {
+              setOutcome({ key: requestKey, kind: "not-in-version" });
+            } else if (bound.engineMayHoldDocument) {
+              setOutcome({
+                key: requestKey,
+                kind: "engine-may-hold-document",
+              });
+            } else if (bound.removalInProgress) {
+              setOutcome({
+                key: requestKey,
+                kind: "removal-in-progress",
+                removal: bound.removalInProgress,
+              });
+            } else {
+              setOutcome({ key: requestKey, kind: "unavailable" });
+            }
+            return;
+          }
+
+          const doc = bound.doc;
+          const onUpdate = () => {
+            if (disposed) return;
+            if (writesRefused.current) {
+              refreshDeletionDraft(doc);
+              return;
+            }
+            reportSaveState("saving");
+          };
+          doc.on("update", onUpdate);
+          detachSaveObserver = () => doc.off("update", onUpdate);
+          if (deletionPending) captureDeletion(doc);
+          setOutcome({ key: requestKey, token, kind: "bound", doc });
+        } catch {
+          if (!disposed) {
+            setOutcome({ key: requestKey, kind: "unavailable" });
+          }
+        }
+      })();
+    },
+    dispose() {
+      if (disposePromise) return disposePromise;
+
       if (binding?.doc) refreshDeletionDraft(binding.doc);
-      cancelled = true;
+      disposed = true;
       unsubscribeSaveState?.();
+      unsubscribeSaveState = null;
       detachSaveObserver?.();
-      // Settle + close the engine session in main (releases the single-canonical
-      // reservation so a version/file switch can reopen the same object), then
-      // drop the mirror doc.
-      void binding?.destroy();
-      // The result dies with the session it describes. Without this, a request
-      // that comes BACK to a key it held before (a truncated read that reloads
-      // whole, so `enabled` goes false then true) would match the old outcome
-      // and hand the caller an editable doc this cleanup already destroyed.
-      setOutcome(null);
+      detachSaveObserver = null;
+      const immediateDestroy = binding ? destroyBinding() : null;
+      disposePromise = (async () => {
+        if (immediateDestroy) {
+          await immediateDestroy;
+        } else {
+          // An open can remain unanswered indefinitely. The lifecycle observes
+          // disposed and closes a binding if it eventually arrives; cleanup
+          // must not wait forever for that external answer.
+          void lifecycle.catch(() => undefined);
+        }
+        // A deletion projection can outlive React cleanup. Production must
+        // retain that recovery write; tests also need a join point before they
+        // reset the process-wide recovery store.
+        await deletionQueue;
+        listeners.clear();
+      })();
+      return disposePromise;
+    },
+  };
+  return lease;
+}
+
+// Test seam for process-wide renderer state. React StrictMode requires the
+// ordinary zero-reference release to wait one microtask, while test cleanup
+// must join every deletion recovery before resetting the global draft store.
+export async function disposeEngineDocLeasesForTests(): Promise<void> {
+  const leases = [...new Set(engineDocLeases.values())];
+  engineDocLeases.clear();
+  await Promise.all(leases.map((lease) => lease.dispose()));
+}
+
+function retainEngineDocLease(
+  input: EngineDocInput,
+  requestKey: string,
+): EngineDocLease {
+  let lease = engineDocLeases.get(requestKey);
+  if (!lease) {
+    const documentKey = JSON.stringify([input.workspaceId, input.path]);
+    for (const candidate of engineDocLeases.values()) {
+      if (candidate.documentKey === documentKey) {
+        candidate.disposeIfReleased();
+      }
+    }
+    lease = createEngineDocLease(input, requestKey);
+    engineDocLeases.set(requestKey, lease);
+    lease.start();
+  }
+  lease.retain();
+  return lease;
+}
+
+export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
+  const requestKey = engineDocRequestKey(input);
+  const requestGenerationRef = useRef({ key: requestKey, generation: 0 });
+  if (requestGenerationRef.current.key !== requestKey) {
+    requestGenerationRef.current = {
+      key: requestKey,
+      generation: requestGenerationRef.current.generation + 1,
     };
-    // input is destructured; re-open only when the workspace, path, gate, or the
-    // active-version token changes — never on unrelated re-renders. reopenKey
-    // re-binds the editor to the new version's lineage on a version switch
-    // (server-side switchVersion already settled+closed the old session and
-    // materialized the new version to disk; this effect's cleanup settles+closes
-    // the renderer's mirror session and the re-run opens a fresh one, guarded by
-    // the per-open token so a stale response never repaints).
+  }
+  const requestGeneration = requestGenerationRef.current.generation;
+  const [leaseState, setLeaseState] = useState<{
+    generation: number;
+    snapshot: EngineDocLeaseSnapshot;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!input.enabled) return;
+
+    const lease = retainEngineDocLease(input, requestKey);
+    const update = () =>
+      setLeaseState({
+        generation: requestGeneration,
+        snapshot: lease.getSnapshot(),
+      });
+    const unsubscribe = lease.subscribe(update);
+    update();
+    return () => {
+      unsubscribe();
+      lease.release();
+      // A real request change must close before its replacement opens. React
+      // StrictMode replays the same request, so only that same-generation
+      // cleanup receives the cancellable deferred release.
+      if (requestGenerationRef.current.generation !== requestGeneration) {
+        lease.disposeIfReleased();
+      }
+    };
+    // Re-open only when the workspace, path, gate, retry, or active version
+    // changes. Other renders keep the same shared lease.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input.workspaceId, input.path, input.enabled, input.reopenKey, input.retryKey]);
+
+  // Derive this during render. A result for an earlier request never grants
+  // one editable frame while a version, path, gate, or retry request changes.
+  const settled =
+    leaseState?.generation === requestGeneration &&
+    leaseState.snapshot.key === requestKey
+      ? leaseState.snapshot
+      : null;
+  const outcome = settled?.outcome ?? null;
+  const available = outcome?.kind === "bound";
+  const doc = outcome?.kind === "bound" ? outcome.doc : null;
+  const opening = input.enabled && outcome === null;
+  const notInVersion = outcome?.kind === "not-in-version";
+  const engineMayHoldDocument =
+    outcome?.kind === "engine-may-hold-document";
+  const removalInProgress =
+    outcome?.kind === "removal-in-progress" ? outcome.removal : null;
+  const deletedWhileEditing =
+    outcome?.kind === "bound" &&
+    settled?.deletion?.token === outcome.token;
+  const deletedDraftId = deletedWhileEditing
+    ? (settled?.deletion?.draftId ?? null)
+    : null;
 
   return {
     available,
     opening,
     doc,
-    saveState,
+    saveState: settled?.saveState ?? "saved",
     notInVersion,
     engineMayHoldDocument,
     deletedWhileEditing,

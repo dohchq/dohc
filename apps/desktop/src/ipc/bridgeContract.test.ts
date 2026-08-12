@@ -642,8 +642,9 @@ describe("workspace UI state IPC contract", () => {
     ).toBe(false);
   });
 
-  it("requires globally unique tabs, valid focus, and normalized sizes", () => {
-    const duplicate = WorkspaceUiState.safeParse({
+  it("allows a path in several groups while requiring group-local uniqueness", () => {
+    expect(
+      WorkspaceUiState.safeParse({
         ...validState,
         editorGroups: [
           { ...validState.editorGroups[0], size: 0.5 },
@@ -654,13 +655,26 @@ describe("workspace UI state IPC contract", () => {
             size: 0.5,
           },
         ],
-      });
-    expect(duplicate.success).toBe(false);
-    if (!duplicate.success) {
-      expect(duplicate.error.issues.map((issue) => issue.message)).toEqual([
-        "Open tab paths must be unique across editor groups.",
+      }).success,
+    ).toBe(true);
+    const duplicateInGroup = WorkspaceUiState.safeParse({
+      ...validState,
+      editorGroups: [
+        {
+          ...validState.editorGroups[0],
+          tabs: ["notes/a.md", "notes/a.md"],
+        },
+      ],
+    });
+    expect(duplicateInGroup.success).toBe(false);
+    if (!duplicateInGroup.success) {
+      expect(duplicateInGroup.error.issues.map((issue) => issue.message)).toEqual([
+        "Editor group tabs must be unique.",
       ]);
     }
+  });
+
+  it("requires valid focus and normalized sizes", () => {
     expect(
       WorkspaceUiState.safeParse({
         ...validState,
