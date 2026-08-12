@@ -134,6 +134,19 @@ describe("Excalidraw scene adapter", () => {
     expect(Y.encodeStateAsUpdate(doc, before)).toHaveLength(2);
     expect(foldScene(doc).elements).toEqual([sparseRemote]);
 
+    // Excalidraw can report the normalized scene again after the one-shot
+    // remote marker is consumed. Its immutable revision is still an echo.
+    expect(() =>
+      applyCanvasSceneChange({
+        doc,
+        elements: [normalizedByExcalidraw],
+        appState: {},
+        files: {},
+        remoteEchoes: echoes,
+      }),
+    ).not.toThrow();
+    expect(Y.encodeStateAsUpdate(doc, before)).toHaveLength(2);
+
     const localEdit = {
       ...normalizedByExcalidraw,
       version: 2,

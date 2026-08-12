@@ -3,6 +3,7 @@ import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { declareSceneRoots, foldScene, insertElementRevision } from "@dohc/excalidraw-scene";
 import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
 import * as Y from "yjs";
 import type { PresenceTransport } from "./collab/presenceChannel";
 
@@ -124,6 +125,40 @@ afterEach(() => {
   excalidraw.addFiles.mockReset();
   excalidraw.props = null;
   excalidraw.resetApiDelivery();
+});
+
+it("binds the initial scene after a production-scheduled mount", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  insertElementRevision(doc, rectangle(1, 10, 20));
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  root.render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+    />,
+  );
+  try {
+    for (
+      let turn = 0;
+      turn < 10 && !excalidraw.updateScene.mock.calls.length;
+      turn += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(excalidraw.updateScene).toHaveBeenCalledWith(
+      expect.objectContaining({
+        elements: [expect.objectContaining({ id: "shape", x: 20 })],
+      }),
+    );
+  } finally {
+    root.unmount();
+    container.remove();
+  }
 });
 
 it("starts the scene, hydration, and presence after a delayed API callback", async () => {

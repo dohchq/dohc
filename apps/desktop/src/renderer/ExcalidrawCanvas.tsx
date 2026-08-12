@@ -5,7 +5,14 @@ import {
   serializeAsJSON,
 } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   BinaryFileData,
   ExcalidrawImperativeAPI,
@@ -91,7 +98,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     hydratedFileIds.current.clear();
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;

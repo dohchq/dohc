@@ -50,7 +50,10 @@ export function applyCanvasSceneChange(input: {
 }): { changed: boolean; assetsRefused: boolean } {
   const current = foldScene(input.doc);
   const currentElements = new Map(
-    current.elements.map((element) => [element.id, stableJson(element)]),
+    current.elements.map((element) => [
+      element.id,
+      revisionKey(element.id, element.version, element.versionNonce),
+    ]),
   );
   let changed = false;
   let assetsRefused = false;
@@ -73,12 +76,11 @@ export function applyCanvasSceneChange(input: {
         element.version,
         element.versionNonce,
       );
-      const encoded = stableJson(element);
       if (input.remoteEchoes.has(key)) {
         input.remoteEchoes.delete(key);
         continue;
       }
-      if (currentElements.get(element.id) === encoded) continue;
+      if (currentElements.get(element.id) === key) continue;
       if (insertElementRevision(input.doc, element)) changed = true;
     }
 
