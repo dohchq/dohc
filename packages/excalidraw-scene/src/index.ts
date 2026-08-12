@@ -42,6 +42,15 @@ export const EXCALIDRAW_EXPORTABLE_APP_STATE = [
   "viewBackgroundColor",
 ] as const;
 const EXPORTABLE_APP_STATE = new Set<string>(EXCALIDRAW_EXPORTABLE_APP_STATE);
+const ASSET_FIELDS = new Set([
+  "id",
+  "mimeType",
+  "created",
+  "ref",
+  "sha256",
+  "lastRetrieved",
+  "version",
+]);
 
 export class SceneCodecError extends Error {
   constructor(message: string) {
@@ -75,6 +84,9 @@ export function parseRevisionKey(key: string): readonly [string, number, number]
   }
   const [id, version, nonce] = tuple;
   validateIdentity(id, version, nonce);
+  if (revisionKey(id, version as number, nonce as number) !== key) {
+    throw new SceneCodecError("The element revision key must use canonical JSON.");
+  }
   return [id, version, nonce];
 }
 
@@ -106,7 +118,7 @@ export function insertElementRevision(doc: Y.Doc, input: unknown): boolean {
 }
 
 export function setAppStateProperty(doc: Y.Doc, key: string, value: JsonValue): void {
-  validateAppStateKey(key);
+  validateAppStateProperty(key, value);
   const encoded = stableJson(value);
   doc.transact(() => declareSceneRoots(doc).appState.set(key, encoded));
 }
@@ -144,8 +156,8 @@ export function foldScene(doc: Y.Doc): FoldedScene {
   const appState: JsonObject = {};
   for (const [key, encoded] of roots.appState) {
     try {
-      validateAppStateKey(key);
       const parsed = parseStored(encoded, "app-state value");
+      validateAppStateProperty(key, parsed);
       if (stableJson(parsed) === encoded) appState[key] = parsed;
     } catch {
       // Ignore only this invalid property.
@@ -170,7 +182,11 @@ export function exportPortableScene(doc: Y.Doc): string {
   const liveElements = scene.elements.filter((element) => !element.isDeleted);
   const liveIds = new Set(liveElements.map((element) => element.id));
   const elements = liveElements.map((element) =>
-    repairElementReferences(clearElementForExport(element), liveIds),
+    repairElementReferences(
+      clearElementForExport(element),
+      liveIds,
+      new Set(Object.keys(scene.assets)),
+    ),
   );
   const appState: JsonObject = {};
   for (const key of Object.keys(scene.appState).sort(compareUnicodeScalar)) {
@@ -187,29 +203,28 @@ export function exportPortableScene(doc: Y.Doc): string {
 }
 
 export function stableJson(value: unknown): string {
-  return JSON.stringify(canonicalize(value));
-}
-
-function canonicalize(value: unknown): unknown {
-  if (value === null || typeof value === "boolean") return value;
+  if (value === null || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "string") {
     assertWellFormedUnicode(value);
-    return value;
+    return JSON.stringify(value);
   }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new SceneCodecError("Scene JSON numbers must be finite.");
-    return Object.is(value, -0) ? 0 : value;
+    return JSON.stringify(Object.is(value, -0) ? 0 : value);
   }
-  if (Array.isArray(value)) return value.map(canonicalize);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (typeof value === "object") {
-    const output: Record<string, unknown> = {};
     const keys = Object.keys(value as object);
     keys.forEach(assertWellFormedUnicode);
-    for (const key of keys.sort(compareUnicodeScalar)) {
-      const item = (value as Record<string, unknown>)[key];
-      if (item !== undefined) output[key] = canonicalize(item);
-    }
-    return output;
+    const entries = keys
+      .sort(compareUnicodeScalar)
+      .flatMap((key) => {
+        const item = (value as Record<string, unknown>)[key];
+        return item === undefined
+          ? []
+          : [`${JSON.stringify(key)}:${stableJson(item)}`];
+      });
+    return `{${entries.join(",")}}`;
   }
   throw new SceneCodecError("Scene data must contain only JSON values.");
 }
@@ -219,6 +234,8 @@ function validateElement(input: unknown): ElementSnapshot {
   validateIdentity(input.id, input.version, input.versionNonce);
   if (typeof input.type !== "string" || input.type.length === 0)
     throw new SceneCodecError("The element type must not be empty.");
+  if (input.type === "selection")
+    throw new SceneCodecError("A selection cannot be stored as a drawing element.");
   if (typeof input.isDeleted !== "boolean")
     throw new SceneCodecError("The element deletion flag must be a Boolean.");
   if ("index" in input && input.index !== null && typeof input.index !== "string")
@@ -230,21 +247,32 @@ function validateElement(input: unknown): ElementSnapshot {
 function validateIdentity(id: unknown, version: unknown, nonce: unknown): asserts id is string {
   if (typeof id !== "string" || id.length === 0)
     throw new SceneCodecError("The element ID must not be empty.");
+  assertWellFormedUnicode(id);
   if (!Number.isSafeInteger(version) || (version as number) < 0)
     throw new SceneCodecError("The element version must be a nonnegative safe integer.");
   if (!Number.isSafeInteger(nonce) || (nonce as number) < 0)
     throw new SceneCodecError("The element version nonce must be a nonnegative safe integer.");
 }
 
-function validateAppStateKey(key: string): void {
-  if (key.length === 0) {
-    throw new SceneCodecError("The app-state key must not be empty.");
-  }
+function validateAppStateProperty(key: string, value: JsonValue): void {
   assertWellFormedUnicode(key);
+  const valid =
+    key === "gridModeEnabled"
+      ? typeof value === "boolean"
+      : key === "gridSize" || key === "gridStep"
+        ? value === null || (typeof value === "number" && Number.isFinite(value))
+        : key === "viewBackgroundColor"
+          ? typeof value === "string" && value.length > 0
+          : false;
+  if (!valid) {
+    throw new SceneCodecError("The app-state property is not a valid durable value.");
+  }
 }
 
 function validateAsset(input: unknown): SceneAsset {
   if (!isObject(input)) throw new SceneCodecError("The asset must be a JSON object.");
+  if (Object.keys(input).some((key) => !ASSET_FIELDS.has(key)))
+    throw new SceneCodecError("The asset record has an unsupported property.");
   if (typeof input.id !== "string" || input.id.length === 0)
     throw new SceneCodecError("The asset ID must not be empty.");
   if (typeof input.mimeType !== "string" || input.mimeType.length === 0)
@@ -261,13 +289,18 @@ function validateAsset(input: unknown): SceneAsset {
     throw new SceneCodecError("The asset reference must be a normalized workspace-relative path.");
   if (typeof input.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(input.sha256))
     throw new SceneCodecError("The asset SHA-256 must be 64 lowercase hexadecimal characters.");
-  if ("dataURL" in input) throw new SceneCodecError("The asset record must not contain file bytes.");
   stableJson(input);
   return input as SceneAsset;
 }
 
 function isWorkspaceRelativeRef(ref: string): boolean {
-  if (!ref || ref.includes("\\") || ref.startsWith("/") || /^[A-Za-z]:/.test(ref)) return false;
+  if (
+    !ref ||
+    ref.includes("\\") ||
+    ref.includes(":") ||
+    ref.startsWith("/") ||
+    /[\u0000-\u001f\u007f-\u009f]/.test(ref)
+  ) return false;
   const parts = ref.split("/");
   return parts.every((part) => part.length > 0 && part !== "." && part !== "..");
 }
@@ -332,33 +365,50 @@ function clearElementForExport(element: ElementSnapshot): ElementSnapshot {
 function repairElementReferences(
   element: ElementSnapshot,
   liveIds: ReadonlySet<string>,
+  assetIds: ReadonlySet<string>,
 ): ElementSnapshot {
   const repaired: ElementSnapshot = { ...element };
   if (Array.isArray(element.boundElements)) {
-    repaired.boundElements = element.boundElements.filter(
-      (bound) =>
-        typeof bound === "object" &&
-        bound !== null &&
-        !Array.isArray(bound) &&
-        typeof bound.id === "string" &&
-        liveIds.has(bound.id),
-    );
+    const seen = new Set<string>();
+    repaired.boundElements = element.boundElements.filter((bound) => {
+      if (
+        typeof bound !== "object" ||
+        bound === null ||
+        Array.isArray(bound) ||
+        typeof bound.id !== "string" ||
+        !liveIds.has(bound.id) ||
+        seen.has(bound.id)
+      ) return false;
+      seen.add(bound.id);
+      return true;
+    });
+  } else if ("boundElements" in element) {
+    repaired.boundElements = null;
   }
   for (const field of ["containerId", "frameId"] as const) {
     const target = element[field];
-    if (typeof target === "string" && !liveIds.has(target)) repaired[field] = null;
+    if (field in element && (typeof target !== "string" || !liveIds.has(target))) {
+      repaired[field] = null;
+    }
   }
   for (const field of ["startBinding", "endBinding"] as const) {
     const binding = element[field];
-    if (
+    const valid =
+      element.type === "arrow" &&
       typeof binding === "object" &&
       binding !== null &&
       !Array.isArray(binding) &&
       typeof binding.elementId === "string" &&
-      !liveIds.has(binding.elementId)
-    ) {
+      liveIds.has(binding.elementId);
+    if (field in element && !valid) {
       repaired[field] = null;
     }
+  }
+  if (
+    element.type === "image" &&
+    (typeof element.fileId !== "string" || !assetIds.has(element.fileId))
+  ) {
+    repaired.fileId = null;
   }
   return repaired;
 }

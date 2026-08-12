@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
+import canonicalJsonFixture from "../fixtures/canonical-json.json";
 import {
   compareUnicodeScalar,
   declareSceneRoots,
@@ -24,6 +25,16 @@ function merge(target: Y.Doc, ...sources: Y.Doc[]) {
 }
 
 describe("element revisions", () => {
+  it("declares the exact cross-engine roots", () => {
+    const doc = new Y.Doc();
+    declareSceneRoots(doc);
+    expect([...doc.share.keys()].sort()).toEqual([
+      "excalidraw:app-state",
+      "excalidraw:assets",
+      "excalidraw:revisions",
+    ]);
+  });
+
   it("converges in either update order and retains offline branches", () => {
     const base = new Y.Doc();
     insertElementRevision(base, element("shape", 1, 10));
@@ -61,6 +72,8 @@ describe("element revisions", () => {
   it("uses unambiguous tuple keys and rejects nonce collisions", () => {
     expect(parseRevisionKey(revisionKey("a,1", 2, 3))).toEqual(["a,1", 2, 3]);
     expect(() => parseRevisionKey('["a",1,2,3]')).toThrow("three-item");
+    expect(() => parseRevisionKey('[ "a",1,2]')).toThrow("canonical JSON");
+    expect(() => revisionKey("\ud800", 1, 2)).toThrow("valid Unicode");
     const doc = new Y.Doc();
     insertElementRevision(doc, element("a", 1, 2, { x: 1 }));
     expect(() => insertElementRevision(doc, element("a", 1, 2, { x: 2 }))).toThrow("different content");
@@ -143,7 +156,7 @@ describe("portable export", () => {
     setAppStateProperty(doc, "gridStep", 5);
     setAppStateProperty(doc, "gridModeEnabled", true);
     setAppStateProperty(doc, "viewBackgroundColor", "#ffffff");
-    setAppStateProperty(doc, "scrollX", 42);
+    declareSceneRoots(doc).appState.set("scrollX", "42");
     const exported = JSON.parse(exportPortableScene(doc));
     expect(exported.source).toBe("https://excalidraw.com");
     expect(exported.elements.map(({ id }: { id: string }) => id)).toEqual(["image"]);
@@ -162,7 +175,10 @@ describe("portable export", () => {
     expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "../x", sha256: SHA256 })).toThrow("workspace-relative");
     expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "x" })).toThrow("SHA-256");
     expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "x", sha256: "A".repeat(64) })).toThrow("lowercase");
-    expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "x", sha256: SHA256, dataURL: "bytes" })).toThrow("file bytes");
+    expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "x", sha256: SHA256, dataURL: "bytes" })).toThrow("unsupported property");
+    expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "assets/a:b.png", sha256: SHA256 })).toThrow("workspace-relative");
+    expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "assets/a.png", sha256: SHA256, extra: true })).toThrow("unsupported property");
+    expect(() => insertElementRevision(doc, element("selection", 1, 1, { type: "selection" }))).toThrow("selection");
   });
 
   it("writes stable canonical JSON", () => {
@@ -172,6 +188,29 @@ describe("portable export", () => {
       '{"":1,"😀":2}',
     );
     expect(() => stableJson({ text: "\ud800" })).toThrow("valid Unicode");
+    for (const fixture of canonicalJsonFixture.cases) {
+      expect(stableJson(JSON.parse(fixture.raw)), fixture.name).toBe(
+        fixture.canonical,
+      );
+    }
+  });
+
+  it("keeps only canonical durable app-state values", () => {
+    const doc = new Y.Doc();
+    setAppStateProperty(doc, "gridSize", null);
+    setAppStateProperty(doc, "gridStep", 5);
+    setAppStateProperty(doc, "gridModeEnabled", false);
+    setAppStateProperty(doc, "viewBackgroundColor", "#fff");
+    expect(() => setAppStateProperty(doc, "scrollX", 1)).toThrow("durable value");
+    expect(() => setAppStateProperty(doc, "gridModeEnabled", 1 as never)).toThrow("durable value");
+    declareSceneRoots(doc).appState.set("gridStep", '"five"');
+    declareSceneRoots(doc).appState.set("scrollX", "1");
+
+    expect(foldScene(doc).appState).toEqual({
+      gridModeEnabled: false,
+      gridSize: null,
+      viewBackgroundColor: "#fff",
+    });
   });
 
   it("removes references to tombstoned elements", () => {
@@ -194,6 +233,41 @@ describe("portable export", () => {
       frameId: null,
       startBinding: null,
       endBinding: null,
+    });
+  });
+
+  it("repairs image and native binding references like the Rust projector", () => {
+    const doc = new Y.Doc();
+    insertElementRevision(doc, element("target", 1, 1));
+    insertElementRevision(doc, element("image-backed", 1, 1, {
+      type: "image",
+      fileId: "asset",
+    }));
+    insertElementRevision(doc, element("image-missing", 1, 1, {
+      type: "image",
+      fileId: "missing",
+    }));
+    insertElementRevision(doc, element("box", 1, 1, {
+      boundElements: [
+        { id: "target", type: "text" },
+        { id: "target", type: "text" },
+      ],
+      startBinding: { elementId: "target" },
+    }));
+    putSceneAsset(doc, {
+      id: "asset",
+      mimeType: "image/png",
+      created: 1,
+      ref: "assets/image.png",
+      sha256: SHA256,
+    });
+
+    const exported = JSON.parse(exportPortableScene(doc)).elements as Array<Record<string, unknown>>;
+    expect(exported.find(({ id }) => id === "image-backed")?.fileId).toBe("asset");
+    expect(exported.find(({ id }) => id === "image-missing")?.fileId).toBeNull();
+    expect(exported.find(({ id }) => id === "box")).toMatchObject({
+      boundElements: [{ id: "target", type: "text" }],
+      startBinding: null,
     });
   });
 

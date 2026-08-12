@@ -1,0 +1,69 @@
+{
+  "cases": [
+    {
+      "name": "negative zero",
+      "raw": "{\"n\":-0}",
+      "canonical": "{\"n\":0}"
+    },
+    {
+      "name": "fixed upper boundary",
+      "raw": "{\"n\":1e20}",
+      "canonical": "{\"n\":100000000000000000000}"
+    },
+    {
+      "name": "exponent upper boundary",
+      "raw": "{\"n\":1e21}",
+      "canonical": "{\"n\":1e+21}"
+    },
+    {
+      "name": "fixed lower boundary",
+      "raw": "{\"n\":1e-6}",
+      "canonical": "{\"n\":0.000001}"
+    },
+    {
+      "name": "exponent lower boundary",
+      "raw": "{\"n\":1e-7}",
+      "canonical": "{\"n\":1e-7}"
+    },
+    {
+      "name": "integer above the JavaScript safe range",
+      "raw": "{\"n\":9007199254740993}",
+      "canonical": "{\"n\":9007199254740992}"
+    },
+    {
+      "name": "maximum safe integer",
+      "raw": "{\"n\":9007199254740991}",
+      "canonical": "{\"n\":9007199254740991}"
+    },
+    {
+      "name": "fraction below one",
+      "raw": "{\"n\":0.9999999999999999}",
+      "canonical": "{\"n\":0.9999999999999999}"
+    },
+    {
+      "name": "smallest positive double",
+      "raw": "{\"n\":5e-324}",
+      "canonical": "{\"n\":5e-324}"
+    },
+    {
+      "name": "largest finite double",
+      "raw": "{\"n\":1.7976931348623157e308}",
+      "canonical": "{\"n\":1.7976931348623157e+308}"
+    },
+    {
+      "name": "Unicode scalar key order",
+      "raw": "{\"😀\":2,\"\":1}",
+      "canonical": "{\"\":1,\"😀\":2}"
+    },
+    {
+      "name": "nested numeric-looking keys",
+      "raw": "{\"nested\":{\"2\":2,\"10\":10,\"01\":1}}",
+      "canonical": "{\"nested\":{\"01\":1,\"10\":10,\"2\":2}}"
+    },
+    {
+      "name": "prototype-looking key",
+      "raw": "{\"nested\":{\"value\":1,\"__proto__\":{\"polluted\":true}}}",
+      "canonical": "{\"nested\":{\"__proto__\":{\"polluted\":true},\"value\":1}}"
+    }
+  ]
+}

@@ -13,6 +13,8 @@ use base64::Engine as _;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::canonical_json::canonical_json_string;
+
 const EXPORT_SOURCE: &str = "https://excalidraw.com";
 const EXPORT_VERSION: u8 = 2;
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -116,8 +118,7 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
         .collect();
     if object.len() != expected.len() || object.keys().any(|key| !expected.contains(key.as_str())) {
         return Err(SceneImportError::Invalid {
-            reason:
-                "top level must contain only type, version, source, elements, appState, and files",
+            reason: "top level must contain only type, version, source, elements, appState, and files",
         });
     }
     if object.get("type").and_then(Value::as_str) != Some("excalidraw")
@@ -172,12 +173,11 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
                 reason: "an element has an invalid native snapshot shape",
             });
         }
-        let revision_key = serde_json::to_string(&json_revision_key(&key)).map_err(|_| {
-            SceneImportError::Invalid {
+        let revision_key =
+            canonical_json_string(&json_revision_key(&key)).ok_or(SceneImportError::Invalid {
                 reason: "an element revision key could not be encoded",
-            }
-        })?;
-        let snapshot = serde_json::to_string(element).map_err(|_| SceneImportError::Invalid {
+            })?;
+        let snapshot = canonical_json_string(element).ok_or(SceneImportError::Invalid {
             reason: "an element snapshot could not be encoded",
         })?;
         if revisions.insert(revision_key, snapshot).is_some() {
@@ -213,9 +213,9 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
     let app_state: BTreeMap<String, String> = app_state_object
         .iter()
         .map(|(key, value)| {
-            serde_json::to_string(value)
+            canonical_json_string(value)
                 .map(|value| (key.clone(), value))
-                .map_err(|_| SceneImportError::Invalid {
+                .ok_or(SceneImportError::Invalid {
                     reason: "an appState property could not be encoded",
                 })
         })
@@ -274,19 +274,22 @@ fn json_revision_key(key: &RevisionKey) -> Value {
 
 fn validate_app_state(object: &Map<String, Value>) -> Result<(), SceneImportError> {
     for (key, value) in object {
-        let valid = match key.as_str() {
-            "gridModeEnabled" => value.is_boolean(),
-            "gridSize" | "gridStep" => value.is_null() || value.as_f64().is_some(),
-            "viewBackgroundColor" => value.as_str().is_some_and(|color| !color.is_empty()),
-            _ => false,
-        };
-        if !valid {
+        if !valid_app_state_property(key, value) {
             return Err(SceneImportError::Invalid {
                 reason: "an appState property has an invalid native value",
             });
         }
     }
     Ok(())
+}
+
+fn valid_app_state_property(key: &str, value: &Value) -> bool {
+    match key {
+        "gridModeEnabled" => value.is_boolean(),
+        "gridSize" | "gridStep" => value.is_null() || value.as_f64().is_some(),
+        "viewBackgroundColor" => value.as_str().is_some_and(|color| !color.is_empty()),
+        _ => false,
+    }
 }
 
 fn import_file(id: &str, value: &Value) -> Result<ImportedSceneFile, SceneImportError> {
@@ -430,7 +433,10 @@ pub fn fold_scene(
 
     let app_state = EXPORTED_APP_STATE_KEYS
         .into_iter()
-        .filter_map(|key| canonical_json(app_state.get(key)?).map(|value| (key.to_owned(), value)))
+        .filter_map(|key| {
+            let value = canonical_json(app_state.get(key)?)?;
+            valid_app_state_property(key, &value).then(|| (key.to_owned(), value))
+        })
         .collect();
 
     FoldedScene {
@@ -442,7 +448,7 @@ pub fn fold_scene(
 
 fn canonical_json(raw: &str) -> Option<Value> {
     let value: Value = serde_json::from_str(raw).ok()?;
-    (serde_json::to_string(&value).ok()?.as_str() == raw).then_some(value)
+    (canonical_json_string(&value)?.as_str() == raw).then_some(value)
 }
 
 fn parse_revision_key(raw: &str) -> Option<RevisionKey> {
@@ -653,7 +659,7 @@ mod tests {
     use serde_json::json;
 
     fn canonical(value: Value) -> String {
-        serde_json::to_string(&value).expect("test JSON serializes")
+        canonical_json_string(&value).expect("test JSON serializes")
     }
 
     fn revision(id: &str, version: u64, nonce: u64, mut extra: Map<String, Value>) -> String {
@@ -669,6 +675,13 @@ mod tests {
 
     fn revision_key(id: &str, version: u64, nonce: u64) -> String {
         canonical(json!([id, version, nonce]))
+    }
+
+    #[test]
+    fn scene_roots_match_the_typescript_contract() {
+        assert_eq!(crate::ROOT_SCENE_REVISIONS, "excalidraw:revisions");
+        assert_eq!(crate::ROOT_SCENE_APP_STATE, "excalidraw:app-state");
+        assert_eq!(crate::ROOT_SCENE_ASSETS, "excalidraw:assets");
     }
 
     #[test]
@@ -765,6 +778,59 @@ mod tests {
         assert_eq!(folded.elements.len(), 1);
         assert_eq!(folded.elements[0]["id"], "a");
         assert_eq!(folded.elements[0]["version"], 1);
+    }
+
+    #[test]
+    fn noncanonical_numbers_and_invalid_unicode_are_skipped_per_record() {
+        let revisions = BTreeMap::from([
+            (
+                revision_key("valid", 1, 1),
+                revision(
+                    "valid",
+                    1,
+                    1,
+                    Map::from_iter([("x".to_owned(), json!(1e20))]),
+                ),
+            ),
+            (
+                revision_key("noncanonical", 1, 1),
+                r#"{"id":"noncanonical","isDeleted":false,"type":"rectangle","version":1,"versionNonce":1,"x":1e20}"#
+                    .to_owned(),
+            ),
+            (
+                revision_key("negative-zero", 1, 1),
+                r#"{"id":"negative-zero","isDeleted":false,"type":"rectangle","version":1,"versionNonce":1,"x":-0}"#
+                    .to_owned(),
+            ),
+            (
+                revision_key("surrogate", 1, 1),
+                r#"{"id":"surrogate","isDeleted":false,"text":"\ud800","type":"text","version":1,"versionNonce":1}"#
+                    .to_owned(),
+            ),
+        ]);
+
+        let folded = fold_scene(&revisions, &BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(folded.elements.len(), 1);
+        assert_eq!(folded.elements[0]["id"], "valid");
+    }
+
+    #[test]
+    fn fold_keeps_only_valid_durable_app_state() {
+        let app_state = BTreeMap::from([
+            ("gridModeEnabled".to_owned(), canonical(json!(false))),
+            ("gridSize".to_owned(), canonical(Value::Null)),
+            ("gridStep".to_owned(), canonical(json!("five"))),
+            ("viewBackgroundColor".to_owned(), canonical(json!(""))),
+            ("scrollX".to_owned(), canonical(json!(20))),
+        ]);
+
+        assert_eq!(
+            fold_scene(&BTreeMap::new(), &app_state, &BTreeMap::new()).app_state,
+            BTreeMap::from([
+                ("gridModeEnabled".to_owned(), Value::Bool(false)),
+                ("gridSize".to_owned(), Value::Null),
+            ])
+        );
     }
 
     #[test]
@@ -1017,6 +1083,36 @@ mod tests {
         assert_eq!(canonical[crate::ROOT_SCENE_REVISIONS]["type"], "map");
         assert_eq!(canonical[crate::ROOT_SCENE_APP_STATE]["type"], "map");
         assert_eq!(doc.fold_scene().elements[0]["id"], "image");
+    }
+
+    #[test]
+    fn native_import_writes_javascript_canonical_numbers() {
+        let content = r##"{
+          "type":"excalidraw",
+          "version":2,
+          "source":"https://excalidraw.com",
+          "elements":[{
+            "id":"shape",
+            "type":"rectangle",
+            "version":1,
+            "versionNonce":2,
+            "isDeleted":false,
+            "x":1e20,
+            "y":-0,
+            "angle":1e-7
+          }],
+          "appState":{"gridSize":1e20},
+          "files":{}
+        }"##;
+
+        let imported = import_portable_scene(content).expect("native scene imports");
+        let doc = crate::Ydoc::wire();
+        doc.apply(&imported.initial_update).expect("initial update");
+        let folded = doc.fold_scene();
+        assert_eq!(folded.elements[0]["x"], json!(1e20));
+        assert_eq!(folded.elements[0]["y"], json!(0));
+        assert_eq!(folded.elements[0]["angle"], json!(1e-7));
+        assert_eq!(folded.app_state["gridSize"], json!(1e20));
     }
 
     #[test]

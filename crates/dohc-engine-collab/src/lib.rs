@@ -22,6 +22,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod canonical_json;
 pub mod durable;
 pub mod error;
 pub mod lease;
