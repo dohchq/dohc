@@ -2730,12 +2730,20 @@ export function DesktopWorkspaceShell(props: {
     },
     [openFile],
   );
+  const openVirtualTab = useCallback(
+    (path: string) => {
+      const targetGroupId = wbRef.current.activeEditorGroup;
+      invalidateDeferredFileOpen(targetGroupId);
+      mutateWb((state) => openTab(state, path, targetGroupId));
+    },
+    [invalidateDeferredFileOpen, mutateWb],
+  );
   const openGraphTab = useCallback(() => {
-    mutateWb((state) => openTab(state, GRAPH_TAB_PATH));
-  }, [mutateWb]);
+    openVirtualTab(GRAPH_TAB_PATH);
+  }, [openVirtualTab]);
   const openHistoryTab = useCallback(() => {
-    mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
-  }, [mutateWb]);
+    openVirtualTab(HISTORY_TAB_PATH);
+  }, [openVirtualTab]);
   // The editor owns the live conversation while the right panel remains a
   // lightweight Slack-style navigator. The ref seeds editor remounts without
   // making draft keystrokes rerender the shell; selectedNav is only updated on
@@ -2790,8 +2798,8 @@ export function DesktopWorkspaceShell(props: {
     chatsDrafts.current = drafts;
   }, []);
   const openChatsTab = useCallback(() => {
-    mutateWb((state) => openTab(state, CHATS_TAB_PATH));
-  }, [mutateWb]);
+    openVirtualTab(CHATS_TAB_PATH);
+  }, [openVirtualTab]);
   const openChatsNavInTab = useCallback(
     (nav: ChatsNav) => {
       // Read before the write: both answers are about the destination the
@@ -2816,9 +2824,9 @@ export function DesktopWorkspaceShell(props: {
       if (shouldRemount) {
         setChatsPageRevision((current) => current + 1);
       }
-      mutateWb((state) => openTab(state, CHATS_TAB_PATH));
+      openVirtualTab(CHATS_TAB_PATH);
     },
-    [mutateWb, setChatsDestination],
+    [openVirtualTab, setChatsDestination],
   );
   const openCanonicalDmInTab = useCallback(
     async (locator: DmChatLocator) => {

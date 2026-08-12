@@ -26,6 +26,8 @@ function sharedBridge() {
   >();
   const openedSessionIds: string[] = [];
   let closeGate: Promise<void> | null = null;
+  let openError: Error | null = null;
+  let remoteUnsubscribeError: Error | null = null;
   const source = new Y.Doc();
   source.getMap("meta").set("contentKind", "plain-text");
   source.getText("plainText").insert(0, "seed");
@@ -34,6 +36,11 @@ function sharedBridge() {
     openEngineYDocSession: vi.fn(
       async (payload: { sessionId: string }) => {
         openedSessionIds.push(payload.sessionId);
+        if (openError) {
+          const error = openError;
+          openError = null;
+          throw error;
+        }
         return {
           available: true,
           initialUpdate: Y.encodeStateAsUpdate(source),
@@ -45,7 +52,14 @@ function sharedBridge() {
       listener: (event: { sessionId: string; update: Uint8Array }) => void,
     ) => {
       remoteUpdateListeners.add(listener);
-      return () => remoteUpdateListeners.delete(listener);
+      return () => {
+        remoteUpdateListeners.delete(listener);
+        if (remoteUnsubscribeError) {
+          const error = remoteUnsubscribeError;
+          remoteUnsubscribeError = null;
+          throw error;
+        }
+      };
     },
     onEngineYDocSaveState: (listener: SaveStateListener) => {
       saveStateListeners.add(listener);
@@ -73,6 +87,12 @@ function sharedBridge() {
     api,
     emit,
     openedSessionIds,
+    failNextOpen(error = new Error("engine unavailable")) {
+      openError = error;
+    },
+    failNextRemoteUnsubscribe(error = new Error("unsubscribe failed")) {
+      remoteUnsubscribeError = error;
+    },
     holdClose() {
       let release!: () => void;
       closeGate = new Promise<void>((resolve) => {
@@ -286,6 +306,52 @@ it("shares one document lease until the final consumer unmounts", async () => {
   await waitFor(() =>
     expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(1),
   );
+});
+
+it("settles a failed shared open for both consumers", async () => {
+  harness.failNextOpen();
+  const view = render(<Pair />);
+
+  await waitFor(() => {
+    expect(screen.getByTestId("available-first").textContent).toBe("false");
+    expect(screen.getByTestId("available-second").textContent).toBe("false");
+  });
+  expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(1);
+
+  view.unmount();
+  await expect(disposeEngineDocLeasesForTests()).resolves.toBeUndefined();
+});
+
+it("continues shared retries after a session cleanup rejects", async () => {
+  const cleanupError = new Error("unsubscribe failed");
+  const consoleError = vi
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+  const view = render(<Pair />);
+  await waitForPair();
+  harness.failNextRemoteUnsubscribe(cleanupError);
+
+  view.rerender(<Pair firstRetryKey={1} />);
+  await waitFor(() =>
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(2),
+  );
+  await waitForPair();
+
+  view.rerender(<Pair firstRetryKey={2} />);
+  await waitFor(() =>
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(3),
+  );
+  await waitForPair();
+  expect(consoleError).toHaveBeenCalledWith(
+    "[desktop] could not fully clean up a live document session:",
+    cleanupError,
+  );
+
+  view.unmount();
+  await waitFor(() =>
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(2),
+  );
+  consoleError.mockRestore();
 });
 
 it("attaches a newly split consumer to the lease retained after retry", async () => {

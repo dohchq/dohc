@@ -318,6 +318,20 @@ const engineDocLeases = new Map<string, EngineDocLease>();
 const engineDocDisposalBarriers = new Map<string, Promise<void>>();
 let engineDocLeaseCounter = 0;
 
+async function settleEngineDocCleanup(
+  cleanup: Promise<void> | undefined,
+): Promise<void> {
+  if (!cleanup) return;
+  try {
+    await cleanup;
+  } catch (error: unknown) {
+    console.error(
+      "[desktop] could not fully clean up a live document session:",
+      error,
+    );
+  }
+}
+
 function trackEngineDocDisposal(lease: EngineDocLease): Promise<void> {
   const disposal = lease.dispose();
   const previous = engineDocDisposalBarriers.get(lease.documentKey);
@@ -695,14 +709,16 @@ function createEngineDocLease(
         deletion: null,
       });
 
-      transition = transition.then(async () => {
-        await previous?.dispose();
-        if (disposed || generation !== transitionGeneration) {
-          await replacement.dispose();
-          return;
-        }
-        attach(replacement);
-      });
+      transition = settleEngineDocCleanup(
+        settleEngineDocCleanup(transition).then(async () => {
+          await settleEngineDocCleanup(previous?.dispose());
+          if (disposed || generation !== transitionGeneration) {
+            await settleEngineDocCleanup(replacement.dispose());
+            return;
+          }
+          attach(replacement);
+        }),
+      );
     },
     subscribe(listener) {
       listeners.add(listener);
@@ -719,13 +735,15 @@ function createEngineDocLease(
         return;
       }
       const generation = transitionGeneration;
-      transition = barrier.then(async () => {
-        if (disposed || generation !== transitionGeneration) {
-          await initialSession.dispose();
-          return;
-        }
-        attach(initialSession);
-      });
+      transition = settleEngineDocCleanup(
+        settleEngineDocCleanup(barrier).then(async () => {
+          if (disposed || generation !== transitionGeneration) {
+            await settleEngineDocCleanup(initialSession.dispose());
+            return;
+          }
+          attach(initialSession);
+        }),
+      );
     },
     dispose() {
       if (disposePromise) return disposePromise;
@@ -735,9 +753,9 @@ function createEngineDocLease(
       unsubscribeSession = null;
       const current = activeSession;
       activeSession = null;
-      const immediateDispose = current?.dispose();
+      const immediateDispose = settleEngineDocCleanup(current?.dispose());
       disposePromise = (async () => {
-        await transition;
+        await settleEngineDocCleanup(transition);
         await immediateDispose;
         listeners.clear();
       })();

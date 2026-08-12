@@ -1094,12 +1094,6 @@ function useAutosavedTextDraft(props: {
       if (options.textSnapshot !== undefined) {
         props.localBuffer.publishDraft(options.textSnapshot, localSource.current);
       }
-      if (props.localBuffer.getSnapshot().contentHash === null) {
-        if (options.captureOnFailure && options.textSnapshot !== undefined) {
-          captureLatestConflictDraft(options.textSnapshot);
-        }
-        return;
-      }
       const issuedBaseRequestId = baseContentRequestId.current;
       unsavedDraft.current = false;
       if (!unmounted.current) setSaveState("saving");
@@ -2410,12 +2404,6 @@ function MarkdownView(props: {
       // and it has no earlier publish seam.
       if (options.textSnapshot !== undefined) {
         props.localBuffer.publishDraft(options.textSnapshot, localSource.current);
-      }
-      if (props.localBuffer.getSnapshot().contentHash === null) {
-        if (options.captureOnFailure && options.textSnapshot !== undefined) {
-          captureLatestConflictDraft(options.textSnapshot);
-        }
-        return;
       }
       const issuedBaseRequestId = baseContentRequestId.current;
       // Serialized HERE, not at enqueue: a writer that waited reads the

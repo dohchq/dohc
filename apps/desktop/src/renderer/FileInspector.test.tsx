@@ -1642,8 +1642,9 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
     let publishesBeforeRelease = 0;
+    const peerSource = {};
     await act(async () => {
-      buffer.publishDraft("# Peer newest\n", {});
+      buffer.publishDraft("# Peer newest\n", peerSource);
       publishesBeforeRelease = publishDraft.mock.calls.length;
       finishFirst();
       await firstWrite;
@@ -1659,6 +1660,102 @@ describe("markdown editor unmount flush", () => {
     });
     expect(buffer.getSnapshot().body).toBe("# Peer newest\n");
   });
+
+  it("retains a peer-owned Markdown draft after an older pane save succeeds", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Hello\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    let finishWrite!: () => void;
+    const pending = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        finishWrite = () =>
+          resolve({ status: "written", contentHash: "b".repeat(64) });
+      },
+    );
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => pending);
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="peer-owned.md" />);
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(await screen.findByTestId("markdown-editor"), "Writer");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+    const buffer = getSharedLocalDocument(
+      localDocumentKey("ws-1", "peer-owned.md", undefined),
+    );
+    const peerSource = {};
+
+    await act(async () => {
+      buffer.publishDraft("# Peer newest\n", peerSource);
+      finishWrite();
+      await pending;
+    });
+
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "# Peer newest\n",
+      contentHash: "b".repeat(64),
+      dirty: true,
+      saveState: "saving",
+    });
+    expect(buffer.getSnapshot().source).toBe(peerSource);
+  });
+
+  it.each([
+    ["plain text", "notes/no-baseline.txt", "view-text-editor"],
+    ["Markdown", "no-baseline.md", "view-markdown"],
+  ])(
+    "rejects a %s flush when the shared draft has no content hash",
+    async (_label, path, viewTestId) => {
+      const buffer = getSharedLocalDocument(
+        localDocumentKey("ws-1", path, undefined),
+      );
+      buffer.publishDraft("unsaved", {});
+      let flush: DraftFlush | null = null;
+      const view = render(
+        <FileInspector
+          workspaceId="ws-1"
+          path={path}
+          registerDraftFlush={(next) => {
+            flush = next;
+          }}
+        />,
+      );
+      await screen.findByTestId(viewTestId);
+      await waitFor(() => expect(flush).not.toBeNull());
+
+      const flushing = flush!({ captureOnFailure: true });
+      const rejected = expect(flushing).rejects.toThrow(
+        "dohc cannot save this draft without a content hash.",
+      );
+      // Let the old implementation leave its first no-progress iteration,
+      // then stop its loop without hanging the test runner.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      view.rerender(
+        <FileInspector
+          workspaceId="ws-1"
+          path={path}
+          readOnly
+          registerDraftFlush={(next) => {
+            flush = next;
+          }}
+        />,
+      );
+
+      await rejected;
+      expect(buffer.getSnapshot()).toMatchObject({
+        body: "unsaved",
+        contentHash: null,
+        dirty: true,
+      });
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not expose a retained same-path body or hash after switching workspaces", async () => {
     const firstHash = "1".repeat(64);

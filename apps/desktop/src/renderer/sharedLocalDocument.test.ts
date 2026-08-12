@@ -69,6 +69,38 @@ describe("SharedLocalDocument", () => {
     release();
   });
 
+  it("keeps a newer peer as the source when an older writer succeeds", async () => {
+    const buffer = getSharedLocalDocument(
+      localDocumentKey("ws", "source-owner.txt", 1),
+    );
+    const release = buffer.retain();
+    const writerSource = {};
+    const peerSource = {};
+    buffer.initialize("zero", "hash-0");
+    buffer.publishDraft("writer", writerSource);
+    let finishWrite!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    });
+    const writing = buffer.write(writerSource, async () => {
+      await pending;
+      return { status: "written", contentHash: "hash-1" };
+    });
+    buffer.publishDraft("peer", peerSource);
+
+    finishWrite();
+    await writing;
+
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "peer",
+      contentHash: "hash-1",
+      dirty: true,
+      saveState: "saving",
+    });
+    expect(buffer.getSnapshot().source).toBe(peerSource);
+    release();
+  });
+
   it("keeps a clean buffer saved when a writer has nothing to do", async () => {
     const key = localDocumentKey("ws", "clean.txt", 1);
     const buffer = getSharedLocalDocument(key);

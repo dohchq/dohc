@@ -1138,6 +1138,112 @@ describe("editor groups", () => {
     },
   );
 
+  it.each([
+    {
+      destination: "Graph",
+      tabPath: "dohc://graph",
+      navigate: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(screen.getByTestId("activity-graph"));
+        await user.click(await screen.findByTestId("graph-open-tab"));
+      },
+    },
+    {
+      destination: "History",
+      tabPath: "dohc://history",
+      navigate: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(screen.getByTestId("activity-history"));
+        await user.click(await screen.findByTestId("history-open-tab"));
+      },
+    },
+    {
+      destination: "Chats",
+      tabPath: "dohc://chats",
+      navigate: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(await screen.findByTestId("chats-open-tab"));
+      },
+    },
+  ])(
+    "keeps $destination selected when an older duplicate-file open finishes flushing",
+    async ({ tabPath, navigate }) => {
+      const save = deferred<{ status: "written"; contentHash: string }>();
+      const bridge = makeEngineBridge(
+        Promise.resolve({
+          ...STORED_STATE,
+          editorGroups: [
+            {
+              id: "left",
+              tabs: ["race-a.txt"],
+              activeTab: "race-a.txt",
+              size: 0.5,
+            },
+            {
+              id: "right",
+              tabs: ["b.md"],
+              activeTab: "b.md",
+              size: 0.5,
+            },
+          ],
+          activeEditorGroup: "right",
+        }),
+      );
+      bridge.listWorkspaceFiles = vi.fn(async () => ({
+        files: ["race-a.txt", "b.md"].map((path) => ({
+          path,
+          kind: "file" as const,
+        })),
+        folders: [],
+      }));
+      bridge.readWorkspaceText = vi.fn(async () => ({
+        text: "Draft base",
+        truncated: false as const,
+        contentHash: "a".repeat(64),
+      }));
+      bridge.writeWorkspaceText = vi.fn(() => save.promise);
+      const user = userEvent.setup();
+      renderShell(bridge);
+      await settleEngineOnRead(bridge);
+
+      const left = await screen.findByRole("region", {
+        name: "Editor group 1",
+      });
+      const right = screen.getByRole("region", { name: "Editor group 2" });
+      const content = (await within(left).findByTestId("view-text-editor"))
+        .querySelector(".cm-content") as HTMLElement;
+      await user.click(content);
+      await user.keyboard("{End} changed");
+      await waitFor(() =>
+        expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
+      );
+
+      fireEvent.pointerDown(right);
+      await waitFor(() => expect(right.dataset.active).toBe("true"));
+      await user.click(fileTreeRow("race-a.txt"));
+      await waitFor(() =>
+        expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      );
+
+      await navigate(user);
+      await waitFor(() =>
+        expect(within(right).getByTestId(`tab-${tabPath}`).dataset.active).toBe(
+          "true",
+        ),
+      );
+
+      await act(async () => {
+        save.resolve({ status: "written", contentHash: "b".repeat(64) });
+        await save.promise;
+      });
+
+      await waitFor(() =>
+        expect(within(right).getByTestId(`tab-${tabPath}`).dataset.active).toBe(
+          "true",
+        ),
+      );
+      expect(right.dataset.active).toBe("true");
+      expect(within(right).queryByTestId("tab-race-a.txt")).toBeNull();
+    },
+  );
+
   it("moves a tab into an empty editor group by pointer drag", async () => {
     const bridge = makeBridge(
       Promise.resolve({

@@ -215,7 +215,7 @@ export class SharedLocalDocument {
         const newerDraft = this.snapshot.body !== body;
         this.replace(
           { body: this.snapshot.body, contentHash: written.contentHash },
-          source,
+          newerDraft ? this.snapshot.source : source,
           newerDraft,
           newerDraft ? "saving" : "saved",
         );
