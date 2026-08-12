@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
+import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import {
   bindEngineYDoc,
   mergeYDocUpdatesForTransport,
@@ -450,6 +451,57 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     await binding.destroy();
     mainDoc.destroy();
+  });
+
+  it("sets aside one oversized update and lets teardown complete", async () => {
+    const seed = new Y.Doc();
+    seed.getText("plainText");
+    let applyAttempts = 0;
+    let closed = false;
+    const transport: EngineYDocTransport = {
+      async open() {
+        return { available: true, initialUpdate: Y.encodeStateAsUpdate(seed) };
+      },
+      stageLocalUpdate: () => 1,
+      applyLocalUpdate() {
+        applyAttempts += 1;
+      },
+      onRemoteUpdate() {
+        return () => undefined;
+      },
+      async close() {
+        closed = true;
+      },
+    };
+    const batches = manualBatchScheduler();
+    let refusal:
+      | { constraint: string; limitBytes: number; observedBytes: number }
+      | undefined;
+    let recoveredText = "";
+    const binding = await bindEngineYDoc(transport, batches.scheduler, {
+      onPermanentLocalUpdateFailure(error, doc) {
+        refusal = error;
+        recoveredText = doc.getText("plainText").toString();
+      },
+    });
+
+    const text = "x".repeat(ENGINE_YDOC_UPDATE_MAX_BYTES + 1);
+    binding.doc!.getText("plainText").insert(0, text);
+    await batches.runNext();
+
+    expect(applyAttempts).toBe(0);
+    expect(refusal).toMatchObject({
+      constraint: "ENGINE_YDOC_UPDATE_MAX_BYTES",
+      limitBytes: ENGINE_YDOC_UPDATE_MAX_BYTES,
+    });
+    expect(refusal!.observedBytes).toBeGreaterThan(
+      ENGINE_YDOC_UPDATE_MAX_BYTES,
+    );
+    expect(recoveredText).toBe(text);
+
+    await binding.destroy();
+    expect(closed).toBe(true);
+    seed.destroy();
   });
 
   it("keeps teardown pending and the session open while the head cannot be acknowledged", async () => {

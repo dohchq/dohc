@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "./channels";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
@@ -1718,6 +1719,22 @@ describe("engine Y.Doc update IPC contract", () => {
         seq: -1,
       }),
     ).toThrow();
+  });
+
+  it("names the update limit and observed bytes when an update is too large", () => {
+    const observedBytes = ENGINE_YDOC_UPDATE_MAX_BYTES + 1;
+    const result = ApplyEngineYDocUpdatePayload.safeParse({
+      sessionId: "s",
+      update: new Uint8Array(observedBytes),
+      seq: 1,
+    });
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.map(({ message }) => message)).toContain(
+      `ENGINE_YDOC_UPDATE_MAX_BYTES is ${ENGINE_YDOC_UPDATE_MAX_BYTES} bytes; ` +
+        `the update is ${observedBytes} bytes.`,
+    );
   });
 });
 

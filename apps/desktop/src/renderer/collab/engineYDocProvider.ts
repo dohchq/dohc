@@ -79,6 +79,36 @@ export interface EngineYDocBatchScheduler {
   cancel(handle: unknown): void;
 }
 
+export class EngineYDocUpdateTooLargeError extends Error {
+  readonly code = "engine-ydoc-update-too-large";
+  readonly constraint = "ENGINE_YDOC_UPDATE_MAX_BYTES";
+
+  constructor(
+    readonly observedBytes: number,
+    readonly limitBytes: number = ENGINE_YDOC_UPDATE_MAX_BYTES,
+  ) {
+    super(
+      "dohc could not save this edit. ENGINE_YDOC_UPDATE_MAX_BYTES is " +
+        `${limitBytes} bytes; the update is ${observedBytes} bytes. ` +
+        "Copy the set-aside edit below.",
+    );
+    this.name = "EngineYDocUpdateTooLargeError";
+  }
+}
+
+function isEngineYDocUpdateTooLargeError(
+  error: unknown,
+): error is EngineYDocUpdateTooLargeError {
+  return error instanceof EngineYDocUpdateTooLargeError;
+}
+
+export interface EngineYDocBindOptions {
+  onPermanentLocalUpdateFailure?: (
+    error: EngineYDocUpdateTooLargeError,
+    doc: Y.Doc,
+  ) => void;
+}
+
 const LOCAL_UPDATE_BATCH_MS = 32;
 // Local IPC normally answers in one turn. A quarter-second retry avoids a hot
 // loop during an outage while recovering a brief renderer/main handoff quickly.
@@ -160,6 +190,7 @@ export interface EngineYDocBinding {
 export async function bindEngineYDoc(
   transport: EngineYDocTransport,
   batchScheduler: EngineYDocBatchScheduler = timeoutBatchScheduler,
+  options: EngineYDocBindOptions = {},
 ): Promise<EngineYDocBinding> {
   const opened = await transport.open();
   if (!opened.available || !opened.initialUpdate) {
@@ -202,16 +233,39 @@ export async function bindEngineYDoc(
     sequence: number;
   }> = [];
   let sendChain = Promise.resolve();
+  let localUpdatesRefused = false;
+
+  const refuseLocalUpdates = (error: EngineYDocUpdateTooLargeError): void => {
+    if (localUpdatesRefused) return;
+    localUpdatesRefused = true;
+    pendingLocalUpdates = [];
+    try {
+      options.onPermanentLocalUpdateFailure?.(error, doc);
+    } catch {
+      // Observer boundary: recovery reporting must not wedge teardown.
+    }
+  };
 
   const applyLocalUpdateUntilAcknowledged = async (batch: {
     update: Uint8Array;
     sequence: number;
   }): Promise<void> => {
+    if (localUpdatesRefused) return;
+    if (batch.update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) {
+      refuseLocalUpdates(
+        new EngineYDocUpdateTooLargeError(batch.update.byteLength),
+      );
+      return;
+    }
     for (;;) {
       try {
         await transport.applyLocalUpdate(batch.update, batch.sequence);
         return;
-      } catch {
+      } catch (error) {
+        if (isEngineYDocUpdateTooLargeError(error)) {
+          refuseLocalUpdates(error);
+          return;
+        }
         // Yjs increments a client's clock across updates. A later delta can
         // therefore depend on structs in this one, so the head of the queue
         // must stay put until main acknowledges it. Retrying the same update
@@ -257,6 +311,7 @@ export async function bindEngineYDoc(
   const onUpdate = (update: Uint8Array, origin: unknown): void => {
     if (destroyed) return;
     if (origin === ENGINE_SOURCED_ORIGIN) return;
+    if (localUpdatesRefused) return;
     const sequence = transport.stageLocalUpdate();
     if (sequence === null) return;
     pendingLocalUpdates.push({ update, sequence });

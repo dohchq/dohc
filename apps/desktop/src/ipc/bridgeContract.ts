@@ -3255,13 +3255,27 @@ const ENGINE_YDOC_SESSION_ID = z.string().min(1).max(ENGINE_YDOC_SESSION_ID_MAX_
 // z.custom (not z.instanceof) so the inferred type is a plain `Uint8Array`
 // (ArrayBufferLike) — matching yjs's update type and the transport — rather than
 // the ArrayBuffer-narrowed shape z.instanceof yields.
-const ENGINE_YDOC_UPDATE = z.custom<Uint8Array>(
-  (value) =>
-    value instanceof Uint8Array &&
-    value.byteLength > 0 &&
-    value.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
-  "Y.Doc update is not a Uint8Array within the IPC byte bound.",
-);
+const ENGINE_YDOC_UPDATE = z
+  .custom<Uint8Array>(
+    (value) => value instanceof Uint8Array,
+    "Y.Doc update must be a Uint8Array.",
+  )
+  .superRefine((value, context) => {
+    if (value.byteLength === 0) {
+      context.addIssue({
+        code: "custom",
+        message: "Y.Doc update must not be empty.",
+      });
+    }
+    if (value.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message:
+          `ENGINE_YDOC_UPDATE_MAX_BYTES is ${ENGINE_YDOC_UPDATE_MAX_BYTES} bytes; ` +
+          `the update is ${value.byteLength} bytes.`,
+      });
+    }
+  });
 const ENGINE_YDOC_INITIAL_UPDATE = z.custom<Uint8Array>(
   (value) => value instanceof Uint8Array && value.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
   "Y.Doc initial update is not a Uint8Array within the IPC byte bound.",

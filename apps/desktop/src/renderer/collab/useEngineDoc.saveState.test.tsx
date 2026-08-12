@@ -4,7 +4,10 @@ import { useRef, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { declareSceneRoots, insertElementRevision } from "@dohc/excalidraw-scene";
-import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
+import {
+  ENGINE_YDOC_UPDATE_MAX_BYTES,
+  type EngineYDocSaveStateEvent,
+} from "../../ipc/channels";
 import {
   resetOrphanedDrafts,
   useOrphanedDrafts,
@@ -168,6 +171,7 @@ function Harness(props: {
   path: string;
   enabled?: boolean;
   kind?: "richdoc" | "scene";
+  compactDraft?: boolean;
 }) {
   const sceneVersion = useRef(1);
   const [retryKey, setRetryKey] = useState(0);
@@ -182,12 +186,22 @@ function Harness(props: {
   return (
     <div>
       <span data-testid="state">{engine.saveState}</span>
+      <span data-testid="save-error">{engine.saveError ?? "none"}</span>
       <span data-testid="available">{String(engine.available)}</span>
       <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
       <span data-testid="read-only-transition">
         {String(engine.readOnlyWhileEditing)}
       </span>
-      <span data-testid="draft">{drafts.at(-1)?.text ?? "none"}</span>
+      <span data-testid="draft">
+        {props.compactDraft
+          ? drafts.at(-1)
+            ? "present"
+            : "none"
+          : drafts.at(-1)?.text ?? "none"}
+      </span>
+      <span data-testid="draft-size">
+        {String(drafts.at(-1)?.text.length ?? 0)}
+      </span>
       <span data-testid="removal-operation">
         {engine.removalInProgress?.operation ?? "none"}
       </span>
@@ -219,6 +233,31 @@ function Harness(props: {
       </button>
       <button type="button" data-testid="retry" onClick={() => setRetryKey((n) => n + 1)}>
         retry
+      </button>
+      <button
+        type="button"
+        data-testid="type-oversized"
+        onClick={() => {
+          if (props.kind === "scene" && engine.doc) {
+            insertElementRevision(engine.doc, {
+              id: "oversized-shape",
+              type: "rectangle",
+              version: 1,
+              versionNonce: 1,
+              isDeleted: false,
+              index: "a1",
+              customData: {
+                payload: "x".repeat(ENGINE_YDOC_UPDATE_MAX_BYTES + 1),
+              },
+            });
+            return;
+          }
+          engine.doc
+            ?.getText("plainText")
+            .insert(0, "x".repeat(ENGINE_YDOC_UPDATE_MAX_BYTES + 1));
+        }}
+      >
+        type oversized
       </button>
     </div>
   );
@@ -634,6 +673,46 @@ it("stays Saving while a rejected transport head retries ahead of later edits", 
   expect(screen.getByTestId("state").textContent).toBe("saving");
   harness.emit("saved", 2);
   expect(screen.getByTestId("state").textContent).toBe("saved");
+});
+
+it.each([
+  { kind: "richdoc" as const, path: "notes/big.md" },
+  { kind: "scene" as const, path: "drawing.excalidraw" },
+])("sets aside an oversized $kind edit and reports the measured limit", async ({
+  kind,
+  path,
+}) => {
+  harness = harnessBridge(kind);
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness
+      workspaceId="ws-1"
+      path={path}
+      kind={kind}
+      compactDraft
+    />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type-oversized").click());
+  await flushLocalBatch();
+
+  expect(harness.applyAttempts).toEqual([]);
+  expect(screen.getByTestId("state").textContent).toBe("error");
+  expect(screen.getByTestId("save-error").textContent).toContain(
+    `ENGINE_YDOC_UPDATE_MAX_BYTES is ${ENGINE_YDOC_UPDATE_MAX_BYTES} bytes`,
+  );
+  expect(screen.getByTestId("save-error").textContent).toMatch(
+    /the update is \d+ bytes/,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("draft").textContent).toBe("present"),
+  );
+  expect(Number(screen.getByTestId("draft-size").textContent)).toBeGreaterThan(
+    ENGINE_YDOC_UPDATE_MAX_BYTES,
+  );
 });
 
 it("degrades to not-engine-backed on a bridge without the save-state channel, instead of blanking the editor", async () => {

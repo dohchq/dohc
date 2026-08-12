@@ -24,6 +24,7 @@ const engineDocState: UseEngineDoc = {
   objectId: null,
   versionId: null,
   saveState: "saved",
+  saveError: null,
   notInVersion: false,
   engineMayHoldDocument: false,
   deletedWhileEditing: false,

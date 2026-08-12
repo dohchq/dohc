@@ -14,6 +14,7 @@ import {
 } from "../orphanedDrafts";
 import {
   bindEngineYDoc,
+  type EngineYDocUpdateTooLargeError,
   type EngineRemovalInProgress,
   type EngineYDocBinding,
   type EngineYDocTransport,
@@ -187,6 +188,9 @@ export type UseEngineDoc = {
   // a 1s timer that flipped to "saved" regardless of what the engine did —
   // three dogfood journeys watched a doc read "Saved" over a zero-byte file.
   saveState: EngineDocSaveState;
+  // A known terminal save failure. The save-state chip uses this instead of
+  // its generic error text so it can name the constraint and measured bytes.
+  saveError: string | null;
   // The path is not in the version this workspace is on: a version switch
   // removed it while this open was queued behind that switch (#534). Unlike
   // every other available:false the caller must NOT fall back to the writable
@@ -355,6 +359,7 @@ export function useEngineDoc(input: {
   const requestKey = engineDocRequestKey(input);
   const [outcome, setOutcome] = useState<EngineDocOpenOutcome | null>(null);
   const [saveState, setSaveState] = useState<EngineDocSaveState>("saved");
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [deletion, setDeletion] = useState<{
     token: number;
     draftId: number | null;
@@ -421,6 +426,7 @@ export function useEngineDoc(input: {
   useEffect(() => {
     saveStateRef.current = "saved";
     setSaveState("saved");
+    setSaveError(null);
     if (!input.enabled) return;
     const { workspaceId, path } = input;
     // The key of the render that scheduled this effect — the request this open
@@ -434,16 +440,17 @@ export function useEngineDoc(input: {
     let binding: EngineYDocBinding | null = null;
     let detachSaveObserver: (() => void) | null = null;
     let unsubscribeSaveState: (() => void) | null = null;
-    // The last snapshot taken for this terminal lifecycle (for change dedup)
-    // and the draft it produced, once the async serialize+capture lands.
+    // The last recovery snapshot (for change dedup) and the draft it produced.
+    // Terminal deletion, read-only transitions, and permanently refused local
+    // updates share this path because the mirror holds the user's latest work.
     let recoverySnapshotBytes: Uint8Array | null = null;
     let recoveryDraftId: number | null = null;
-    let deletionLifecycle = false;
     // Serializes recovery snapshots in the order they were taken: a later
     // snapshot's capture must never be overwritten by an earlier one that
     // resolves late (the projection import, and each markdown conversion,
     // are async now).
     let recoveryQueue: Promise<void> = Promise.resolve();
+    let recoveryIsDeletion = false;
     let deletionPending = false;
     let releaseStarted = false;
 
@@ -458,9 +465,13 @@ export function useEngineDoc(input: {
       documentKind,
     );
 
-    const reportSaveState = (state: EngineDocSaveState): void => {
+    const reportSaveState = (
+      state: EngineDocSaveState,
+      error: string | null = null,
+    ): void => {
       saveStateRef.current = state;
       setSaveState(state);
+      setSaveError(error);
     };
 
     // `forceCreate` false means: nothing was unsettled at the moment this
@@ -470,6 +481,7 @@ export function useEngineDoc(input: {
     const enqueueRecoverySnapshot = (
       bytes: Uint8Array,
       forceCreate: boolean,
+      reportDeletion: boolean,
     ): void => {
       recoveryQueue = recoveryQueue
         .then(async () => {
@@ -483,7 +495,7 @@ export function useEngineDoc(input: {
           // Only the LOCAL render state is guarded by the open token — the
           // draft itself is already durable in the module-level store above,
           // unmount or not.
-          if (deletionLifecycle && token === openTokenRef.current) {
+          if (reportDeletion && token === openTokenRef.current) {
             setDeletion({ token, draftId: recoveryDraftId });
           }
         })
@@ -499,7 +511,7 @@ export function useEngineDoc(input: {
 
     const captureDeletion = (doc: Y.Doc): void => {
       writesRefused.current = true;
-      deletionLifecycle = true;
+      recoveryIsDeletion = true;
       // Snapshot NOW, synchronously: the doc can be destroyed (unmount) or
       // the caller's reference can go stale before a lazily-loaded
       // serializer would otherwise get to read it.
@@ -521,7 +533,33 @@ export function useEngineDoc(input: {
       }
       setDeletion({ token, draftId: recoveryDraftId });
       reportSaveState("deleted");
-      enqueueRecoverySnapshot(bytes, forceCreate);
+      enqueueRecoverySnapshot(bytes, forceCreate, true);
+    };
+
+    const refreshRecoveryDraft = (doc: Y.Doc): void => {
+      if (recoverySnapshotBytes === null) return;
+      const bytes = Y.encodeStateAsUpdate(doc);
+      if (snapshotsEqual(bytes, recoverySnapshotBytes)) return;
+      recoverySnapshotBytes = bytes;
+      enqueueRecoverySnapshot(bytes, true, recoveryIsDeletion);
+    };
+
+    const capturePermanentFailure = (
+      error: EngineYDocUpdateTooLargeError,
+      doc: Y.Doc,
+    ): void => {
+      writesRefused.current = true;
+      const bytes = Y.encodeStateAsUpdate(doc);
+      recoverySnapshotBytes = bytes;
+      recoveryDraftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        crudeRecoveryText(documentKind, doc),
+      );
+      if (!cancelled && token === openTokenRef.current) {
+        reportSaveState("error", error.message);
+      }
+      enqueueRecoverySnapshot(bytes, true, false);
     };
 
     const captureReadOnlyTransition = (doc: Y.Doc): void => {
@@ -537,15 +575,7 @@ export function useEngineDoc(input: {
       );
       setReadOnlyTransition({ token });
       reportSaveState("read-only");
-      enqueueRecoverySnapshot(bytes, true);
-    };
-
-    const refreshRecoveryDraft = (doc: Y.Doc): void => {
-      if (recoverySnapshotBytes === null) return;
-      const bytes = Y.encodeStateAsUpdate(doc);
-      if (snapshotsEqual(bytes, recoverySnapshotBytes)) return;
-      recoverySnapshotBytes = bytes;
-      enqueueRecoverySnapshot(bytes, true);
+      enqueueRecoverySnapshot(bytes, true, false);
     };
 
     const releaseBinding = (): void => {
@@ -568,6 +598,10 @@ export function useEngineDoc(input: {
           return;
         }
         if (recoverySnapshotBytes !== null) {
+          deletionPending = true;
+          recoveryIsDeletion = true;
+          setDeletion({ token, draftId: recoveryDraftId });
+          reportSaveState("deleted");
           refreshRecoveryDraft(doc);
           return;
         }
@@ -611,7 +645,9 @@ export function useEngineDoc(input: {
       // in that hand-over window. The async boundary catches an older preload
       // that does not expose this channel without delaying the open itself.
       unsubscribeSaveState = bridge().onEngineYDocSaveState(onSaveState);
-      return bindEngineYDoc(transport);
+      return bindEngineYDoc(transport, undefined, {
+        onPermanentLocalUpdateFailure: capturePermanentFailure,
+      });
     })();
     void openAttempt
       .then((bound) => {
@@ -726,6 +762,7 @@ export function useEngineDoc(input: {
     objectId,
     versionId,
     saveState,
+    saveError,
     notInVersion,
     engineMayHoldDocument,
     deletedWhileEditing,

@@ -2584,7 +2584,9 @@ function MarkdownView(props: {
                 title={
                   engineChipState === "deleted" && hasSetAsideEdit
                     ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
-                    : engineChip.title
+                    : engineChipState === "error" && engine.saveError
+                      ? engine.saveError
+                      : engineChip.title
                 }
                 className={`font-mono text-[11px] ${
                   engineChipState === "saved" || engineChipState === "saving"
@@ -3735,7 +3737,11 @@ function DrawingView({
           <span
             data-testid="drawing-save-state"
             data-state={drawingChipState}
-            title={drawingChip.title}
+            title={
+              drawingChipState === "error" && engine.saveError
+                ? engine.saveError
+                : drawingChip.title
+            }
             className={`text-[11px] ${
               drawingChipState === "saved" ||
               drawingChipState === "saving" ||
