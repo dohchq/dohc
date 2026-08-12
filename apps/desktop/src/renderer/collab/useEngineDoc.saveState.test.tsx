@@ -182,6 +182,12 @@ async function mountBound() {
   await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 }
 
+async function flushLocalBatch(): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(32);
+  });
+}
+
 it("never flips back to Saved on a timer — only a real settle report clears it", async () => {
   await mountBound();
 
@@ -208,6 +214,7 @@ it("shows the failure when a settle fails, instead of reading Saved", async () =
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   harness.emit("error", harness.applied.at(-1)!.seq);
   expect(screen.getByTestId("state").textContent).toBe("error");
 
@@ -224,6 +231,7 @@ it("refuses transport writes synchronously after main reports deletion", async (
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   const appliedAtDelete = harness.applied.length;
   harness.emit("deleted", harness.applied.at(-1)!.seq);
 
@@ -248,6 +256,7 @@ it("replaces the same deletion's draft when a keystroke lands before read-only c
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   const appliedAtDelete = harness.applied.length;
 
   // One React batch: main reports deletion, then Tiptap emits one last local
@@ -279,6 +288,7 @@ it("freezes the deleted doc's bytes at the event, immune to a remote edit that l
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   harness.emitNow("deleted", harness.applied.at(-1)!.seq);
 
   // Lands after the event, before the queued serialize job has resolved.
@@ -294,6 +304,7 @@ it("still holds the final text after teardown, with no further save-state event 
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   harness.emit("deleted", harness.applied.at(-1)!.seq);
   await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!"));
 
@@ -324,6 +335,7 @@ it("does not carry a deleted verdict into a fresh bind of the same path", async 
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   harness.emit("deleted", harness.applied.at(-1)!.seq);
   expect(screen.getByTestId("deleted").textContent).toBe("true");
 
@@ -341,6 +353,7 @@ it("does not carry a deleted verdict into a fresh bind of the same path", async 
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   expect(harness.applied).toHaveLength(appliedBeforeFreshEdit + 1);
 });
 
@@ -387,6 +400,7 @@ it("passes a file-locked report through, and a real settle clears it", async () 
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   harness.emit("file-locked", harness.applied.at(-1)!.seq);
   expect(screen.getByTestId("state").textContent).toBe("file-locked");
 
@@ -413,20 +427,23 @@ it("does not claim File in use for a lock refusal that predates the newest keyst
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   const firstSeq = harness.applied.at(-1)!.seq;
   act(() => {
     screen.getByTestId("type").click();
   });
-  const secondSeq = harness.applied.at(-1)!.seq;
-  expect(secondSeq).toBeGreaterThan(firstSeq);
 
   // The lock refusal belongs to the settle that started before the second
-  // keystroke. It says nothing about that keystroke, so the document is still
-  // saving, not safely parked under a lock.
+  // keystroke. The second edit is staged but not sent yet. The local sequence
+  // already guards it, so the document stays saving instead of claiming the
+  // edit is safely parked under a lock.
   harness.emit("file-locked", firstSeq);
   expect(screen.getByTestId("state").textContent).toBe("saving");
 
   // A refusal that DOES cover the newest edit names the blocker.
+  await flushLocalBatch();
+  const secondSeq = harness.applied.at(-1)!.seq;
+  expect(secondSeq).toBeGreaterThan(firstSeq);
   harness.emit("file-locked", secondSeq);
   expect(screen.getByTestId("state").textContent).toBe("file-locked");
 });
@@ -437,19 +454,22 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   const firstSeq = harness.applied.at(-1)!.seq;
   act(() => {
     screen.getByTestId("type").click();
   });
-  const secondSeq = harness.applied.at(-1)!.seq;
-  expect(secondSeq).toBeGreaterThan(firstSeq);
 
   // A settle that STARTED before the second keystroke reports success. It
-  // never carried that edit, so the indicator must keep saying "saving".
+  // never carried that staged, not-yet-sent edit, so the indicator must keep
+  // saying "saving".
   harness.emit("saved", firstSeq);
   expect(screen.getByTestId("state").textContent).toBe("saving");
 
   // The follow-up settle covers it.
+  await flushLocalBatch();
+  const secondSeq = harness.applied.at(-1)!.seq;
+  expect(secondSeq).toBeGreaterThan(firstSeq);
   harness.emit("saved", secondSeq);
   expect(screen.getByTestId("state").textContent).toBe("saved");
 });
@@ -478,6 +498,7 @@ it("ignores a save-state report addressed to a different session", async () => {
   act(() => {
     screen.getByTestId("type").click();
   });
+  await flushLocalBatch();
   const seq = harness.applied.at(-1)!.seq;
 
   // Another document's settle must never repaint this one (the renderer

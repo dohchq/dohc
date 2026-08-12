@@ -16,6 +16,7 @@
 // carries Tiptap's own (non-ENGINE) origin and IS shipped.
 
 import * as Y from "yjs";
+import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 
 // Applied to the mirror doc for every update that ORIGINATED in the engine
 // (initial state, forwarded remote deltas). The local-edit observer ignores it.
@@ -48,13 +49,68 @@ export interface EngineYDocTransport {
     // the plain editor would let its autosave race that operation.
     removalInProgress?: EngineRemovalInProgress;
   }>;
-  // Ship a local editor update to main, where it is journaled via recordUpdate.
-  applyLocalUpdate(update: Uint8Array): void;
+  // Reserve the save sequence synchronously when a local edit occurs. The
+  // provider can delay transport without letting an older settle report the
+  // pending edit as saved. null refuses the write before it enters a batch.
+  stageLocalUpdate(): number | null;
+  // Ship a local editor batch to main, where it is journaled via recordUpdate.
+  // sequence is the newest staged edit covered by the merged update.
+  applyLocalUpdate(update: Uint8Array, sequence: number): void | Promise<void>;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
   // through the engine). Returns an unsubscribe function.
   onRemoteUpdate(listener: (update: Uint8Array) => void): () => void;
   // Settle + close the engine session in main (releases the reservation).
   close(): Promise<void>;
+}
+
+export interface EngineYDocBatchScheduler {
+  schedule(callback: () => void, delayMs: number): unknown;
+  cancel(handle: unknown): void;
+}
+
+const LOCAL_UPDATE_BATCH_MS = 32;
+const timeoutBatchScheduler: EngineYDocBatchScheduler = {
+  schedule(callback, delayMs) {
+    return globalThis.setTimeout(callback, delayMs);
+  },
+  cancel(handle) {
+    globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+};
+
+export function mergeYDocUpdatesForTransport(
+  stagedUpdates: ReadonlyArray<{
+    update: Uint8Array;
+    sequence: number;
+  }>,
+  maxBytes: number = ENGINE_YDOC_UPDATE_MAX_BYTES,
+): Array<{ update: Uint8Array; sequence: number }> {
+  if (stagedUpdates.length === 0) return [];
+
+  const mergeRange = (
+    start: number,
+    end: number,
+  ): Array<{ update: Uint8Array; sequence: number }> => {
+    const range = stagedUpdates.slice(start, end);
+    const merged =
+      range.length === 1
+        ? range[0]!.update
+        : Y.mergeUpdates(range.map(({ update }) => update));
+    const sequence = range.at(-1)!.sequence;
+    if (merged.byteLength <= maxBytes || range.length === 1) {
+      // Keep a single oversized update intact. This provider must not invent a
+      // new rejection; the existing transport boundary owns that refusal.
+      return [{ update: merged, sequence }];
+    }
+
+    const middle = start + Math.ceil(range.length / 2);
+    return [...mergeRange(start, middle), ...mergeRange(middle, end)];
+  };
+
+  // The normal path parses any number of pending updates once. If a throttled
+  // background timer accumulated enough work to cross the existing transport
+  // boundary, balanced splitting avoids repeatedly merging a growing prefix.
+  return mergeRange(0, stagedUpdates.length);
 }
 
 export interface EngineYDocBinding {
@@ -81,6 +137,7 @@ export interface EngineYDocBinding {
 // returned binding's `doc` is ready for the Collaboration extension.
 export async function bindEngineYDoc(
   transport: EngineYDocTransport,
+  batchScheduler: EngineYDocBatchScheduler = timeoutBatchScheduler,
 ): Promise<EngineYDocBinding> {
   const opened = await transport.open();
   if (!opened.available || !opened.initialUpdate) {
@@ -105,14 +162,53 @@ export async function bindEngineYDoc(
   Y.applyUpdate(doc, opened.initialUpdate, ENGINE_SOURCED_ORIGIN);
 
   let destroyed = false;
+  let destroyPromise: Promise<void> | null = null;
+  let scheduledFlush: unknown | null = null;
+  let pendingLocalUpdates: Array<{
+    update: Uint8Array;
+    sequence: number;
+  }> = [];
+  let sendChain = Promise.resolve();
 
-  // Ship every LOCAL editor edit to main. A Tiptap edit carries a non-ENGINE
-  // origin; an engine-sourced apply carries ENGINE_SOURCED_ORIGIN and is
-  // skipped (no echo back to main).
+  const flushPendingLocalUpdates = (): Promise<void> => {
+    if (scheduledFlush !== null) {
+      batchScheduler.cancel(scheduledFlush);
+      scheduledFlush = null;
+    }
+    if (pendingLocalUpdates.length === 0) {
+      return sendChain;
+    }
+    const updates = pendingLocalUpdates;
+    pendingLocalUpdates = [];
+    // Preserve batch order even when the transport is asynchronous. A failed
+    // send keeps the editor usable and unsaved, matching the old best-effort
+    // transport behavior; teardown still waits for the chain before close.
+    for (const batch of mergeYDocUpdatesForTransport(updates)) {
+      sendChain = sendChain
+        .then(() => transport.applyLocalUpdate(batch.update, batch.sequence))
+        .catch(() => undefined);
+    }
+    return sendChain;
+  };
+
+  const scheduleLocalUpdateFlush = (): void => {
+    if (scheduledFlush !== null) return;
+    scheduledFlush = batchScheduler.schedule(() => {
+      scheduledFlush = null;
+      void flushPendingLocalUpdates();
+    }, LOCAL_UPDATE_BATCH_MS);
+  };
+
+  // Coalesce consecutive LOCAL editor edits before shipping them to main. A
+  // Tiptap edit carries a non-ENGINE origin; an engine-sourced apply carries
+  // ENGINE_SOURCED_ORIGIN and is skipped (no echo back to main).
   const onUpdate = (update: Uint8Array, origin: unknown): void => {
     if (destroyed) return;
     if (origin === ENGINE_SOURCED_ORIGIN) return;
-    transport.applyLocalUpdate(update);
+    const sequence = transport.stageLocalUpdate();
+    if (sequence === null) return;
+    pendingLocalUpdates.push({ update, sequence });
+    scheduleLocalUpdateFlush();
   };
   doc.on("update", onUpdate);
 
@@ -129,15 +225,19 @@ export async function bindEngineYDoc(
     notInVersion: false,
     engineMayHoldDocument: false,
     removalInProgress: null,
-    async destroy() {
-      if (destroyed) return;
+    destroy() {
+      if (destroyPromise !== null) return destroyPromise;
       destroyed = true;
       doc.off("update", onUpdate);
       unsubscribe();
-      // Close the engine session first (it settles the converged state), then
-      // drop the mirror doc.
-      await transport.close().catch(() => undefined);
-      doc.destroy();
+      // A close settles the engine state. Flush and await every accepted local
+      // edit before close so teardown cannot settle behind the mirror.
+      destroyPromise = (async () => {
+        await flushPendingLocalUpdates();
+        await transport.close().catch(() => undefined);
+        doc.destroy();
+      })();
+      return destroyPromise;
     },
   };
 }

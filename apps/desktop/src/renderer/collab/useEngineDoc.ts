@@ -245,16 +245,17 @@ function makeTransport(
           : {}),
       };
     },
-    applyLocalUpdate(update) {
-      if (writesRefused.current) return;
-      // Fire-and-forget: main journals + settles. A transient IPC error never
-      // tears the editor down; the mirror doc keeps the edit and the next update
-      // (or close) re-converges. The seq is NOT rolled back on that failure —
-      // the edit is genuinely unsaved until a later settle covers it, and the
-      // indicator must keep saying so.
+    stageLocalUpdate() {
+      if (writesRefused.current) return null;
       localSeq.current += 1;
-      const seq = localSeq.current;
-      void bridge()
+      return localSeq.current;
+    },
+    async applyLocalUpdate(update, seq) {
+      if (writesRefused.current) return;
+      // Main journals + settles. A transient IPC error never tears the editor
+      // down. The seq is not rolled back on that failure: the edit remains
+      // unsaved until a later settle covers it.
+      await bridge()
         .applyEngineYDocUpdate({ sessionId, update, seq })
         .catch(() => undefined);
     },
