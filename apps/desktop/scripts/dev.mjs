@@ -6,8 +6,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const desktopRoot = resolve(import.meta.dirname, "..");
-const repoRoot = resolve(desktopRoot, "../..");
+const repoRoot = resolve(import.meta.dirname, "../../..");
 
 export function desktopDevEnvironment(source) {
   const environment = { ...source };
@@ -17,6 +16,10 @@ export function desktopDevEnvironment(source) {
     }
   }
   return environment;
+}
+
+export function foregroundExitCode(result) {
+  return result.status ?? 0;
 }
 
 function electronViteCliPath() {
@@ -45,26 +48,27 @@ function run() {
   runRequired(
     process.execPath,
     [join(import.meta.dirname, "ensure-electron-installed.mjs")],
-    { env: process.env, stdio: "inherit" },
+    { stdio: "inherit" },
     "verify the Electron installation",
   );
 
   runRequired(
     "cargo",
     ["build", "-p", "dohc-workspace-engine", "--bin", "dohc-workspace-engine"],
-    { cwd: repoRoot, env: process.env, stdio: "inherit" },
+    { cwd: repoRoot, stdio: "inherit" },
     "build the Rust workspace engine",
   );
 
-  runRequired(
+  const devServer = spawnSync(
     process.execPath,
     [electronViteCliPath(), "dev", ...process.argv.slice(2)],
     {
       env: desktopDevEnvironment(process.env),
       stdio: "inherit",
     },
-    "start electron-vite",
   );
+  if (devServer.error) fail("start electron-vite", devServer.error);
+  process.exit(foregroundExitCode(devServer));
 }
 
 const isMain =

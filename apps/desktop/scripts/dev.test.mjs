@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { desktopDevEnvironment } from "./dev.mjs";
+import { desktopDevEnvironment, foregroundExitCode } from "./dev.mjs";
 
 test("desktop dev launches Electron outside Node mode", () => {
   const source = {
@@ -13,4 +13,9 @@ test("desktop dev launches Electron outside Node mode", () => {
 
   assert.deepEqual(environment, { KEEP_ME: "yes" });
   assert.equal(source.ELECTRON_RUN_AS_NODE, "1");
+});
+
+test("desktop dev does not report an interrupted foreground process as a launch failure", () => {
+  assert.equal(foregroundExitCode({ status: null }), 0);
+  assert.equal(foregroundExitCode({ status: 1 }), 1);
 });
