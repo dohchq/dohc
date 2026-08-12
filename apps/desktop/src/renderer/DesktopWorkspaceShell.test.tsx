@@ -8880,6 +8880,31 @@ describe("settings entry points", () => {
   });
 });
 
+describe("drawing entry point", () => {
+  it("creates and opens an untitled Excalidraw file from the command palette", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New drawing",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        relativePath: "Untitled.excalidraw",
+      }),
+    );
+    expect(
+      (await screen.findAllByText("Untitled.excalidraw")).length,
+    ).toBeGreaterThan(0);
+  });
+});
+
 // #687/#589: the note's precedence and exact copy are pinned at the
 // AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
 // sessionRecorderOn and sharedView straight to DesktopSettings — bypassing

@@ -5,6 +5,7 @@ import {
   Music,
   Plus,
   Share2,
+  Shapes,
   Table,
   Trash2,
 } from "lucide-react";
@@ -61,6 +62,11 @@ import {
   extractWorkspaceHeadings,
   resolveWorkspaceHeadingAnchorTarget,
 } from "../workspaces/workspaceHeadings";
+import {
+  EMPTY_EXCALIDRAW_DOCUMENT,
+  parseExcalidrawDocument,
+} from "./excalidrawDocument";
+import type { ExcalidrawCanvasProps } from "./ExcalidrawCanvas";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -369,6 +375,8 @@ const LazySourceCodeEditor = lazy(() =>
     default: mod.SourceCodeEditor,
   })),
 );
+const LazyExcalidrawCanvas = lazy(() => import("./ExcalidrawCanvas")) as
+  LazyExoticComponent<(props: ExcalidrawCanvasProps) => React.ReactElement>;
 
 // The source view needs editor/import-export only on demand. Cache the module
 // after the first toggle so later toggles reuse it.
@@ -413,6 +421,7 @@ export function mergeMarkdownEditorBody(sourceMarkdown: string, body: string): s
 
 export type FileViewKind =
   | "markdown"
+  | "drawing"
   | "csv"
   | "json"
   | "text"
@@ -427,6 +436,7 @@ export type FileViewKind =
 export function classifyForView(path: string): FileViewKind {
   const ext = extensionOf(path);
   if (liveDocumentKindForPath(path) === "richdoc") return "markdown";
+  if (ext === "excalidraw") return "drawing";
   if (TABLE_EXT.has(ext)) return "csv";
   if (ext === "json") return "json";
   if (IMAGE_EXT.has(ext)) return "image";
@@ -3415,6 +3425,150 @@ function ImageView({ url, path }: { url: string; path: string }) {
   );
 }
 
+function DrawingView({
+  body,
+  contentHash,
+  contentRequestId,
+  latestContentRequestId,
+  refreshAfterConflict,
+  workspaceId,
+  path,
+  readOnly,
+  truncated,
+  reopenKey,
+  switchReadPending,
+  switchUnresyncedRef,
+  onSaveStateChange,
+  registerDraftFlush,
+  onShare,
+  notice,
+  recoveryNotices,
+}: {
+  body: string;
+  contentHash: string | null;
+  contentRequestId: number;
+  latestContentRequestId: number;
+  refreshAfterConflict: () => void;
+  workspaceId: string;
+  path: string;
+  readOnly: boolean;
+  truncated: boolean;
+  reopenKey?: number;
+  switchReadPending: boolean;
+  switchUnresyncedRef: { current: boolean };
+  onSaveStateChange?: (state: SaveState) => void;
+  registerDraftFlush?: (flush: DraftFlush | null) => void;
+  onShare?: () => void;
+  notice?: React.ReactNode;
+  recoveryNotices: React.ReactNode;
+}) {
+  const editor = useAutosavedTextDraft({
+    body,
+    contentHash,
+    contentRequestId,
+    latestContentRequestId,
+    refreshAfterConflict,
+    workspaceId,
+    path,
+    disabled: readOnly || truncated,
+    reopenKey,
+    switchReadPending,
+    switchUnresyncedRef,
+    onSaveStateChange,
+    registerDraftFlush,
+  });
+  const blankFile = editor.getDraft().trim() === "";
+  useEffect(() => {
+    if (!blankFile || readOnly || truncated) return;
+    editor.setDraft(EMPTY_EXCALIDRAW_DOCUMENT);
+    // The accepted disk revision is the trigger. setDraft is intentionally
+    // omitted: the autosave hook returns a fresh closure on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor.valueRevision, blankFile, readOnly, truncated]);
+  // Local Excalidraw changes update the autosave draft but the mounted canvas
+  // already owns that scene. Parse again only when a disk read replaces the
+  // draft; this avoids restoring the whole scene on every pointer update.
+  const document = useMemo(() => {
+    try {
+      return {
+        value: parseExcalidrawDocument(
+          blankFile ? EMPTY_EXCALIDRAW_DOCUMENT : editor.getDraft(),
+        ),
+        error: null,
+      };
+    } catch (cause) {
+      return {
+        value: null,
+        error: cause instanceof Error ? cause.message : "The drawing is invalid.",
+      };
+    }
+    // valueRevision advances only when the hook accepts a new disk snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor.valueRevision]);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
+      <ViewHeader
+        icon={<Shapes size={13} aria-hidden />}
+        path={path}
+        label="drawing"
+        onShare={onShare}
+        actions={
+          <span
+            data-testid="drawing-save-state"
+            data-state={editor.saveState}
+            className={`text-[11px] ${editor.saveState === "error" ? "text-danger" : "text-subtle"}`}
+          >
+            {readOnly || truncated
+              ? "Read-only"
+              : editor.saveState === "saved"
+                ? "Saved"
+                : editor.saveState === "saving"
+                  ? "Saving..."
+                  : "Couldn't save"}
+          </span>
+        }
+      />
+      {notice}
+      {recoveryNotices}
+      {truncated ? (
+        <AffordanceCard
+          testId="view-drawing-truncated"
+          title="Drawing too large"
+          body="dohc cannot open a partial Excalidraw file."
+        />
+      ) : document.value ? (
+        <div
+          className="relative min-h-0 flex-1 overflow-hidden"
+          data-testid="view-drawing"
+        >
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center text-sm text-subtle">
+                Loading drawing…
+              </div>
+            }
+          >
+            <LazyExcalidrawCanvas
+              key={editor.valueRevision}
+              document={document.value}
+              readOnly={readOnly}
+              onChange={readOnly ? undefined : editor.setDraft}
+            />
+          </Suspense>
+        </div>
+      ) : (
+        <AffordanceCard
+          testId="view-drawing-error"
+          title="Couldn't open drawing"
+          body={document.error ?? "The drawing is invalid."}
+          openExternally={{ workspaceId, path }}
+        />
+      )}
+    </div>
+  );
+}
+
 function TextEditorView({
   body,
   contentHash,
@@ -3683,7 +3837,12 @@ export function FileInspector(props: {
   registerSourceToggle?: (toggle: (() => void) | null) => void;
 }) {
   const kind = classifyForView(props.path);
-  const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
+  const isText =
+    kind === "markdown" ||
+    kind === "drawing" ||
+    kind === "csv" ||
+    kind === "json" ||
+    kind === "text";
   // Whether an unsaved draft is pending. Only MarkdownView knows (it owns the
   // draft), so it reports every render and this holds the answer BEFORE the
   // refusal arrives — which is the only way to have it, since the refusal
@@ -3928,6 +4087,28 @@ export function FileInspector(props: {
             writesRefusedRef={writesRefusedRef}
           />
         </div>
+      );
+    case "drawing":
+      return (
+        <DrawingView
+          body={text ?? ""}
+          contentHash={contentHash}
+          contentRequestId={contentRequestId}
+          latestContentRequestId={latestContentRequestId}
+          refreshAfterConflict={refreshAfterConflict}
+          workspaceId={props.workspaceId}
+          path={props.path}
+          readOnly={!!props.readOnly}
+          truncated={truncated}
+          reopenKey={props.engineVersionKey}
+          switchReadPending={switchReadPending.current}
+          switchUnresyncedRef={switchUnresyncedRef}
+          onSaveStateChange={props.onSaveStateChange}
+          registerDraftFlush={props.registerDraftFlush}
+          onShare={onShareCurrentPath}
+          notice={truncatedNotice}
+          recoveryNotices={recoveryNotices}
+        />
       );
     case "csv":
       return (

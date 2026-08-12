@@ -574,6 +574,19 @@ function uniqueUntitledTextPath(
   return `Untitled ${Date.now()}.txt`;
 }
 
+function uniqueUntitledDrawingPath(
+  files: WorkspaceFileEntry[],
+  folders: string[],
+): string {
+  const occupied = new Set([...files.map((file) => file.path), ...folders]);
+  if (!occupied.has("Untitled.excalidraw")) return "Untitled.excalidraw";
+  for (let index = 2; index < 10_000; index += 1) {
+    const candidate = `Untitled ${index}.excalidraw`;
+    if (!occupied.has(candidate)) return candidate;
+  }
+  return `Untitled ${Date.now()}.excalidraw`;
+}
+
 function isEditableShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
   if (
@@ -3123,6 +3136,18 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create an untitled text file.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+  const createUntitledDrawing = useCallback(async () => {
+    try {
+      const result = await bridge().createWorkspaceFile({
+        workspaceId,
+        relativePath: uniqueUntitledDrawingPath(files, folders),
+      });
+      await refreshFiles();
+      openFile(result.path);
+    } catch (error) {
+      reportShellError("Could not create a drawing.", error);
+    }
+  }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
   const openHistoryView = useCallback(() => {
     mutateWb((state) => ({
       ...setView(state, "history"),
@@ -3365,6 +3390,11 @@ export function DesktopWorkspaceShell(props: {
         run: () => setNewFileOpen(true),
       },
       {
+        id: "new-drawing",
+        label: "New drawing",
+        run: () => void createUntitledDrawing(),
+      },
+      {
         id: "new-folder",
         label: "New folder",
         run: () => requestExplorerCreate("folder"),
@@ -3469,6 +3499,7 @@ export function DesktopWorkspaceShell(props: {
     ],
     [
       activeDocumentPath,
+      createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
       importFiles,
