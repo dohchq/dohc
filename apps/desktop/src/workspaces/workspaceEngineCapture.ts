@@ -1851,10 +1851,7 @@ export function createWorkspaceEngineCapture(
               return input.onSettled(result, token, generation);
             },
           });
-          opened = {
-            ...providerOpened,
-            artifactAssets: providerOpened.artifactAssets ?? [],
-          };
+          opened = providerOpened;
           openingRemoteUpdates.set(opened, opening);
           return opened;
         },

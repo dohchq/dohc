@@ -1145,7 +1145,7 @@ describe("workspaceEngineCapture batch capture", () => {
     // Genuine text over the text cap is untracked content (established
     // behavior): the previously tracked path is retired, never stored as
     // binary bytes.
-    await write(root, "big.md", "x".repeat(1024 * 1024));
+    await write(root, "big.md", "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES + 1));
     engine.captureBatch([{ path: "big.md", operation: "update" }]);
     await engine.flush();
 
