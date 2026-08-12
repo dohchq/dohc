@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
+import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import type { Event } from "./generated/Event";
 import type { JsonValue } from "./generated/serde_json/JsonValue";
 import type { Request } from "./generated/Request";
@@ -183,19 +184,24 @@ function sha256(value: Uint8Array | string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function declaredDoc(): Y.Doc {
+function declaredDoc(contentKind?: YdocContentKind): Y.Doc {
   const doc = new Y.Doc();
   doc.getMap("frontmatter");
   doc.getMap("meta");
   doc.getXmlFragment("body");
   doc.getText("plainText");
+  if (contentKind === "scene") {
+    doc.getMap(EXCALIDRAW_SCENE_ROOTS.revisions);
+    doc.getMap(EXCALIDRAW_SCENE_ROOTS.appState);
+    doc.getMap(EXCALIDRAW_SCENE_ROOTS.assets);
+  }
   return doc;
 }
 
 /// The lineage brought back as a fresh session's doc, exactly as the daemon's
 /// reopen replays its durable rows.
-function resurrectedDoc(lineage: Y.Doc): Y.Doc {
-  const doc = declaredDoc();
+function resurrectedDoc(lineage: Y.Doc, contentKind: YdocContentKind): Y.Doc {
+  const doc = declaredDoc(contentKind);
   Y.applyUpdate(doc, Y.encodeStateAsUpdate(lineage));
   return doc;
 }
@@ -452,7 +458,8 @@ export class YdocLoopbackEngine implements EngineTransport {
     if (
       requestedKind !== undefined &&
       requestedKind !== "richdoc" &&
-      requestedKind !== "plaintext"
+      requestedKind !== "plaintext" &&
+      requestedKind !== "scene"
     ) {
       throw new Error("ydoc.open params.contentKind is invalid.");
     }
@@ -495,7 +502,9 @@ export class YdocLoopbackEngine implements EngineTransport {
     const contentKind = lineage
       ? lineage.contentKind
       : (requestedKind ?? file?.contentKind ?? "richdoc");
-    const doc = lineage ? resurrectedDoc(lineage.doc) : declaredDoc();
+    const doc = lineage
+      ? resurrectedDoc(lineage.doc, contentKind)
+      : declaredDoc(contentKind);
     const lineageAbsentAtOpen = lineage === undefined;
     // A captured file with no durable lineage yet ships its content as
     // `seedContent`, not embedded in `initialUpdateBase64` — the CLIENT
@@ -551,7 +560,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       requiredString(params, "updateBase64", "ydoc.recordUpdate params"),
     );
     optionalString(params, "actorOriginId");
-    const validationDoc = new Y.Doc();
+    const validationDoc = declaredDoc(session.contentKind);
     Y.applyUpdate(validationDoc, Y.encodeStateAsUpdate(session.doc));
     Y.applyUpdate(validationDoc, update);
     Y.applyUpdate(session.doc, update);
@@ -721,7 +730,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     // state that seeded its session.
     const key = this.lineageKeyFor(session);
     const entry = this.lineages.get(key) ?? {
-      doc: declaredDoc(),
+      doc: declaredDoc(session.contentKind),
       regime: "local-only" as LineageRegime,
       contentKind: session.contentKind,
       lastSettledSha: null,

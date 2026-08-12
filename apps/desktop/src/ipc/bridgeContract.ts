@@ -3593,7 +3593,7 @@ export interface DohcDesktopBridge {
   // batches that belong to a superseded search.
   onSearchResults(listener: (batch: SearchResultsEvent) => void): () => void;
   // WS-G2-C-2 engine Y.Doc editor binding. The renderer mints a sessionId and
-  // opens a live engine Y.Doc session for a rich file; main constructs the
+  // opens a live engine Y.Doc session for a supported live file; main constructs the
   // node-only session through the workspace's engine capture (reusing its
   // store). available:false => not engine-backed
   // (unflagged workspace, secret path, missing file, or already live) — the

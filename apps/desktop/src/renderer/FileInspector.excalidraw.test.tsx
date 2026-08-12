@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  declareSceneRoots,
+  foldScene,
+  insertElementRevision,
+} from "@dohc/excalidraw-scene";
+import * as Y from "yjs";
 import type { ExcalidrawCanvasProps } from "./ExcalidrawCanvas";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 
@@ -11,6 +17,10 @@ vi.mock("./ExcalidrawCanvas", () => ({
       data-read-only={String(props.readOnly)}
       data-source={props.document.source ?? ""}
       data-files={Object.keys(props.document.files).join(",")}
+      data-scene-doc={String(props.sceneDoc !== undefined)}
+      data-scene-elements={
+        props.sceneDoc ? String(foldScene(props.sceneDoc).elements.length) : ""
+      }
     >
       <button
         type="button"
@@ -73,6 +83,11 @@ function bridgeFor(text = drawing("first", true)) {
     writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
       async () => ({ status: "written", contentHash: WRITTEN_HASH }),
     ),
+    openEngineYDocSession: vi.fn(async () => ({ available: false })),
+    closeEngineYDocSession: vi.fn(async () => undefined),
+    applyEngineYDocUpdate: vi.fn(async () => undefined),
+    onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+    onEngineYDocSaveState: vi.fn(() => () => undefined),
     openFileExternally: vi.fn(async () => undefined),
   };
 }
@@ -100,6 +115,7 @@ describe("FileInspector Excalidraw view", () => {
 
     const canvas = await screen.findByTestId("mock-excalidraw-canvas");
     expect(canvas.dataset.files).toBe("file-1");
+    await waitFor(() => expect(canvas.dataset.readOnly).toBe("false"));
     fireEvent.click(screen.getByTestId("mock-drawing-change"));
     view.unmount();
 
@@ -120,6 +136,11 @@ describe("FileInspector Excalidraw view", () => {
     );
 
     await screen.findByTestId("mock-excalidraw-canvas");
+    await waitFor(() =>
+      expect(screen.getByTestId("mock-excalidraw-canvas").dataset.readOnly).toBe(
+        "false",
+      ),
+    );
     view.unmount();
     expect(bridge.writeWorkspaceText).toHaveBeenCalledWith({
       workspaceId: "ws-1",
@@ -152,7 +173,7 @@ describe("FileInspector Excalidraw view", () => {
     bridge.readWorkspaceText = vi.fn(async () => ({
       text: '{"type":"excalidraw","elements":[',
       truncated: true as const,
-      contentHash: CONTENT_HASH,
+      contentHash: null,
     }));
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(
@@ -170,6 +191,60 @@ describe("FileInspector Excalidraw view", () => {
     });
     view.unmount();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("opens a truncated drawing from a bound scene without parsing the prefix", async () => {
+    const bridge = bridgeFor('{"type":"excalidraw","elements":[');
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: '{"type":"excalidraw","elements":[',
+      truncated: true as const,
+      contentHash: null,
+    }));
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    insertElementRevision(scene, {
+      id: "engine-shape",
+      type: "rectangle",
+      version: 1,
+      versionNonce: 1,
+      isDeleted: false,
+      index: "a0",
+    });
+    bridge.openEngineYDocSession = vi.fn(async () => ({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(scene),
+    }));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="large.excalidraw" />);
+
+    const canvas = await screen.findByTestId("mock-excalidraw-canvas");
+    expect(canvas.dataset.sceneDoc).toBe("true");
+    expect(canvas.dataset.sceneElements).toBe("1");
+    expect(canvas.dataset.readOnly).toBe("false");
+    expect(screen.queryByTestId("view-drawing-truncated")).toBeNull();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("keeps a truncated drawing non-writable while its scene opens", async () => {
+    const bridge = bridgeFor('{"type":"excalidraw","elements":[');
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: '{"type":"excalidraw","elements":[',
+      truncated: true as const,
+      contentHash: null,
+    }));
+    bridge.openEngineYDocSession = vi.fn(
+      () => new Promise(() => undefined),
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="large.excalidraw" />,
+    );
+
+    expect(await screen.findByTestId("view-drawing-opening")).toBeTruthy();
+    expect(screen.queryByTestId("mock-excalidraw-canvas")).toBeNull();
+    expect(screen.queryByTestId("view-drawing-truncated")).toBeNull();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+    view.unmount();
   });
 
   it("shows an actionable error for invalid drawing JSON", async () => {

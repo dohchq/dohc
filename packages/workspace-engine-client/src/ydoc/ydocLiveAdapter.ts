@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import {
   EngineRequestDeadlineError,
@@ -286,11 +287,19 @@ function base64ToBytes(value: string): Uint8Array {
   return new Uint8Array(Buffer.from(value, "base64"));
 }
 
-function declareDohcRootSchema(doc: Y.Doc): void {
+function declareDohcRootSchema(
+  doc: Y.Doc,
+  contentKind?: YdocContentKind,
+): void {
   doc.getMap("frontmatter");
   doc.getMap("meta");
   doc.getXmlFragment("body");
   doc.getText("plainText");
+  if (contentKind === "scene") {
+    doc.getMap(EXCALIDRAW_SCENE_ROOTS.revisions);
+    doc.getMap(EXCALIDRAW_SCENE_ROOTS.appState);
+    doc.getMap(EXCALIDRAW_SCENE_ROOTS.assets);
+  }
 }
 
 function createPlaintextSeedDoc(content: string): Y.Doc {
@@ -607,7 +616,7 @@ export class YdocAdapterSession {
     this.contentKind = input.contentKind;
     this.initialUpdate = input.initialUpdate;
     this.doc = new Y.Doc();
-    declareDohcRootSchema(this.doc);
+    declareDohcRootSchema(this.doc, this.contentKind);
     Y.applyUpdate(this.doc, this.initialUpdate, ENGINE_DELIVERED_ORIGIN);
     this.doc.on("update", this.handleDocUpdate);
   }
@@ -809,7 +818,7 @@ export class YdocAdapterSession {
       this.assertOpen();
       const durableUpdate = await this.requestResyncUpdate();
       const durableDoc = new Y.Doc();
-      declareDohcRootSchema(durableDoc);
+      declareDohcRootSchema(durableDoc, this.contentKind);
       Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
       // Take the durable state first, exactly as recovery does, so the delta
       // below is measured against what the engine actually holds.
@@ -857,10 +866,10 @@ export class YdocAdapterSession {
   > {
     const durableUpdate = await this.requestResyncUpdate();
     const durableDoc = new Y.Doc();
-    declareDohcRootSchema(durableDoc);
+    declareDohcRootSchema(durableDoc, this.contentKind);
     Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
     const recoveryDoc = new Y.Doc();
-    declareDohcRootSchema(recoveryDoc);
+    declareDohcRootSchema(recoveryDoc, this.contentKind);
     Y.applyUpdate(recoveryDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
     Y.applyUpdate(recoveryDoc, refusedUpdate, LOCAL_EDITOR_ORIGIN);
 

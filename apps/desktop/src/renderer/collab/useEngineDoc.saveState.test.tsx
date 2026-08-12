@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { declareSceneRoots, insertElementRevision } from "@dohc/excalidraw-scene";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import {
   resetOrphanedDrafts,
@@ -21,7 +22,7 @@ afterEach(cleanup);
 
 type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 
-function harnessBridge() {
+function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   const saveStateListeners = new Set<SaveStateListener>();
   const remoteUpdateListeners = new Set<
     (event: { sessionId: string; update: Uint8Array }) => void
@@ -29,8 +30,20 @@ function harnessBridge() {
   const applied: Array<{ sessionId: string; seq: number }> = [];
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
-  doc.getMap("meta").set("contentKind", "plain-text");
-  doc.getText("plainText").insert(0, "seed");
+  if (kind === "scene") {
+    declareSceneRoots(doc);
+    insertElementRevision(doc, {
+      id: "recovered-shape",
+      type: "rectangle",
+      version: 1,
+      versionNonce: 1,
+      isDeleted: false,
+      index: "a0",
+    });
+  } else {
+    doc.getMap("meta").set("contentKind", "plain-text");
+    doc.getText("plainText").insert(0, "seed");
+  }
   let removalInProgress: {
     operation: "delete" | "move";
     message: string;
@@ -124,12 +137,18 @@ function harnessBridge() {
   };
 }
 
-function Harness(props: { workspaceId: string; path: string; enabled?: boolean }) {
+function Harness(props: {
+  workspaceId: string;
+  path: string;
+  enabled?: boolean;
+  kind?: "richdoc" | "scene";
+}) {
   const [retryKey, setRetryKey] = useState(0);
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
     enabled: props.enabled ?? true,
+    kind: props.kind,
     retryKey,
   });
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
@@ -149,6 +168,18 @@ function Harness(props: { workspaceId: string; path: string; enabled?: boolean }
         type="button"
         data-testid="type"
         onClick={() => {
+          if (props.kind === "scene" && engine.doc) {
+            insertElementRevision(engine.doc, {
+              id: "recovered-shape",
+              type: "rectangle",
+              version: 2,
+              versionNonce: 2,
+              isDeleted: false,
+              index: "a0",
+              x: 10,
+            });
+            return;
+          }
           const text = engine.doc?.getText("plainText");
           text?.insert(text.length, "!");
         }}
@@ -295,6 +326,37 @@ it("freezes the deleted doc's bytes at the event, immune to a remote edit that l
   harness.emitRemoteEdit("+remote");
 
   await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!"));
+});
+
+it("stores a deleted scene as portable Excalidraw JSON", async () => {
+  harness = harnessBridge("scene");
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness
+      workspaceId="ws-1"
+      path="drawing.excalidraw"
+      kind="scene"
+    />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+
+  await waitFor(() => {
+    const text = screen.getByTestId("draft").textContent ?? "none";
+    expect(text).not.toBe("none");
+    const recovered = JSON.parse(text);
+    expect(recovered).toMatchObject({
+      type: "excalidraw",
+      source: "https://excalidraw.com",
+      elements: [{ id: "recovered-shape" }],
+      files: {},
+    });
+  });
 });
 
 it("still holds the final text after teardown, with no further save-state event to answer it", async () => {

@@ -20,7 +20,7 @@ export const YDOC_EVENT = {
   remoteUpdate: "ydoc.remoteUpdate",
 } as const;
 
-export type YdocContentKind = "richdoc" | "plaintext";
+export type YdocContentKind = "richdoc" | "plaintext" | "scene";
 export type JsonObject = { [key: string]: JsonValue | undefined };
 
 export type YdocOpenParams = JsonObject & {
@@ -180,9 +180,9 @@ function contentKindValue(
   label: string,
 ): YdocContentKind {
   const value = object[key];
-  if (value !== "richdoc" && value !== "plaintext") {
+  if (value !== "richdoc" && value !== "plaintext" && value !== "scene") {
     throw new YdocProtocolShapeError(
-      `${label}.${key} must be richdoc or plaintext.`,
+      `${label}.${key} must be richdoc, plaintext, or scene.`,
     );
   }
   return value;

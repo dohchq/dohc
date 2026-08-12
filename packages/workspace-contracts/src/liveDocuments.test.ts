@@ -11,12 +11,18 @@ describe("liveDocumentKindForPath", () => {
     expect(liveDocumentKindForPath(path)).toBe("richdoc");
   });
 
+  it.each(["drawings/plan.excalidraw", "drawings/PLAN.EXCALIDRAW"])(
+    "classifies %s as a scene",
+    (path) => {
+      expect(liveDocumentKindForPath(path)).toBe("scene");
+    },
+  );
+
   it.each([
     "notes/today",
     "notes/today.mdx",
     "notes/today.md.bak",
     "notes/markdown",
-    "drawings/plan.excalidraw",
     "drawings/plan.excalidraw.json",
   ])("leaves %s outside live document sessions", (path) => {
     expect(liveDocumentKindForPath(path)).toBeNull();

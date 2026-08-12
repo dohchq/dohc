@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
+import type { LiveDocumentKind } from "@dohc/workspace-contracts/live-documents";
+import {
+  declareSceneRoots,
+  exportPortableScene,
+} from "@dohc/excalidraw-scene";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { bridge } from "../bridge";
 import {
@@ -47,6 +52,26 @@ function markdownFromSnapshot(snapshot: Uint8Array): Promise<string> {
     Y.applyUpdate(rebuilt, snapshot);
     return yDocToMarkdown(rebuilt);
   });
+}
+
+function sceneFromSnapshot(snapshot: Uint8Array): string {
+  const rebuilt = new Y.Doc();
+  declareSceneRoots(rebuilt);
+  Y.applyUpdate(rebuilt, snapshot);
+  return exportPortableScene(rebuilt);
+}
+
+function recoveryTextFromSnapshot(
+  kind: LiveDocumentKind,
+  snapshot: Uint8Array,
+): Promise<string> {
+  return kind === "scene"
+    ? Promise.resolve(sceneFromSnapshot(snapshot))
+    : markdownFromSnapshot(snapshot);
+}
+
+function crudeRecoveryText(kind: LiveDocumentKind, doc: Y.Doc): string {
+  return kind === "scene" ? exportPortableScene(doc) : crudeMarkdownFromDoc(doc);
 }
 
 // The crude fallback the deletion boundary persists BEFORE the projection
@@ -97,21 +122,19 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-// The engine Y.Doc editor hook for rich-text files. Given a workspace + rich
-// file, it opens a
-// live engine Y.Doc session in MAIN over IPC and binds a mirror Y.Doc the Tiptap
-// Collaboration extension drives via its "body" XmlFragment — no websocket, no
-// token, no cloud. Solo editing runs entirely on the engine; a co-editor's edit
-// arrives as a forwarded remote delta on the same channel.
+// The engine Y.Doc editor hook for live files. Given a workspace, path, and
+// format kind, it opens a live engine Y.Doc session in main over IPC and binds
+// a mirror Y.Doc to the format editor. Solo editing runs through the engine; a
+// co-editor's edit arrives as a forwarded remote delta on the same channel.
 //
 // available:false AND opening:false => the doc is NOT engine-backed (unflagged
 // workspace, secret path, or already live) — the caller stays on the plain
 // local autosave editor showing the real on-disk content. While opening:true
 // the answer is not known yet and the caller must stay read-only. The other
 // exception is `notInVersion`, where the answer IS known and the caller must
-// stop editing rather than fall back (#534). Undo/redo is intact: the
-// Collaboration extension bundles the Yjs UndoManager binding (COLLAB_STARTER_KIT
-// disables the plain history), so Mod-z/Mod-y drive the CRDT undo stack.
+// stop editing rather than fall back (#534). Each editor owns undo: rich
+// documents use their collaboration history, while drawings use Excalidraw's
+// native history and publish the resulting higher element revision.
 //
 // Renderer async-state invariant (product invariant): every open response is
 // guarded by the per-open request token (a monotonic id + the effect's cancelled
@@ -187,11 +210,13 @@ function engineDocRequestKey(input: {
   workspaceId: string;
   path: string;
   enabled: boolean;
+  kind?: LiveDocumentKind;
   reopenKey?: number;
   retryKey?: number;
 }): string {
   return JSON.stringify([
     input.enabled,
+    input.kind ?? "richdoc",
     input.workspaceId,
     input.path,
     input.reopenKey ?? null,
@@ -227,8 +252,10 @@ function makeTransport(
   // the newest edit may be reported as "Saved".
   localSeq: { current: number },
   writesRefused: { current: boolean },
+  kind: LiveDocumentKind,
 ): EngineYDocTransport {
   return {
+    ...(kind === "scene" ? { initializeDoc: declareSceneRoots } : {}),
     async open() {
       const result = await bridge().openEngineYDocSession({
         workspaceId,
@@ -274,9 +301,13 @@ function makeTransport(
 export function useEngineDoc(input: {
   workspaceId: string;
   path: string;
-  // The caller gates: only a rich (markdown) file that is not truncated / read-
-  // only opens an engine session. Everything else keeps the local editor.
+  // The caller gates which supported live files open an engine session.
+  // Read-only shared views stay local. A scene can open even when the bounded
+  // renderer text read is truncated because the engine owns the full scene.
   enabled: boolean;
+  // Defaults to richdoc for existing direct hook callers. Product callers pass
+  // the classifier result explicitly.
+  kind?: LiveDocumentKind;
   // Bump to retry after `engineMayHoldDocument` (#564): part of the request
   // key, so a retry is a fresh open with the same stale-response guard as any
   // other.
@@ -292,6 +323,7 @@ export function useEngineDoc(input: {
   // SAME version must NOT bump this (that would churn the live session).
   reopenKey?: number;
 }): UseEngineDoc {
+  const documentKind = input.kind ?? "richdoc";
   const requestKey = engineDocRequestKey(input);
   const [outcome, setOutcome] = useState<EngineDocOpenOutcome | null>(null);
   const [saveState, setSaveState] = useState<EngineDocSaveState>("saved");
@@ -370,6 +402,7 @@ export function useEngineDoc(input: {
       sessionId,
       localSeq,
       writesRefused,
+      documentKind,
     );
 
     const reportSaveState = (state: EngineDocSaveState): void => {
@@ -387,7 +420,7 @@ export function useEngineDoc(input: {
     ): void => {
       deletionQueue = deletionQueue
         .then(async () => {
-          const text = await markdownFromSnapshot(bytes);
+          const text = await recoveryTextFromSnapshot(documentKind, bytes);
           if (deletionDraftId === null) {
             if (!forceCreate) return;
             deletionDraftId = captureOrphanedDraft(workspaceId, path, text);
@@ -429,7 +462,7 @@ export function useEngineDoc(input: {
         deletionDraftId = captureOrphanedDraft(
           workspaceId,
           path,
-          crudeMarkdownFromDoc(doc),
+          crudeRecoveryText(documentKind, doc),
         );
       }
       setDeletion({ token, draftId: deletionDraftId });
@@ -507,7 +540,7 @@ export function useEngineDoc(input: {
         // lands within the same microtask as its snapshot. The snapshot in
         // captureDeletion/refreshDeletionDraft keeps a genuinely cold start
         // (import still in flight) correct regardless.
-        void loadProjectionModule();
+        if (documentKind === "richdoc") void loadProjectionModule();
         if (!bound.available || !bound.doc) {
           // Resolved: NOT engine-backed. The caller may offer the plain local
           // editor again — that is what `opening` was holding back. EXCEPT
@@ -581,7 +614,14 @@ export function useEngineDoc(input: {
     // the renderer's mirror session and the re-run opens a fresh one, guarded by
     // the per-open token so a stale response never repaints).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input.workspaceId, input.path, input.enabled, input.reopenKey, input.retryKey]);
+  }, [
+    input.workspaceId,
+    input.path,
+    input.enabled,
+    input.kind,
+    input.reopenKey,
+    input.retryKey,
+  ]);
 
   return {
     available,

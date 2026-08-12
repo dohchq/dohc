@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
+import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import {
   bindEngineYDoc,
   mergeYDocUpdatesForTransport,
@@ -167,6 +168,56 @@ function chunks<T>(values: T[], size: number): T[][] {
 }
 
 describe("engine Y.Doc provider — renderer bridge", () => {
+  it("declares scene maps before applying initial and remote updates", async () => {
+    const seed = new Y.Doc();
+    seed.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).set("initial", "one");
+    let remoteListener: (update: Uint8Array) => void = () => {
+      throw new Error("Remote listener was not registered.");
+    };
+    let initialized = false;
+    const binding = await bindEngineYDoc({
+      initializeDoc(doc) {
+        doc.getMap(EXCALIDRAW_SCENE_ROOTS.revisions);
+        doc.getMap(EXCALIDRAW_SCENE_ROOTS.appState);
+        doc.getMap(EXCALIDRAW_SCENE_ROOTS.assets);
+        initialized = true;
+      },
+      async open() {
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(seed),
+        };
+      },
+      stageLocalUpdate: () => 1,
+      applyLocalUpdate: () => undefined,
+      onRemoteUpdate(listener) {
+        remoteListener = listener;
+        return () => undefined;
+      },
+      close: async () => undefined,
+    });
+
+    expect(initialized).toBe(true);
+    expect(binding.doc?.share.get(EXCALIDRAW_SCENE_ROOTS.revisions)).toBeInstanceOf(
+      Y.Map,
+    );
+    expect(
+      binding.doc?.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).get("initial"),
+    ).toBe("one");
+
+    const remote = new Y.Doc();
+    remote.getMap(EXCALIDRAW_SCENE_ROOTS.assets).set("remote", "two");
+    remoteListener(Y.encodeStateAsUpdate(remote));
+    expect(binding.doc?.share.get(EXCALIDRAW_SCENE_ROOTS.assets)).toBeInstanceOf(
+      Y.Map,
+    );
+    expect(binding.doc?.getMap(EXCALIDRAW_SCENE_ROOTS.assets).get("remote")).toBe(
+      "two",
+    );
+
+    await binding.destroy();
+  });
+
   it("measures two- and three-frame batching for a drawing-rate pointer drag", () => {
     // Excalidraw throttles drag mutation to one call per animation frame. At
     // 60 Hz, 120 updates model a two-second drag. Two updates span about 32 ms;

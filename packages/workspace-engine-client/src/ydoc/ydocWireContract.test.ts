@@ -98,6 +98,12 @@ function openResult(overrides: Record<string, unknown> = {}) {
 }
 
 describe("decodeYdocOpenResult", () => {
+  it("accepts scene sessions", () => {
+    expect(
+      decodeYdocOpenResult(openResult({ contentKind: "scene" })).contentKind,
+    ).toBe("scene");
+  });
+
   it("carries optional seed content through", () => {
     expect(decodeYdocOpenResult(openResult({ seedContent: "# Seed\n" }))).toMatchObject({
       seedContent: "# Seed\n",

@@ -3443,6 +3443,7 @@ function DrawingView({
   onShare,
   notice,
   recoveryNotices,
+  engine,
 }: {
   body: string;
   contentHash: string | null;
@@ -3456,12 +3457,19 @@ function DrawingView({
   reopenKey?: number;
   switchReadPending: boolean;
   switchUnresyncedRef: { current: boolean };
-  onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   onShare?: () => void;
   notice?: React.ReactNode;
   recoveryNotices: React.ReactNode;
+  engine: UseEngineDoc;
+  onSaveStateChange?: (state: FileSaveState) => void;
 }) {
+  const engineMode = engine.available && engine.doc !== null;
+  const engineReadOnly =
+    engine.opening ||
+    engine.deletedWhileEditing ||
+    engine.engineMayHoldDocument ||
+    engine.removalInProgress !== null;
   const editor = useAutosavedTextDraft({
     body,
     contentHash,
@@ -3470,25 +3478,33 @@ function DrawingView({
     refreshAfterConflict,
     workspaceId,
     path,
-    disabled: readOnly || truncated,
+    disabled: readOnly || truncated || engineMode || engineReadOnly,
     reopenKey,
     switchReadPending,
     switchUnresyncedRef,
-    onSaveStateChange,
+    onSaveStateChange: engineMode || engine.opening ? undefined : onSaveStateChange,
     registerDraftFlush,
   });
-  const blankFile = editor.getDraft().trim() === "";
+  const blankFile = !engineMode && editor.getDraft().trim() === "";
+  const [assetRefused, setAssetRefused] = useState(false);
+  useEffect(() => setAssetRefused(false), [path, engine.doc]);
   useEffect(() => {
-    if (!blankFile || readOnly || truncated) return;
+    if (!blankFile || readOnly || truncated || engine.opening) return;
     editor.setDraft(EMPTY_EXCALIDRAW_DOCUMENT);
     // The accepted disk revision is the trigger. setDraft is intentionally
     // omitted: the autosave hook returns a fresh closure on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor.valueRevision, blankFile, readOnly, truncated]);
+  }, [editor.valueRevision, blankFile, readOnly, truncated, engine.opening]);
   // Local Excalidraw changes update the autosave draft but the mounted canvas
   // already owns that scene. Parse again only when a disk read replaces the
   // draft; this avoids restoring the whole scene on every pointer update.
   const document = useMemo(() => {
+    if (truncated) {
+      return {
+        value: null,
+        error: "dohc cannot open a partial Excalidraw file.",
+      };
+    }
     try {
       return {
         value: parseExcalidrawDocument(
@@ -3504,7 +3520,22 @@ function DrawingView({
     }
     // valueRevision advances only when the hook accepts a new disk snapshot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor.valueRevision]);
+  }, [editor.valueRevision, truncated]);
+
+  useEffect(() => {
+    if (!engineMode) return;
+    onSaveStateChange?.(
+      engine.saveState === "saved" ||
+        engine.saveState === "saving" ||
+        engine.saveState === "deleted"
+        ? engine.saveState
+        : "error",
+    );
+  }, [engineMode, engine.saveState, onSaveStateChange]);
+
+  const visibleSaveState = engineMode ? engine.saveState : editor.saveState;
+  const canvasReadOnly = readOnly || engineReadOnly;
+  const drawingReady = engineMode || document.value !== null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
@@ -3516,28 +3547,44 @@ function DrawingView({
         actions={
           <span
             data-testid="drawing-save-state"
-            data-state={editor.saveState}
-            className={`text-[11px] ${editor.saveState === "error" ? "text-danger" : "text-subtle"}`}
+            data-state={visibleSaveState}
+            className={`text-[11px] ${visibleSaveState === "error" ? "text-danger" : "text-subtle"}`}
           >
-            {readOnly || truncated
+            {readOnly || (truncated && !engineMode) || engineReadOnly
               ? "Read-only"
-              : editor.saveState === "saved"
+              : visibleSaveState === "saved"
                 ? "Saved"
-                : editor.saveState === "saving"
+                : visibleSaveState === "saving"
                   ? "Saving..."
                   : "Couldn't save"}
           </span>
         }
       />
-      {notice}
+      {engineMode || engine.opening ? null : notice}
       {recoveryNotices}
-      {truncated ? (
+      {assetRefused ? (
+        <div
+          className="border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
+          data-testid="drawing-assets-refused"
+        >
+          This image was not added. Collaborative drawings cannot add images
+          yet.
+        </div>
+      ) : null}
+      {engine.opening ? (
+        <div
+          className="flex min-h-0 flex-1 items-center justify-center text-sm text-subtle"
+          data-testid="view-drawing-opening"
+        >
+          Loading drawing…
+        </div>
+      ) : truncated && !engineMode ? (
         <AffordanceCard
           testId="view-drawing-truncated"
           title="Drawing too large"
           body="dohc cannot open a partial Excalidraw file."
         />
-      ) : document.value ? (
+      ) : drawingReady ? (
         <div
           className="relative min-h-0 flex-1 overflow-hidden"
           data-testid="view-drawing"
@@ -3550,10 +3597,14 @@ function DrawingView({
             }
           >
             <LazyExcalidrawCanvas
-              key={editor.valueRevision}
-              document={document.value}
-              readOnly={readOnly}
-              onChange={readOnly ? undefined : editor.setDraft}
+              key={engineMode ? "engine-scene" : editor.valueRevision}
+              document={
+                document.value ?? parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)
+              }
+              sceneDoc={engine.doc ?? undefined}
+              readOnly={canvasReadOnly}
+              onAssetRefusedChange={setAssetRefused}
+              onChange={canvasReadOnly || engineMode ? undefined : editor.setDraft}
             />
           </Suspense>
         </div>
@@ -3873,10 +3924,12 @@ export function FileInspector(props: {
   // the version (#534, codex P2).
   //
   // `enabled` waits for the read to ANSWER, so this opens no earlier than it
-  // used to (and never for a truncated file). It deliberately does NOT go false
+  // used to. A scene can open after a truncated read because the engine owns
+  // the full artifact. It deliberately does NOT go false
   // when that answer is a failure: a failed reread is exactly when the refusal
   // is on its way, and dropping `enabled` would cancel the open that carries it.
   const readAnswered = text !== null || error;
+  const liveDocumentKind = liveDocumentKindForPath(props.path);
   // "Try again" after an open that hit its retry deadline (#564): part of the
   // hook's request key, so a retry is a fresh open under the same
   // stale-response guard as any other request change.
@@ -3888,7 +3941,12 @@ export function FileInspector(props: {
     workspaceId: props.workspaceId,
     path: props.path,
     enabled:
-      kind === "markdown" && readAnswered && !truncated && !props.readOnly,
+      liveDocumentKind !== null &&
+      (kind === "markdown" || kind === "drawing") &&
+      readAnswered &&
+      (!truncated || liveDocumentKind === "scene") &&
+      !props.readOnly,
+    kind: liveDocumentKind ?? undefined,
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
   });
@@ -4108,6 +4166,7 @@ export function FileInspector(props: {
           onShare={onShareCurrentPath}
           notice={truncatedNotice}
           recoveryNotices={recoveryNotices}
+          engine={engine}
         />
       );
     case "csv":

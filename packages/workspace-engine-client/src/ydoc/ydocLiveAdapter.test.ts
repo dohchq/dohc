@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import {
   EngineRequestDeadlineError,
   EngineRequestError,
@@ -136,6 +137,53 @@ async function drain(): Promise<void> {
 }
 
 describe("YdocLiveAdapter", () => {
+  it("keeps scene roots as Y.Maps across initial and remote updates", async () => {
+    const engine = new YdocLoopbackEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const first = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "drawing.excalidraw",
+      contentKind: "scene",
+    });
+    await first.applyLocalEdit((doc) => {
+      doc.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).set("revision", "one");
+      doc.getMap(EXCALIDRAW_SCENE_ROOTS.appState).set("gridSize", "20");
+    });
+    await first.evict();
+
+    const reopened = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "drawing.excalidraw",
+      contentKind: "scene",
+    });
+    expect(reopened.doc.get(EXCALIDRAW_SCENE_ROOTS.revisions)).toBeInstanceOf(
+      Y.Map,
+    );
+    expect(
+      reopened.doc.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).get("revision"),
+    ).toBe("one");
+
+    const remote = new Y.Doc();
+    remote.getMap(EXCALIDRAW_SCENE_ROOTS.revisions);
+    remote.getMap(EXCALIDRAW_SCENE_ROOTS.appState);
+    remote.getMap(EXCALIDRAW_SCENE_ROOTS.assets).set("asset", "two");
+    engine.applyRemoteUpdate(
+      reopened.sessionId,
+      Y.encodeStateAsUpdate(remote),
+    );
+    expect(reopened.doc.get(EXCALIDRAW_SCENE_ROOTS.assets)).toBeInstanceOf(
+      Y.Map,
+    );
+    expect(reopened.doc.getMap(EXCALIDRAW_SCENE_ROOTS.assets).get("asset")).toBe(
+      "two",
+    );
+
+    await reopened.evict();
+    adapter.dispose();
+  });
+
   it("falls back when String.isWellFormed is unavailable at runtime", () => {
     const descriptor = Object.getOwnPropertyDescriptor(
       String.prototype,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
+  compareUnicodeScalar,
   declareSceneRoots,
   exportPortableScene,
   foldScene,
@@ -11,6 +12,8 @@ import {
   setAppStateProperty,
   stableJson,
 } from "./index";
+
+const SHA256 = "a".repeat(64);
 
 const element = (id: string, version: number, nonce: number, extra = {}) => ({
   id, type: "rectangle", version, versionNonce: nonce, isDeleted: false, index: "a0", ...extra,
@@ -72,24 +75,79 @@ describe("element revisions", () => {
     expect(stableJson(foldScene(a))).toBe(stableJson(foldScene(b)));
     expect(declareSceneRoots(a).revisions.size).toBe(1);
   });
+
+  it("ignores malformed and noncanonical remote records one at a time", () => {
+    const doc = new Y.Doc();
+    insertElementRevision(doc, element("valid", 1, 1, { x: 10 }));
+    setAppStateProperty(doc, "gridSize", 20);
+    putSceneAsset(doc, {
+      id: "valid-asset",
+      mimeType: "image/png",
+      created: 1,
+      ref: "assets/valid.png",
+      sha256: "a".repeat(64),
+    });
+    const roots = declareSceneRoots(doc);
+    roots.revisions.set("not-json", "not-json");
+    roots.revisions.set(
+      revisionKey("spaced", 1, 1),
+      '{ "id":"spaced","index":"a0","isDeleted":false,"type":"rectangle","version":1,"versionNonce":1}',
+    );
+    roots.revisions.set(
+      revisionKey("wrong-key", 1, 1),
+      stableJson(element("other-id", 1, 1)),
+    );
+    roots.appState.set("scrollX", "{ bad");
+    roots.appState.set("gridStep", " 5");
+    roots.assets.set("broken", "null");
+    roots.assets.set(
+      "wrong-id",
+      stableJson({
+        id: "other-asset",
+        mimeType: "image/png",
+        created: 1,
+        ref: "assets/other.png",
+        sha256: "b".repeat(64),
+      }),
+    );
+
+    expect(foldScene(doc)).toEqual({
+      elements: [element("valid", 1, 1, { x: 10 })],
+      appState: { gridSize: 20 },
+      assets: {
+        "valid-asset": {
+          id: "valid-asset",
+          mimeType: "image/png",
+          created: 1,
+          ref: "assets/valid.png",
+          sha256: "a".repeat(64),
+        },
+      },
+    });
+    expect(JSON.parse(exportPortableScene(doc))).toMatchObject({
+      elements: [{ id: "valid" }],
+      appState: { gridSize: 20 },
+      files: {},
+    });
+  });
 });
 
 describe("portable export", () => {
-  it("omits tombstones, unreferenced assets, private app state, and file bytes", () => {
+  it("omits tombstones, asset references, private app state, and file bytes", () => {
     const doc = new Y.Doc();
     insertElementRevision(doc, element("image", 1, 1, { type: "image", fileId: "used" }));
     insertElementRevision(doc, element("gone", 1, 1, { isDeleted: true, fileId: "unused" }));
-    putSceneAsset(doc, { id: "used", mimeType: "image/png", created: 1, ref: "assets/used.png" });
-    putSceneAsset(doc, { id: "unused", mimeType: "image/png", created: 1, ref: "assets/unused.png" });
+    putSceneAsset(doc, { id: "used", mimeType: "image/png", created: 1, ref: "assets/used.png", sha256: SHA256 });
+    putSceneAsset(doc, { id: "unused", mimeType: "image/png", created: 1, ref: "assets/unused.png", sha256: SHA256 });
     setAppStateProperty(doc, "gridSize", 20);
     setAppStateProperty(doc, "gridStep", 5);
     setAppStateProperty(doc, "gridModeEnabled", true);
     setAppStateProperty(doc, "viewBackgroundColor", "#ffffff");
     setAppStateProperty(doc, "scrollX", 42);
     const exported = JSON.parse(exportPortableScene(doc));
+    expect(exported.source).toBe("https://excalidraw.com");
     expect(exported.elements.map(({ id }: { id: string }) => id)).toEqual(["image"]);
-    expect(Object.keys(exported.files)).toEqual(["used"]);
-    expect(exported.files.used).not.toHaveProperty("dataURL");
+    expect(exported.files).toEqual({});
     expect(exported.appState).toEqual({
       gridModeEnabled: true,
       gridSize: 20,
@@ -101,12 +159,52 @@ describe("portable export", () => {
   it("rejects invalid revisions and asset references", () => {
     const doc = new Y.Doc();
     expect(() => insertElementRevision(doc, element("x", 1.5, 1))).toThrow("safe integer");
-    expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "../x" })).toThrow("workspace-relative");
-    expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "x", dataURL: "bytes" })).toThrow("file bytes");
+    expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "../x", sha256: SHA256 })).toThrow("workspace-relative");
+    expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "x" })).toThrow("SHA-256");
+    expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "x", sha256: "A".repeat(64) })).toThrow("lowercase");
+    expect(() => putSceneAsset(doc, { id: "x", mimeType: "image/png", created: 1, ref: "x", sha256: SHA256, dataURL: "bytes" })).toThrow("file bytes");
   });
 
   it("writes stable canonical JSON", () => {
     expect(stableJson({ z: 1, a: { d: 2, c: 1 } })).toBe('{"a":{"c":1,"d":2},"z":1}');
+    expect(compareUnicodeScalar("\uE000", "😀")).toBeLessThan(0);
+    expect(stableJson({ "😀": 2, "\uE000": 1 })).toBe(
+      '{"":1,"😀":2}',
+    );
+    expect(() => stableJson({ text: "\ud800" })).toThrow("valid Unicode");
+  });
+
+  it("removes references to tombstoned elements", () => {
+    const doc = new Y.Doc();
+    insertElementRevision(
+      doc,
+      element("live", 1, 1, {
+        boundElements: [{ id: "gone", type: "text" }],
+        containerId: "gone",
+        frameId: "gone",
+        startBinding: { elementId: "gone" },
+        endBinding: { elementId: "gone" },
+      }),
+    );
+    insertElementRevision(doc, element("gone", 1, 1, { isDeleted: true }));
+    const [exported] = JSON.parse(exportPortableScene(doc)).elements;
+    expect(exported).toMatchObject({
+      boundElements: [],
+      containerId: null,
+      frameId: null,
+      startBinding: null,
+      endBinding: null,
+    });
+  });
+
+  it("retains tombstone winners in the collaborative fold but omits them from export", () => {
+    const doc = new Y.Doc();
+    insertElementRevision(doc, element("gone", 2, 1, { isDeleted: true }));
+
+    expect(foldScene(doc).elements).toEqual([
+      element("gone", 2, 1, { isDeleted: true }),
+    ]);
+    expect(JSON.parse(exportPortableScene(doc)).elements).toEqual([]);
   });
 });
 

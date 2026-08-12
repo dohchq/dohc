@@ -1,7 +1,7 @@
 // WS-G2-C-2 — the ENGINE Y.Doc provider (renderer half of the bridge).
 //
 // The live engine Y.Doc lives in MAIN (the engine driver is node-only). The
-// renderer's Tiptap editor binds to a MIRROR Y.Doc that this provider keeps
+// renderer's format editor binds to a MIRROR Y.Doc that this provider keeps
 // convergent with the main session over a transport (IPC in production, a mock
 // in tests). It exposes a Y.Doc that the Collaboration extension binds to via
 // its "body" XmlFragment. Solo editing runs purely on the
@@ -32,6 +32,9 @@ export type EngineRemovalInProgress = {
 };
 
 export interface EngineYDocTransport {
+  // Declare format-owned top-level roots before the initial engine update is
+  // applied. This prevents Yjs from inferring an incompatible shared type.
+  initializeDoc?(doc: Y.Doc): void;
   // Open the engine session in main. available:false => not an engine-backed
   // doc (unflagged workspace, secret path, or already live) — the caller falls
   // back to the plain local editor. notInVersion:true is the ONE available:false
@@ -157,6 +160,7 @@ export async function bindEngineYDoc(
   }
 
   const doc = new Y.Doc();
+  transport.initializeDoc?.(doc);
   // Seed the mirror to the engine's current state BEFORE binding, under the
   // engine origin so the observer we attach next does not ship it back.
   Y.applyUpdate(doc, opened.initialUpdate, ENGINE_SOURCED_ORIGIN);

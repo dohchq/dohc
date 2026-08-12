@@ -78,6 +78,9 @@ importers:
       '@dohc/cli':
         specifier: workspace:*
         version: link:../../packages/cli
+      '@dohc/excalidraw-scene':
+        specifier: workspace:*
+        version: link:../../packages/excalidraw-scene
       '@dohc/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
@@ -364,6 +367,9 @@ importers:
 
   packages/excalidraw-scene:
     dependencies:
+      '@dohc/workspace-contracts':
+        specifier: workspace:*
+        version: link:../workspace-contracts
       yjs:
         specifier: 13.6.30
         version: 13.6.30
