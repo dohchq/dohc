@@ -1376,11 +1376,38 @@ fn leases_are_process_local_per_registry() {
 
 // ---- settle -----------------------------------------------------------------
 
+#[test]
+fn scene_content_kind_is_stored_without_bypassing_the_schema_check() {
+    let mut ts = fresh_store("scene-marker-kind");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Scene,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("scene marker"),
+    );
+
+    assert_eq!(
+        read_marker(&ts.store, &key)
+            .expect("read marker")
+            .expect("marker exists")
+            .content_kind,
+        ContentKind::Scene
+    );
+}
+
 fn assert_unknown_content_kind(error: CollabError) {
     assert_eq!(error.code(), "unsupported-content-kind");
     assert_eq!(
         error.to_string(),
-        "unsupported durable Y.Doc content kind `scene`; supported kinds are `plaintext` and `richdoc`"
+        "unsupported durable Y.Doc content kind `spatial`; supported kinds are `plaintext`, `richdoc`, and `scene`"
     );
 }
 
@@ -1414,7 +1441,7 @@ fn unknown_marker_content_kind_cannot_project_append_or_settle_as_richdoc() {
                 tx.execute_batch("PRAGMA ignore_check_constraints = ON")
                     .map_err(dohc_engine_storage::StorageError::persist_public)?;
                 tx.execute(
-                    "UPDATE ydoc_docs SET content_kind = 'scene' \
+                    "UPDATE ydoc_docs SET content_kind = 'spatial' \
                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                     rusqlite::params![key.workspace_id, key.version_id, key.object_id],
                 )

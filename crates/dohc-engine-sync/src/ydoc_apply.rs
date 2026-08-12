@@ -266,7 +266,9 @@ pub fn drain_deferred_ydoc_for_key(
                     Some("ydoc.update content kind does not match the established lineage")
                 }
                 Ok(_) => None,
-                Err(_) => Some("ydoc.update content kind must be `plaintext` or `richdoc`"),
+                Err(_) => {
+                    Some("ydoc.update content kind must be `plaintext`, `richdoc`, or `scene`")
+                }
             };
         // Once the base arrives it establishes the authoritative path. A
         // queued payload naming another path is still refused, but its valid
@@ -603,7 +605,11 @@ pub fn fold_resolution_into_ydoc_in_tx(
             reason: "ydoc projection exceeds materialization cap",
         })?;
     if projection.content != chosen_text {
-        let update = doc.rewrite_content_to_markdown(marker.content_kind, chosen_text);
+        let update = doc
+            .rewrite_content_to_markdown(marker.content_kind, chosen_text)
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "the content kind does not support Markdown conflict resolution",
+            })?;
         // VERIFY THE FOLD'S OWN OUTPUT. The markdown parser behind the
         // rewrite is asserted to be the projector's inverse, and nothing
         // makes that true: a construct it does not model round-trips through
@@ -859,7 +865,10 @@ pub fn apply_ydoc_envelope(
     let (classification, normalized) = classify_engine_file_path_normalized(&payload.path);
     if classification != PathClassification::Tracked
         || normalized.as_deref() != Some(payload.path.as_str())
-        || !matches!(payload.content_kind.as_str(), "plaintext" | "richdoc")
+        || !matches!(
+            payload.content_kind.as_str(),
+            "plaintext" | "richdoc" | "scene"
+        )
     {
         return refuse_ydoc(
             store,
@@ -1427,7 +1436,8 @@ fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncErr
         | CollabError::EmptyUpdate
         | CollabError::UpdateTooLarge { .. }
         | CollabError::ProjectionTooLarge { .. }
-        | CollabError::ProjectionTooComplex { .. } => SyncError::InvalidInput { reason },
+        | CollabError::ProjectionTooComplex { .. }
+        | CollabError::MarkdownRewriteUnsupported { .. } => SyncError::InvalidInput { reason },
         CollabError::BaseStateDiverged => SyncError::CoordinateDiverged,
         hard => map_collab_hard_error(hard),
     }

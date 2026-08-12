@@ -7092,6 +7092,7 @@ impl EngineService {
         let content_kind = match params.content_kind.as_str() {
             "plaintext" => ContentKind::Plaintext,
             "richdoc" => ContentKind::Richdoc,
+            "scene" => ContentKind::Scene,
             _ => return Err(wire(ErrorCode::InvalidParams, "unknown Y.Doc content kind")),
         };
         let outcome = open
@@ -11215,6 +11216,7 @@ fn parse_ydoc_content_kind(raw: &str) -> Result<ContentKind, WireError> {
     match raw {
         "plaintext" => Ok(ContentKind::Plaintext),
         "richdoc" => Ok(ContentKind::Richdoc),
+        "scene" => Ok(ContentKind::Scene),
         _ => Err(wire(ErrorCode::InvalidParams, "unknown Y.Doc content kind")),
     }
 }
@@ -11223,6 +11225,7 @@ fn ydoc_content_kind_name(kind: ContentKind) -> &'static str {
     match kind {
         ContentKind::Plaintext => "plaintext",
         ContentKind::Richdoc => "richdoc",
+        ContentKind::Scene => "scene",
     }
 }
 
@@ -11546,6 +11549,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::InvalidIdentifier { .. }
         | CollabError::ContentKindMismatch
         | CollabError::UnsupportedContentKind { .. }
+        | CollabError::MarkdownRewriteUnsupported { .. }
         | CollabError::BaseAlreadyClaimed
         | CollabError::BaseStateDiverged
         | CollabError::LeaseHeld

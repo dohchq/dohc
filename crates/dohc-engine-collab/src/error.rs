@@ -53,9 +53,14 @@ pub enum CollabError {
     /// A durable marker names a content kind this engine cannot interpret.
     /// The engine must not guess a projection schema for unknown state.
     #[error(
-        "unsupported durable Y.Doc content kind `{kind}`; supported kinds are `plaintext` and `richdoc`"
+        "unsupported durable Y.Doc content kind `{kind}`; supported kinds are `plaintext`, `richdoc`, and `scene`"
     )]
     UnsupportedContentKind { kind: String },
+
+    /// The conflict resolver tried to replace a non-Markdown artifact with
+    /// Markdown source. Scene conflict resolution needs its own operation.
+    #[error("Y.Doc content kind `{kind}` does not support Markdown replacement")]
+    MarkdownRewriteUnsupported { kind: &'static str },
 
     /// A replicated lineage already has its single base; a second base is
     /// rejected (base-once). The caller must resume the existing lineage.
@@ -126,6 +131,7 @@ impl CollabError {
             CollabError::InvalidIdentifier { .. } => "invalid-identifier",
             CollabError::ContentKindMismatch => "content-kind-mismatch",
             CollabError::UnsupportedContentKind { .. } => "unsupported-content-kind",
+            CollabError::MarkdownRewriteUnsupported { .. } => "markdown-rewrite-unsupported",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::BaseStateDiverged => "base-state-diverged",
             CollabError::LeaseHeld => "lease-held",

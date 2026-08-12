@@ -406,7 +406,7 @@ CREATE TABLE ydoc_docs (
     -- replicated lineage down the pruning path; a bad `content_kind` must not
     -- project the wrong root). Fail closed at write.
     content_kind      TEXT    NOT NULL DEFAULT 'richdoc'
-                              CHECK (content_kind IN ('plaintext', 'richdoc')),
+                              CHECK (content_kind IN ('plaintext', 'richdoc', 'scene')),
     regime            TEXT    NOT NULL DEFAULT 'local-only'
                               CHECK (regime IN ('local-only', 'replicated')),
     head_update_seq   INTEGER NOT NULL DEFAULT 0,

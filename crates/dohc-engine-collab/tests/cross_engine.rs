@@ -142,6 +142,7 @@ fn assert_matches_expectation(fx: &Fixture, doc: &Ydoc) {
                 );
             }
         }
+        ContentKind::Scene => panic!("the legacy cross-engine corpus has no scene fixtures"),
     }
 }
 
@@ -163,6 +164,7 @@ fn every_fixture_converges_on_yjs_expectation() {
         match content_kind(fx) {
             ContentKind::Plaintext => plaintext += 1,
             ContentKind::Richdoc => richdoc += 1,
+            ContentKind::Scene => panic!("the legacy cross-engine corpus has no scene fixtures"),
         }
     }
     // Guard against a silently-empty corpus.
