@@ -235,11 +235,29 @@ launch / first users). Do not "fix" the missing checks.
 
 When an agent publishes prose through the user's GitHub account, start the body with:
 
-> Written by `<model name>`.
+> Written by `<exact model slug>`.
 
-Replace the placeholder with the exact model name that the current harness
-provides. Do not guess the model version or variant. If no exact name is
-available, use:
+Use the exact runtime model slug. Do not use a family name or display name.
+
+On Codex, read `turn_context.payload.model` from the current task's latest
+rollout record. Match the rollout filename with `CODEX_THREAD_ID`.
+
+On Claude Code, use the canonical model slug from the active environment
+context. For headless runs, confirm it with the active entry's `canonicalModel`
+in the JSON `modelUsage` result. Ignore auxiliary model entries.
+
+On other harnesses, use the equivalent runtime metadata. Do not infer, shorten,
+normalize, or guess the slug.
+
+If no exact model slug is available, use the known agent name:
+
+> Written by Codex.
+
+or:
+
+> Written by Claude.
+
+If neither the model slug nor agent name is available, use:
 
 > Written by an AI agent (model name unavailable).
 
