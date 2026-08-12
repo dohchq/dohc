@@ -22,6 +22,18 @@ export function foregroundExitCode(result) {
   return result.status ?? 0;
 }
 
+export function workspaceEngineBuildArguments(root) {
+  return [
+    "build",
+    "--target-dir",
+    join(root, "target"),
+    "-p",
+    "dohc-workspace-engine",
+    "--bin",
+    "dohc-workspace-engine",
+  ];
+}
+
 function electronViteCliPath() {
   const packageJson = require.resolve("electron-vite/package.json");
   return join(dirname(packageJson), "bin", "electron-vite.js");
@@ -54,7 +66,7 @@ function run() {
 
   runRequired(
     "cargo",
-    ["build", "-p", "dohc-workspace-engine", "--bin", "dohc-workspace-engine"],
+    workspaceEngineBuildArguments(repoRoot),
     { cwd: repoRoot, stdio: "inherit" },
     "build the Rust workspace engine",
   );
