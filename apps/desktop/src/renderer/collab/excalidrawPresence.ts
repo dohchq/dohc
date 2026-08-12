@@ -16,6 +16,8 @@ const MAX_SELECTED_ELEMENT_IDS = 16;
 const MAX_ELEMENT_ID_CHARS = 24;
 const UNSAFE_ELEMENT_ID = /[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/;
 
+type CleanSelection = Record<string, true>;
+
 const COLORS = [
   { background: "#dbeafe", stroke: "#2563eb" },
   { background: "#dcfce7", stroke: "#16a34a" },
@@ -114,11 +116,11 @@ function cleanPointer(value: unknown): Collaborator["pointer"] | undefined {
   return { x, y, tool: pointer.tool };
 }
 
-function cleanSelection(value: unknown): Record<string, true> | undefined {
+function cleanSelection(value: unknown): CleanSelection | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
-  const selected = Object.create(null) as Record<string, true>;
+  const selected = Object.create(null) as CleanSelection;
   const entries = Object.entries(value)
     .filter(
       ([id, isSelected]) =>
@@ -138,11 +140,11 @@ function cleanSelection(value: unknown): Record<string, true> | undefined {
 }
 
 function sameSelection(
-  left: Record<string, boolean>,
-  right: Record<string, boolean>,
+  left: CleanSelection,
+  right: CleanSelection,
 ): boolean {
-  const leftIds = Object.keys(left).filter((id) => left[id] === true).sort();
-  const rightIds = Object.keys(right).filter((id) => right[id] === true).sort();
+  const leftIds = Object.keys(left).sort();
+  const rightIds = Object.keys(right).sort();
   return (
     leftIds.length === rightIds.length &&
     leftIds.every((id, index) => id === rightIds[index])
@@ -196,7 +198,7 @@ export function bindExcalidrawPresence(options: {
   let pendingPointer: ExcalidrawPointerUpdate | null = null;
   let pointerTimer: unknown | null = null;
   let lastPointerAt = Number.NEGATIVE_INFINITY;
-  let lastSelection: Record<string, boolean> = {};
+  let lastSelection: CleanSelection = {};
 
   const binding = bindDocPresence({
     doc: options.doc,
@@ -261,7 +263,9 @@ export function bindExcalidrawPresence(options: {
     },
     updateSelection(selectedElementIds) {
       if (destroyed) return;
-      const selection = cleanSelection(selectedElementIds) ?? Object.create(null);
+      const selection =
+        cleanSelection(selectedElementIds) ??
+        (Object.create(null) as CleanSelection);
       if (sameSelection(lastSelection, selection)) return;
       lastSelection = selection;
       try {

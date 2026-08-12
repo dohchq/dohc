@@ -8631,6 +8631,24 @@ describe("open editors", () => {
     expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0);
   });
 
+  it("numbers untitled text files after case-insensitive file and folder matches", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "untitled.txt", kind: "file" as const }],
+      folders: ["UNTITLED 2.TXT"],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New untitled text file"));
+
+    expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test",
+      relativePath: "Untitled 3.txt",
+    });
+  });
+
   it("surfaces file title actions for create, refresh, and collapse folders", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -9234,6 +9252,31 @@ describe("drawing entry point", () => {
     expect(
       (await screen.findAllByText("Untitled.excalidraw")).length,
     ).toBeGreaterThan(0);
+  });
+
+  it("numbers drawings after case-insensitive file and folder matches", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "UNTITLED 2.EXCALIDRAW", kind: "file" as const }],
+      folders: ["untitled.excalidraw"],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New drawing",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        relativePath: "Untitled 3.excalidraw",
+      }),
+    );
   });
 
   it("opens a new drawing only in the focused editor group", async () => {

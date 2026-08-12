@@ -572,30 +572,23 @@ function ancestorDirs(path: string): string[] {
   return segments.slice(0, -1).map((_, i) => segments.slice(0, i + 1).join("/"));
 }
 
-function uniqueUntitledTextPath(
+function uniqueUntitledPath(
   files: WorkspaceFileEntry[],
   folders: string[],
+  extension: string,
 ): string {
-  const occupied = new Set([...files.map((file) => file.path), ...folders]);
-  if (!occupied.has("Untitled.txt")) return "Untitled.txt";
+  const occupied = new Set(
+    [...files.map((file) => file.path), ...folders].map((path) =>
+      path.toLowerCase(),
+    ),
+  );
+  const base = `Untitled.${extension}`;
+  if (!occupied.has(base.toLowerCase())) return base;
   for (let index = 2; index < 10_000; index += 1) {
-    const candidate = `Untitled ${index}.txt`;
-    if (!occupied.has(candidate)) return candidate;
+    const candidate = `Untitled ${index}.${extension}`;
+    if (!occupied.has(candidate.toLowerCase())) return candidate;
   }
-  return `Untitled ${Date.now()}.txt`;
-}
-
-function uniqueUntitledDrawingPath(
-  files: WorkspaceFileEntry[],
-  folders: string[],
-): string {
-  const occupied = new Set([...files.map((file) => file.path), ...folders]);
-  if (!occupied.has("Untitled.excalidraw")) return "Untitled.excalidraw";
-  for (let index = 2; index < 10_000; index += 1) {
-    const candidate = `Untitled ${index}.excalidraw`;
-    if (!occupied.has(candidate)) return candidate;
-  }
-  return `Untitled ${Date.now()}.excalidraw`;
+  return `Untitled ${Date.now()}.${extension}`;
 }
 
 function isEditableShortcutTarget(target: EventTarget | null) {
@@ -3267,7 +3260,7 @@ export function DesktopWorkspaceShell(props: {
     try {
       const result = await bridge().createWorkspaceFile({
         workspaceId,
-        relativePath: uniqueUntitledTextPath(files, folders),
+        relativePath: uniqueUntitledPath(files, folders, "txt"),
       });
       await refreshFiles();
       openFile(result.path);
@@ -3279,7 +3272,7 @@ export function DesktopWorkspaceShell(props: {
     try {
       const result = await bridge().createWorkspaceFile({
         workspaceId,
-        relativePath: uniqueUntitledDrawingPath(files, folders),
+        relativePath: uniqueUntitledPath(files, folders, "excalidraw"),
       });
       await refreshFiles();
       openFile(result.path);
