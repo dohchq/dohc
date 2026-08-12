@@ -7129,6 +7129,12 @@ impl EngineService {
             .as_deref()
             .map(parse_ydoc_content_kind)
             .transpose()?;
+        if params.seed_from_artifact && requested_kind != Some(ContentKind::Scene) {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "seedFromArtifact requires contentKind scene",
+            ));
+        }
         let cancellation = OperationCancellation::new(ctx);
         let _serial = tokio::select! {
             biased;
@@ -7155,7 +7161,7 @@ impl EngineService {
                 cancellation.token(),
             )
             .await
-            .map_err(map_runtime)?;
+            .map_err(map_ydoc_open_runtime)?;
         let lease =
             self.leases
                 .scoped(&open.root)
@@ -7166,7 +7172,7 @@ impl EngineService {
                 })?;
         let state = open
             .actor
-            .ydoc_open_state(
+            .ydoc_open_state_with_artifact_seed(
                 open.workspace_id.clone(),
                 now_ms()?,
                 true,
@@ -7174,14 +7180,35 @@ impl EngineService {
                 params.version_id,
                 params.path.clone(),
                 requested_kind,
+                params.seed_from_artifact,
                 cancellation.token(),
             )
             .await
-            .map_err(map_runtime)?;
+            .map_err(map_ydoc_open_runtime)?;
         if state.key != probe.key {
             // The path's owner changed between the probe and the lease: the
             // held lease guards the WRONG key. Refuse; the client retries.
             return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
+        }
+        if !state.seed_materialization_jobs.is_empty() {
+            let materialization = open
+                .actor
+                .ydoc_materialize_scene_seed_assets(
+                    open.root.clone(),
+                    open.workspace_id.clone(),
+                    state.seed_materialization_jobs.clone(),
+                    Arc::new(self.self_writes.scoped(&open.root)),
+                    now_ms()?,
+                )
+                .await
+                .map_err(map_runtime)?;
+            if !materialization.materialized {
+                return Err(if materialization.invalid_jobs > 0 {
+                    wire(ErrorCode::Internal, "ydoc-artifact-assets-invalid")
+                } else {
+                    wire(ErrorCode::Overloaded, "ydoc-artifact-assets-pending")
+                });
+            }
         }
         let sequence = self
             .next_session
@@ -7219,6 +7246,21 @@ impl EngineService {
                 }
                 state.seed_content
             },
+            artifact_assets: (!state.artifact_assets.is_empty()).then(|| {
+                state
+                    .artifact_assets
+                    .into_iter()
+                    .map(|asset| ArtifactAssetDescriptorResult {
+                        id: asset.id,
+                        mime_type: asset.mime_type,
+                        created: asset.created,
+                        r#ref: asset.path,
+                        sha256: asset.sha256,
+                        last_retrieved: asset.last_retrieved,
+                        version: asset.version,
+                    })
+                    .collect()
+            }),
         };
         lock(&self.sessions).insert(
             session_id,
@@ -8263,6 +8305,18 @@ impl EngineService {
     }
 }
 
+fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
+    match error {
+        RuntimeError::YdocArtifactAssetsPending => {
+            wire(ErrorCode::Overloaded, "ydoc-artifact-assets-pending")
+        }
+        RuntimeError::YdocArtifactAssetsInvalid => {
+            wire(ErrorCode::Internal, "ydoc-artifact-assets-invalid")
+        }
+        other => map_runtime(other),
+    }
+}
+
 async fn close_ydoc_session_for_version_fence(
     sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
     self_writes: &SelfWriteSuppression,
@@ -9119,6 +9173,8 @@ struct YdocOpenParams {
     path: String,
     #[serde(default)]
     content_kind: Option<String>,
+    #[serde(default)]
+    seed_from_artifact: bool,
 }
 
 #[derive(Serialize)]
@@ -9139,6 +9195,22 @@ struct YdocOpenResult {
     head: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     seed_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_assets: Option<Vec<ArtifactAssetDescriptorResult>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactAssetDescriptorResult {
+    id: String,
+    mime_type: String,
+    created: u64,
+    r#ref: String,
+    sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_retrieved: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<u64>,
 }
 
 #[derive(Deserialize)]

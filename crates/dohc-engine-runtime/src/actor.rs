@@ -37,7 +37,7 @@ use crate::search::{
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry, Projection,
-    Regime, Ydoc,
+    Regime, Ydoc, encode_scene_asset_records, import_portable_scene,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -68,8 +68,9 @@ use dohc_engine_domain::{
     has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
     list_secret_files_keyless_page, list_secret_moments_page_keyless,
     restore_secret_file_verbatim_with_metadata_and_after, secret_file_len_keyless,
-    select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
-    write_projected_text_in_tx, write_text_in_tx,
+    select_snapshot_by_path_in_tx, validate_addressable_plaintext_path,
+    validate_plaintext_storable_path, write_binary_in_tx, write_projected_text_in_tx,
+    write_text_in_tx,
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
@@ -94,7 +95,7 @@ use dohc_engine_sync::{
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
@@ -224,6 +225,26 @@ pub struct YdocOpenState {
     pub head_blob_sha256: Option<String>,
     pub lineage_existing: bool,
     pub seed_content: Option<String>,
+    pub artifact_assets: Vec<ArtifactAssetDescriptor>,
+    pub seed_materialization_jobs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactAssetDescriptor {
+    pub id: String,
+    pub mime_type: String,
+    pub created: u64,
+    pub path: String,
+    pub sha256: String,
+    pub last_retrieved: Option<u64>,
+    pub version: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct YdocSeedMaterialization {
+    pub materialized: bool,
+    pub incomplete_jobs: usize,
+    pub invalid_jobs: usize,
 }
 
 /// Result of the single moment+snapshot+materialization settlement path.
@@ -1158,6 +1179,7 @@ enum Command {
         version_id: String,
         path: String,
         content_kind: Option<ContentKind>,
+        seed_from_artifact: bool,
         token: CancellationToken,
         reply: oneshot::Sender<Result<YdocOpenState, RuntimeError>>,
     },
@@ -1167,6 +1189,14 @@ enum Command {
         ignored_object_ids: Vec<String>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<ContentKind>, RuntimeError>>,
+    },
+    YdocMaterializeSceneSeedAssets {
+        root_dir: PathBuf,
+        workspace_id: String,
+        job_ids: Vec<String>,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<YdocSeedMaterialization, RuntimeError>>,
     },
     YdocRecordUpdate {
         key: DocKey,
@@ -3265,6 +3295,33 @@ impl ActorHandle {
         content_kind: Option<ContentKind>,
         token: CancellationToken,
     ) -> Result<YdocOpenState, RuntimeError> {
+        self.ydoc_open_state_with_artifact_seed(
+            workspace_id,
+            now_ms,
+            drain_deferred,
+            expected_key,
+            version_id,
+            path,
+            content_kind,
+            false,
+            token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_open_state_with_artifact_seed(
+        &self,
+        workspace_id: String,
+        now_ms: i64,
+        drain_deferred: bool,
+        expected_key: Option<DocKey>,
+        version_id: String,
+        path: String,
+        content_kind: Option<ContentKind>,
+        seed_from_artifact: bool,
+        token: CancellationToken,
+    ) -> Result<YdocOpenState, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::YdocOpenState {
@@ -3275,6 +3332,7 @@ impl ActorHandle {
                 version_id,
                 path,
                 content_kind,
+                seed_from_artifact,
                 token,
                 reply,
             })
@@ -3299,6 +3357,29 @@ impl ActorHandle {
                 version_id,
                 ignored_object_ids,
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn ydoc_materialize_scene_seed_assets(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        job_ids: Vec<String>,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+    ) -> Result<YdocSeedMaterialization, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocMaterializeSceneSeedAssets {
+                root_dir,
+                workspace_id,
+                job_ids,
+                self_writes,
+                now_ms,
                 reply,
             })
             .await
@@ -7324,6 +7405,7 @@ fn worker_main(
                 version_id,
                 path,
                 content_kind,
+                seed_from_artifact,
                 token,
                 reply,
             } => {
@@ -7336,6 +7418,7 @@ fn worker_main(
                     &version_id,
                     &path,
                     content_kind,
+                    seed_from_artifact,
                     &token,
                 );
                 let _ = reply.send(outcome);
@@ -7354,6 +7437,48 @@ fn worker_main(
                     &ignored_object_ids,
                     &token,
                 );
+                let _ = reply.send(outcome);
+            }
+            Command::YdocMaterializeSceneSeedAssets {
+                root_dir,
+                workspace_id,
+                job_ids,
+                self_writes,
+                now_ms,
+                reply,
+            } => {
+                let selected: HashSet<String> = job_ids.into_iter().collect();
+                let outcome = reconcile_scene_asset_materialization_conflicts(
+                    &store, &root_dir, &selected, now_ms,
+                )
+                .and_then(|invalid_jobs| {
+                    replay_pending_materializations(
+                        &mut store,
+                        &root_dir,
+                        MaterializationReplayScope {
+                            workspace_id: &workspace_id,
+                            self_writes: Some(self_writes.as_ref()),
+                        },
+                        now_ms,
+                        &NoFaults,
+                        Some(&selected),
+                        false,
+                    )?;
+                    let completed = selected.iter().try_fold(0_usize, |count, job_id| {
+                        store.load_materialization_job(job_id).map(|job| {
+                            count
+                                + usize::from(
+                                    job.is_some_and(|job| job.status == JobStatus::Complete),
+                                )
+                        })
+                    })?;
+                    let incomplete_jobs = selected.len().saturating_sub(completed);
+                    Ok(YdocSeedMaterialization {
+                        materialized: invalid_jobs == 0 && incomplete_jobs == 0,
+                        incomplete_jobs,
+                        invalid_jobs,
+                    })
+                });
                 let _ = reply.send(outcome);
             }
             Command::YdocRecordUpdate {
@@ -8664,6 +8789,36 @@ fn worker_main(
     drop(store);
 }
 
+fn reconcile_scene_asset_materialization_conflicts(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    selected: &HashSet<String>,
+    now_ms: i64,
+) -> Result<usize, RuntimeError> {
+    let mut invalid_jobs = 0;
+    for job_id in selected {
+        let Some(job) = store.load_materialization_job(job_id)? else {
+            invalid_jobs += 1;
+            continue;
+        };
+        if job.status != JobStatus::Conflict {
+            continue;
+        }
+        match probe_projection_target(root_dir, &job.target_path, ProjectionTargetKind::Plaintext) {
+            ProjectionTargetState::Absent => {
+                if !store.requeue_materialization_conflict(job_id)? {
+                    invalid_jobs += 1;
+                }
+            }
+            ProjectionTargetState::Binary { sha256 } if sha256 == job.content_sha256 => {
+                store.mark_materialization_complete(job_id, now_ms)?;
+            }
+            _ => invalid_jobs += 1,
+        }
+    }
+    Ok(invalid_jobs)
+}
+
 fn ydoc_apply_on_store(
     store: &mut EngineStore,
     key: &DocKey,
@@ -8778,7 +8933,26 @@ fn ydoc_version_unsettled_content_kind_on_store(
             return Ok(Some(content_kind));
         }
         let content_kind = persisted.marker.content_kind;
-        let projected = persisted.doc.project(content_kind)?;
+        let path: Option<String> = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
+                 AND object_id=?3 ORDER BY path LIMIT 1",
+                params![workspace_id, version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)
+        })?;
+        if content_kind == ContentKind::Scene && path.is_none() {
+            return Ok(Some(content_kind));
+        }
+        let projected = project_ydoc_on_store(
+            store,
+            &key,
+            path.as_deref().unwrap_or(""),
+            &persisted.doc,
+            content_kind,
+        )?;
         let projected_sha = hex_sha256(projected.content.as_bytes());
         let materialized_sha: Option<String> = store.read_with(|conn| {
             conn.query_row(
@@ -8820,6 +8994,306 @@ fn ensure_mutation_version_on_store(
     Ok(())
 }
 
+#[derive(Debug)]
+struct SceneSeedAsset {
+    descriptor: ArtifactAssetDescriptor,
+    bytes: Vec<u8>,
+    object_id: String,
+    moment_id: String,
+}
+
+fn plan_scene_seed_assets(
+    key: &DocKey,
+    drawing_path: &str,
+    files: BTreeMap<String, dohc_engine_collab::ImportedSceneFile>,
+) -> Result<Vec<SceneSeedAsset>, RuntimeError> {
+    files
+        .into_values()
+        .map(|file| {
+            if file.bytes.len() > dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES {
+                return Err(DomainError::PayloadTooLarge {
+                    constraint: "MAX_CAPTURE_BINARY_FILE_BYTES",
+                    limit_bytes: dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES,
+                    observed_bytes: file.bytes.len(),
+                }
+                .into());
+            }
+            let sha256 = hex_sha256(&file.bytes);
+            let path = validate_plaintext_storable_path(
+                &dohc_engine_collab::scene_asset_ref(
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                    &sha256,
+                    &file.mime_type,
+                )
+                .map_err(|error| DomainError::InvalidInput {
+                    reason: match error {
+                        dohc_engine_collab::SceneImportError::Invalid { reason } => reason,
+                    },
+                })?,
+            )?;
+            let descriptor = ArtifactAssetDescriptor {
+                id: file.id,
+                mime_type: file.mime_type,
+                created: file.created,
+                path: path.clone(),
+                sha256: sha256.clone(),
+                last_retrieved: file.last_retrieved,
+                version: file.version,
+            };
+            let identity = format!(
+                "{}\0{}\0{}\0{}",
+                key.workspace_id, key.version_id, drawing_path, descriptor.id
+            );
+            Ok(SceneSeedAsset {
+                descriptor,
+                bytes: file.bytes,
+                object_id: derive_capture_object_id(&key.workspace_id, &key.version_id, &path),
+                moment_id: format!("moment-scene-asset-{}", hex_sha256(identity.as_bytes())),
+            })
+        })
+        .collect()
+}
+
+fn scene_asset_records(
+    assets: &[SceneSeedAsset],
+) -> Result<BTreeMap<String, String>, RuntimeError> {
+    assets
+        .iter()
+        .map(|asset| {
+            let descriptor = &asset.descriptor;
+            let mut record = serde_json::Map::new();
+            record.insert("created".to_owned(), serde_json::json!(descriptor.created));
+            record.insert("id".to_owned(), serde_json::json!(descriptor.id));
+            if let Some(last_retrieved) = descriptor.last_retrieved {
+                record.insert(
+                    "lastRetrieved".to_owned(),
+                    serde_json::json!(last_retrieved),
+                );
+            }
+            record.insert(
+                "mimeType".to_owned(),
+                serde_json::json!(descriptor.mime_type),
+            );
+            record.insert("ref".to_owned(), serde_json::json!(descriptor.path));
+            record.insert("sha256".to_owned(), serde_json::json!(descriptor.sha256));
+            if let Some(version) = descriptor.version {
+                record.insert("version".to_owned(), serde_json::json!(version));
+            }
+            serde_json::to_string(&record)
+                .map(|record| (descriptor.id.clone(), record))
+                .map_err(|_| {
+                    RuntimeError::Domain(DomainError::InvalidInput {
+                        reason: "an Excalidraw asset record could not be encoded",
+                    })
+                })
+        })
+        .collect()
+}
+
+fn validate_scene_artifact_assets_on_store(
+    store: &EngineStore,
+    key: &DocKey,
+    drawing_path: &str,
+    doc: &Ydoc,
+    assets: &[ArtifactAssetDescriptor],
+) -> Result<Vec<String>, RuntimeError> {
+    store.read_with(|conn| {
+        dohc_engine_sync::project_ydoc_with_store(conn, key, drawing_path, doc, ContentKind::Scene)
+            .map_err(|error| match error {
+                dohc_engine_sync::SyncError::RetryableState { .. } => {
+                    RuntimeError::YdocArtifactAssetsPending
+                }
+                _ => RuntimeError::YdocArtifactAssetsInvalid,
+            })?;
+        let mut pending_jobs = Vec::new();
+        for asset in assets {
+            let mut statement = conn
+                .prepare(
+                    "SELECT job_id,status FROM materialization_jobs \
+                     WHERE workspace_id = ?1 AND target_path = ?2 \
+                       AND content_sha256 = ?3 AND status != 'complete' \
+                     ORDER BY job_id",
+                )
+                .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+            let jobs = statement
+                .query_map(params![key.workspace_id, asset.path, asset.sha256], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+            for job in jobs {
+                let (job_id, status) =
+                    job.map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+                if status == "cancelled" {
+                    return Err(RuntimeError::YdocArtifactAssetsInvalid);
+                }
+                pending_jobs.push(job_id);
+            }
+        }
+        Ok::<_, RuntimeError>(pending_jobs)
+    })
+}
+
+fn live_scene_asset_descriptors(doc: &Ydoc) -> Vec<ArtifactAssetDescriptor> {
+    let folded = doc.fold_scene();
+    let referenced: std::collections::BTreeSet<&str> = folded
+        .elements
+        .iter()
+        .filter(|element| element.get("type").and_then(serde_json::Value::as_str) == Some("image"))
+        .filter_map(|element| element.get("fileId").and_then(serde_json::Value::as_str))
+        .collect();
+    referenced
+        .into_iter()
+        .filter_map(|id| folded.assets.get(id))
+        .map(|asset| ArtifactAssetDescriptor {
+            id: asset.id.clone(),
+            mime_type: asset.mime_type.clone(),
+            created: asset.created,
+            path: asset.path.clone(),
+            sha256: asset.sha256.clone(),
+            last_retrieved: asset.last_retrieved,
+            version: asset.version,
+        })
+        .collect()
+}
+
+fn project_ydoc_on_store(
+    store: &EngineStore,
+    key: &DocKey,
+    path: &str,
+    doc: &Ydoc,
+    content_kind: ContentKind,
+) -> Result<Projection, RuntimeError> {
+    store.read_with(|conn| {
+        dohc_engine_sync::project_ydoc_with_store(conn, key, path, doc, content_kind)
+            .map_err(RuntimeError::from)
+    })
+}
+
+fn seed_scene_from_artifact_on_store(
+    store: &mut EngineStore,
+    key: &DocKey,
+    path: &str,
+    artifact: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<Vec<String>, RuntimeError> {
+    let imported = import_portable_scene(artifact).map_err(|error| match error {
+        dohc_engine_collab::SceneImportError::Invalid { reason } => {
+            RuntimeError::Domain(DomainError::InvalidInput { reason })
+        }
+    })?;
+    let assets = plan_scene_seed_assets(key, path, imported.files)?;
+    let asset_update = encode_scene_asset_records(&scene_asset_records(&assets)?).map_err(
+        |error| match error {
+            dohc_engine_collab::SceneImportError::Invalid { reason } => {
+                RuntimeError::Domain(DomainError::InvalidInput { reason })
+            }
+        },
+    )?;
+    let seed_update = dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])?;
+    let request_id = format!(
+        "ydoc-scene-seed-{}",
+        hex_sha256(
+            format!(
+                "{}\0{}\0{}\0{}",
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                hex_sha256(artifact.as_bytes())
+            )
+            .as_bytes()
+        )
+    );
+    let outcome = dohc_engine_collab::record_local_update_creating_marker_guarded(
+        store,
+        key,
+        ContentKind::Scene,
+        Regime::LocalOnly,
+        &seed_update,
+        None,
+        true,
+        true,
+        Some(&request_id),
+        faults,
+        now_ms,
+        |tx, _| {
+            let version_is_active: bool = tx
+                .query_row(
+                    "SELECT ?2 = COALESCE( \
+                         (SELECT version_id FROM active_versions WHERE workspace_id = ?1), \
+                         (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id = ?1))",
+                    params![key.workspace_id, key.version_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: format!("scene asset active-version lookup failed: {error}"),
+                })?;
+            for asset in &assets {
+                let existing: Option<(String, Option<String>)> = tx
+                    .query_row(
+                        "SELECT COALESCE(s.content_kind, 'text'), s.binary_sha256 \
+                         FROM path_aliases a JOIN snapshots s \
+                           ON s.workspace_id = a.workspace_id \
+                          AND s.version_id = a.version_id AND s.object_id = a.object_id \
+                         WHERE a.workspace_id = ?1 AND a.version_id = ?2 AND a.path = ?3",
+                        params![key.workspace_id, key.version_id, asset.descriptor.path],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| CollabError::Corrupt {
+                        reason: format!("scene asset head lookup failed: {error}"),
+                    })?;
+                if let Some((kind, sha256)) = existing {
+                    if kind == "binary" && sha256.as_deref() == Some(&asset.descriptor.sha256) {
+                        continue;
+                    }
+                    return Err(CollabError::Corrupt {
+                        reason: "scene asset path is already bound to different content".to_owned(),
+                    });
+                }
+                let stored_sha = put_binary_blob(tx, &asset.bytes)?;
+                if stored_sha != asset.descriptor.sha256 {
+                    return Err(CollabError::Corrupt {
+                        reason: "scene asset content address changed while storing bytes"
+                            .to_owned(),
+                    });
+                }
+                dohc_engine_domain::write_binary_file_in_tx(
+                    tx,
+                    &dohc_engine_domain::WriteBinaryFile {
+                        workspace_id: key.workspace_id.clone(),
+                        version_id: key.version_id.clone(),
+                        object_id: asset.object_id.clone(),
+                        path: asset.descriptor.path.clone(),
+                        binary_sha256: asset.descriptor.sha256.clone(),
+                        moment_id: asset.moment_id.clone(),
+                        metadata_origin: "ydoc".to_owned(),
+                        metadata_summary: Some("Imported drawing asset".to_owned()),
+                        metadata_correlation_id: Some(request_id.clone()),
+                        author_json: None,
+                        materialize: version_is_active.then_some(Preimage::Absent),
+                        now_ms,
+                    },
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: format!("scene asset head write failed: {error}"),
+                })?;
+                journal_moment_outbound_in_tx(tx, &key.workspace_id, &asset.moment_id, false)
+                    .map_err(|error| CollabError::Corrupt {
+                        reason: format!("scene asset outbound journal failed: {error}"),
+                    })?;
+            }
+            Ok(())
+        },
+    )?;
+    if matches!(outcome, TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    Ok(assets.into_iter().map(|asset| asset.moment_id).collect())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ydoc_open_state_on_store(
     store: &mut EngineStore,
@@ -8830,6 +9304,7 @@ fn ydoc_open_state_on_store(
     version_id: &str,
     path: &str,
     requested_content_kind: Option<ContentKind>,
+    seed_from_artifact: bool,
     token: &CancellationToken,
 ) -> Result<YdocOpenState, RuntimeError> {
     if token.is_cancelled() {
@@ -8964,7 +9439,7 @@ fn ydoc_open_state_on_store(
         }
         .into());
     }
-    let persisted = dohc_engine_collab::load_persisted(store, &key)?;
+    let mut persisted = dohc_engine_collab::load_persisted(store, &key)?;
     // "Existing" means durable DOC STATE, not a bare marker: a local-only
     // close prunes every CRDT row and leaves head_update_seq == 0
     // (the workspace file is the artifact). Reporting it as existing would
@@ -8976,52 +9451,126 @@ fn ydoc_open_state_on_store(
     // base snapshot (head_update_seq == 0, head_snapshot_seq > 0) is
     // EXISTING — reporting it absent would hand the client the base state
     // AND a content seed, duplicating the artifact on the first seed apply.
-    let lineage_existing = persisted
+    let mut lineage_existing = persisted
         .as_ref()
         .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
-    let (content_kind, regime, initial_update) = match persisted {
-        Some(persisted) => {
-            let marker = &persisted.marker;
-            let mut kind = marker.content_kind;
-            // A BARE local marker is a remembered default, not a lineage:
-            // honor an explicit caller kind and rewrite the row (re-proved
-            // bare inside the write transaction). Without this, a stale
-            // default — e.g. the plaintext markers the dead editor path
-            // minted for rich .md files — permanently overrides every later
-            // richdoc open: empty doc over a non-empty file, typed edits
-            // discarded at the pruning close.
-            if let Some(requested) = requested_content_kind
-                && requested != marker.content_kind
-                && !lineage_existing
-                && marker.regime == Regime::LocalOnly
-                && !marker.base_claimed
-            {
-                match dohc_engine_collab::rewrite_bare_marker_content_kind(
-                    store, &key, requested, &NoFaults, now_ms,
-                )? {
-                    TxnOutcome::Committed(true) => kind = requested,
-                    // A raced update/seed made the marker non-bare between
-                    // the read and the write: the lineage owns its kind.
-                    TxnOutcome::Committed(false) => {}
-                    TxnOutcome::Crashed { .. } => {
-                        return Err(RuntimeError::OperationCrashed);
+    let mut seed_materialization_jobs = Vec::new();
+    if drain_deferred
+        && expected_key_matches
+        && seed_from_artifact
+        && requested_content_kind == Some(ContentKind::Scene)
+        && !lineage_existing
+        && let Some(artifact) = head.as_ref()
+    {
+        seed_materialization_jobs = seed_scene_from_artifact_on_store(
+            store,
+            &key,
+            path,
+            &artifact.text,
+            now_ms,
+            &NoFaults,
+        )?;
+        persisted = dohc_engine_collab::load_persisted(store, &key)?;
+        lineage_existing = persisted
+            .as_ref()
+            .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
+        if !lineage_existing {
+            return Err(DomainError::StateCorrupt {
+                reason: "scene artifact seed committed without durable Y.Doc state",
+            }
+            .into());
+        }
+    }
+    let (content_kind, regime, initial_update, artifact_assets, pending_asset_jobs) =
+        match persisted {
+            Some(persisted) => {
+                let marker = &persisted.marker;
+                let mut kind = marker.content_kind;
+                // A BARE local marker is a remembered default, not a lineage:
+                // honor an explicit caller kind and rewrite the row (re-proved
+                // bare inside the write transaction). Without this, a stale
+                // default — e.g. the plaintext markers the dead editor path
+                // minted for rich .md files — permanently overrides every later
+                // richdoc open: empty doc over a non-empty file, typed edits
+                // discarded at the pruning close.
+                if let Some(requested) = requested_content_kind
+                    && requested != marker.content_kind
+                    && !lineage_existing
+                    && marker.regime == Regime::LocalOnly
+                    && !marker.base_claimed
+                {
+                    match dohc_engine_collab::rewrite_bare_marker_content_kind(
+                        store, &key, requested, &NoFaults, now_ms,
+                    )? {
+                        TxnOutcome::Committed(true) => kind = requested,
+                        // A raced update/seed made the marker non-bare between
+                        // the read and the write: the lineage owns its kind.
+                        TxnOutcome::Committed(false) => {}
+                        TxnOutcome::Crashed { .. } => {
+                            return Err(RuntimeError::OperationCrashed);
+                        }
                     }
                 }
+                let artifact_assets = if kind == ContentKind::Scene {
+                    live_scene_asset_descriptors(&persisted.doc)
+                } else {
+                    Vec::new()
+                };
+                let pending_asset_jobs = if kind == ContentKind::Scene {
+                    validate_scene_artifact_assets_on_store(
+                        store,
+                        &key,
+                        path,
+                        &persisted.doc,
+                        &artifact_assets,
+                    )?
+                } else {
+                    Vec::new()
+                };
+                (
+                    kind,
+                    marker.regime,
+                    persisted.doc.encode_full_state(),
+                    artifact_assets,
+                    pending_asset_jobs,
+                )
             }
-            (kind, marker.regime, persisted.doc.encode_full_state())
+            None => {
+                let doc = Ydoc::wire();
+                (
+                    // PLAINTEXT default when the caller does not specify: the
+                    // plaintext surfaces open without a contentKind; richdoc
+                    // callers (the desktop's rich-doc IPC path) pass the kind
+                    // explicitly.
+                    requested_content_kind.unwrap_or(ContentKind::Plaintext),
+                    Regime::LocalOnly,
+                    doc.encode_full_state(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
+        };
+    let seed_materialization_jobs = if content_kind == ContentKind::Scene {
+        if seed_materialization_jobs.is_empty() {
+            pending_asset_jobs
+        } else {
+            let expected: HashSet<&str> = seed_materialization_jobs
+                .iter()
+                .map(String::as_str)
+                .collect();
+            if !pending_asset_jobs
+                .iter()
+                .all(|job| expected.contains(job.as_str()))
+            {
+                return Err(DomainError::StateCorrupt {
+                    reason: "a seeded scene asset has an unexpected pending materialization",
+                }
+                .into());
+            }
+            pending_asset_jobs
         }
-        None => {
-            let doc = Ydoc::wire();
-            (
-                // PLAINTEXT default when the caller does not specify: the
-                // plaintext surfaces open without a contentKind; richdoc
-                // callers (the desktop's rich-doc IPC path) pass the kind
-                // explicitly.
-                requested_content_kind.unwrap_or(ContentKind::Plaintext),
-                Regime::LocalOnly,
-                doc.encode_full_state(),
-            )
-        }
+    } else {
+        Vec::new()
     };
     Ok(YdocOpenState {
         head_blob_sha256: head_sha,
@@ -9030,9 +9579,11 @@ fn ydoc_open_state_on_store(
         regime,
         initial_update,
         lineage_existing,
-        seed_content: (!lineage_existing)
+        seed_content: (content_kind != ContentKind::Scene && !lineage_existing)
             .then(|| head.map(|snapshot| snapshot.text))
             .flatten(),
+        artifact_assets,
+        seed_materialization_jobs,
     })
 }
 
@@ -9365,7 +9916,7 @@ fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
-    let projection = doc.project(content_kind)?;
+    let projection = project_ydoc_on_store(store, key, path, &doc, content_kind)?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
     // the file from `projection.content` down here, so an over-cap doc
@@ -11219,4 +11770,202 @@ fn snapshot(store: &EngineStore) -> Result<StoreSnapshot, StorageError> {
         request_ledger: store.request_ledger_len()?,
         migration_ledger: store.migration_ledger_len()?,
     })
+}
+
+#[cfg(test)]
+mod scene_seed_transaction_tests {
+    use super::*;
+    use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+
+    #[test]
+    fn scene_seed_rolls_back_lineage_assets_and_outbound_work_as_one_unit() {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
+            .expect("open engine store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("ensure main version");
+        let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
+        let artifact = serde_json::json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [{
+                "id": "image-element",
+                "type": "image",
+                "x": 0,
+                "y": 0,
+                "width": 10,
+                "height": 10,
+                "angle": 0,
+                "strokeColor": "transparent",
+                "backgroundColor": "transparent",
+                "fillStyle": "solid",
+                "strokeWidth": 1,
+                "strokeStyle": "solid",
+                "roughness": 0,
+                "opacity": 100,
+                "groupIds": [],
+                "frameId": null,
+                "index": "a0",
+                "roundness": null,
+                "seed": 1,
+                "version": 1,
+                "versionNonce": 1,
+                "isDeleted": false,
+                "boundElements": null,
+                "updated": 1,
+                "link": null,
+                "locked": false,
+                "status": "saved",
+                "fileId": "image-file",
+                "scale": [1, 1],
+                "crop": null
+            }],
+            "appState": {},
+            "files": {
+                "image-file": {
+                    "id": "image-file",
+                    "mimeType": "image/png",
+                    "created": 1,
+                    "dataURL": "data:image/png;base64,AQIDBA=="
+                }
+            }
+        })
+        .to_string();
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+
+        let result = seed_scene_from_artifact_on_store(
+            &mut store,
+            &key,
+            "drawing.excalidraw",
+            &artifact,
+            2,
+            faults.as_ref(),
+        );
+        assert!(matches!(result, Err(RuntimeError::OperationCrashed)));
+        assert!(faults.fired());
+
+        store
+            .read_with(|conn| {
+                for table in [
+                    "ydoc_docs",
+                    "ydoc_updates",
+                    "snapshots",
+                    "moments",
+                    "materialization_jobs",
+                    "replication_log",
+                ] {
+                    let count: i64 = conn
+                        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                            row.get(0)
+                        })
+                        .map_err(StorageError::corrupt_public)?;
+                    assert_eq!(count, 0, "{table} must roll back with the scene seed");
+                }
+                Ok::<_, StorageError>(())
+            })
+            .expect("inspect rolled-back transaction");
+    }
+
+    #[test]
+    fn scene_asset_materialization_conflict_stays_closed_until_disk_is_resolved() {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
+            .expect("open engine store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("ensure main version");
+        let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
+        let artifact = serde_json::json!({
+            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+            "elements": [{
+                "id": "image-element", "type": "image", "version": 1,
+                "versionNonce": 1, "isDeleted": false, "index": "a0",
+                "fileId": "image-file"
+            }],
+            "appState": {},
+            "files": {
+                "image-file": {
+                    "id": "image-file", "mimeType": "image/png", "created": 1,
+                    "dataURL": "data:image/png;base64,AQIDBA=="
+                }
+            }
+        })
+        .to_string();
+        let jobs = seed_scene_from_artifact_on_store(
+            &mut store,
+            &key,
+            "drawing.excalidraw",
+            &artifact,
+            2,
+            &NoFaults,
+        )
+        .expect("seed scene");
+        let selected: HashSet<String> = jobs.into_iter().collect();
+        let job = store
+            .load_materialization_job(selected.iter().next().expect("job id"))
+            .expect("load job")
+            .expect("seed materialization job");
+        let target = scratch.path().join(&job.target_path);
+        std::fs::create_dir_all(target.parent().expect("asset parent")).expect("create parent");
+        std::fs::write(&target, b"foreign bytes").expect("write conflict");
+
+        let first = replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            MaterializationReplayScope {
+                workspace_id: "workspace",
+                self_writes: None,
+            },
+            3,
+            &NoFaults,
+            Some(&selected),
+            false,
+        )
+        .expect("first replay");
+        assert_eq!(first.failed, 1);
+        assert_eq!(
+            store
+                .load_materialization_job(&job.job_id)
+                .expect("load conflict")
+                .expect("conflict job")
+                .status,
+            JobStatus::Conflict
+        );
+        assert_eq!(
+            reconcile_scene_asset_materialization_conflicts(&store, scratch.path(), &selected, 4)
+                .expect("first refusal"),
+            1
+        );
+        assert_eq!(
+            reconcile_scene_asset_materialization_conflicts(&store, scratch.path(), &selected, 5)
+                .expect("repeated refusal"),
+            1,
+            "repeated opens must not clear a live disk conflict"
+        );
+
+        std::fs::remove_file(&target).expect("remove conflicting disk file");
+        assert_eq!(
+            reconcile_scene_asset_materialization_conflicts(&store, scratch.path(), &selected, 6)
+                .expect("recover conflict"),
+            0
+        );
+        let recovered = replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            MaterializationReplayScope {
+                workspace_id: "workspace",
+                self_writes: None,
+            },
+            7,
+            &NoFaults,
+            Some(&selected),
+            false,
+        )
+        .expect("recovery replay");
+        assert_eq!(recovered.completed, 1);
+        assert_eq!(
+            std::fs::read(target).expect("materialized asset"),
+            [1, 2, 3, 4]
+        );
+    }
 }

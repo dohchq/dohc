@@ -1648,6 +1648,35 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     await engine.stop();
   });
 
+  it("materializes a pull-fast-forwarded binary path from authoritative bytes", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
+    const bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    loopback.seedBinaryFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "assets/excalidraw/abc/asset.png",
+      bytes,
+      origin: "sync",
+    });
+
+    await engine.runRelaySync(async () => ({
+      fastForwardedPaths: [
+        {
+          path: "assets/excalidraw/abc/asset.png",
+          operation: "write" as const,
+          contentKind: "binary" as const,
+        },
+      ],
+    }));
+
+    expect(await readFile(join(root, "assets/excalidraw/abc/asset.png"))).toEqual(
+      Buffer.from(bytes),
+    );
+    await engine.stop();
+  });
+
   it("materializes a remote delete and reports no disk work when nothing fast-forwarded", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();

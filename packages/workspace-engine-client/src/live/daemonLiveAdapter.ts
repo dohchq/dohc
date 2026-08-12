@@ -196,6 +196,43 @@ export function isYdocRemoteUpdatesPendingRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-remote-updates-pending";
 }
 
+// Scene seeding has committed the canonical lineage, but one or more linked
+// binary files are still waiting for their durable materialization job. A
+// writable file fallback would race that lineage. Retry only the engine open.
+export function isYdocArtifactAssetsPendingRefusal(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    if (
+      refusalMessageOf(current, "OVERLOADED") ===
+      "ydoc-artifact-assets-pending"
+    ) {
+      return true;
+    }
+    seen.add(current);
+    current = "cause" in current ? current.cause : null;
+  }
+  return false;
+}
+
+// A durable scene's linked-asset record conflicts with authoritative storage.
+// Retrying cannot repair this state, but a writable disk fallback would still
+// race the canonical Y.Doc. Keep the document read-only and surface recovery.
+export function isYdocArtifactAssetsInvalidRefusal(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    if (
+      refusalMessageOf(current, "INTERNAL") === "ydoc-artifact-assets-invalid"
+    ) {
+      return true;
+    }
+    seen.add(current);
+    current = "cause" in current ? current.cause : null;
+  }
+  return false;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -13,6 +13,7 @@ import {
 import type {
   YdocApplyExternalMarkdownEditResult,
   YdocContentKind,
+  ArtifactAssetDescriptor,
   YdocSettleResult,
 } from "./ydocWireContract";
 
@@ -108,6 +109,7 @@ export interface EngineYdocProviderSession {
   readonly objectId?: string;
   readonly versionId?: string;
   readonly contentKind: YdocContentKind;
+  readonly artifactAssets?: readonly ArtifactAssetDescriptor[];
   readonly path: string;
   // Whether the ENTERED VERSION has a committed snapshot for this path.
   // "absent" plus a lineage that is also absent means the daemon bound an
@@ -342,6 +344,7 @@ export async function openEngineYdocProviderSession(
     objectId: session.objectId,
     versionId: options.versionId,
     contentKind: session.contentKind,
+    artifactAssets: session.artifactAssets,
     path: session.path,
     head: session.head,
     lineage: session.lineage,

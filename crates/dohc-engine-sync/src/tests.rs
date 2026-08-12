@@ -8126,6 +8126,320 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
 }
 
 #[test]
+fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
+    let make_ops = |engine: &mut EngineStore| {
+        seed_identity(engine);
+        seed_replication_version(engine, "main", "main");
+        let object_id = "scene-object";
+        let asset_id = "image-file";
+        let asset_bytes = vec![1_u8, 2, 3, 4, 5];
+        let asset_sha = dohc_engine_storage::hex_sha256(&asset_bytes);
+        let asset_ref =
+            dohc_engine_collab::scene_asset_ref("ws", "main", object_id, &asset_sha, "image/png")
+                .expect("asset ref");
+        let portable = serde_json::to_string(&json!({
+            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+            "elements": [{ "id": "image", "type": "image", "version": 1,
+                "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": asset_id }],
+            "appState": {},
+            "files": { (asset_id): { "id": asset_id, "mimeType": "image/png", "created": 1,
+                "dataURL": "data:image/png;base64,AQIDBAU=" } }
+        }))
+        .expect("portable scene");
+        let imported = dohc_engine_collab::import_portable_scene(&portable).expect("import");
+        let records = BTreeMap::from([(
+            asset_id.to_owned(),
+            serde_json::to_string(&json!({
+                "created": 1, "id": asset_id, "mimeType": "image/png",
+                "ref": asset_ref, "sha256": asset_sha
+            }))
+            .expect("asset record"),
+        )]);
+        let asset_update =
+            dohc_engine_collab::encode_scene_asset_records(&records).expect("asset-root update");
+        let base_update =
+            dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])
+                .expect("scene base");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&base_update).expect("base applies");
+        let ydoc_sha = engine
+            .put_binary_blob(&doc.encode_full_state())
+            .expect("ydoc blob");
+        assert_eq!(
+            engine.put_binary_blob(&asset_bytes).expect("asset blob"),
+            asset_sha
+        );
+        let asset = envelope(
+            "asset-peer",
+            0,
+            "moment.append",
+            json!({
+                "momentId": "asset-moment", "versionId": "main",
+                "objectId": "asset-object", "objectCreatedAtMs": 1,
+                "path": asset_ref, "recordedAtMs": 2_000, "operation": "write",
+                "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+                "payloadAfterBlobSha256": asset_sha, "payloadAfterPath": asset_ref,
+                "payloadAfterContentKind": "binary", "payloadAfterByteLength": asset_bytes.len(),
+                "metadata": {"origin": "sync"}, "beforePresent": "absent"
+            }),
+        );
+        let scene = envelope(
+            "scene-peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": object_id,
+                "path": "drawings/board.excalidraw", "contentKind": "scene",
+                "updateBlobSha256": ydoc_sha, "isBaseState": true
+            }),
+        );
+        (asset, scene, asset_ref, portable)
+    };
+
+    let (scratch_a, path_a, mut asset_first) = store();
+    let (asset_a, scene_a, asset_ref_a, _) = make_ops(&mut asset_first);
+    let asset_first_pull = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![asset_a, scene_a],
+            next_cursor: 2,
+            has_more: false,
+        })),
+    });
+    let SyncPassOutcome::Complete {
+        changed_paths: asset_first_changes,
+        applied: 2,
+        refused: 0,
+        ..
+    } = asset_first_pull
+        .pull_chat_workspace(&mut asset_first, "ws", &NoFaults, &NoLiveLeases)
+        .expect("asset-first relay pull")
+    else {
+        panic!("asset-first relay pull must complete");
+    };
+
+    let (scratch_b, path_b, mut scene_first) = store();
+    let (asset_b, scene_b, asset_ref_b, portable) = make_ops(&mut scene_first);
+    let scene_first_pull = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![scene_b, asset_b],
+            next_cursor: 2,
+            has_more: false,
+        })),
+    });
+    let SyncPassOutcome::Complete {
+        changed_paths: scene_first_changes,
+        applied: 2,
+        refused: 0,
+        ..
+    } = scene_first_pull
+        .pull_chat_workspace(&mut scene_first, "ws", &NoFaults, &NoLiveLeases)
+        .expect("scene-first relay pull retries after the asset moment")
+    else {
+        panic!("scene-first relay pull must complete");
+    };
+
+    let read_head = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                     WHERE s.workspace_id='ws' AND s.version_id='main' \
+                       AND s.path='drawings/board.excalidraw'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(SyncError::corrupt)
+            })
+            .expect("portable head")
+    };
+    let expected: serde_json::Value = serde_json::from_str(&portable).expect("expected JSON");
+    let first: serde_json::Value = serde_json::from_str(&read_head(&asset_first)).expect("first");
+    let second: serde_json::Value = serde_json::from_str(&read_head(&scene_first)).expect("second");
+    assert_eq!(first, expected);
+    assert_eq!(second, expected);
+    assert_eq!(
+        first["files"]["image-file"]["dataURL"],
+        "data:image/png;base64,AQIDBAU="
+    );
+    let conflicts: i64 = scene_first
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))
+                .map_err(SyncError::corrupt)
+        })
+        .expect("conflict count");
+    assert_eq!(conflicts, 0);
+
+    for (store, scratch, asset_ref, changes) in [
+        (
+            &mut asset_first,
+            &scratch_a,
+            &asset_ref_a,
+            &asset_first_changes,
+        ),
+        (
+            &mut scene_first,
+            &scratch_b,
+            &asset_ref_b,
+            &scene_first_changes,
+        ),
+    ] {
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| (change.path.as_str(), change.content_kind))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("drawings/board.excalidraw", "text"),
+                (asset_ref.as_str(), "binary"),
+            ]),
+            "the real pull must expose both disk debts before its cursor commits"
+        );
+        let materialized = dohc_engine_files::run_pending_jobs(
+            store,
+            scratch.path(),
+            dohc_engine_files::DurabilityPolicy::per_os(),
+            &dohc_engine_files::StdReplacer,
+            &dohc_engine_files::NoBackoff,
+            2_500,
+            &NoFaults,
+        )
+        .expect("materialize replicated scene and sidecar");
+        assert!(
+            materialized
+                .iter()
+                .all(|result| matches!(result.outcome, dohc_engine_files::JobOutcome::Completed)),
+            "replicated scene projection must not conflict"
+        );
+        for change in changes {
+            if change.operation != "write" || change.content_kind != "binary" {
+                continue;
+            }
+            let head = VersionedTextStore::new(store)
+                .read_binary("ws", "main", &change.path)
+                .expect("read authoritative binary head")
+                .expect("binary head exists");
+            let target = scratch.join(&change.path);
+            std::fs::create_dir_all(target.parent().expect("asset parent"))
+                .expect("create asset directory");
+            std::fs::write(target, head.bytes).expect("materialize relay binary debt");
+        }
+        let disk: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(scratch.join("drawings/board.excalidraw"))
+                .expect("materialized portable scene"),
+        )
+        .expect("portable scene JSON");
+        assert_eq!(disk, expected);
+        assert_eq!(
+            std::fs::read(scratch.join(asset_ref)).expect("materialized sidecar"),
+            [1, 2, 3, 4, 5]
+        );
+    }
+    drop(asset_first);
+    let restarted_asset_first = EngineStore::open(&path_a, 3_000).expect("restart asset-first");
+    assert!(
+        dohc_engine_collab::load_persisted(
+            &restarted_asset_first,
+            &dohc_engine_collab::DocKey::new("ws", "main", "scene-object").expect("key")
+        )
+        .expect("load asset-first after restart")
+        .is_some()
+    );
+    drop(scene_first);
+    let reopened = EngineStore::open(&path_b, 3_000).expect("restart store");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "scene-object").expect("key");
+    let folded = dohc_engine_collab::load_persisted(&reopened, &key)
+        .expect("load after restart")
+        .expect("scene lineage")
+        .doc
+        .fold_scene();
+    assert_eq!(folded.elements[0]["fileId"], "image-file");
+}
+
+#[test]
+fn scene_base_permanently_refuses_forged_asset_authority() {
+    let sha = "11".repeat(32);
+    let other_sha = "22".repeat(32);
+    let png_ref =
+        dohc_engine_collab::scene_asset_ref("ws", "main", "scene-forged", &sha, "image/png")
+            .expect("PNG ref");
+    let mismatched_hash_ref =
+        dohc_engine_collab::scene_asset_ref("ws", "main", "scene-forged", &other_sha, "image/png")
+            .expect("other hash ref");
+    for (case, mime_type, asset_ref) in [
+        ("unrelated", "image/png", "user/image.png".to_owned()),
+        ("hash-filename", "image/png", mismatched_hash_ref),
+        ("mime-extension", "image/jpeg", png_ref.clone()),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        seed_replication_version(&mut engine, "main", "main");
+        let portable = json!({
+            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+            "elements": [{ "id": "image", "type": "image", "version": 1,
+                "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": "file" }],
+            "appState": {},
+            "files": { "file": { "id": "file", "mimeType": "image/png", "created": 1,
+                "dataURL": "data:image/png;base64,AQIDBA==" } }
+        })
+        .to_string();
+        let imported = dohc_engine_collab::import_portable_scene(&portable).expect("scene import");
+        let records = BTreeMap::from([(
+            "file".to_owned(),
+            json!({
+                "created": 1, "id": "file", "mimeType": mime_type,
+                "ref": asset_ref, "sha256": sha
+            })
+            .to_string(),
+        )]);
+        let asset_update = dohc_engine_collab::encode_scene_asset_records(&records)
+            .expect("structurally valid forged record");
+        let update = dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])
+            .expect("merge scene");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&update).expect("scene applies");
+        let update_sha = engine
+            .put_binary_blob(&doc.encode_full_state())
+            .expect("scene blob");
+        let operation = envelope(
+            &format!("forged-{case}"),
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": "scene-forged",
+                "path": "drawings/forged.excalidraw", "contentKind": "scene",
+                "updateBlobSha256": update_sha, "isBaseState": true
+            }),
+        );
+        assert!(
+            matches!(
+                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { .. },
+                    ..
+                }))
+            ),
+            "{case}"
+        );
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", &format!("forged-{case}"))
+                .expect("refusal ack"),
+            0,
+            "{case} must be terminal instead of retrying forever"
+        );
+        assert!(
+            dohc_engine_collab::read_marker(
+                &engine,
+                &dohc_engine_collab::DocKey::new("ws", "main", "scene-forged").expect("key")
+            )
+            .expect("marker read")
+            .is_none(),
+            "{case} must not retain a refused lineage"
+        );
+    }
+}
+
+#[test]
 fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant() {
     for (case, base_kind, queued_kind) in [
         ("plaintext-base", "plaintext", "richdoc"),

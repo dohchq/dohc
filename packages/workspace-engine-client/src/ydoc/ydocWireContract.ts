@@ -23,10 +23,28 @@ export const YDOC_EVENT = {
 export type YdocContentKind = "richdoc" | "plaintext" | "scene";
 export type JsonObject = { [key: string]: JsonValue | undefined };
 
+// Format-neutral metadata for bytes owned by an artifact. The provider owns
+// `id`; core owns the workspace/version/path authority behind `ref` and binds
+// the descriptor to the session's entered version.
+export interface ArtifactAssetDescriptor extends JsonObject {
+  id: string;
+  mimeType: string;
+  created: number;
+  ref: string;
+  sha256: string;
+  lastRetrieved?: number;
+  version?: number;
+}
+
 export type YdocOpenParams = JsonObject & {
   versionId: string;
   path: string;
   contentKind?: YdocContentKind;
+  // Scene-only admission intent. On the first generation the engine may
+  // import a portable .excalidraw artifact into the canonical Y.Doc before
+  // replying. Replacement generations replay the renderer's canonical state
+  // instead and must send false.
+  seedFromArtifact?: boolean;
 };
 
 export type YdocOpenResult = JsonObject & {
@@ -45,6 +63,9 @@ export type YdocOpenResult = JsonObject & {
   // daemon resurrects is lineage-existing and head-absent. Only both absent
   // means the session is bound to an EMPTY doc over nothing.
   lineage: "existing" | "absent";
+  // Metadata only. Asset bytes stay in the versioned binary store and are
+  // hydrated through its workspace-authorized read contract.
+  artifactAssets?: ArtifactAssetDescriptor[];
   // Present only when the engine opened a captured artifact without durable
   // CRDT lineage. The client records this content as the lineage's first update.
   seedContent?: string;
@@ -202,6 +223,9 @@ export function decodeYdocOpenResult(value: JsonValue): YdocOpenResult {
     ),
     head: headValue(object, "head", "ydoc.open result"),
     lineage: lineageValue(object, "lineage", "ydoc.open result"),
+    ...(object.artifactAssets === undefined
+      ? {}
+      : { artifactAssets: artifactAssetsValue(object.artifactAssets) }),
     ...(object.seedContent === undefined
       ? {}
       : {
@@ -212,6 +236,91 @@ export function decodeYdocOpenResult(value: JsonValue): YdocOpenResult {
           ),
         }),
   };
+}
+
+function artifactAssetsValue(value: JsonValue): ArtifactAssetDescriptor[] {
+  if (!Array.isArray(value)) {
+    throw new YdocProtocolShapeError(
+      "ydoc.open result.artifactAssets must be an array.",
+    );
+  }
+  return value.map((item, index) => {
+    const label = `ydoc.open result.artifactAssets[${index}]`;
+    const object = objectValue(item, label);
+    const id = stringValue(object, "id", label);
+    const mimeType = stringValue(object, "mimeType", label);
+    const ref = stringValue(object, "ref", label);
+    const sha256 = stringValue(object, "sha256", label);
+    const created = nonnegativeIntegerValue(object, "created", label);
+    if (
+      id.length === 0 ||
+      mimeType.length === 0 ||
+      !isNormalizedWorkspaceRef(ref) ||
+      !/^[0-9a-f]{64}$/.test(sha256)
+    ) {
+      throw new YdocProtocolShapeError(`${label} is not a valid asset descriptor.`);
+    }
+    return {
+      id,
+      mimeType,
+      created,
+      ref,
+      sha256,
+      ...(object.lastRetrieved === undefined
+        ? {}
+        : {
+            lastRetrieved: nonnegativeIntegerValue(
+              object,
+              "lastRetrieved",
+              label,
+            ),
+          }),
+      ...(object.version === undefined
+        ? {}
+        : { version: nonnegativeIntegerValue(object, "version", label) }),
+    };
+  });
+}
+
+function nonnegativeIntegerValue(
+  object: JsonObject,
+  key: string,
+  label: string,
+): number {
+  const value = numberValue(object, key, label);
+  if (value < 0) {
+    throw new YdocProtocolShapeError(`${label}.${key} must be nonnegative.`);
+  }
+  return value;
+}
+
+function isNormalizedWorkspaceRef(ref: string): boolean {
+  if (
+    !ref ||
+    ref.includes("\\") ||
+    ref.startsWith("/") ||
+    /[:\u0000-\u001f\u007f-\u009f]/.test(ref) ||
+    !hasWellFormedSurrogates(ref)
+  ) {
+    return false;
+  }
+  return ref
+    .split("/")
+    .every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
+function hasWellFormedSurrogates(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Both fields gate a REFUSAL, so neither may be inferred. A decoder that

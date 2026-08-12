@@ -78,6 +78,63 @@ function richdocUpdate(initialUpdate: Uint8Array, text: string): Uint8Array {
   return Y.encodeStateAsUpdate(mirror, before);
 }
 
+describe("scene artifact seed admission", () => {
+  it("forwards the first-generation intent and disables it for a replay generation", async () => {
+    const engine = new YdocLoopbackEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const first = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "drawings/board.excalidraw",
+      contentKind: "scene",
+      seedAbsentLineage: true,
+    });
+    await first.close({ settle: false });
+    const replacement = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "drawings/board.excalidraw",
+      contentKind: "scene",
+      seedAbsentLineage: false,
+    });
+    await replacement.close({ settle: false });
+    adapter.dispose();
+
+    const opens = engine.requests.filter(
+      (request) => request.method === YDOC_METHOD.open,
+    );
+    expect(opens.map((request) => request.params)).toEqual([
+      {
+        versionId: VERSION,
+        path: "drawings/board.excalidraw",
+        contentKind: "scene",
+        seedFromArtifact: true,
+      },
+      {
+        versionId: VERSION,
+        path: "drawings/board.excalidraw",
+        contentKind: "scene",
+        seedFromArtifact: false,
+      },
+    ]);
+  });
+
+  it("does not add scene seed admission to text opens", async () => {
+    const engine = seedPlaintextEngine("");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      seedAbsentLineage: true,
+    });
+    await session.close({ settle: false });
+    adapter.dispose();
+    expect(engine.requests[0]?.params).not.toHaveProperty("seedFromArtifact");
+  });
+});
+
 function findPartiallyAppliedMalformedUpdate(fullUpdate: Uint8Array): Uint8Array {
   for (let cut = 1; cut < fullUpdate.byteLength; cut += 1) {
     const candidate = fullUpdate.slice(0, cut);

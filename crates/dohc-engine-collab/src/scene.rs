@@ -101,11 +101,118 @@ impl FoldedScene {
             files: BTreeMap::new(),
         })
     }
+
+    /// Emit native portable JSON with bytes for exactly the live image assets.
+    pub fn portable_json_with_asset_bytes(
+        &self,
+        bytes_by_id: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<String, SceneImportError> {
+        let referenced: BTreeSet<&str> = self
+            .elements
+            .iter()
+            .filter(|element| element.get("type").and_then(Value::as_str) == Some("image"))
+            .filter_map(|element| element.get("fileId").and_then(Value::as_str))
+            .collect();
+        let mut files = BTreeMap::new();
+        for id in referenced {
+            let asset = self.assets.get(id).ok_or(SceneImportError::Invalid {
+                reason: "a live image references a missing asset record",
+            })?;
+            let bytes = bytes_by_id.get(id).ok_or(SceneImportError::Invalid {
+                reason: "a live image asset has no resolved bytes",
+            })?;
+            let mut file = Map::new();
+            file.insert("created".to_owned(), serde_json::json!(asset.created));
+            file.insert(
+                "dataURL".to_owned(),
+                serde_json::json!(format!(
+                    "data:{};base64,{}",
+                    asset.mime_type,
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )),
+            );
+            file.insert("id".to_owned(), serde_json::json!(asset.id));
+            if let Some(last_retrieved) = asset.last_retrieved {
+                file.insert(
+                    "lastRetrieved".to_owned(),
+                    serde_json::json!(last_retrieved),
+                );
+            }
+            file.insert("mimeType".to_owned(), serde_json::json!(asset.mime_type));
+            if let Some(version) = asset.version {
+                file.insert("version".to_owned(), serde_json::json!(version));
+            }
+            files.insert(id.to_owned(), Value::Object(file));
+        }
+        serde_json::to_string_pretty(&PortableScene {
+            kind: "excalidraw",
+            version: EXPORT_VERSION,
+            source: EXPORT_SOURCE,
+            elements: &self.elements,
+            app_state: &self.app_state,
+            files,
+        })
+        .map_err(|_| SceneImportError::Invalid {
+            reason: "the portable scene could not be encoded",
+        })
+    }
 }
 
-/// Parse a native Excalidraw v2 artifact into the live scene roots and decode
-/// its embedded files. This function does not choose workspace paths or write
-/// storage.
+pub fn scene_asset_extension(mime_type: &str) -> Result<&'static str, SceneImportError> {
+    match mime_type {
+        "image/svg+xml" => Ok("svg"),
+        "image/png" => Ok("png"),
+        "image/jpeg" => Ok("jpg"),
+        "image/gif" => Ok("gif"),
+        "image/webp" => Ok("webp"),
+        "image/bmp" => Ok("bmp"),
+        "image/x-icon" => Ok("ico"),
+        "image/avif" => Ok("avif"),
+        "image/jfif" => Ok("jfif"),
+        "application/octet-stream" => Ok("bin"),
+        _ => Err(SceneImportError::Invalid {
+            reason: "an Excalidraw asset has an unsupported MIME type",
+        }),
+    }
+}
+
+pub fn scene_asset_ref(
+    workspace_id: &str,
+    version_id: &str,
+    drawing_object_id: &str,
+    sha256: &str,
+    mime_type: &str,
+) -> Result<String, SceneImportError> {
+    if workspace_id.is_empty()
+        || version_id.is_empty()
+        || drawing_object_id.is_empty()
+        || sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SceneImportError::Invalid {
+            reason: "a scene asset SHA-256 is invalid",
+        });
+    }
+    let mut owner = b"dohc:excalidraw-asset-owner:v1\0".to_vec();
+    for field in [workspace_id, version_id, drawing_object_id] {
+        owner.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        owner.extend_from_slice(field.as_bytes());
+    }
+    Ok(format!(
+        "assets/excalidraw/{}/{}.{}",
+        dohc_engine_storage::hex_sha256(&owner),
+        sha256,
+        scene_asset_extension(mime_type)?
+    ))
+}
+
+/// Parse an Excalidraw artifact into the live scene roots and decode its
+/// embedded files. Native export emits the exact v2 shape, but Excalidraw's
+/// external-file reader accepts legacy documents with optional metadata and
+/// missing/null scene collections. This function matches that import floor;
+/// it does not choose workspace paths or write storage.
 pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImportError> {
     let value: Value = serde_json::from_str(content).map_err(|_| SceneImportError::Invalid {
         reason: "content must be JSON",
@@ -113,30 +220,22 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
     let object = value.as_object().ok_or(SceneImportError::Invalid {
         reason: "top level must be an object",
     })?;
-    let expected: BTreeSet<&str> = ["appState", "elements", "files", "source", "type", "version"]
-        .into_iter()
-        .collect();
-    if object.len() != expected.len() || object.keys().any(|key| !expected.contains(key.as_str())) {
+    if object.get("type").and_then(Value::as_str) != Some("excalidraw") {
         return Err(SceneImportError::Invalid {
-            reason: "top level must contain only type, version, source, elements, appState, and files",
-        });
-    }
-    if object.get("type").and_then(Value::as_str) != Some("excalidraw")
-        || object.get("version").and_then(safe_u64) != Some(u64::from(EXPORT_VERSION))
-        || object.get("source").and_then(Value::as_str).is_none()
-    {
-        return Err(SceneImportError::Invalid {
-            reason: "type, version, or source is invalid",
+            reason: "type must be excalidraw",
         });
     }
 
-    let element_values =
-        object
-            .get("elements")
-            .and_then(Value::as_array)
-            .ok_or(SceneImportError::Invalid {
-                reason: "elements must be an array",
-            })?;
+    let empty_elements = Vec::new();
+    let element_values = match object.get("elements") {
+        None | Some(Value::Null) => &empty_elements,
+        Some(Value::Array(elements)) => elements,
+        Some(_) => {
+            return Err(SceneImportError::Invalid {
+                reason: "elements must be an array or null",
+            });
+        }
+    };
     let mut revisions = BTreeMap::new();
     let mut image_file_ids = BTreeSet::new();
     for element in element_values {
@@ -194,24 +293,25 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
         }
     }
 
-    let app_state_object =
-        object
-            .get("appState")
-            .and_then(Value::as_object)
-            .ok_or(SceneImportError::Invalid {
-                reason: "appState must be an object",
-            })?;
-    if app_state_object
-        .keys()
-        .any(|key| !EXPORTED_APP_STATE_KEYS.contains(&key.as_str()))
-    {
-        return Err(SceneImportError::Invalid {
-            reason: "appState contains a property that native export does not preserve",
-        });
-    }
-    validate_app_state(app_state_object)?;
+    let empty_object = Map::new();
+    let app_state_object = match object.get("appState") {
+        None | Some(Value::Null) => &empty_object,
+        Some(Value::Object(app_state)) => app_state,
+        Some(_) => {
+            return Err(SceneImportError::Invalid {
+                reason: "appState must be an object or null",
+            });
+        }
+    };
+    let exported_app_state = app_state_object
+        .iter()
+        .filter(|(key, _)| EXPORTED_APP_STATE_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Map<_, _>>();
+    validate_app_state(&exported_app_state)?;
     let app_state: BTreeMap<String, String> = app_state_object
         .iter()
+        .filter(|(key, _)| EXPORTED_APP_STATE_KEYS.contains(&key.as_str()))
         .map(|(key, value)| {
             canonical_json_string(value)
                 .map(|value| (key.clone(), value))
@@ -221,13 +321,15 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
         })
         .collect::<Result<_, _>>()?;
 
-    let files_object =
-        object
-            .get("files")
-            .and_then(Value::as_object)
-            .ok_or(SceneImportError::Invalid {
-                reason: "files must be an object",
-            })?;
+    let files_object = match object.get("files") {
+        None | Some(Value::Null) => &empty_object,
+        Some(Value::Object(files)) => files,
+        Some(_) => {
+            return Err(SceneImportError::Invalid {
+                reason: "files must be an object or null",
+            });
+        }
+    };
     let mut files = BTreeMap::new();
     for file_id in image_file_ids {
         let value = files_object
@@ -1116,20 +1218,38 @@ mod tests {
     }
 
     #[test]
-    fn native_import_rejects_non_native_top_level_and_missing_image_bytes() {
-        let extra = json!({
-            "appState": {},
-            "elements": [],
-            "extra": true,
-            "files": {},
-            "source": "https://excalidraw.com",
-            "type": "excalidraw",
-            "version": 2
-        });
-        assert!(matches!(
-            import_portable_scene(&canonical(extra)),
-            Err(SceneImportError::Invalid { .. })
-        ));
+    fn native_import_accepts_the_upstream_external_file_floor() {
+        for external in [
+            json!({"type":"excalidraw"}),
+            json!({"type":"excalidraw","elements":null,"appState":null,"files":null}),
+            json!({"type":"excalidraw","version":1,"elements":[],"appState":{}}),
+            json!({
+                "type":"excalidraw",
+                "version":99,
+                "scrollToContent":true,
+                "libraryItems":[],
+                "futureField":{"keptByFutureExcalidraw":true},
+                "appState":{"zoom":{"value":2},"viewBackgroundColor":"#abcdef"}
+            }),
+        ] {
+            let imported = import_portable_scene(&canonical(external))
+                .expect("upstream-valid external artifact imports");
+            let doc = crate::Ydoc::wire();
+            doc.apply(&imported.initial_update).expect("initial update");
+            let folded = doc.fold_scene();
+            assert!(folded.elements.is_empty());
+            assert!(!folded.app_state.contains_key("zoom"));
+        }
+    }
+
+    #[test]
+    fn native_import_still_rejects_wrong_type_and_missing_image_bytes() {
+        for wrong_type in [json!({}), json!({"type":"other"})] {
+            assert!(matches!(
+                import_portable_scene(&canonical(wrong_type)),
+                Err(SceneImportError::Invalid { .. })
+            ));
+        }
 
         let missing = json!({
             "appState": {},
@@ -1179,5 +1299,47 @@ mod tests {
             })),
         )]);
         assert!(encode_scene_asset_records(&invalid).is_err());
+    }
+
+    #[test]
+    fn asset_refs_digest_untrusted_identity_into_one_canonical_segment() {
+        let sha = "ab".repeat(32);
+        let dangerous = "../peer:object/\u{0000}/雪".repeat(40);
+        let asset_ref = scene_asset_ref(
+            "workspace/../x",
+            "version:one",
+            &dangerous,
+            &sha,
+            "image/png",
+        )
+        .expect("identity is encoded, not interpolated");
+        let parts: Vec<&str> = asset_ref.split('/').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0..2], ["assets", "excalidraw"]);
+        assert_eq!(parts[2].len(), 64);
+        assert!(parts[2].bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(parts[3], format!("{sha}.png"));
+        assert_eq!(
+            asset_ref,
+            scene_asset_ref(
+                "workspace/../x",
+                "version:one",
+                &dangerous,
+                &sha,
+                "image/png"
+            )
+            .expect("deterministic ref")
+        );
+        assert_ne!(
+            asset_ref,
+            scene_asset_ref(
+                "workspace/../x",
+                "version:two",
+                &dangerous,
+                &sha,
+                "image/png"
+            )
+            .expect("version-scoped ref")
+        );
     }
 }

@@ -626,6 +626,7 @@ export const CHANNELS = {
   cancelWorkspaceSearch: "desktop:cancel-workspace-search",
   searchResults: "desktop:search-results",
   engineYDocOpen: "desktop:engine-ydoc-open",
+  engineYDocReadArtifactAsset: "desktop:engine-ydoc-read-artifact-asset",
   engineYDocApplyUpdate: "desktop:engine-ydoc-apply-update",
   engineYDocClose: "desktop:engine-ydoc-close",
   engineYDocRemoteUpdate: "desktop:engine-ydoc-remote-update",

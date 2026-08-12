@@ -13,6 +13,8 @@ import {
   WorkspaceDaemonRequester,
   decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
+  isYdocArtifactAssetsPendingRefusal,
+  isYdocArtifactAssetsInvalidRefusal,
 } from "@dohc/workspace-engine-client";
 import {
   app,
@@ -238,6 +240,8 @@ import {
   SearchResultsEventSchema,
   OpenEngineYDocSessionPayload,
   OpenEngineYDocSessionResult,
+  ReadEngineYDocArtifactAssetPayload,
+  ReadEngineYDocArtifactAssetResult,
   ApplyEngineYDocUpdatePayload,
   CloseEngineYDocSessionPayload,
   EngineYDocRemoteUpdateEventSchema,
@@ -2737,6 +2741,10 @@ interface EngineYDocSessionEntry {
   // are routinely in flight at once, so this is a FIFO, not a scalar — see
   // engineYDocSaveSeq.ts.
   saveSeq: EngineYDocSaveSeqState;
+  artifactAssetsById: ReadonlyMap<
+    string,
+    NonNullable<WorkspaceEngineYDocProviderSession["artifactAssets"]>[number]
+  >;
   // Set by releaseEngineYDocSession when a close failed. The next open of this
   // document retries the release before it binds anything.
   closeFailed?: boolean;
@@ -8427,7 +8435,9 @@ function registerIpcHandlers(
               }
             : {}),
           ...(isEngineWorkspaceOpenRefusedError(error) ||
-          isYDocSessionUnreleasedError(error)
+          isYDocSessionUnreleasedError(error) ||
+          isYdocArtifactAssetsPendingRefusal(error) ||
+          isYdocArtifactAssetsInvalidRefusal(error)
             ? { engineMayHoldDocument: true }
             : {}),
         });
@@ -8441,6 +8451,9 @@ function registerIpcHandlers(
         sender,
         generation,
         saveSeq,
+        artifactAssetsById: new Map(
+          (session.artifactAssets ?? []).map((asset) => [asset.id, asset]),
+        ),
       };
       // Every path below that refuses this session releases it through the
       // same helper, and answers read-only unless the release succeeded.
@@ -8506,11 +8519,50 @@ function registerIpcHandlers(
         initialUpdate: session.initialUpdate,
         ...(session.objectId ? { objectId: session.objectId } : {}),
         ...(session.versionId ? { versionId: session.versionId } : {}),
+        artifactAssets: session.artifactAssets ?? [],
       });
     } finally {
       finishPendingOpen();
     }
   });
+
+  ipcMain.handle(
+    CHANNELS.engineYDocReadArtifactAsset,
+    async (event, payload) => {
+      assertTrustedSender(event);
+      const input = ReadEngineYDocArtifactAssetPayload.parse(payload);
+      const entry = engineYDocSessions.get(
+        engineYDocSessionKey(event.sender.id, input.sessionId),
+      );
+      if (
+        !entry ||
+        entry.deleted ||
+        entry.sender !== event.sender ||
+        entry.generation !== rendererGeneration(event.sender.id)
+      ) {
+        throw new Error(
+          "The live document session is no longer available. Open the file again.",
+        );
+      }
+      const descriptor = entry.artifactAssetsById.get(input.assetId);
+      if (!descriptor) {
+        throw new Error(
+          `The live document does not reference artifact asset ${input.assetId}.`,
+        );
+      }
+      const hydrated = await entry.session.readArtifactAsset(input.assetId);
+      if (
+        hydrated.descriptor.ref !== descriptor.ref ||
+        hydrated.descriptor.sha256 !== descriptor.sha256 ||
+        hydrated.descriptor.mimeType !== descriptor.mimeType
+      ) {
+        throw new Error(
+          `Artifact asset ${input.assetId} changed while it was loading. Open the file again.`,
+        );
+      }
+      return ReadEngineYDocArtifactAssetResult.parse(hydrated);
+    },
+  );
 
   ipcMain.handle(CHANNELS.engineYDocApplyUpdate, (event, payload) => {
     assertTrustedSender(event);

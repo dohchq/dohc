@@ -71,6 +71,24 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     ).toBe(2);
   });
 
+  it("keeps a committed scene read-only while its artifact assets are pending", () => {
+    const handler = handlerSource("engineYDocOpen");
+    const predicateAt = handler.indexOf("isYdocArtifactAssetsPendingRefusal(error)");
+    expect(predicateAt).toBeGreaterThan(-1);
+    expect(
+      handler.slice(predicateAt, handler.indexOf("const entry:", predicateAt)),
+    ).toContain("engineMayHoldDocument: true");
+  });
+
+  it("keeps a canonical scene read-only when linked asset authority is corrupt", () => {
+    const handler = handlerSource("engineYDocOpen");
+    const predicateAt = handler.indexOf("isYdocArtifactAssetsInvalidRefusal(error)");
+    expect(predicateAt).toBeGreaterThan(-1);
+    expect(
+      handler.slice(predicateAt, handler.indexOf("const entry:", predicateAt)),
+    ).toContain("engineMayHoldDocument: true");
+  });
+
   it("retries a failed close BY PATH before it binds anything", () => {
     // The renderer retries under a NEW session id (useEngineDoc, nextSessionId),
     // so an id-keyed retry never reaches the session whose close failed. The
@@ -167,6 +185,31 @@ describe("engine Y.Doc registry: a registration never replaces a live session", 
       expect(handler).toContain("engineYDocSessionKey(");
       expect(handler).not.toContain("engineYDocSessions.get(input.sessionId)");
     }
+  });
+});
+
+describe("engine Y.Doc artifact assets stay bound to one authorized session", () => {
+  it("derives authority from the sender session and its pinned descriptor", () => {
+    const handler = handlerSource("engineYDocReadArtifactAsset");
+    expect(handler).toContain("assertTrustedSender(event)");
+    expect(handler).toContain("engineYDocSessionKey(event.sender.id, input.sessionId)");
+    expect(handler).toContain("entry.sender !== event.sender");
+    expect(handler).toContain("entry.generation !== rendererGeneration(event.sender.id)");
+    expect(handler).toContain("entry.artifactAssetsById.get(input.assetId)");
+    expect(handler).toContain("entry.session.readArtifactAsset(input.assetId)");
+    expect(handler).not.toContain("workspaceId");
+    expect(handler).not.toContain("versionId");
+    expect(handler).not.toContain("input.ref");
+  });
+
+  it("rejects unknown, stale, foreign, and changed descriptors", () => {
+    const handler = handlerSource("engineYDocReadArtifactAsset");
+    expect(handler).toContain("!entry ||");
+    expect(handler).toContain("entry.deleted");
+    expect(handler).toContain("!descriptor");
+    expect(handler).toContain("hydrated.descriptor.ref !== descriptor.ref");
+    expect(handler).toContain("hydrated.descriptor.sha256 !== descriptor.sha256");
+    expect(handler).toContain("hydrated.descriptor.mimeType !== descriptor.mimeType");
   });
 });
 

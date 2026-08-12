@@ -40,6 +40,7 @@ import {
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   type EngineTransport,
+  type ArtifactAssetDescriptor,
   type YdocContentKind,
 } from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
@@ -54,7 +55,6 @@ import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { dirname, join, resolve, sep } from "node:path";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
-  MAX_HISTORY_TEXT_SNAPSHOT_BYTES,
   type ActiveAgentRun,
 } from "./workspaceWatcher";
 import {
@@ -100,7 +100,7 @@ export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 //     secret paths — the SAME floor engine search uses) that .dohc policy
 //     files can NEVER override, plus workspace policy from .dohc/files.toml
 //     which can only narrow (tracked = false), never widen.
-//   - Only UTF-8 text files up to MAX_HISTORY_TEXT_SNAPSHOT_BYTES are
+//   - Only UTF-8 text files up to the engine's MAX_TEXT_BYTES are
 //     captured (the legacy history snapshot pipeline's text heuristics).
 //     Binary, oversized, non-UTF-8, and secret files are skipped entirely —
 //     no metadata-only engine moments; if a previously captured path stops
@@ -169,7 +169,7 @@ export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 // which a daemon that never fails never enters.
 export const YDOC_OPEN_RETRY_DEADLINE_MS =
   2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
-export const MAX_ENGINE_CAPTURE_TEXT_BYTES = MAX_HISTORY_TEXT_SNAPSHOT_BYTES;
+export const MAX_ENGINE_CAPTURE_TEXT_BYTES = 10 * 1024 * 1024;
 export const MAX_ENGINE_CAPTURE_BINARY_BYTES = MAX_VERSIONED_BINARY_FILE_BYTES;
 
 export interface ExpectedEngineEvent {
@@ -341,6 +341,10 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // (#665) — see `RestartSafeYDocSession`.
   | "evict"
 > & {
+  readArtifactAsset(assetId: string): Promise<{
+    descriptor: ArtifactAssetDescriptor;
+    bytes: Uint8Array;
+  }>;
   // `onArmed` fires when THIS update has reached the provider — journaled onto
   // the session's journal chain and counted by the settle it arms. The call is
   // queued, so that moment is later than the caller handing the update over,
@@ -611,7 +615,11 @@ export interface WorkspaceEngineCaptureOptions {
   // Injectable only to simulate daemon generations in focused restart tests.
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
-  ) => Promise<EngineYdocProviderSession>;
+  ) => Promise<
+    Omit<EngineYdocProviderSession, "artifactAssets"> & {
+      artifactAssets?: EngineYdocProviderSession["artifactAssets"];
+    }
+  >;
 }
 
 export interface EngineDiskWriter {
@@ -1102,14 +1110,9 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
       if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
       return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
     }
-    // Text-media ordering (WS-G1 review fix): the BINARY cap decides
-    // readability here, because a text-suffixed path can be binary in
-    // disguise (invalid UTF-8) and the store accepts that as binary up to
-    // MAX_ENGINE_CAPTURE_BINARY_BYTES. Only content that genuinely IS text
-    // (round-trips through UTF-8) is held to the smaller text cap.
-    if (info.size > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
+    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
     const bytes = await readFile(absolute);
-    if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
+    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
       // Bytes in hand: carry the sha so a settle's own materialization past
       // even the BINARY cap is recognizable as our write, exactly like the
       // text-cap case below. (The size-only early-out above cannot — it
@@ -1120,6 +1123,12 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
     // The engine only stores text that round-trips through UTF-8; anything
     // else is binary in disguise, not engine-ownable as text.
     if (!Buffer.from(text, "utf8").equals(bytes)) {
+      if (
+        path.toLowerCase().endsWith(".excalidraw") ||
+        bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES
+      ) {
+        return { kind: "untracked-content", sha256: sha256Bytes(bytes) };
+      }
       return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
     }
     // Genuine text over the text cap stays untracked (established behavior —
@@ -1810,7 +1819,7 @@ export function createWorkspaceEngineCapture(
               onError(`Y.Doc rebind of ${input.path}`, rebindError);
             });
           };
-          opened = await openProvider({
+          const providerOpened = await openProvider({
             transport: binding.client as EngineTransport,
             workspace: binding.workspace,
             versionId: input.versionId,
@@ -1842,6 +1851,10 @@ export function createWorkspaceEngineCapture(
               return input.onSettled(result, token, generation);
             },
           });
+          opened = {
+            ...providerOpened,
+            artifactAssets: providerOpened.artifactAssets ?? [],
+          };
           openingRemoteUpdates.set(opened, opening);
           return opened;
         },
@@ -2054,6 +2067,7 @@ export function createWorkspaceEngineCapture(
     const objectId = current.objectId;
     const sessionVersionId = current.versionId;
     const contentKind = current.contentKind;
+    const artifactAssets = current.artifactAssets ?? [];
     const sessionPath = current.path;
     const openedHead = current.head;
     const openedLineage = current.lineage;
@@ -2064,7 +2078,15 @@ export function createWorkspaceEngineCapture(
       ...(objectId ? { objectId } : {}),
       ...(sessionVersionId ? { versionId: sessionVersionId } : {}),
       contentKind,
+      artifactAssets,
       path: sessionPath,
+      readArtifactAsset(assetId) {
+        return Promise.reject(
+          new Error(
+            `Artifact asset ${assetId} must load through its version-bound capture session.`,
+          ),
+        );
+      },
       applyLocalUpdate(update, onArmed) {
         // ONE announcement per update, at the FIRST provider call that arms a
         // settle carrying it. Three calls can be that first one — the live
@@ -2764,7 +2786,7 @@ export function createWorkspaceEngineCapture(
     }
     if (disk.kind === "untracked-content") {
       // OUR OWN settle materialization can land here. A Y.Doc is not bounded
-      // by MAX_ENGINE_CAPTURE_TEXT_BYTES (128 KiB), so a document grown past
+      // by the engine's MAX_TEXT_BYTES, so a document grown past
       // it materializes a file this reader classifies as un-ownable — and
       // retiring the record would DELETE the document's engine history while
       // the editor reports "Saved". (The dogfood journey's repro was 131,442
@@ -4331,7 +4353,7 @@ export function createWorkspaceEngineCapture(
             // THE ORPHAN'S THIRD EXIT (#665). It may not settle — the rule
             // above — and its prune-close refuses while no artifact holds its
             // CRDT's bytes. On a policy-excluded path, or a file over the
-            // 128 KiB capture limit, no capture will ever mint that artifact,
+            // MAX_TEXT_BYTES capture limit, no capture will ever mint that artifact,
             // so the refused close's reinserted lease answered every later
             // open with `ydoc-session-busy` until the daemon restarted.
             //
@@ -4621,7 +4643,35 @@ export function createWorkspaceEngineCapture(
           ...(session.objectId ? { objectId: session.objectId } : {}),
           ...(session.versionId ? { versionId: session.versionId } : {}),
           contentKind: session.contentKind,
+          artifactAssets: session.artifactAssets ?? [],
           path: session.path,
+          async readArtifactAsset(assetId) {
+            const descriptor = (session.artifactAssets ?? []).find(
+              (asset) => asset.id === assetId,
+            );
+            if (!descriptor) {
+              throw new Error(
+                `The live document does not reference artifact asset ${assetId}.`,
+              );
+            }
+            const bytes = await engine.readBinaryFile({
+              workspaceId,
+              versionId,
+              path: descriptor.ref,
+            });
+            if (!bytes) {
+              throw new Error(
+                `Artifact asset ${assetId} is missing from version ${versionId}. Open the file again after sync finishes.`,
+              );
+            }
+            const actualSha256 = sha256Bytes(bytes);
+            if (actualSha256 !== descriptor.sha256) {
+              throw new Error(
+                `Artifact asset ${assetId} failed its SHA-256 check. Open the file again after sync finishes.`,
+              );
+            }
+            return { descriptor, bytes };
+          },
           // TWO counters ride this call, and they are not the same count.
           // `noteUpdate` is the CLOSE counter (#496): it asks whether every
           // update is covered by a settle, counts here at hand-over, and
@@ -6183,6 +6233,18 @@ export function createWorkspaceEngineCapture(
           for (const change of changed) {
             if (change.operation === "delete") {
               materializations.push({ kind: "delete", path: change.path });
+              continue;
+            }
+            if (change.contentKind === "binary") {
+              const bytes = await engine.readBinaryFile({
+                workspaceId,
+                versionId: activeVersionId,
+                path: change.path,
+              });
+              if (!bytes) {
+                throw new Error(`Binary content for ${change.path} is no longer available.`);
+              }
+              materializations.push({ kind: "write-binary", path: change.path, bytes });
               continue;
             }
             const snapshot = await engine.readTextFile({

@@ -110,6 +110,48 @@ describe("decodeYdocOpenResult", () => {
     });
   });
 
+  it("carries validated artifact asset descriptors through", () => {
+    const descriptor = {
+      id: "image-1",
+      mimeType: "image/png",
+      created: 12,
+      lastRetrieved: 13,
+      version: 1,
+      ref: "drawings/board.assets/image-1-aabbccdd.png",
+      sha256: "a".repeat(64),
+    };
+    expect(
+      decodeYdocOpenResult(openResult({
+        contentKind: "scene",
+        artifactAssets: [descriptor],
+      })).artifactAssets,
+    ).toEqual([descriptor]);
+  });
+
+  it("rejects malformed artifact asset authority", () => {
+    const asset = {
+      id: "image-1",
+      mimeType: "image/png",
+      created: 12,
+      ref: "drawings/board.assets/image.png",
+      sha256: "a".repeat(64),
+    };
+    for (const invalid of [
+      { ...asset, ref: "../outside.png" },
+      { ...asset, ref: "drawings/bad:name.png" },
+      { ...asset, ref: "drawings/bad\u0000name.png" },
+      { ...asset, ref: "drawings/bad\u0085name.png" },
+      { ...asset, ref: "drawings/bad\ud800name.png" },
+      { ...asset, ref: "drawings/bad\udc00name.png" },
+      { ...asset, sha256: "A".repeat(64) },
+      { ...asset, created: -1 },
+    ]) {
+      expect(() =>
+        decodeYdocOpenResult(openResult({ artifactAssets: [invalid] })),
+      ).toThrow(YdocProtocolShapeError);
+    }
+  });
+
   it("carries head and lineage through independently", () => {
     const decoded = decodeYdocOpenResult(
       openResult({ head: "absent", lineage: "existing" }),

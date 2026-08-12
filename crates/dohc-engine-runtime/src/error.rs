@@ -49,6 +49,16 @@ pub enum RuntimeError {
     #[error("active-version materialization left {failed_jobs} job(s) incomplete")]
     ActiveVersionMaterializationIncomplete { failed_jobs: usize },
 
+    /// A live scene references an authoritative binary head or blob that has
+    /// not arrived yet. The Y.Doc remains canonical; callers may retry open.
+    #[error("a linked artifact asset is not available yet")]
+    YdocArtifactAssetsPending,
+
+    /// A live scene's durable asset descriptor conflicts with authoritative
+    /// storage. The Y.Doc remains canonical and must not fall back to disk.
+    #[error("a linked artifact asset is invalid")]
+    YdocArtifactAssetsInvalid,
+
     /// The actor's worker thread could not be spawned.
     #[error("could not spawn actor worker thread")]
     ThreadSpawn(#[source] std::io::Error),
@@ -97,6 +107,8 @@ impl RuntimeError {
             RuntimeError::Search(err) => err.code(),
             RuntimeError::Materialize(_) => "materialize-failed",
             RuntimeError::ActiveVersionMaterializationIncomplete { .. } => "materialize-failed",
+            RuntimeError::YdocArtifactAssetsPending => "ydoc-artifact-assets-pending",
+            RuntimeError::YdocArtifactAssetsInvalid => "ydoc-artifact-assets-invalid",
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",
             RuntimeError::Overloaded => "overloaded",

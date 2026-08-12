@@ -359,6 +359,7 @@ const MEDIA_TYPES: Record<string, string> = {
   csv: "text/csv",
   css: "text/css",
   db: "application/vnd.sqlite3",
+  excalidraw: "application/json",
   htm: "text/html",
   html: "text/html",
   js: "text/javascript",

@@ -11,7 +11,7 @@ use dohc_engine_protocol::{
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -78,6 +78,730 @@ fn write_file(root: &Path, path: &str, bytes: &[u8]) {
 fn plaintext_update(text: &str) -> String {
     let doc = Ydoc::wire();
     base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, text))
+}
+
+fn png_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320_u32 & 0_u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
+fn valid_png_with_text_padding(minimum_bytes: usize) -> Vec<u8> {
+    let base = base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        .expect("embedded valid 1x1 PNG");
+    let iend = base.len() - 12;
+    let mut data = b"dohc-test\0".to_vec();
+    data.resize(minimum_bytes.saturating_sub(base.len()) + data.len(), b'x');
+    let mut chunk = Vec::with_capacity(data.len() + 12);
+    chunk.extend_from_slice(
+        &u32::try_from(data.len())
+            .expect("PNG chunk length")
+            .to_be_bytes(),
+    );
+    chunk.extend_from_slice(b"tEXt");
+    chunk.extend_from_slice(&data);
+    chunk.extend_from_slice(&png_crc32(&chunk[4..]).to_be_bytes());
+    let mut png = Vec::with_capacity(base.len() + chunk.len());
+    png.extend_from_slice(&base[..iend]);
+    png.extend_from_slice(&chunk);
+    png.extend_from_slice(&base[iend..]);
+    assert!(png.len() >= minimum_bytes);
+    png
+}
+
+fn image_scene_update_with_asset_record(
+    asset_id: &str,
+    mime_type: &str,
+    asset_ref: &str,
+    sha256: &str,
+) -> String {
+    let portable = serde_json::to_string(&json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "image-element",
+            "type": "image",
+            "version": 1,
+            "versionNonce": 1,
+            "isDeleted": false,
+            "index": "a0",
+            "fileId": asset_id
+        }],
+        "appState": {},
+        "files": {
+            (asset_id): {
+                "id": asset_id,
+                "mimeType": mime_type,
+                "dataURL": format!("data:{mime_type};base64,AQIDBA=="),
+                "created": 12
+            }
+        }
+    }))
+    .expect("portable image scene");
+    let imported = dohc_engine_collab::import_portable_scene(&portable).expect("scene import");
+    let mut records = BTreeMap::new();
+    records.insert(
+        asset_id.to_owned(),
+        serde_json::to_string(&json!({
+            "created": 12,
+            "id": asset_id,
+            "mimeType": mime_type,
+            "ref": asset_ref,
+            "sha256": sha256
+        }))
+        .expect("asset record"),
+    );
+    let assets = dohc_engine_collab::encode_scene_asset_records(&records).expect("asset update");
+    base64::engine::general_purpose::STANDARD.encode(
+        dohc_engine_collab::merge_updates(&[imported.initial_update, assets])
+            .expect("merged scene update"),
+    )
+}
+
+async fn call_error(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> dohc_engine_protocol::error::WireError {
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(id, method, Some(handle.clone()), params),
+        )
+        .await
+        .unwrap_err()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_settle() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let image_bytes = valid_png_with_text_padding(49 * 1024);
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "image-element",
+            "type": "image",
+            "version": 1,
+            "versionNonce": 1,
+            "isDeleted": false,
+            "index": "a0",
+            "fileId": "image-file"
+        }],
+        "appState": { "viewBackgroundColor": "#ffffff" },
+        "files": {
+            "image-file": {
+                "id": "image-file",
+                "mimeType": "image/png",
+                "dataURL": format!("data:image/png;base64,{image_base64}"),
+                "created": 12,
+                "lastRetrieved": 13,
+                "version": 1
+            }
+        }
+    }))
+    .expect("portable scene");
+    assert!(
+        artifact.len() > 48 * 1024,
+        "fixture must exceed the old seedContent cap"
+    );
+    write_file(
+        scratch.path(),
+        "drawings/large.excalidraw",
+        artifact.as_bytes(),
+    );
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-seed", 1).await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "drawings/large.excalidraw",
+            "contentKind": "scene",
+            "seedFromArtifact": true
+        }),
+    )
+    .await;
+
+    assert_eq!(opened["head"], json!("present"));
+    assert_eq!(opened["lineage"], json!("existing"));
+    assert!(opened.get("seedContent").is_none());
+    let initial = base64::engine::general_purpose::STANDARD
+        .decode(
+            opened["initialUpdateBase64"]
+                .as_str()
+                .expect("initial update"),
+        )
+        .expect("base64 update");
+    assert!(
+        !initial
+            .windows(image_base64.len())
+            .any(|window| window == image_base64.as_bytes()),
+        "embedded file bytes must not enter the canonical Y.Doc"
+    );
+    let doc = Ydoc::wire();
+    doc.apply(&initial).expect("seeded state applies");
+    let folded = doc.fold_scene();
+    assert_eq!(folded.elements.len(), 1);
+    assert_eq!(folded.assets.len(), 1);
+
+    let descriptor = &opened["artifactAssets"][0];
+    assert_eq!(descriptor["id"], json!("image-file"));
+    assert_eq!(descriptor["mimeType"], json!("image/png"));
+    let asset_path = descriptor["ref"].as_str().expect("asset ref");
+    assert!(asset_path.starts_with("assets/excalidraw/"));
+    assert!(asset_path.ends_with(".png"));
+    assert_eq!(
+        std::fs::read(scratch.path().join(asset_path)).expect("materialized asset"),
+        image_bytes,
+    );
+
+    let settled = call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.settle",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    assert_eq!(settled["materialized"], json!(true));
+    assert_eq!(settled["content"], Value::Null);
+    let portable: Value = serde_json::from_slice(
+        &std::fs::read(scratch.path().join("drawings/large.excalidraw"))
+            .expect("materialized scene"),
+    )
+    .expect("settled portable JSON");
+    assert_eq!(
+        portable["files"]["image-file"]["dataURL"],
+        json!(format!("data:image/png;base64,{image_base64}")),
+    );
+    assert!(portable["files"]["image-file"].get("ref").is_none());
+    assert!(portable["files"]["image-file"].get("sha256").is_none());
+
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    // Simulate a committed open whose response was lost: the retry asks to
+    // seed again, but resumes the one durable lineage and one asset moment.
+    let retry = call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "drawings/large.excalidraw",
+            "contentKind": "scene",
+            "seedFromArtifact": true
+        }),
+    )
+    .await;
+    assert_eq!(retry["lineage"], "existing");
+    assert_eq!(retry["objectId"], opened["objectId"]);
+    assert_eq!(retry["artifactAssets"], opened["artifactAssets"]);
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.evict",
+        json!({ "sessionId": retry["sessionId"] }),
+    )
+    .await;
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+    let conn = rusqlite::Connection::open(
+        scratch
+            .path()
+            .join(".dohc")
+            .join("engine")
+            .join("engine.db"),
+    )
+    .expect("open committed store");
+    let asset_moments: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM moments WHERE workspace_id=?1 AND path=?2",
+            rusqlite::params!["ws-rpc-scene-seed", asset_path],
+            |row| row.get(0),
+        )
+        .expect("asset moment count");
+    assert_eq!(asset_moments, 1, "lost-response retry must not seed twice");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_rebind_with_seed_disabled_never_resurrects_the_portable_artifact() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "stale-image", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0",
+            "fileId": "stale-file"
+        }],
+        "appState": { "viewBackgroundColor": "#ff0000" },
+        "files": {
+            "stale-file": {
+                "id": "stale-file", "mimeType": "image/png", "created": 1,
+                "dataURL": "data:image/png;base64,AQIDBA=="
+            }
+        }
+    }))
+    .expect("portable scene");
+    write_file(
+        scratch.path(),
+        "replacement.excalidraw",
+        artifact.as_bytes(),
+    );
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-no-reseed", 81).await;
+
+    for request_id in [82, 84] {
+        let opened = call(
+            &transport,
+            &handle,
+            request_id,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": "replacement.excalidraw",
+                "contentKind": "scene",
+                "seedFromArtifact": false
+            }),
+        )
+        .await;
+        assert_eq!(opened["lineage"], "absent");
+        assert!(opened.get("artifactAssets").is_none());
+        let update = base64::engine::general_purpose::STANDARD
+            .decode(
+                opened["initialUpdateBase64"]
+                    .as_str()
+                    .expect("initial update"),
+            )
+            .expect("base64 update");
+        let doc = Ydoc::wire();
+        doc.apply(&update).expect("empty state applies");
+        let folded = doc.fold_scene();
+        assert!(folded.elements.is_empty());
+        assert!(folded.app_state.is_empty());
+        assert!(folded.assets.is_empty());
+        call(
+            &transport,
+            &handle,
+            request_id + 1,
+            "ydoc.close",
+            json!({ "sessionId": opened["sessionId"], "settle": false }),
+        )
+        .await;
+    }
+
+    assert!(
+        !scratch.path().join("assets/excalidraw").exists(),
+        "replacement and reconnect opens must not extract stale portable files"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_open_defers_missing_authoritative_asset_then_recovers_and_survives_rename() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [],
+        "appState": {},
+        "files": {}
+    }))
+    .expect("portable scene");
+    write_file(
+        scratch.path(),
+        "drawings/missing.excalidraw",
+        artifact.as_bytes(),
+    );
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-missing", 101).await;
+    let opened = call(
+        &transport,
+        &handle,
+        102,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "drawings/missing.excalidraw",
+            "contentKind": "scene",
+            "seedFromArtifact": false
+        }),
+    )
+    .await;
+    assert_eq!(opened["lineage"], "absent");
+    let object_id = opened["objectId"].as_str().expect("object id");
+    let bytes = vec![1_u8, 2, 3, 4];
+    let sha256 = dohc_engine_storage::hex_sha256(&bytes);
+    let asset_ref = dohc_engine_collab::scene_asset_ref(
+        "ws-rpc-scene-missing",
+        "main",
+        object_id,
+        &sha256,
+        "image/png",
+    )
+    .expect("asset ref");
+    let recorded = call(
+        &transport,
+        &handle,
+        103,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": opened["sessionId"],
+            "updateBase64": image_scene_update_with_asset_record(
+                "image-file",
+                "image/png",
+                &asset_ref,
+                &sha256
+            )
+        }),
+    )
+    .await;
+    assert_eq!(recorded["seq"], 1);
+    call(
+        &transport,
+        &handle,
+        104,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+
+    for id in [105, 106] {
+        let pending = call_error(
+            &transport,
+            &handle,
+            id,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": "drawings/missing.excalidraw",
+                "contentKind": "scene",
+                "seedFromArtifact": false
+            }),
+        )
+        .await;
+        assert_eq!(pending.code, ErrorCode::Overloaded);
+        assert_eq!(pending.message, "ydoc-artifact-assets-pending");
+    }
+
+    call(
+        &transport,
+        &handle,
+        107,
+        "versionedBinary.write",
+        json!({
+            "versionId": "main",
+            "path": asset_ref,
+            "bytes": bytes,
+            "origin": "api"
+        }),
+    )
+    .await;
+    let recovered = call(
+        &transport,
+        &handle,
+        108,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "drawings/missing.excalidraw",
+            "contentKind": "scene",
+            "seedFromArtifact": false
+        }),
+    )
+    .await;
+    assert_eq!(recovered["lineage"], "existing");
+    assert_eq!(recovered["artifactAssets"][0]["ref"], asset_ref);
+    call(
+        &transport,
+        &handle,
+        109,
+        "ydoc.settle",
+        json!({ "sessionId": recovered["sessionId"] }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        110,
+        "ydoc.evict",
+        json!({ "sessionId": recovered["sessionId"] }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        111,
+        "versionedText.rename",
+        json!({
+            "versionId": "main",
+            "fromPath": "drawings/missing.excalidraw",
+            "toPath": "moved/renamed.excalidraw",
+            "origin": "api"
+        }),
+    )
+    .await;
+    let renamed = call(
+        &transport,
+        &handle,
+        112,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "moved/renamed.excalidraw",
+            "contentKind": "scene",
+            "seedFromArtifact": false
+        }),
+    )
+    .await;
+    assert_eq!(renamed["objectId"], object_id);
+    assert_eq!(renamed["artifactAssets"][0]["ref"], asset_ref);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_open_rejects_forged_asset_namespace_without_a_writable_fallback() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [], "appState": {}, "files": {}
+    }))
+    .expect("portable scene");
+    write_file(scratch.path(), "forged.excalidraw", artifact.as_bytes());
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-forged", 121).await;
+    let opened = call(
+        &transport,
+        &handle,
+        122,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": "forged.excalidraw",
+            "contentKind": "scene", "seedFromArtifact": false
+        }),
+    )
+    .await;
+    let sha256 = dohc_engine_storage::hex_sha256(&[1_u8, 2, 3, 4]);
+    call(
+        &transport,
+        &handle,
+        123,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": opened["sessionId"],
+            "updateBase64": image_scene_update_with_asset_record(
+                "image-file", "image/png", "unrelated/user-image.png", &sha256
+            )
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        124,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    let invalid = call_error(
+        &transport,
+        &handle,
+        125,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": "forged.excalidraw",
+            "contentKind": "scene", "seedFromArtifact": false
+        }),
+    )
+    .await;
+    assert_eq!(invalid.code, ErrorCode::Internal);
+    assert_eq!(invalid.message, "ydoc-artifact-assets-invalid");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_seed_omits_deleted_and_unused_native_files() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "deleted-image", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": true, "index": "a0", "fileId": "deleted"
+        }],
+        "appState": {},
+        "files": {
+            "deleted": { "id": "deleted", "mimeType": "image/png", "created": 1,
+                "dataURL": "data:image/png;base64,AQIDBA==" },
+            "unused": { "id": "unused", "mimeType": "image/png", "created": 2,
+                "dataURL": "data:image/png;base64,BQYHCA==" }
+        }
+    }))
+    .expect("portable scene");
+    write_file(scratch.path(), "privacy.excalidraw", artifact.as_bytes());
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-privacy", 131).await;
+    let opened = call(
+        &transport,
+        &handle,
+        132,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": "privacy.excalidraw",
+            "contentKind": "scene", "seedFromArtifact": true
+        }),
+    )
+    .await;
+    assert!(opened.get("artifactAssets").is_none());
+    assert!(!scratch.path().join("assets/excalidraw").exists());
+    call(
+        &transport,
+        &handle,
+        133,
+        "ydoc.settle",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    let settled: Value = serde_json::from_slice(
+        &std::fs::read(scratch.path().join("privacy.excalidraw")).expect("settled scene"),
+    )
+    .expect("settled JSON");
+    assert_eq!(settled["elements"], json!([]));
+    assert_eq!(settled["files"], json!({}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_seed_refuses_a_preexisting_different_asset_at_its_owned_ref() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let image_bytes = vec![1_u8, 2, 3, 4];
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{ "id": "image", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": "file" }],
+        "appState": {},
+        "files": { "file": { "id": "file", "mimeType": "image/png", "created": 1,
+            "dataURL": format!("data:image/png;base64,{image_base64}") } }
+    }))
+    .expect("portable scene");
+    let drawing_path = "collision.excalidraw";
+    write_file(scratch.path(), drawing_path, artifact.as_bytes());
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let workspace_id = "ws-rpc-scene-collision";
+    let handle = open_workspace(&transport, &scratch, workspace_id, 141).await;
+    let object_id =
+        dohc_engine_domain::derive_capture_object_id(workspace_id, "main", drawing_path);
+    let sha256 = dohc_engine_storage::hex_sha256(&image_bytes);
+    let asset_ref =
+        dohc_engine_collab::scene_asset_ref(workspace_id, "main", &object_id, &sha256, "image/png")
+            .expect("owned ref");
+    call(
+        &transport,
+        &handle,
+        142,
+        "versionedBinary.write",
+        json!({
+            "versionId": "main", "path": asset_ref,
+            "bytes": [9, 9, 9, 9], "origin": "api"
+        }),
+    )
+    .await;
+    let refused = call_error(
+        &transport,
+        &handle,
+        143,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": drawing_path,
+            "contentKind": "scene", "seedFromArtifact": true
+        }),
+    )
+    .await;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(
+        std::fs::read(scratch.path().join(&asset_ref)).expect("collision survives"),
+        [9, 9, 9, 9]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_seed_names_the_existing_binary_ceiling_before_commit() {
+    // Pinned Excalidraw v0.18.0 commit 817d8c553c3389650f8b4503984a6d4a5d2f0c11
+    // defines MAX_ALLOWED_FILE_BYTES as 4 MiB (constants.ts:314) and refuses
+    // larger inserted images (App.tsx:9763-9767). The engine's existing 5 MiB
+    // binary ceiling is beyond that measured healthy native range.
+    assert_eq!(dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES, 5_242_880);
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let observed = dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES + 1;
+    let bytes = vec![0x5a; observed];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{ "id": "image", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": "file" }],
+        "appState": {},
+        "files": { "file": { "id": "file", "mimeType": "image/png", "created": 1,
+            "dataURL": format!("data:image/png;base64,{encoded}") } }
+    }))
+    .expect("portable scene");
+    assert!(artifact.len() < dohc_engine_domain::MAX_TEXT_BYTES);
+    write_file(
+        scratch.path(),
+        "over-binary.excalidraw",
+        artifact.as_bytes(),
+    );
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-binary-cap", 151).await;
+    let refused = call_error(
+        &transport,
+        &handle,
+        152,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": "over-binary.excalidraw",
+            "contentKind": "scene", "seedFromArtifact": true
+        }),
+    )
+    .await;
+    assert_eq!(refused.code, ErrorCode::PayloadTooLarge);
+    assert!(refused.message.contains("MAX_CAPTURE_BINARY_FILE_BYTES"));
+    assert!(refused.message.contains("5242880 bytes"));
+    assert!(refused.message.contains("5242881 bytes"));
 }
 
 /// Stage the #346 interleaving: a 0-byte artifact on disk that capture has NOT
@@ -985,7 +1709,7 @@ async fn capture_must_not_retire_the_settled_head_of_an_over_cap_ydoc() {
     // while passing in isolation — the capture pass only gets scheduled
     // between the settle and the close under load.
     //
-    // A settled Y.Doc past MAX_CAPTURE_TEXT_BYTES (128 KiB) reads as
+    // A settled Y.Doc past MAX_CAPTURE_TEXT_BYTES (10 MiB) reads as
     // "no longer engine-ownable" to the capture sink, which retires the head.
     // Self-write suppression cannot help: it matches a WRITE by sha, and this
     // is a retire taken on a size classification. The next settle — including

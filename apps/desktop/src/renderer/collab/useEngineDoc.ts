@@ -5,6 +5,7 @@ import {
   declareSceneRoots,
   exportPortableScene,
 } from "@dohc/excalidraw-scene";
+import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { bridge } from "../bridge";
 import {
@@ -205,6 +206,11 @@ export type UseEngineDoc = {
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
+  artifactAssets: readonly ArtifactAssetDescriptor[];
+  readArtifactAsset(assetId: string): Promise<{
+    descriptor: ArtifactAssetDescriptor;
+    bytes: Uint8Array;
+  }>;
 };
 
 // What ONE open answers: a workspace, a path, the gate, and the active-version
@@ -237,6 +243,8 @@ type EngineDocOpenOutcome =
       doc: Y.Doc;
       objectId: string | null;
       versionId: string | null;
+      artifactAssets: readonly ArtifactAssetDescriptor[];
+      readArtifactAsset: EngineYDocBinding["readArtifactAsset"];
     }
   | { key: string; kind: "unavailable" }
   // Their OWN kinds, not flags on "unavailable": every other unavailable
@@ -278,12 +286,18 @@ function makeTransport(
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
         ...(result.objectId ? { objectId: result.objectId } : {}),
         ...(result.versionId ? { versionId: result.versionId } : {}),
+        ...(result.artifactAssets
+          ? { artifactAssets: result.artifactAssets }
+          : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.removalInProgress
           ? { removalInProgress: result.removalInProgress }
           : {}),
       };
+    },
+    readArtifactAsset(assetId) {
+      return bridge().readEngineYDocArtifactAsset({ sessionId, assetId });
     },
     stageLocalUpdate() {
       if (writesRefused.current) return null;
@@ -366,6 +380,17 @@ export function useEngineDoc(input: {
   // repaints the document they just entered.
   const notInVersion = settled?.kind === "not-in-version";
   const engineMayHoldDocument = settled?.kind === "engine-may-hold-document";
+  const artifactAssets =
+    settled?.kind === "bound" ? settled.artifactAssets : [];
+  const readArtifactAsset =
+    settled?.kind === "bound"
+      ? settled.readArtifactAsset
+      : (assetId: string) =>
+          Promise.reject(
+            new Error(
+              `Artifact asset ${assetId} cannot load without a live document session.`,
+            ),
+          );
   const removalInProgress =
     settled?.kind === "removal-in-progress" ? settled.removal : null;
   const deletedWhileEditing =
@@ -598,6 +623,8 @@ export function useEngineDoc(input: {
           doc,
           objectId: bound.objectId,
           versionId: bound.versionId,
+          artifactAssets: bound.artifactAssets,
+          readArtifactAsset: (assetId) => bound.readArtifactAsset(assetId),
         });
       })
       .catch(() => {
@@ -655,5 +682,7 @@ export function useEngineDoc(input: {
     deletedWhileEditing,
     deletedDraftId,
     removalInProgress,
+    artifactAssets,
+    readArtifactAsset,
   };
 }

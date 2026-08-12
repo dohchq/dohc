@@ -1097,7 +1097,7 @@ async fn scenario_two_workspace_switch(
     // An in-flight write on A while B opens and closes. The payload is
     // deliberately bulky so it straddles the switch more often than a
     // one-liner would. The binding limit is the desktop capture text cap
-    // (MAX_DESKTOP_CAPTURE_TEXT_BYTES, 128 KiB) -- NOT the DOP1 wire string
+    // (MAX_TEXT_BYTES, 10 MiB) -- NOT the DOP1 wire string
     // limit an earlier comment here cited as 64 KiB, which is in fact 8 MiB
     // (WireLimits::SPIKE_DEFAULTS.max_string_bytes).
     let (slot, variant) = identity_slot(n);

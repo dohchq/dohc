@@ -7,8 +7,10 @@ use dohc_engine_domain::{
     ConflictFileState, DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx,
     write_projected_text_in_tx,
 };
-use dohc_engine_storage::{EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome};
-use rusqlite::{OptionalExtension, params};
+use dohc_engine_storage::{
+    EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome, get_binary_blob, hex_sha256,
+};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 
 use dohc_engine_files::{
@@ -599,11 +601,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
             reason: "ydoc-incomplete-lineage",
         });
     }
-    let projection = doc
-        .project(marker.content_kind)
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc projection exceeds materialization cap",
-        })?;
+    let projection = project_ydoc_with_store(tx, &key, path, &doc, marker.content_kind)?;
     if projection.content != chosen_text {
         let update = doc
             .rewrite_content_to_markdown(marker.content_kind, chosen_text)
@@ -632,11 +630,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
                 observed_bytes: update.len(),
             });
         }
-        let refolded = doc
-            .project(marker.content_kind)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc projection exceeds materialization cap",
-            })?;
+        let refolded = project_ydoc_with_store(tx, &key, path, &doc, marker.content_kind)?;
         if refolded.content != chosen_text {
             return Err(SyncError::InvalidInput {
                 reason: "ydoc-resolution-not-representable",
@@ -703,6 +697,99 @@ fn put_projection_text_blob(
     Ok(())
 }
 
+/// Project one canonical live document through authoritative versioned state.
+/// Scene bytes never enter the Y.Doc; they resolve from the same workspace and
+/// version as its lineage and are injected only into the portable artifact.
+pub fn project_ydoc_with_store(
+    conn: &Connection,
+    key: &DocKey,
+    _path: &str,
+    doc: &dohc_engine_collab::Ydoc,
+    content_kind: dohc_engine_collab::ContentKind,
+) -> Result<dohc_engine_collab::Projection, SyncError> {
+    if content_kind != dohc_engine_collab::ContentKind::Scene {
+        return doc
+            .project(content_kind)
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc projection exceeds materialization cap",
+            });
+    }
+    let folded = doc.fold_scene();
+    let referenced: std::collections::BTreeSet<&str> = folded
+        .elements
+        .iter()
+        .filter(|element| element.get("type").and_then(serde_json::Value::as_str) == Some("image"))
+        .filter_map(|element| element.get("fileId").and_then(serde_json::Value::as_str))
+        .collect();
+    let mut bytes_by_id = std::collections::BTreeMap::new();
+    for id in referenced {
+        let asset = folded.assets.get(id).ok_or(SyncError::InvalidInput {
+            reason: "scene asset record is invalid",
+        })?;
+        let expected = dohc_engine_collab::scene_asset_ref(
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+            &asset.sha256,
+            &asset.mime_type,
+        )
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "scene asset authority is invalid",
+        })?;
+        let (classification, normalized) = classify_engine_file_path_normalized(&asset.path);
+        if asset.path != expected
+            || classification != PathClassification::Tracked
+            || normalized.as_deref() != Some(asset.path.as_str())
+        {
+            return Err(SyncError::InvalidInput {
+                reason: "scene asset authority is invalid",
+            });
+        }
+        let head: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT COALESCE(s.content_kind, 'text'), s.binary_sha256 \
+                 FROM path_aliases a JOIN snapshots s \
+                   ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
+                  AND s.object_id=a.object_id \
+                 WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
+                params![key.workspace_id, key.version_id, asset.path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        let Some((kind, sha256)) = head else {
+            return Err(SyncError::RetryableState {
+                reason: "scene asset head is pending",
+            });
+        };
+        if kind != "binary" || sha256.as_deref() != Some(asset.sha256.as_str()) {
+            return Err(SyncError::InvalidInput {
+                reason: "scene asset authority is invalid",
+            });
+        }
+        let bytes = get_binary_blob(conn, &asset.sha256)?.ok_or(SyncError::RetryableState {
+            reason: "scene asset blob is pending",
+        })?;
+        if hex_sha256(&bytes) != asset.sha256 {
+            return Err(SyncError::InvalidInput {
+                reason: "scene asset authority is invalid",
+            });
+        }
+        bytes_by_id.insert(id.to_owned(), bytes);
+    }
+    let content = folded
+        .portable_json_with_asset_bytes(&bytes_by_id)
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "scene projection is invalid",
+        })?;
+    Ok(dohc_engine_collab::Projection {
+        content,
+        content_kind,
+        source_state_vector_sha256: hex_sha256(&doc.encode_state_vector()),
+        destructive: false,
+    })
+}
+
 /// Oracle parity for applied `ydoc.update` ops (`projectYDocUpdate` →
 /// `writeTextFileInDb` → CRDT rows): every NON-DEFERRED apply materializes
 /// its projection — moment, snapshot, and durable materialization job — in
@@ -722,11 +809,7 @@ pub fn project_and_write_in_tx(
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(), SyncError> {
     let current = validate_ydoc_identity(tx, key, path)?;
-    let projection = doc
-        .project(content_kind)
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc projection exceeds materialization cap",
-        })?;
+    let projection = project_ydoc_with_store(tx, key, path, doc, content_kind)?;
     // While a sync conflict is open on this object, the visible head belongs
     // to the user's review: writing through it would clobber the exact state
     // the conflict preserves. Coalesce the incoming side to the freshest
@@ -1134,11 +1217,8 @@ pub fn apply_ydoc_envelope(
                 head_settled_by_this_lineage.as_deref() == Some(snapshot.blob_sha256.as_str())
             });
             if !head_is_in_the_union && let Some(snapshot) = current.snapshot.as_ref() {
-                let projection = base_doc
-                    .project(kind)
-                    .map_err(|_| SyncError::InvalidInput {
-                        reason: "ydoc projection exceeds materialization cap",
-                    })?;
+                let projection =
+                    project_ydoc_with_store(tx, &claim_key, &base_path, &base_doc, kind)?;
                 let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
                 if snapshot.blob_sha256 != projected_sha {
                     put_projection_text_blob(tx, &projection.content, &projected_sha)?;
@@ -1229,7 +1309,14 @@ pub fn apply_ydoc_envelope(
                 reason: None,
                 conflicts_opened: 0,
             })
-        })?;
+        });
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(SyncError::InvalidInput { reason }) => {
+                return refuse_ydoc(store, envelope, faults, reason);
+            }
+            Err(hard) => return Err(hard),
+        };
         if matches!(outcome, ApplyOutcome::Applied(_) | ApplyOutcome::Skipped)
             && dohc_engine_collab::read_marker(store, &key)
                 .map_err(map_collab_hard_error)?

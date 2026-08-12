@@ -16,6 +16,7 @@
 // carries Tiptap's own (non-ENGINE) origin and IS shipped.
 
 import * as Y from "yjs";
+import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 
 // Applied to the mirror doc for every update that ORIGINATED in the engine
@@ -46,6 +47,7 @@ export interface EngineYDocTransport {
     initialUpdate?: Uint8Array;
     objectId?: string;
     versionId?: string;
+    artifactAssets?: readonly ArtifactAssetDescriptor[];
     notInVersion?: boolean;
     // A session for this document may still be the engine's (#564, #657) —
     // the other available:false that must not fall back to the plain editor.
@@ -53,6 +55,10 @@ export interface EngineYDocTransport {
     // A destructive operation owns this path for an interval. Falling back to
     // the plain editor would let its autosave race that operation.
     removalInProgress?: EngineRemovalInProgress;
+  }>;
+  readArtifactAsset?(assetId: string): Promise<{
+    descriptor: ArtifactAssetDescriptor;
+    bytes: Uint8Array;
   }>;
   // Reserve the save sequence synchronously when a local edit occurs. The
   // provider can delay transport without letting an older settle report the
@@ -138,6 +144,11 @@ export interface EngineYDocBinding {
   // A delete or move owns the path for an interval. The caller keeps the
   // document read-only and offers a fresh open after the interval ends.
   readonly removalInProgress: EngineRemovalInProgress | null;
+  readonly artifactAssets: readonly ArtifactAssetDescriptor[];
+  readArtifactAsset(assetId: string): Promise<{
+    descriptor: ArtifactAssetDescriptor;
+    bytes: Uint8Array;
+  }>;
   // Tear down: stop shipping edits, unsubscribe, close the engine session, and
   // destroy the mirror doc. Idempotent. If main has not acknowledged an edit,
   // teardown waits and keeps the session open. It completes after recovery.
@@ -160,6 +171,14 @@ export async function bindEngineYDoc(
       notInVersion: opened.notInVersion === true,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,
       removalInProgress: opened.removalInProgress ?? null,
+      artifactAssets: [],
+      readArtifactAsset(assetId) {
+        return Promise.reject(
+          new Error(
+            `Artifact asset ${assetId} cannot load without a live document session.`,
+          ),
+        );
+      },
       async destroy() {
         // Best-effort close even on the unavailable path: main may have taken a
         // reservation before deciding not to serve (it should not, but never
@@ -260,6 +279,15 @@ export async function bindEngineYDoc(
     notInVersion: false,
     engineMayHoldDocument: false,
     removalInProgress: null,
+    artifactAssets: opened.artifactAssets ?? [],
+    readArtifactAsset(assetId) {
+      if (!transport.readArtifactAsset) {
+        return Promise.reject(
+          new Error("This document transport cannot load artifact assets."),
+        );
+      }
+      return transport.readArtifactAsset(assetId);
+    },
     destroy() {
       if (destroyPromise !== null) return destroyPromise;
       destroyed = true;

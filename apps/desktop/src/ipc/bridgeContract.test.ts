@@ -19,6 +19,7 @@ import {
   EngineMomentDetailRecord,
   ApplyEngineYDocUpdatePayload,
   OpenEngineYDocSessionResult,
+  ReadEngineYDocArtifactAssetResult,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
   InvokeSiteSdkPayload,
@@ -1614,5 +1615,24 @@ describe("partial-freshness marker on aggregate chat reads", () => {
         `MUTATION (${name}): "0 rows uncovered" is a full refresh reported as a partial one`,
       ).toThrow();
     }
+  });
+});
+
+describe("live document artifact asset IPC", () => {
+  it("carries a representative image above the former 48 KiB seed boundary", () => {
+    const bytes = new Uint8Array(49 * 1024);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const parsed = ReadEngineYDocArtifactAssetResult.parse({
+      descriptor: {
+        id: "image-file",
+        mimeType: "image/png",
+        created: 1,
+        ref: `assets/excalidraw/${"a".repeat(64)}/${"b".repeat(64)}.png`,
+        sha256: "b".repeat(64),
+      },
+      bytes,
+    });
+    expect(parsed.bytes.byteLength).toBe(49 * 1024);
+    expect(parsed.descriptor.id).toBe("image-file");
   });
 });

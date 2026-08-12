@@ -24,13 +24,13 @@ import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createTestScratch } from "./testTemp";
 import {
   YDOC_OPEN_RETRY_DEADLINE_MS,
+  MAX_ENGINE_CAPTURE_TEXT_BYTES,
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
   createWorkspaceEngineCapture,
   isYDocSessionUnreleasedError,
 } from "./workspaceEngineCapture";
-import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "./workspaceWatcher";
 
 // #564: one document open may not hold the capture chain for the whole
 // six-attempt transport ladder. The deadline lives in the sessions layer
@@ -644,7 +644,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       //
       // #665 closed the other end. A close that keeps refusing used to leave
       // the orphan retained, holding its lease, and on a path no capture will
-      // ever reach — policy-excluded, or over the 128 KiB capture limit — the
+      // ever reach — policy-excluded, or over the 10 MiB capture limit — the
       // document stayed read-only until the daemon restarted. The orphan now
       // EVICTS: the daemon lets go of the session while its lineage stays
       // durable, so nothing is written and nothing is discarded.
@@ -728,7 +728,7 @@ describe("the document open's capture-chain hold (#564)", () => {
 
     it("binds the lineage an evicted orphan left behind, with no restart", async () => {
       // #665, the whole point. On a path no capture will ever reach — one
-      // `.dohc/files.toml` excludes, or a file between the 128 KiB capture
+      // `.dohc/files.toml` excludes, or a file above the engine text capture
       // limit and the 2 MiB editor limit — the orphan's close can never be
       // satisfied, because only a captured or settled artifact can satisfy it.
       // Evicting is what breaks that loop: the daemon lets go of the session
@@ -738,7 +738,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       // paths a restart did not help either, because the reopen still found
       // no head.
       const root = await tempRoot();
-      const excluded = "x".repeat(MAX_HISTORY_TEXT_SNAPSHOT_BYTES + 1024) + "\n";
+      const excluded = "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES + 1024) + "\n";
       await write(root, "note.md", excluded);
       const { sessions } = recordingSessions();
       const doc = new Y.Doc();

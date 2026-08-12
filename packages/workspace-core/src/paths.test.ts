@@ -487,6 +487,7 @@ describe("mediaTypeForPath (shared extension -> media-type table)", () => {
   it("maps the known workspace file extensions case-insensitively", () => {
     expect(mediaTypeForPath("notes/plan.md")).toBe("text/markdown");
     expect(mediaTypeForPath("finance/Ledger.CSV")).toBe("text/csv");
+    expect(mediaTypeForPath("drawings/Plan.EXCALIDRAW")).toBe("application/json");
     expect(mediaTypeForPath("data/rows.jsonl")).toBe("application/x-ndjson");
     expect(mediaTypeForPath("img/logo.PNG")).toBe("image/png");
     expect(mediaTypeForPath("audio/memo.m4a")).toBe("audio/mp4");
@@ -503,5 +504,6 @@ describe("mediaTypeForPath (shared extension -> media-type table)", () => {
   it("returns null for unknown or missing extensions (fallback is the caller's)", () => {
     expect(mediaTypeForPath("bin/blob.xyz")).toBeNull();
     expect(mediaTypeForPath("Makefile")).toBeNull();
+    expect(mediaTypeForPath("library.excalidrawlib")).toBeNull();
   });
 });

@@ -18,10 +18,6 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 // watcher still settles batches so the UI refreshes and cloud sync queues,
 // but nothing records.
 
-// Engine-ownership cap shared with the engine capture path
-// (workspaceEngineCapture.ts): larger files are not text-owned.
-export const MAX_HISTORY_TEXT_SNAPSHOT_BYTES = 128 * 1024;
-
 // The active-run fact a batch attributes to: who the agent is and which run it
 // belongs to. workspaceActivity owns the slot; the watcher only reads it.
 export interface ActiveAgentRun {

@@ -19,7 +19,7 @@ pub fn media_type_for_path(rel_path: &str) -> &'static str {
         "db" | "sqlite" | "sqlite3" => "application/vnd.sqlite3",
         "htm" | "html" => "text/html",
         "jpeg" | "jpg" => "image/jpeg",
-        "json" => "application/json",
+        "json" | "excalidraw" => "application/json",
         "jsonl" | "ndjson" => "application/x-ndjson",
         "m4a" => "audio/mp4",
         "markdown" | "md" => "text/markdown",
@@ -118,6 +118,7 @@ mod tests {
             ("text/plain", "notes.txt"),
             ("text/javascript", "app.js"),
             ("application/json", "x.json"),
+            ("application/json", "drawings/board.excalidraw"),
             ("application/x-ndjson", "x.jsonl"),
             ("text/csv", "d.csv"),
             ("text/html", "page.html"),
@@ -142,6 +143,23 @@ mod tests {
         for (media, path) in binary {
             assert!(!is_text_media_type(media, path), "{media} {path}");
         }
+    }
+
+    #[test]
+    fn excalidraw_is_json_text_but_excalidrawlib_keeps_the_unknown_binary_policy() {
+        assert_eq!(media_type_for_path("board.excalidraw"), "application/json");
+        assert!(is_text_media_type(
+            media_type_for_path("board.excalidraw"),
+            "board.excalidraw"
+        ));
+        assert_eq!(
+            media_type_for_path("library.excalidrawlib"),
+            "application/octet-stream"
+        );
+        assert!(!is_text_media_type(
+            media_type_for_path("library.excalidrawlib"),
+            "library.excalidrawlib"
+        ));
     }
 
     #[test]

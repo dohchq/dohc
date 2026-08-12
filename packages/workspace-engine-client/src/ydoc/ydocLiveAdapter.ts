@@ -29,6 +29,7 @@ import {
   type YdocApplyExternalMarkdownEditResult,
   type YdocCloseParams,
   type YdocContentKind,
+  type ArtifactAssetDescriptor,
   type YdocEvictParams,
   type YdocOpenParams,
   type YdocRecordUpdateParams,
@@ -559,6 +560,7 @@ export class YdocAdapterSession {
   readonly objectId: string;
   readonly path: string;
   readonly contentKind: YdocContentKind;
+  readonly artifactAssets: readonly ArtifactAssetDescriptor[];
   readonly workspace: WorkspaceHandle;
   readonly sessionId: string;
   // Whether the ENTERED VERSION has a committed snapshot for this path.
@@ -606,6 +608,7 @@ export class YdocAdapterSession {
       path: string;
       contentKind: YdocContentKind;
       initialUpdate: Uint8Array;
+      artifactAssets?: readonly ArtifactAssetDescriptor[];
     },
   ) {
     this.adapter = adapter;
@@ -614,6 +617,7 @@ export class YdocAdapterSession {
     this.objectId = input.objectId;
     this.path = input.path;
     this.contentKind = input.contentKind;
+    this.artifactAssets = input.artifactAssets ?? [];
     this.initialUpdate = input.initialUpdate;
     this.doc = new Y.Doc();
     declareDohcRootSchema(this.doc, this.contentKind);
@@ -1220,6 +1224,9 @@ export class YdocLiveAdapter {
       versionId: input.versionId,
       path: input.path,
       ...(input.contentKind ? { contentKind: input.contentKind } : {}),
+      ...(input.contentKind === "scene"
+        ? { seedFromArtifact: input.seedAbsentLineage !== false }
+        : {}),
     };
     const startedAtMs = performance.now();
     let rawResult: Response["result"];
@@ -1241,6 +1248,7 @@ export class YdocLiveAdapter {
       path: result.path,
       contentKind: result.contentKind,
       initialUpdate: base64ToBytes(result.initialUpdateBase64),
+      artifactAssets: result.artifactAssets,
     });
     this.sessions.set(result.sessionId, session);
     session.head = result.head;

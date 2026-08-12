@@ -118,6 +118,30 @@ function daemonRefusal(
 }
 
 describe("EngineWorkspaceSessions", () => {
+  it("keeps a committed scene read-only while asset materialization is pending", () => {
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "ydoc-artifact-assets-pending",
+      "afterBackoff",
+    );
+    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+    expect(
+      isEngineWorkspaceOpenRefusedError(new Error("ydoc-artifact-assets-pending")),
+    ).toBe(false);
+  });
+
+  it("keeps a canonical scene read-only when linked asset authority is corrupt", () => {
+    const refusal = new DaemonRefusalError(
+      {
+        code: "INTERNAL",
+        message: "ydoc-artifact-assets-invalid",
+        retry: "no",
+      },
+      undefined,
+    );
+    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+  });
+
   it("prepares an ordinary workspace before opening it in the daemon", async () => {
     const rootPath = await tempRoot();
     let opened = false;

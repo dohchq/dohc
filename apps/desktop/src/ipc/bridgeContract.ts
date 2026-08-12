@@ -3,6 +3,8 @@ import {
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
 import { z } from "zod";
+import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import {
   MAX_EXPANDED_FOLDERS,
   MAX_OPEN_TABS,
@@ -3177,6 +3179,16 @@ const ENGINE_YDOC_INITIAL_UPDATE = z.custom<Uint8Array>(
   "Y.Doc initial update is not a Uint8Array within the IPC byte bound.",
 );
 
+const ARTIFACT_ASSET_DESCRIPTOR: z.ZodType<ArtifactAssetDescriptor> = z.object({
+  id: z.string().min(1),
+  mimeType: z.string().min(1),
+  created: z.number().int().nonnegative(),
+  ref: PATH_STRING,
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  lastRetrieved: z.number().int().nonnegative().optional(),
+  version: z.number().int().nonnegative().optional(),
+});
+
 export const OpenEngineYDocSessionPayload = z.object({
   workspaceId: WORKSPACE_ID,
   sessionId: ENGINE_YDOC_SESSION_ID,
@@ -3189,6 +3201,7 @@ export const OpenEngineYDocSessionResult = z.object({
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
   objectId: z.string().min(1).optional(),
   versionId: z.string().min(1).optional(),
+  artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR).optional(),
   // The path is not in the version the workspace is on — a version switch
   // removed it while this open was queued behind that switch (#534). Every
   // other available:false reason downgrades the document to the writable plain
@@ -3214,6 +3227,27 @@ export const OpenEngineYDocSessionResult = z.object({
     .optional(),
 });
 export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionResult>;
+
+export const ReadEngineYDocArtifactAssetPayload = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  assetId: z.string().min(1).max(4096),
+});
+export type ReadEngineYDocArtifactAssetPayload = z.infer<
+  typeof ReadEngineYDocArtifactAssetPayload
+>;
+
+export const ReadEngineYDocArtifactAssetResult = z.object({
+  descriptor: ARTIFACT_ASSET_DESCRIPTOR,
+  bytes: z.custom<Uint8Array>(
+    (value) =>
+      value instanceof Uint8Array &&
+      value.byteLength <= MAX_VERSIONED_BINARY_FILE_BYTES,
+    `Artifact asset bytes must fit the engine's MAX_VERSIONED_BINARY_FILE_BYTES limit of ${MAX_VERSIONED_BINARY_FILE_BYTES} bytes.`,
+  ),
+});
+export type ReadEngineYDocArtifactAssetResult = z.infer<
+  typeof ReadEngineYDocArtifactAssetResult
+>;
 
 export const ApplyEngineYDocUpdatePayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
@@ -3604,6 +3638,9 @@ export interface DohcDesktopBridge {
   openEngineYDocSession(
     payload: OpenEngineYDocSessionPayload,
   ): Promise<OpenEngineYDocSessionResult>;
+  readEngineYDocArtifactAsset(
+    payload: ReadEngineYDocArtifactAssetPayload,
+  ): Promise<ReadEngineYDocArtifactAssetResult>;
   // Ship a local editor CRDT update to main (journaled via recordUpdate +
   // debounced settle). A no-op if the session is unknown/closed.
   applyEngineYDocUpdate(payload: ApplyEngineYDocUpdatePayload): Promise<void>;
