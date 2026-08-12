@@ -243,11 +243,9 @@ export function NoticeCenter(props: {
       });
     }
 
-    for (const [index, declined] of (
-      props.syncStatus?.sharingDeclined ?? []
-    ).entries()) {
+    for (const declined of props.syncStatus?.sharingDeclined ?? []) {
       next.push({
-        id: `sharing-declined-${index}`,
+        id: `sharing-declined-${declined.path}`,
         tone: "warning",
         title: "File is too large to sync",
         body: `Your edit is saved on this machine. "${declined.path}" uses ${declined.observedBytes.toLocaleString("en-US")} bytes after encoding. Sync allows ${declined.limitBytes.toLocaleString("en-US")} bytes. Reduce the file to sync it.`,

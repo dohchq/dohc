@@ -46,13 +46,13 @@ pub(crate) fn backfill_enrolment_window_in_tx(
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     backfill_versions(tx, workspace_id)?;
-    let sharing_declined = backfill_ydoc_bases(tx, workspace_id, now_ms)?;
+    let sharing_declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms)?;
     backfill_moments_and_conflict_bundles(tx, workspace_id)?;
     backfill_secret_moments(tx, workspace_id)?;
     Ok(sharing_declined)
 }
 
-fn backfill_ydoc_bases(
+pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
     now_ms: i64,
@@ -2186,9 +2186,10 @@ mod tests {
     }
 
     #[test]
-    fn enrollment_surfaces_a_declined_ydoc_base() {
+    fn every_sync_pass_surfaces_a_declined_ydoc_base_until_it_is_claimed() {
         let (_scratch, mut store) = store();
         seed_main(&mut store);
+        enroll(&mut store).expect("enroll before the local Y.Doc append");
         write_text(
             &mut store,
             "main",
@@ -2228,18 +2229,15 @@ mod tests {
             })
             .expect("seed oversized local lineage");
 
-        let outcome = store
-            .write_with(&NoFaults, |tx| {
-                tx.execute(
-                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
-                     VALUES ('ws','local',-1)",
-                    [],
-                )
-                .map_err(SyncError::persist)?;
-                backfill_enrolment_window_in_tx(tx, "ws", 1_000)
-            })
-            .expect("enroll");
-        let declines = match outcome {
+        let cursor = crate::RelayCursor {
+            cursor: 0,
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            refusal_report_id: None,
+        };
+        let declines = match crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, 1_000)
+            .expect("commit relay cursor after the local append")
+        {
             dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
         };
@@ -2247,5 +2245,22 @@ mod tests {
         assert_eq!(declines.len(), 1, "the caller receives the declined base");
         assert_eq!(declines[0].constraint, "MAX_YDOC_UPDATE_BYTES");
         assert!(declines[0].observed_bytes > declines[0].limit_bytes);
+
+        let next_cursor = crate::RelayCursor {
+            cursor: 1,
+            ..cursor
+        };
+        let next_declines =
+            match crate::commit_relay_cursor(&mut store, "ws", &next_cursor, &NoFaults, 1_001)
+                .expect("commit next relay cursor")
+            {
+                dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
+                dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+            };
+
+        assert_eq!(
+            next_declines, declines,
+            "the unresolved base remains visible on every successful sync pass"
+        );
     }
 }

@@ -198,7 +198,7 @@ fn backfill_after_first_position(
     now_ms: i64,
 ) -> Result<Vec<crate::SharingDeclined>, SyncError> {
     if was_enrolled {
-        return Ok(Vec::new());
+        return crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms);
     }
     crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)
 }

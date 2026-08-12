@@ -313,6 +313,7 @@ describe("relaySyncEngine", () => {
     ];
     pullMock
       .mockResolvedValueOnce(result)
+      .mockResolvedValueOnce(result)
       .mockResolvedValueOnce(pullResult());
     const sync = engine({ capture: capture() });
 
@@ -323,6 +324,11 @@ describe("relaySyncEngine", () => {
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
     expect(pullMock).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().sharingDeclined).toEqual(result.sharingDeclined);
+
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(pullMock).toHaveBeenCalledTimes(3);
     expect(sync.snapshot().sharingDeclined).toEqual([]);
     await sync.stop();
   });

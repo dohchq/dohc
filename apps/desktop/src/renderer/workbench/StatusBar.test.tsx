@@ -223,7 +223,9 @@ describe("notice center", () => {
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
 
-    const notice = screen.getByTestId("notice-sharing-declined-0");
+    const notice = screen.getByTestId(
+      "notice-sharing-declined-notes/large.md",
+    );
     expect(notice.textContent).toContain("File is too large to sync");
     expect(notice.textContent).toContain("notes/large.md");
     expect(notice.textContent).toContain("280,001 bytes");
