@@ -9235,6 +9235,36 @@ describe("drawing entry point", () => {
       (await screen.findAllByText("Untitled.excalidraw")).length,
     ).toBeGreaterThan(0);
   });
+
+  it("opens a new drawing only in the focused editor group", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-a.md");
+    await screen.findByTestId("tab-b.md");
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = await screen.findByRole("region", { name: "Editor group 2" });
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New drawing",
+      ),
+    );
+
+    expect(await within(right).findByTestId("tab-Untitled.excalidraw")).toBeTruthy();
+    expect(within(left).queryByTestId("tab-Untitled.excalidraw")).toBeNull();
+    expect(within(left).getByTestId("tab-a.md")).toBeTruthy();
+  });
 });
 
 // #687/#589: the note's precedence and exact copy are pinned at the
