@@ -780,7 +780,7 @@ function useAutosavedTextDraft(props: {
     props.localBuffer.getSnapshot,
     props.localBuffer.getSnapshot,
   );
-  const sharedRevision = useRef(sharedSnapshot.revision);
+  const sharedRevision = useRef(-1);
   const orphanedDrafts = useOrphanedDrafts(props.workspaceId, props.path);
   const latestDraft = useRef(props.body);
   const baseContentHash = useRef(props.contentHash);
@@ -841,6 +841,17 @@ function useAutosavedTextDraft(props: {
     baseContentHash.current = sharedSnapshot.contentHash;
     latestDraft.current = sharedSnapshot.body;
     setSaveState(sharedSnapshot.saveState);
+    if (
+      sharedSnapshot.saveState === "saved" &&
+      !sharedSnapshot.dirty &&
+      !bodyChanged
+    ) {
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      unsavedDraft.current = false;
+    }
     if (
       sharedSnapshot.source === null ||
       sharedSnapshot.source === localSource.current ||
@@ -1397,7 +1408,7 @@ function MarkdownView(props: {
     props.localBuffer.getSnapshot,
     props.localBuffer.getSnapshot,
   );
-  const sharedRevision = useRef(sharedSnapshot.revision);
+  const sharedRevision = useRef(-1);
 
   const engine = props.engine;
   // #533. The engine open runs ON the capture chain, so a document opened
@@ -1532,6 +1543,17 @@ function MarkdownView(props: {
     baseContentHash.current = sharedSnapshot.contentHash;
     latestDraft.current = sharedSnapshot.body;
     setSaveState(sharedSnapshot.saveState);
+    if (
+      sharedSnapshot.saveState === "saved" &&
+      !sharedSnapshot.dirty &&
+      !bodyChanged
+    ) {
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      unsavedDraft.current = false;
+    }
     if (
       sharedSnapshot.source === null ||
       sharedSnapshot.source === localSource.current ||

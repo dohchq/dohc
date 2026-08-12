@@ -276,6 +276,21 @@ function replaceGroup(
   return { ...state, editorGroups };
 }
 
+function detachTabFromGroup(
+  group: EditorGroup,
+  path: string,
+): { group: EditorGroup; tab: WorkbenchTab } | null {
+  const index = group.tabs.findIndex((tab) => tab.path === path);
+  if (index === -1) return null;
+  const tab = group.tabs[index];
+  const tabs = group.tabs.filter((candidate) => candidate !== tab);
+  const activeTab =
+    group.activeTab === path
+      ? ((tabs[index] ?? tabs[index - 1])?.path ?? null)
+      : group.activeTab;
+  return { group: { ...group, tabs, activeTab }, tab };
+}
+
 function normalizeEditorGroupSizes(groups: EditorGroup[]): EditorGroup[] {
   const weights = groups.map((group) =>
     Number.isFinite(group.size) && group.size > 0 ? group.size : 1,
@@ -368,16 +383,11 @@ export function closeTab(
   groupId: string,
   path: string,
 ): WorkbenchState {
-  return replaceGroup(state, groupId, (group) => {
-    const index = group.tabs.findIndex((tab) => tab.path === path);
-    if (index === -1) return group;
-    const tabs = group.tabs.filter((tab) => tab.path !== path);
-    const activeTab =
-      group.activeTab === path
-        ? ((tabs[index] ?? tabs[index - 1])?.path ?? null)
-        : group.activeTab;
-    return { ...group, tabs, activeTab };
-  });
+  return replaceGroup(
+    state,
+    groupId,
+    (group) => detachTabFromGroup(group, path)?.group ?? group,
+  );
 }
 
 // Reorder one group's tabs. The target index clamps into that group.
@@ -420,12 +430,8 @@ export function moveTabToGroup(
       : moveTab(state, sourceGroupId, sourceIndex, toIndex);
   }
 
-  const tab = source.tabs[sourceIndex];
-  const sourceTabs = source.tabs.filter((candidate) => candidate !== tab);
-  const sourceActiveTab =
-    source.activeTab === path
-      ? ((sourceTabs[sourceIndex] ?? sourceTabs[sourceIndex - 1])?.path ?? null)
-      : source.activeTab;
+  const detached = detachTabFromGroup(source, path);
+  if (!detached) return state;
   const existingTarget = target.tabs.find((candidate) => candidate.path === path);
   const targetTabs = [...target.tabs];
   if (!existingTarget) {
@@ -433,11 +439,11 @@ export function moveTabToGroup(
       Math.max(toIndex ?? targetTabs.length, 0),
       targetTabs.length,
     );
-    targetTabs.splice(bounded, 0, tab);
+    targetTabs.splice(bounded, 0, detached.tab);
   }
   const editorGroups = state.editorGroups.map((group) => {
     if (group.id === sourceGroupId) {
-      return { ...group, tabs: sourceTabs, activeTab: sourceActiveTab };
+      return detached.group;
     }
     if (group.id === targetGroupId) {
       return { ...group, tabs: targetTabs, activeTab: path };
@@ -474,21 +480,15 @@ export function moveTabToNewGroup(
   );
   if (sourceIndex === -1) return state;
   const source = baseGroups[sourceIndex];
-  const tabIndex = source.tabs.findIndex((tab) => tab.path === path);
-  if (tabIndex === -1) return state;
-  const tab = source.tabs[tabIndex];
-  const tabs = source.tabs.filter((candidate) => candidate !== tab);
-  const activeTab =
-    source.activeTab === path
-      ? ((tabs[tabIndex] ?? tabs[tabIndex - 1])?.path ?? null)
-      : source.activeTab;
+  const detached = detachTabFromGroup(source, path);
+  if (!detached) return state;
   const splitSize = source.size / 2;
   const editorGroups = [...baseGroups];
   editorGroups.splice(
     sourceIndex,
     1,
-    { ...source, tabs, activeTab, size: splitSize },
-    { id: newGroupId, tabs: [tab], activeTab: path, size: splitSize },
+    { ...detached.group, size: splitSize },
+    { id: newGroupId, tabs: [detached.tab], activeTab: path, size: splitSize },
   );
   return { ...state, editorGroups, activeEditorGroup: newGroupId };
 }

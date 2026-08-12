@@ -199,17 +199,17 @@ function engineDocRequestKey(input: {
   ]);
 }
 
-// The settled result of one open, stamped with the request it answers.
+// The settled result of one open.
 type EngineDocOpenOutcome =
-  | { key: string; token: number; kind: "bound"; doc: Y.Doc }
-  | { key: string; kind: "unavailable" }
+  | { token: number; kind: "bound"; doc: Y.Doc }
+  | { kind: "unavailable" }
   // Their OWN kinds, not flags on "unavailable": every other unavailable
   // answer means "fall back to the plain editor", and these two mean the
   // opposite (#534, #564). Collapsing them would put the branches back
   // behind one flag.
-  | { key: string; kind: "not-in-version" }
-  | { key: string; kind: "engine-may-hold-document" }
-  | { key: string; kind: "removal-in-progress"; removal: EngineRemovalInProgress };
+  | { kind: "not-in-version" }
+  | { kind: "engine-may-hold-document" }
+  | { kind: "removal-in-progress"; removal: EngineRemovalInProgress };
 
 let engineDocSessionCounter = 0;
 function nextSessionId(): string {
@@ -503,20 +503,16 @@ function createEngineDocSession(
           void loadProjectionModule();
           if (!bound.available || !bound.doc) {
             if (bound.notInVersion) {
-              setOutcome({ key: requestKey, kind: "not-in-version" });
+              setOutcome({ kind: "not-in-version" });
             } else if (bound.engineMayHoldDocument) {
-              setOutcome({
-                key: requestKey,
-                kind: "engine-may-hold-document",
-              });
+              setOutcome({ kind: "engine-may-hold-document" });
             } else if (bound.removalInProgress) {
               setOutcome({
-                key: requestKey,
                 kind: "removal-in-progress",
                 removal: bound.removalInProgress,
               });
             } else {
-              setOutcome({ key: requestKey, kind: "unavailable" });
+              setOutcome({ kind: "unavailable" });
             }
             return;
           }
@@ -533,10 +529,10 @@ function createEngineDocSession(
           doc.on("update", onUpdate);
           detachSaveObserver = () => doc.off("update", onUpdate);
           if (deletionPending) captureDeletion(doc);
-          setOutcome({ key: requestKey, token, kind: "bound", doc });
+          setOutcome({ token, kind: "bound", doc });
         } catch {
           if (!disposed) {
-            setOutcome({ key: requestKey, kind: "unavailable" });
+            setOutcome({ kind: "unavailable" });
           }
         }
       })();
@@ -789,7 +785,6 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const requestGeneration = requestGenerationRef.current.generation;
   const [leaseState, setLeaseState] = useState<{
     generation: number;
-    requestKey: string;
     snapshot: EngineDocLeaseSnapshot;
   } | null>(null);
 
@@ -805,7 +800,6 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     const update = () =>
       setLeaseState({
         generation: requestGeneration,
-        requestKey,
         snapshot: lease.getSnapshot(),
       });
     const unsubscribe = lease.subscribe(update);
@@ -828,10 +822,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   // Derive this during render. A result for an earlier request never grants
   // one editable frame while a version, path, gate, or retry request changes.
   const settled =
-    leaseState?.generation === requestGeneration &&
-    leaseState.requestKey === requestKey
-      ? leaseState.snapshot
-      : null;
+    leaseState?.generation === requestGeneration ? leaseState.snapshot : null;
   const outcome = settled?.outcome ?? null;
   const available = outcome?.kind === "bound";
   const doc = outcome?.kind === "bound" ? outcome.doc : null;

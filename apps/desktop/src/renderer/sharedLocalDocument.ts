@@ -134,38 +134,28 @@ export class SharedLocalDocument {
   ): Promise<LocalDocumentWriteResult> {
     const runsNow = this.writers === 0;
     this.writers += 1;
-    this.replace(
-      { body: this.snapshot.body, contentHash: this.snapshot.contentHash },
-      source,
-      this.snapshot.dirty,
-      "saving",
-    );
-
-    let resolveResult!: (result: LocalDocumentWriteResult) => void;
-    let rejectResult!: (error: unknown) => void;
-    const result = new Promise<LocalDocumentWriteResult>((resolve, reject) => {
-      resolveResult = resolve;
-      rejectResult = reject;
-    });
-
-    const run = async () => {
-      const current = this.snapshot;
-      if (!current.dirty || current.contentHash === null) {
-        resolveResult({
+    const run = async (): Promise<LocalDocumentWriteResult> => {
+      const candidate = this.snapshot;
+      if (!candidate.dirty || candidate.contentHash === null) {
+        return {
           status: "skipped",
-          body: current.body,
-          contentHash: current.contentHash,
-        });
-        return;
+          body: candidate.body,
+          contentHash: candidate.contentHash,
+        };
       }
-      const body = current.body;
-      const expectedContentHash = current.contentHash;
+      this.replace(
+        { body: candidate.body, contentHash: candidate.contentHash },
+        source,
+        true,
+        "saving",
+      );
+      const body = candidate.body;
+      const expectedContentHash = candidate.contentHash;
       try {
         const written = await writer(body, expectedContentHash);
         if (written.status === "conflict") {
           this.markError(source);
-          resolveResult({ ...written, body, expectedContentHash });
-          return;
+          return { ...written, body, expectedContentHash };
         }
         const newerDraft = this.snapshot.body !== body;
         this.replace(
@@ -174,18 +164,19 @@ export class SharedLocalDocument {
           newerDraft,
           newerDraft ? "saving" : "saved",
         );
-        resolveResult({ ...written, body, expectedContentHash });
-      } catch (error) {
+        return { ...written, body, expectedContentHash };
+      } catch (error: unknown) {
         this.markError(source);
-        rejectResult(error);
+        throw error;
       }
     };
 
-    const queued = (runsNow ? run() : this.tail.then(run, run)).finally(() => {
+    const scheduled = runsNow ? run() : this.tail.then(run, run);
+    const result = scheduled.finally(() => {
       this.writers -= 1;
       this.deleteWhenUnused();
     });
-    this.tail = queued.then(
+    this.tail = result.then(
       () => undefined,
       () => undefined,
     );

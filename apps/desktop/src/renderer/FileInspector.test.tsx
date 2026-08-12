@@ -1259,6 +1259,171 @@ describe("markdown editor unmount flush", () => {
     ).toBe(true);
   });
 
+  it("does not rewrite a duplicate text draft after its peer saves the same body", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "before",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const flushes: DraftFlush[] = [];
+    const user = userEvent.setup();
+    const view = render(
+      <>
+        <FileInspector
+          key="first"
+          workspaceId="ws-1"
+          path="notes/shared.txt"
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[0] = flush;
+          }}
+        />
+        <FileInspector
+          key="second"
+          workspaceId="ws-1"
+          path="notes/shared.txt"
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[1] = flush;
+          }}
+        />
+      </>,
+    );
+
+    const editors = await screen.findAllByTestId("view-text-editor");
+    const first = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    const second = editors[1]!.querySelector(".cm-content") as HTMLElement;
+    await user.click(first);
+    await user.keyboard("{End} first");
+    await waitFor(() => expect(second.textContent).toContain("before first"));
+    await user.click(second);
+    await user.keyboard("{End} second");
+    await waitFor(() =>
+      expect(first.textContent).toContain("before first second"),
+    );
+
+    await act(async () => flushes[0]!());
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("view-text-save-state")
+          .every((state) => state.dataset.state === "saved"),
+      ).toBe(true),
+    );
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "notes/shared.txt",
+      text: "before first second",
+      expectedContentHash: TEST_CONTENT_HASH,
+    });
+  });
+
+  it("hydrates a duplicate text inspector mounted after the shared draft is dirty", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "before",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    const first = (
+      <FileInspector
+        key="first"
+        workspaceId="ws-1"
+        path="notes/shared.txt"
+      />
+    );
+    const view = render(first);
+    const firstContent = (
+      await screen.findByTestId("view-text-editor")
+    ).querySelector(".cm-content") as HTMLElement;
+    await user.click(firstContent);
+    await user.keyboard("{End} dirty");
+    await waitFor(() => expect(firstContent.textContent).toContain("before dirty"));
+
+    view.rerender(
+      <>
+        {first}
+        <FileInspector
+          key="second"
+          workspaceId="ws-1"
+          path="notes/shared.txt"
+        />
+      </>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-text-editor")).toHaveLength(2),
+    );
+    const editors = screen.getAllByTestId("view-text-editor");
+    await waitFor(() =>
+      expect(editors[1]!.textContent).toContain("before dirty"),
+    );
+  });
+
+  it("does not replay a duplicate Markdown draft after its peer saves the same body", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Hello\n\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const toggles: Array<(() => void) | null> = [null, null];
+    const flushes: DraftFlush[] = [];
+    const user = userEvent.setup();
+    const view = render(
+      <>
+        <FileInspector
+          key="first"
+          workspaceId="ws-1"
+          path="shared.md"
+          registerSourceToggle={(toggle) => {
+            toggles[0] = toggle;
+          }}
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[0] = flush;
+          }}
+        />
+        <FileInspector
+          key="second"
+          workspaceId="ws-1"
+          path="shared.md"
+          registerSourceToggle={(toggle) => {
+            toggles[1] = toggle;
+          }}
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[1] = flush;
+          }}
+        />
+      </>,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    await toggleSourceOnce(() => toggles[0]);
+    await toggleSourceOnce(() => toggles[1]);
+    const editors = screen.getAllByTestId(
+      "markdown-editor",
+    ) as HTMLTextAreaElement[];
+
+    await user.click(editors[0]!);
+    await user.keyboard("{End}First");
+    await waitFor(() => expect(editors[1]!.value).toContain("First"));
+    await user.click(editors[1]!);
+    await user.keyboard("{End}Second");
+    await waitFor(() => expect(editors[0]!.value).toContain("FirstSecond"));
+
+    await act(async () => flushes[0]!());
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toMatchObject({
+      workspaceId: "ws-1",
+      relativePath: "shared.md",
+      text: "# Hello\n\nFirstSecond",
+      expectedContentHash: TEST_CONTENT_HASH,
+    });
+  });
+
   it("does not expose a retained same-path body or hash after switching workspaces", async () => {
     const firstHash = "1".repeat(64);
     const secondHash = "2".repeat(64);

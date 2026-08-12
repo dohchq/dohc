@@ -69,6 +69,32 @@ describe("SharedLocalDocument", () => {
     release();
   });
 
+  it("keeps a clean buffer saved when a writer has nothing to do", async () => {
+    const key = localDocumentKey("ws", "clean.txt", 1);
+    const buffer = getSharedLocalDocument(key);
+    const release = buffer.retain();
+    buffer.initialize("clean", "hash-1");
+    const listener = vi.fn();
+    const unsubscribe = buffer.subscribe(listener);
+    const writer = vi.fn();
+
+    await expect(buffer.write({}, writer)).resolves.toEqual({
+      status: "skipped",
+      body: "clean",
+      contentHash: "hash-1",
+    });
+
+    expect(writer).not.toHaveBeenCalled();
+    expect(buffer.getSnapshot()).toMatchObject({
+      dirty: false,
+      saveState: "saved",
+    });
+    expect(listener).not.toHaveBeenCalled();
+    unsubscribe();
+    release();
+    expect(getSharedLocalDocument(key)).not.toBe(buffer);
+  });
+
   it("isolates the same path across workspaces and version reopen keys", () => {
     const first = getSharedLocalDocument(localDocumentKey("ws-a", "a.txt", 1));
     const otherWorkspace = getSharedLocalDocument(
