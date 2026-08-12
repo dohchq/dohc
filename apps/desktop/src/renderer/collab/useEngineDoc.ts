@@ -763,26 +763,22 @@ function retainEngineDocLease(
   return lease;
 }
 
+function useChangeGeneration<T>(value: T) {
+  const generation = useRef({ value, count: 0 });
+  if (!Object.is(generation.current.value, value)) {
+    generation.current = { value, count: generation.current.count + 1 };
+  }
+  return generation;
+}
+
 export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const requestKey = engineDocRequestKey(input);
   const consumerRef = useRef<object>({});
   const retryKey = input.retryKey ?? 0;
-  const retryGenerationRef = useRef({ retryKey, generation: 0 });
-  if (retryGenerationRef.current.retryKey !== retryKey) {
-    retryGenerationRef.current = {
-      retryKey,
-      generation: retryGenerationRef.current.generation + 1,
-    };
-  }
-  const retryGeneration = retryGenerationRef.current.generation;
-  const requestGenerationRef = useRef({ key: requestKey, generation: 0 });
-  if (requestGenerationRef.current.key !== requestKey) {
-    requestGenerationRef.current = {
-      key: requestKey,
-      generation: requestGenerationRef.current.generation + 1,
-    };
-  }
-  const requestGeneration = requestGenerationRef.current.generation;
+  const retryGenerationRef = useChangeGeneration(retryKey);
+  const retryGeneration = retryGenerationRef.current.count;
+  const requestGenerationRef = useChangeGeneration(requestKey);
+  const requestGeneration = requestGenerationRef.current.count;
   const [leaseState, setLeaseState] = useState<{
     generation: number;
     snapshot: EngineDocLeaseSnapshot;
@@ -810,7 +806,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
       // A real request change must close before its replacement opens. React
       // StrictMode replays the same request, so only that same-generation
       // cleanup receives the cancellable deferred release.
-      if (requestGenerationRef.current.generation !== requestGeneration) {
+      if (requestGenerationRef.current.count !== requestGeneration) {
         lease.disposeIfReleased();
       }
     };

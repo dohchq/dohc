@@ -16,6 +16,7 @@ type WorkspaceTextWriteResult =
 
 export type LocalDocumentWriteResult =
   | { status: "skipped"; body: string; contentHash: string | null }
+  | { status: "no-baseline"; body: string }
   | ({ body: string; expectedContentHash: string } & WorkspaceTextWriteResult);
 
 const buffers = new Map<string, SharedLocalDocument>();
@@ -136,12 +137,15 @@ export class SharedLocalDocument {
     this.writers += 1;
     const run = async (): Promise<LocalDocumentWriteResult> => {
       const candidate = this.snapshot;
-      if (!candidate.dirty || candidate.contentHash === null) {
+      if (!candidate.dirty) {
         return {
           status: "skipped",
           body: candidate.body,
           contentHash: candidate.contentHash,
         };
+      }
+      if (candidate.contentHash === null) {
+        return { status: "no-baseline", body: candidate.body };
       }
       this.replace(
         { body: candidate.body, contentHash: candidate.contentHash },

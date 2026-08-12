@@ -47,7 +47,11 @@ import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import * as orphanedDraftsModule from "./orphanedDrafts";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
-import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
+import {
+  getSharedLocalDocument,
+  localDocumentKey,
+  resetSharedLocalDocumentsForTests,
+} from "./sharedLocalDocument";
 
 afterEach(() => resetSharedLocalDocumentsForTests());
 
@@ -1422,6 +1426,66 @@ describe("markdown editor unmount flush", () => {
       text: "# Hello\n\nFirstSecond",
       expectedContentHash: TEST_CONTENT_HASH,
     });
+  });
+
+  it("does not republish a stale Markdown pane over a newer peer draft", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Hello\n\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    let finishFirst!: () => void;
+    const firstWrite = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        finishFirst = () =>
+          resolve({ status: "written", contentHash: "b".repeat(64) });
+      },
+    );
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => firstWrite);
+    const buffer = getSharedLocalDocument(
+      localDocumentKey("ws-1", "queued.md", undefined),
+    );
+    // Hold this pane's subscriber behind the queue interleaving. The write
+    // seam must remain safe even before React applies a peer snapshot.
+    buffer.subscribe = () => () => {};
+    const publishDraft = vi.spyOn(buffer, "publishDraft");
+    const user = userEvent.setup();
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="queued.md"
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    const editor = screen.getByTestId("markdown-editor");
+
+    await user.click(editor);
+    await user.keyboard("{End}First");
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+    await user.keyboard("{End}Queued");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    let publishesBeforeRelease = 0;
+    await act(async () => {
+      buffer.publishDraft("# Peer newest\n", {});
+      publishesBeforeRelease = publishDraft.mock.calls.length;
+      finishFirst();
+      await firstWrite;
+    });
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    expect(publishDraft).toHaveBeenCalledTimes(publishesBeforeRelease);
+
+    expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0]).toMatchObject({
+      text: "# Peer newest\n",
+      expectedContentHash: "b".repeat(64),
+    });
+    expect(buffer.getSnapshot().body).toBe("# Peer newest\n");
   });
 
   it("does not expose a retained same-path body or hash after switching workspaces", async () => {
@@ -8047,6 +8111,175 @@ describe("markdown document opening state", () => {
     const written = writes.at(-1)![0];
     expect(written.text).toContain("title: New");
     expect(written.text).not.toContain("R");
+  });
+
+  it("sets aside a read-mode edit made before the switched version finishes reading", async () => {
+    const user = userEvent.setup();
+    const bridge = makeHeldOpenBridge();
+    const oldBody = `# Old\n\n${"old word ".repeat(14_000)}\n`;
+    const newBody = `---\ntitle: New baseline\n---\n\n# New\n\n${"new word ".repeat(14_000)}\n`;
+    const newHash = "b".repeat(64);
+    let finishSwitchedRead!: () => void;
+    const switchedRead = new Promise<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>((resolve) => {
+      finishSwitchedRead = () =>
+        resolve({ text: newBody, truncated: false, contentHash: newHash });
+    });
+    let reads = 0;
+    bridge.bridgeMock.readWorkspaceText.mockImplementation(() => {
+      reads += 1;
+      return reads === 1
+        ? Promise.resolve({
+            text: oldBody,
+            truncated: false as const,
+            contentHash: TEST_CONTENT_HASH,
+          })
+        : switchedRead;
+    });
+    let flush: DraftFlush | null = null;
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    await screen.findByTestId("page-title");
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={2}
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    const pendingTitle = screen.getByTestId("page-title");
+    await user.type(pendingTitle, "During read");
+    await user.tab();
+    const switchedBuffer = getSharedLocalDocument(
+      localDocumentKey("ws-1", "a.md", 2),
+    );
+    expect(switchedBuffer.getSnapshot()).toMatchObject({
+      initialized: true,
+      contentHash: null,
+      dirty: true,
+    });
+
+    await act(async () => {
+      finishSwitchedRead();
+      await switchedRead;
+    });
+    await waitFor(() =>
+      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+        "New baseline",
+      ),
+    );
+    expect(screen.getAllByTestId("orphaned-draft-notice")).toHaveLength(1);
+    expect(switchedBuffer.getSnapshot()).toMatchObject({
+      body: newBody,
+      contentHash: newHash,
+      dirty: false,
+      saveState: "saved",
+    });
+
+    const title = screen.getByTestId("page-title");
+    await user.clear(title);
+    await user.type(title, "After read");
+    await user.tab();
+    await act(async () => flush!());
+    expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedContentHash: newHash,
+        text: expect.stringContaining("title: After read"),
+      }),
+    );
+  });
+
+  it("applies a same-revision snapshot after the shared buffer changes", async () => {
+    const bridge = makeHeldOpenBridge();
+    const oldBody = `---\ntitle: Old\n---\n\n# Old\n\n${"old word ".repeat(14_000)}\n`;
+    const switchedRead = new Promise<never>(() => undefined);
+    let reads = 0;
+    bridge.bridgeMock.readWorkspaceText.mockImplementation(() => {
+      reads += 1;
+      return reads === 1
+        ? Promise.resolve({
+            text: oldBody,
+            truncated: false as const,
+            contentHash: TEST_CONTENT_HASH,
+          })
+        : switchedRead;
+    });
+    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bridge.answerNotEngineBacked();
+    await waitFor(() =>
+      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+        "Old",
+      ),
+    );
+    const oldBuffer = getSharedLocalDocument(
+      localDocumentKey("ws-1", "a.md", 1),
+    );
+    expect(oldBuffer.getSnapshot().revision).toBe(1);
+    await act(async () => {
+      oldBuffer.acceptRead(oldBody, TEST_CONTENT_HASH, {});
+      await Promise.resolve();
+    });
+    expect(oldBuffer.getSnapshot().revision).toBe(2);
+
+    const peerBody = `---\ntitle: Peer\n---\n\n# Peer\n\n${"peer word ".repeat(14_000)}\n`;
+    const peerBuffer = getSharedLocalDocument(
+      localDocumentKey("ws-1", "a.md", 2),
+    );
+    peerBuffer.initialize(oldBody, "c".repeat(64));
+    peerBuffer.publishDraft(peerBody, {});
+    expect(peerBuffer.getSnapshot().revision).toBe(2);
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={2}
+      />,
+    );
+
+    await waitFor(() =>
+      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+        "Peer",
+      ),
+    );
   });
 
   // #579 review r5: a set-aside draft on a path whose read FAILS (a rename

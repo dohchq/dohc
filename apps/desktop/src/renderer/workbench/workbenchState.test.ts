@@ -290,6 +290,7 @@ describe("tabs", () => {
       DEFAULT_EDITOR_GROUP_ID,
       "right",
       "a.md",
+      1,
     );
     expect(next.editorGroups[0]).toMatchObject({ tabs: [], activeTab: null });
     expect(next.editorGroups[1].tabs).toEqual([destination]);

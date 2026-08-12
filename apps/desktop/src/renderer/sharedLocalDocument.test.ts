@@ -95,6 +95,29 @@ describe("SharedLocalDocument", () => {
     expect(getSharedLocalDocument(key)).not.toBe(buffer);
   });
 
+  it("reports a dirty draft that has no write baseline", async () => {
+    const buffer = getSharedLocalDocument(
+      localDocumentKey("ws", "no-baseline.txt", 1),
+    );
+    const release = buffer.retain();
+    buffer.publishDraft("unsaved", {});
+    const writer = vi.fn();
+
+    await expect(buffer.write({}, writer)).resolves.toEqual({
+      status: "no-baseline",
+      body: "unsaved",
+    });
+
+    expect(writer).not.toHaveBeenCalled();
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "unsaved",
+      contentHash: null,
+      dirty: true,
+      saveState: "saving",
+    });
+    release();
+  });
+
   it("isolates the same path across workspaces and version reopen keys", () => {
     const first = getSharedLocalDocument(localDocumentKey("ws-a", "a.txt", 1));
     const otherWorkspace = getSharedLocalDocument(

@@ -780,7 +780,10 @@ function useAutosavedTextDraft(props: {
     props.localBuffer.getSnapshot,
     props.localBuffer.getSnapshot,
   );
-  const sharedRevision = useRef(-1);
+  const sharedRevision = useRef<{
+    buffer: SharedLocalDocument;
+    revision: number;
+  } | null>(null);
   const orphanedDrafts = useOrphanedDrafts(props.workspaceId, props.path);
   const latestDraft = useRef(props.body);
   const baseContentHash = useRef(props.contentHash);
@@ -832,11 +835,15 @@ function useAutosavedTextDraft(props: {
   useEffect(() => {
     if (
       !sharedSnapshot.initialized ||
-      sharedRevision.current === sharedSnapshot.revision
+      (sharedRevision.current?.buffer === props.localBuffer &&
+        sharedRevision.current.revision === sharedSnapshot.revision)
     ) {
       return;
     }
-    sharedRevision.current = sharedSnapshot.revision;
+    sharedRevision.current = {
+      buffer: props.localBuffer,
+      revision: sharedSnapshot.revision,
+    };
     const bodyChanged = latestDraft.current !== sharedSnapshot.body;
     baseContentHash.current = sharedSnapshot.contentHash;
     latestDraft.current = sharedSnapshot.body;
@@ -1087,6 +1094,17 @@ function useAutosavedTextDraft(props: {
         if (result.status === "skipped") {
           baseContentHash.current = result.contentHash;
           if (!unmounted.current) setSaveState("saved");
+          return;
+        }
+        if (result.status === "no-baseline") {
+          unsavedDraft.current = true;
+          if (options.captureOnFailure && options.textSnapshot !== undefined) {
+            captureLatestConflictDraft(options.textSnapshot);
+          }
+          if (!unmounted.current) setSaveState("error");
+          if (options.rejectOnError) {
+            throw new Error("dohc cannot save this draft without a content hash.");
+          }
           return;
         }
         if (result.status === "conflict") {
@@ -1408,7 +1426,10 @@ function MarkdownView(props: {
     props.localBuffer.getSnapshot,
     props.localBuffer.getSnapshot,
   );
-  const sharedRevision = useRef(-1);
+  const sharedRevision = useRef<{
+    buffer: SharedLocalDocument;
+    revision: number;
+  } | null>(null);
 
   const engine = props.engine;
   // #533. The engine open runs ON the capture chain, so a document opened
@@ -1534,11 +1555,15 @@ function MarkdownView(props: {
     if (
       engine.available ||
       !sharedSnapshot.initialized ||
-      sharedRevision.current === sharedSnapshot.revision
+      (sharedRevision.current?.buffer === props.localBuffer &&
+        sharedRevision.current.revision === sharedSnapshot.revision)
     ) {
       return;
     }
-    sharedRevision.current = sharedSnapshot.revision;
+    sharedRevision.current = {
+      buffer: props.localBuffer,
+      revision: sharedSnapshot.revision,
+    };
     const bodyChanged = latestDraft.current !== sharedSnapshot.body;
     baseContentHash.current = sharedSnapshot.contentHash;
     latestDraft.current = sharedSnapshot.body;
@@ -1980,7 +2005,9 @@ function MarkdownView(props: {
   // local editable mode active during that window resyncs after success,
   // preserving a pending edit as an orphaned draft first. A standing heading
   // target is an optional replay layered on that resync, never its gate.
-  const armedLocalResyncMode = useRef<"source" | "wysiwyg" | null>(null);
+  const armedLocalResyncMode = useRef<
+    "read" | "source" | "wysiwyg" | null
+  >(null);
   // External changes (agent edits, sync pulls) flow into the open document
   // only while NOT editing AND with no unsaved draft — mid-edit, the user's
   // draft wins until saved. Read mode now edits frontmatter inline (title/icon
@@ -2056,11 +2083,7 @@ function MarkdownView(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.reopenKey]);
   useEffect(() => {
-    if (
-      !engineMode &&
-      props.switchReadPending &&
-      (mode === "source" || mode === "wysiwyg")
-    ) {
+    if (!engineMode && props.switchReadPending) {
       armedLocalResyncMode.current = mode;
     }
   }, [mode, props.switchReadPending, engineMode]);
@@ -2346,8 +2369,14 @@ function MarkdownView(props: {
         if (!unmounted.current) setSaveState("error");
         return;
       }
-      const requestedText = options.textSnapshot ?? serializeDraftRef.current();
-      props.localBuffer.publishDraft(requestedText, localSource.current);
+      // Mounted edits publish when they happen. Re-reading this pane's editor
+      // after waiting in its local queue can be stale relative to a peer pane
+      // that has since published a newer shared draft. Only an explicit
+      // unmount snapshot is allowed to publish here because its editor is gone
+      // and it has no earlier publish seam.
+      if (options.textSnapshot !== undefined) {
+        props.localBuffer.publishDraft(options.textSnapshot, localSource.current);
+      }
       if (props.localBuffer.getSnapshot().contentHash === null) {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
@@ -2377,6 +2406,17 @@ function MarkdownView(props: {
         if (result.status === "skipped") {
           baseContentHash.current = result.contentHash;
           if (!unmounted.current) setSaveState("saved");
+          return;
+        }
+        if (result.status === "no-baseline") {
+          unsavedDraft.current = true;
+          if (options.captureOnFailure && options.textSnapshot !== undefined) {
+            captureLatestConflictDraft(options.textSnapshot);
+          }
+          if (!unmounted.current) setSaveState("error");
+          if (options.rejectOnError) {
+            throw new Error("dohc cannot save this draft without a content hash.");
+          }
           return;
         }
         if (result.status === "conflict") {

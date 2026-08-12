@@ -304,7 +304,7 @@ function normalizeEditorGroupSizes(groups: EditorGroup[]): EditorGroup[] {
 
 // Make room for one tab instance without unmounting any active editor. Tab
 // identity matters here: the same path can be active in several groups.
-function evictOldestInactiveTab(state: WorkbenchState): WorkbenchState | null {
+function evictFirstInactiveTab(state: WorkbenchState): WorkbenchState | null {
   for (const group of state.editorGroups) {
     const evicted = group.tabs.find((tab) => tab.path !== group.activeTab);
     if (!evicted) continue;
@@ -345,7 +345,7 @@ export function openTab(
   if (allTabs(state).length >= MAX_OPEN_TABS) {
     // Every tab can be active only when every group owns one. The cap still
     // wins, but no mounted editor is evicted.
-    const evicted = evictOldestInactiveTab(state);
+    const evicted = evictFirstInactiveTab(state);
     if (!evicted) return state;
     next = evicted;
   }
@@ -416,19 +416,12 @@ export function moveTabToGroup(
   sourceGroupId: string,
   targetGroupId: string,
   path: string,
-  toIndex?: number,
+  toIndex: number,
 ): WorkbenchState {
-  if (toIndex !== undefined && !Number.isInteger(toIndex)) return state;
+  if (!Number.isInteger(toIndex)) return state;
   const source = state.editorGroups.find((group) => group.id === sourceGroupId);
   const target = state.editorGroups.find((group) => group.id === targetGroupId);
-  if (!source || !target) return state;
-  const sourceIndex = source.tabs.findIndex((tab) => tab.path === path);
-  if (sourceIndex === -1) return state;
-  if (sourceGroupId === targetGroupId) {
-    return toIndex === undefined
-      ? activateTab(state, sourceGroupId, path)
-      : moveTab(state, sourceGroupId, sourceIndex, toIndex);
-  }
+  if (!source || !target || source === target) return state;
 
   const detached = detachTabFromGroup(source, path);
   if (!detached) return state;
@@ -436,7 +429,7 @@ export function moveTabToGroup(
   const targetTabs = [...target.tabs];
   if (!existingTarget) {
     const bounded = Math.min(
-      Math.max(toIndex ?? targetTabs.length, 0),
+      Math.max(toIndex, 0),
       targetTabs.length,
     );
     targetTabs.splice(bounded, 0, detached.tab);
@@ -514,7 +507,7 @@ export function createEditorGroupRight(
     ),
   };
   if (allTabs(base).length >= MAX_OPEN_TABS) {
-    const evicted = evictOldestInactiveTab(base);
+    const evicted = evictFirstInactiveTab(base);
     if (!evicted) return state;
     base = evicted;
   }

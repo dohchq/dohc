@@ -3060,6 +3060,28 @@ export function DesktopWorkspaceShell(props: {
     [closeTabsAfterFlush],
   );
 
+  const commitAfterTabFlush = useCallback(
+    (
+      groupId: string,
+      tab: WorkbenchTab,
+      failureMessage: string,
+      commit: () => void,
+    ) => {
+      const registration = mountedEditorsRef.current.get(groupId);
+      if (registration?.tab !== tab || !registration.flush) {
+        commit();
+        return;
+      }
+      void flushStableDrafts(
+        (candidateGroupId, candidateTab) =>
+          candidateGroupId === groupId && candidateTab === tab,
+      )
+        .then(commit)
+        .catch((error) => reportShellError(failureMessage, error));
+    },
+    [flushStableDrafts, reportShellError],
+  );
+
   const closeActiveTab = useCallback(() => {
     const current = wbRef.current;
     const group = activeGroup(current);
@@ -3145,24 +3167,14 @@ export function DesktopWorkspaceShell(props: {
         );
       };
 
-      const registration = mountedEditorsRef.current.get(sourceGroupId);
-      if (registration?.tab !== tab || !registration.flush) {
-        commitMove();
-        return;
-      }
-      void flushStableDrafts(
-        (groupId, candidateTab) =>
-          groupId === sourceGroupId && candidateTab === tab,
-      )
-        .then(commitMove)
-        .catch((error) =>
-          reportShellError(
-            "dohc could not save this file. The tab stayed in its current editor group.",
-            error,
-          ),
-        );
+      commitAfterTabFlush(
+        sourceGroupId,
+        tab,
+        "dohc could not save this file. The tab stayed in its current editor group.",
+        commitMove,
+      );
     },
-    [flushStableDrafts, mutateWb, reportShellError],
+    [commitAfterTabFlush, mutateWb],
   );
 
   const showPathInExplorer = useCallback(
@@ -3445,24 +3457,14 @@ export function DesktopWorkspaceShell(props: {
         if (live !== tab) return;
         mutateWb((state) => moveTabToNewGroup(state, groupId, tabPath, newGroupId));
       };
-      const registration = mountedEditorsRef.current.get(groupId);
-      if (registration?.tab !== tab || !registration.flush) {
-        commitMove();
-        return;
-      }
-      void flushStableDrafts(
-        (candidateGroupId, candidateTab) =>
-          candidateGroupId === groupId && candidateTab === tab,
-      )
-        .then(commitMove)
-        .catch((error) =>
-          reportShellError(
-            "Could not save the draft, so the tab stays in this group.",
-            error,
-          ),
-        );
+      commitAfterTabFlush(
+        groupId,
+        tab,
+        "Could not save the draft, so the tab stays in this group.",
+        commitMove,
+      );
     },
-    [flushStableDrafts, mutateWb, reportShellError],
+    [commitAfterTabFlush, mutateWb],
   );
 
   const openEditorGroupRight = useCallback(
@@ -3485,24 +3487,14 @@ export function DesktopWorkspaceShell(props: {
         if (liveTab !== tab) return;
         mutateWb((state) => createEditorGroupRight(state, groupId, newGroupId));
       };
-      const registration = mountedEditorsRef.current.get(groupId);
-      if (registration?.tab !== tab || !registration.flush) {
-        commitSplit();
-        return;
-      }
-      void flushStableDrafts(
-        (candidateGroupId, candidateTab) =>
-          candidateGroupId === groupId && candidateTab === tab,
-      )
-        .then(commitSplit)
-        .catch((error) =>
-          reportShellError(
-            "dohc could not save this file. The editor group was not created.",
-            error,
-          ),
-        );
+      commitAfterTabFlush(
+        groupId,
+        tab,
+        "dohc could not save this file. The editor group was not created.",
+        commitSplit,
+      );
     },
-    [flushStableDrafts, mutateWb, reportShellError],
+    [commitAfterTabFlush, mutateWb],
   );
 
   const closeGroupAfterFlush = useCallback(
