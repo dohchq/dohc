@@ -7,6 +7,7 @@ import "@excalidraw/excalidraw/index.css";
 import { useMemo, useRef } from "react";
 import type { ExcalidrawInitialDataState } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawDocument } from "./excalidrawDocument";
+import { bridge } from "./bridge";
 
 export type ExcalidrawCanvasProps = {
   document: ExcalidrawDocument;
@@ -48,6 +49,15 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
         autoFocus={!props.readOnly}
         aiEnabled={false}
         validateEmbeddable={false}
+        onLinkOpen={(element, event) => {
+          // Excalidraw otherwise calls window.open, which the desktop shell
+          // denies. Keep navigation inside dohc's audited URL bridge.
+          event.preventDefault();
+          if (!element.link) return;
+          void bridge()
+            .openExternalUrl({ url: element.link })
+            .catch(() => undefined);
+        }}
         UIOptions={{
           canvasActions: {
             loadScene: false,

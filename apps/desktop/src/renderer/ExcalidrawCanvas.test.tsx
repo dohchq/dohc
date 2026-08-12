@@ -24,32 +24,50 @@ vi.mock("@excalidraw/excalidraw", () => ({
   serializeAsJSON: excalidraw.serializeAsJSON,
   Excalidraw: (props: {
     viewModeEnabled?: boolean;
+    onLinkOpen?: (
+      element: { id: string; link: string },
+      event: { preventDefault(): void },
+    ) => void;
     onChange?: (
       elements: readonly unknown[],
       appState: Record<string, unknown>,
       files: Record<string, unknown>,
     ) => void;
   }) => (
-    <button
-      type="button"
-      data-testid="mock-upstream-excalidraw"
-      data-read-only={String(props.viewModeEnabled)}
-      onClick={() =>
-        props.onChange?.(
-          [{ id: "image-1", type: "image", fileId: "file-1" }],
-          { viewBackgroundColor: "#ffffff" },
-          {
-            "file-1": {
-              id: "file-1",
-              dataURL: "data:image/png;base64,iVBORw0KGgo=",
-              mimeType: "image/png",
+    <div>
+      <button
+        type="button"
+        data-testid="mock-upstream-excalidraw"
+        data-read-only={String(props.viewModeEnabled)}
+        onClick={() =>
+          props.onChange?.(
+            [{ id: "image-1", type: "image", fileId: "file-1" }],
+            { viewBackgroundColor: "#ffffff" },
+            {
+              "file-1": {
+                id: "file-1",
+                dataURL: "data:image/png;base64,iVBORw0KGgo=",
+                mimeType: "image/png",
+              },
             },
-          },
-        )
-      }
-    >
-      Drawing
-    </button>
+          )
+        }
+      >
+        Drawing
+      </button>
+      <button
+        type="button"
+        data-testid="mock-drawing-link"
+        onClick={() =>
+          props.onLinkOpen?.(
+            { id: "linked", link: "https://example.com/drawing" },
+            { preventDefault: vi.fn() },
+          )
+        }
+      >
+        Link
+      </button>
+    </div>
   ),
 }));
 
@@ -57,6 +75,7 @@ import ExcalidrawCanvas from "./ExcalidrawCanvas";
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
@@ -94,5 +113,17 @@ describe("ExcalidrawCanvas", () => {
     );
     fireEvent.click(screen.getByTestId("mock-upstream-excalidraw"));
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("opens links through the audited desktop bridge", () => {
+    const openExternalUrl = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", { openExternalUrl });
+    render(<ExcalidrawCanvas document={document} readOnly={false} />);
+
+    fireEvent.click(screen.getByTestId("mock-drawing-link"));
+
+    expect(openExternalUrl).toHaveBeenCalledWith({
+      url: "https://example.com/drawing",
+    });
   });
 });
