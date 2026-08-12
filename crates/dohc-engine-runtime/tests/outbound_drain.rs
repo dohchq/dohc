@@ -1,3 +1,4 @@
+use dohc_engine_collab::{ContentKind, DocKey, Regime, ensure_marker, scene_asset_ref};
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
     CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret, CaptureSecretRetire,
@@ -7,14 +8,14 @@ use dohc_engine_domain::{
     TextConflict, TextSnapshot, VersionedTextStore, WriteBinary, WriteText,
 };
 use dohc_engine_runtime::{
-    ActorHandle, CancellationToken, NoFaults, SelfWriteRecorder, WorkspaceSupervisor,
+    ActorHandle, CancellationToken, NoFaults, RuntimeError, SelfWriteRecorder, WorkspaceSupervisor,
 };
-use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
+use dohc_engine_storage::{EngineStore, FaultPoint, StorageError, hex_sha256};
 use dohc_engine_sync::{
     ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, apply_moment_envelope_detailed,
     apply_secret_envelope, apply_version_envelope,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::params;
 use std::path::Path;
 use std::sync::Arc;
@@ -1877,6 +1878,297 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
                 .is_some()
         );
     }
+}
+
+#[tokio::test]
+async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-scene-delete-replicates";
+    initialize_workspace(&source_db, workspace_id, true);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
+    let drawing = actor
+        .versioned_text_write(
+            WriteText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "drawing-object".to_owned(),
+                path: "drawings/board.excalidraw".to_owned(),
+                text: r#"{"type":"excalidraw","elements":[],"appState":{},"files":{}}"#.to_owned(),
+                moment_id: "drawing-write".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write drawing");
+    supervisor.close(&source_db).expect("close before marker");
+    let key = DocKey::new(workspace_id, "main", &drawing.object.object_id).expect("doc key");
+    let mut source_store = EngineStore::open(&source_db, 3).expect("open source store");
+    ensure_marker(
+        &mut source_store,
+        &key,
+        ContentKind::Scene,
+        Regime::LocalOnly,
+        &NoFaults,
+        3,
+    )
+    .expect("ensure scene marker");
+    drop(source_store);
+
+    let actor = supervisor.open(&source_db, 4).expect("reopen actor").actor;
+    let bytes = b"scene-owned-image".to_vec();
+    let sha256 = hex_sha256(&bytes);
+    let asset_path = scene_asset_ref(
+        workspace_id,
+        "main",
+        &drawing.object.object_id,
+        &sha256,
+        "image/png",
+    )
+    .expect("asset ref");
+    actor
+        .versioned_binary_write(
+            WriteBinary {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "drawing-asset-object".to_owned(),
+                path: asset_path.clone(),
+                bytes,
+                moment_id: "drawing-asset-write".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: Some("Imported drawing asset".to_owned()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            source.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write asset");
+    actor
+        .versioned_text_delete(
+            DeleteTextFile {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                path: "drawings/board.excalidraw".to_owned(),
+                moment_id: "drawing-delete".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+            },
+            source.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("delete drawing");
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ops(&source_db);
+    assert_eq!(ops.len(), 4);
+    assert!(
+        ops.iter()
+            .any(|op| { op.payload["operation"] == "delete" && op.payload["path"] == asset_path })
+    );
+    let peer = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer.engine_db_path().expect("peer db");
+    initialize_workspace(&peer_db, workspace_id, false);
+    let source_store = EngineStore::open(&source_db, 6).expect("source store");
+    let mut peer_store = EngineStore::open(&peer_db, 7).expect("peer store");
+    for op in &ops {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    let remaining: i64 = peer_store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("count peer snapshots");
+    assert_eq!(remaining, 0, "peer retained the drawing or its owned asset");
+}
+
+#[tokio::test]
+async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let workspace_id = "ws-scene-delete-rollback";
+    initialize_workspace(&db, workspace_id, false);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 2).expect("open actor").actor;
+    let drawing = actor
+        .versioned_text_write(
+            write_path_input(
+                workspace_id,
+                "main",
+                "drawings/rollback.excalidraw",
+                "rollback-drawing-object",
+                "rollback-drawing-write",
+                r#"{"type":"excalidraw","elements":[],"appState":{},"files":{}}"#,
+                2,
+            ),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write drawing");
+    supervisor.close(&db).expect("close before marker");
+    let key = DocKey::new(workspace_id, "main", &drawing.object.object_id).expect("doc key");
+    let mut store = EngineStore::open(&db, 3).expect("open marker store");
+    ensure_marker(
+        &mut store,
+        &key,
+        ContentKind::Scene,
+        Regime::LocalOnly,
+        &NoFaults,
+        3,
+    )
+    .expect("scene marker");
+    drop(store);
+    let actor = supervisor.open(&db, 4).expect("reopen actor").actor;
+    let bytes = b"rollback-scene-asset".to_vec();
+    let asset_path = scene_asset_ref(
+        workspace_id,
+        "main",
+        &drawing.object.object_id,
+        &hex_sha256(&bytes),
+        "image/png",
+    )
+    .expect("asset ref");
+    actor
+        .versioned_binary_write(
+            WriteBinary {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "rollback-asset-object".to_owned(),
+                path: asset_path.clone(),
+                bytes: bytes.clone(),
+                moment_id: "rollback-asset-write".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: Some("Imported drawing asset".to_owned()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write asset");
+    let aborted = actor
+        .versioned_text_delete(
+            DeleteTextFile {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                path: "drawings/rollback.excalidraw".to_owned(),
+                moment_id: "aborted-drawing-delete".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(aborted, Err(RuntimeError::OperationCrashed)));
+    assert!(
+        actor
+            .versioned_text_read(
+                workspace_id.to_owned(),
+                "main".to_owned(),
+                "drawings/rollback.excalidraw".to_owned(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("read drawing after rollback")
+            .is_some()
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join(&asset_path)).expect("asset survives rollback"),
+        bytes
+    );
+    let drawing_delete = actor
+        .versioned_text_delete(
+            DeleteTextFile {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                path: "drawings/rollback.excalidraw".to_owned(),
+                moment_id: "rollback-drawing-delete".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 6,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("delete committed");
+    assert_eq!(
+        std::fs::read(scratch.path().join(&asset_path)).expect("asset pending"),
+        bytes
+    );
+    actor
+        .versioned_text_rollback(
+            RollbackTextFileMutation {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                path: "drawings/rollback.excalidraw".to_owned(),
+                mutation_moment_id: drawing_delete.moment.moment_id,
+                request_id: None,
+                legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rollback drawing delete");
+    supervisor.close(&db).expect("close before replay");
+    let restarted = WorkspaceSupervisor::new();
+    let actor = restarted.open(&db, 10).expect("restart actor").actor;
+    actor
+        .materialize_replay_pending(scratch.path().to_path_buf(), workspace_id.to_owned(), 10)
+        .await
+        .expect("replay pending");
+    assert_eq!(
+        std::fs::read(scratch.path().join(asset_path)).expect("asset preserved"),
+        bytes
+    );
 }
 
 #[tokio::test]

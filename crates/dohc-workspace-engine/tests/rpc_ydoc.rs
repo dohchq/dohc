@@ -461,6 +461,312 @@ async fn default_close_settles_and_releases_a_seeded_image_scene_after_an_edit()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_a_scene_retires_only_its_owned_assets_and_restore_reseeds_them() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let image_bytes = valid_png_with_text_padding(2048);
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "image-element", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0",
+            "fileId": "image-file"
+        }],
+        "appState": {},
+        "files": { "image-file": {
+            "id": "image-file", "mimeType": "image/png", "created": 12,
+            "dataURL": format!("data:image/png;base64,{image_base64}")
+        }}
+    }))
+    .expect("portable scene");
+    for path in ["drawings/delete.excalidraw", "drawings/keep.excalidraw"] {
+        write_file(scratch.path(), path, artifact.as_bytes());
+    }
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-scene-asset-delete", 1).await;
+    let deleted_drawing = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "drawings/delete.excalidraw",
+            "contentKind": "scene", "seedFromArtifact": true }),
+    )
+    .await;
+    let deleted_asset = deleted_drawing["artifactAssets"][0]["ref"]
+        .as_str()
+        .expect("deleted asset ref")
+        .to_owned();
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.close",
+        json!({ "sessionId": deleted_drawing["sessionId"] }),
+    )
+    .await;
+    let kept_drawing = call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "drawings/keep.excalidraw",
+            "contentKind": "scene", "seedFromArtifact": true }),
+    )
+    .await;
+    let kept_asset = kept_drawing["artifactAssets"][0]["ref"]
+        .as_str()
+        .expect("kept asset ref")
+        .to_owned();
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.close",
+        json!({ "sessionId": kept_drawing["sessionId"] }),
+    )
+    .await;
+
+    let owner_directory = deleted_asset.rsplit_once('/').expect("owner directory").0;
+    let adjacent_bytes = b"user-owned-adjacent-file";
+    let adjacent_sha = dohc_engine_storage::hex_sha256(adjacent_bytes);
+    let adjacent_path = format!("{owner_directory}/{adjacent_sha}.png");
+    call(
+        &transport,
+        &handle,
+        6,
+        "versionedBinary.write",
+        json!({ "versionId": "main", "path": adjacent_path,
+            "bytes": adjacent_bytes, "origin": "api" }),
+    )
+    .await;
+
+    let deleted = call(
+        &transport,
+        &handle,
+        7,
+        "versionedText.delete",
+        json!({ "versionId": "main", "path": "drawings/delete.excalidraw",
+            "origin": "api", "requestId": "delete-drawing-assets" }),
+    )
+    .await;
+    assert!(!scratch.path().join(&deleted_asset).exists());
+    assert_eq!(
+        std::fs::read(scratch.path().join(&kept_asset)).expect("sibling asset"),
+        image_bytes
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join(&adjacent_path)).expect("adjacent user asset"),
+        adjacent_bytes
+    );
+    std::fs::remove_file(scratch.path().join("drawings/delete.excalidraw"))
+        .expect("simulate the desktop trash move");
+
+    call(&transport, &handle, 8, "workspace.close", json!({})).await;
+    drop(transport);
+    let restarted = InProcessTransport::new(Arc::new(EngineService::new()));
+    let restarted_handle = open_workspace(&restarted, &scratch, "ws-scene-asset-delete", 9).await;
+    assert!(!scratch.path().join(&deleted_asset).exists());
+    call(
+        &restarted,
+        &restarted_handle,
+        10,
+        "versionedText.rollback",
+        json!({ "versionId": "main", "path": "drawings/delete.excalidraw",
+            "mutationMomentId": deleted["moment"]["momentId"], "origin": "restore" }),
+    )
+    .await;
+    let restored = call(
+        &restarted,
+        &restarted_handle,
+        11,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "drawings/delete.excalidraw",
+            "contentKind": "scene", "seedFromArtifact": true }),
+    )
+    .await;
+    assert_eq!(restored["artifactAssets"][0]["ref"], json!(deleted_asset));
+    assert_eq!(
+        std::fs::read(scratch.path().join(&deleted_asset)).expect("restored asset"),
+        image_bytes
+    );
+    call(
+        &restarted,
+        &restarted_handle,
+        12,
+        "ydoc.evict",
+        json!({ "sessionId": restored["sessionId"] }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_retire_of_a_scene_removes_its_owned_asset_sidecar() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let image_bytes = valid_png_with_text_padding(1024);
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{ "id": "image", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": "file" }],
+        "appState": {},
+        "files": { "file": { "id": "file", "mimeType": "image/png", "created": 1,
+            "dataURL": format!("data:image/png;base64,{image_base64}") } }
+    }))
+    .expect("scene");
+    const PATH: &str = "drawings/capture-delete.excalidraw";
+    write_file(scratch.path(), PATH, artifact.as_bytes());
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, "ws-scene-capture-delete", 1).await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "scene",
+            "seedFromArtifact": true }),
+    )
+    .await;
+    let asset_path = opened["artifactAssets"][0]["ref"]
+        .as_str()
+        .expect("asset ref")
+        .to_owned();
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    std::fs::remove_file(scratch.path().join(PATH)).expect("remove drawing");
+    let mut retired = false;
+    for attempt in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        call(
+            &transport,
+            &handle,
+            4 + attempt * 2,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        if !scratch.path().join(&asset_path).exists() {
+            retired = true;
+            break;
+        }
+    }
+
+    assert!(retired, "capture never retired the scene asset sidecar");
+    let missing = call(
+        &transport,
+        &handle,
+        5,
+        "versionedBinary.read",
+        json!({ "versionId": "main", "path": asset_path }),
+    )
+    .await;
+    assert_eq!(missing, Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_active_disk() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let image_bytes = valid_png_with_text_padding(1024);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{ "id": "image", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": "file" }],
+        "appState": {}, "files": { "file": { "id": "file", "mimeType": "image/png",
+            "created": 1, "dataURL": format!("data:image/png;base64,{encoded}") } }
+    }))
+    .expect("scene");
+    write_file(
+        scratch.path(),
+        "drawings/forked.excalidraw",
+        artifact.as_bytes(),
+    );
+    let workspace_id = "ws-scene-fork-delete";
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "drawings/forked.excalidraw",
+            "contentKind": "scene", "seedFromArtifact": true }),
+    )
+    .await;
+    let asset_path = opened["artifactAssets"][0]["ref"]
+        .as_str()
+        .expect("asset ref")
+        .to_owned();
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    let feature = call(
+        &transport,
+        &handle,
+        4,
+        "versions.createNamed",
+        json!({ "workspaceId": workspace_id, "name": "feature",
+            "fromVersionId": "main" }),
+    )
+    .await["id"]
+        .as_str()
+        .expect("feature id")
+        .to_owned();
+    let inherited = call(
+        &transport,
+        &handle,
+        5,
+        "versionedBinary.read",
+        json!({ "versionId": feature, "path": asset_path }),
+    )
+    .await;
+    assert_eq!(inherited["sha256"], opened["artifactAssets"][0]["sha256"]);
+    call(
+        &transport,
+        &handle,
+        6,
+        "versionedText.delete",
+        json!({ "versionId": feature, "path": "drawings/forked.excalidraw",
+            "origin": "api", "requestId": "delete-forked-scene" }),
+    )
+    .await;
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            7,
+            "versionedBinary.read",
+            json!({ "versionId": feature, "path": asset_path }),
+        )
+        .await,
+        Value::Null
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join(asset_path)).expect("active main asset"),
+        image_bytes
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");

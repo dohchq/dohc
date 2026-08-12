@@ -198,16 +198,32 @@ pub fn scene_asset_ref(
             reason: "a scene asset SHA-256 is invalid",
         });
     }
+    let owner_directory = scene_asset_directory(workspace_id, version_id, drawing_object_id)?;
+    Ok(format!(
+        "{owner_directory}/{}.{}",
+        sha256,
+        scene_asset_extension(mime_type)?
+    ))
+}
+
+pub fn scene_asset_directory(
+    workspace_id: &str,
+    version_id: &str,
+    drawing_object_id: &str,
+) -> Result<String, SceneImportError> {
+    if workspace_id.is_empty() || version_id.is_empty() || drawing_object_id.is_empty() {
+        return Err(SceneImportError::Invalid {
+            reason: "scene asset ownership coordinates must not be empty",
+        });
+    }
     let mut owner = b"dohc:excalidraw-asset-owner:v1\0".to_vec();
     for field in [workspace_id, version_id, drawing_object_id] {
         owner.extend_from_slice(&(field.len() as u64).to_be_bytes());
         owner.extend_from_slice(field.as_bytes());
     }
     Ok(format!(
-        "assets/excalidraw/{}/{}.{}",
-        dohc_engine_storage::hex_sha256(&owner),
-        sha256,
-        scene_asset_extension(mime_type)?
+        "assets/excalidraw/{}",
+        dohc_engine_storage::hex_sha256(&owner)
     ))
 }
 

@@ -37,7 +37,7 @@ use crate::search::{
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry, Projection,
-    Regime, Ydoc, encode_scene_asset_records, import_portable_scene,
+    Regime, Ydoc, encode_scene_asset_records, import_portable_scene, scene_asset_directory,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -932,6 +932,8 @@ enum Command {
     },
     CaptureRetire {
         input: CaptureRetire,
+        root_dir: Option<PathBuf>,
+        self_writes: Option<Arc<dyn SelfWriteRecorder>>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureRetireResult, RuntimeError>>,
@@ -2157,6 +2159,34 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::CaptureRetire {
                 input,
+                root_dir: None,
+                self_writes: None,
+                faults,
+                token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Retire a captured path and immediately apply any durable disk cleanup
+    /// that the mutation creates.
+    pub fn capture_retire_materialized_blocking(
+        &self,
+        input: CaptureRetire,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CaptureRetire {
+                input,
+                root_dir: Some(root_dir),
+                self_writes: Some(self_writes),
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -3206,6 +3236,8 @@ impl ActorHandle {
         self.tx
             .send(Command::CaptureRetire {
                 input,
+                root_dir: None,
+                self_writes: None,
                 faults,
                 token,
                 reply,
@@ -7343,11 +7375,20 @@ fn worker_main(
             }
             Command::CaptureRetire {
                 input,
+                root_dir,
+                self_writes,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome = capture_retire_on_store(&mut store, &input, faults.as_ref(), &token);
+                let outcome = capture_retire_on_store(
+                    &mut store,
+                    &input,
+                    root_dir.as_deref(),
+                    self_writes.as_deref(),
+                    faults.as_ref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextRead {
@@ -8986,6 +9027,7 @@ struct SceneSeedAsset {
 fn plan_scene_seed_assets(
     key: &DocKey,
     drawing_path: &str,
+    drawing_moment_id: &str,
     files: BTreeMap<String, dohc_engine_collab::ImportedSceneFile>,
 ) -> Result<Vec<SceneSeedAsset>, RuntimeError> {
     files
@@ -9024,13 +9066,22 @@ fn plan_scene_seed_assets(
                 version: file.version,
             };
             let identity = format!(
-                "{}\0{}\0{}\0{}",
-                key.workspace_id, key.version_id, drawing_path, descriptor.id
+                "{}\0{}\0{}\0{}\0{}",
+                key.workspace_id, key.version_id, drawing_path, drawing_moment_id, descriptor.id
             );
             Ok(SceneSeedAsset {
                 descriptor,
                 bytes: file.bytes,
-                object_id: derive_capture_object_id(&key.workspace_id, &key.version_id, &path),
+                object_id: format!(
+                    "scene-asset-object-{}",
+                    hex_sha256(
+                        format!(
+                            "{}\0{}\0{}\0{}",
+                            key.workspace_id, key.version_id, path, drawing_moment_id
+                        )
+                        .as_bytes()
+                    )
+                ),
                 moment_id: format!("moment-scene-asset-{}", hex_sha256(identity.as_bytes())),
             })
         })
@@ -9156,6 +9207,7 @@ fn seed_scene_from_artifact_on_store(
     key: &DocKey,
     path: &str,
     artifact: &str,
+    artifact_moment_id: &str,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<Vec<String>, RuntimeError> {
@@ -9164,7 +9216,7 @@ fn seed_scene_from_artifact_on_store(
             RuntimeError::Domain(DomainError::InvalidInput { reason })
         }
     })?;
-    let assets = plan_scene_seed_assets(key, path, imported.files)?;
+    let assets = plan_scene_seed_assets(key, path, artifact_moment_id, imported.files)?;
     let asset_update = encode_scene_asset_records(&scene_asset_records(&assets)?).map_err(
         |error| match error {
             dohc_engine_collab::SceneImportError::Invalid { reason } => {
@@ -9177,10 +9229,11 @@ fn seed_scene_from_artifact_on_store(
         "ydoc-scene-seed-{}",
         hex_sha256(
             format!(
-                "{}\0{}\0{}\0{}",
+                "{}\0{}\0{}\0{}\0{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
+                artifact_moment_id,
                 hex_sha256(artifact.as_bytes())
             )
             .as_bytes()
@@ -9447,6 +9500,7 @@ fn ydoc_open_state_on_store(
             &key,
             path,
             &artifact.text,
+            &artifact.latest_moment_id,
             now_ms,
             &NoFaults,
         )?;
@@ -10774,7 +10828,7 @@ fn versioned_text_delete_on_store(
     let outcome = store.write_with(faults, |tx| {
         let result =
             dohc_engine_domain::delete_text_in_tx(tx, input).map_err(RuntimeError::from)?;
-        if !result.deduped {
+        let asset_jobs = if !result.deduped {
             delete_file_search_index(
                 tx,
                 &input.workspace_id,
@@ -10783,7 +10837,10 @@ fn versioned_text_delete_on_store(
             )
             .map_err(RuntimeError::from)?;
             enqueue_binary_delete(tx, &result).map_err(RuntimeError::from)?;
-        }
+            delete_owned_scene_assets_in_tx(tx, &result)?
+        } else {
+            scene_asset_delete_jobs_in_tx(tx, &result)?
+        };
         journal_moment_outbound_in_tx(
             tx,
             &input.workspace_id,
@@ -10791,10 +10848,10 @@ fn versioned_text_delete_on_store(
             result.deduped,
         )
         .map_err(RuntimeError::from)?;
-        Ok::<_, RuntimeError>(result)
+        Ok::<_, RuntimeError>((result, asset_jobs))
     })?;
     match outcome {
-        TxnOutcome::Committed(result) => {
+        TxnOutcome::Committed((result, asset_jobs)) => {
             if result.moment.before_content_kind == "binary" {
                 materialize_expected_job(
                     store,
@@ -10806,9 +10863,245 @@ fn versioned_text_delete_on_store(
                     faults,
                 );
             }
+            materialize_scene_asset_deletes(
+                store,
+                root_dir,
+                &input.workspace_id,
+                &asset_jobs,
+                self_writes,
+                faults,
+            );
             Ok(result)
         }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn delete_owned_scene_assets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    drawing_delete: &DeleteResult,
+) -> Result<Vec<(String, i64)>, RuntimeError> {
+    if drawing_delete.moment.before_content_kind != "text" {
+        return Ok(Vec::new());
+    }
+    let is_scene = drawing_delete
+        .before
+        .path
+        .to_ascii_lowercase()
+        .ends_with(".excalidraw")
+        || tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM ydoc_docs WHERE workspace_id = ?1 \
+                 AND version_id = ?2 AND object_id = ?3 AND content_kind = 'scene')",
+                params![
+                    drawing_delete.before.workspace_id,
+                    drawing_delete.before.version_id,
+                    drawing_delete.object.object_id
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
+            })?;
+    if !is_scene {
+        return Ok(Vec::new());
+    }
+    let mut owner_versions = Vec::new();
+    let mut seen_versions = HashSet::new();
+    let mut version = Some(drawing_delete.before.version_id.clone());
+    while let Some(current) = version {
+        if !seen_versions.insert(current.clone()) {
+            return Err(DomainError::StateCorrupt {
+                reason: "version ancestry contains a cycle",
+            }
+            .into());
+        }
+        owner_versions.push(current.clone());
+        version = tx
+            .query_row(
+                "SELECT fork_version_id FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+                params![drawing_delete.before.workspace_id, current],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
+            })?;
+    }
+    let owner_directories = owner_versions
+        .into_iter()
+        .map(|version_id| {
+            scene_asset_directory(
+                &drawing_delete.before.workspace_id,
+                &version_id,
+                &drawing_delete.object.object_id,
+            )
+            .map_err(|error| match error {
+                dohc_engine_collab::SceneImportError::Invalid { reason } => {
+                    RuntimeError::Domain(DomainError::StateCorrupt { reason })
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut candidates: BTreeMap<String, String> = BTreeMap::new();
+    for owner_directory in &owner_directories {
+        let pattern = format!("{owner_directory}/*");
+        let mut statement = tx
+            .prepare(
+                "SELECT a.path, s.binary_sha256 FROM path_aliases a JOIN snapshots s \
+                 ON s.workspace_id = a.workspace_id AND s.version_id = a.version_id \
+                 AND s.object_id = a.object_id WHERE a.workspace_id = ?1 \
+                 AND a.version_id = ?2 AND a.path GLOB ?3 \
+                 AND COALESCE(s.content_kind, 'text') = 'binary' \
+                 AND s.metadata_origin = 'ydoc' ORDER BY a.path",
+            )
+            .map_err(|error| {
+                RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
+            })?;
+        let rows = statement
+            .query_map(
+                params![
+                    drawing_delete.before.workspace_id,
+                    drawing_delete.before.version_id,
+                    pattern
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| {
+                RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
+            })?;
+        for row in rows {
+            let (path, sha256) = row.map_err(|error| {
+                RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
+            })?;
+            candidates.insert(path, sha256);
+        }
+    }
+    let mut jobs = Vec::new();
+    for (path, sha256) in candidates {
+        if !owner_directories
+            .iter()
+            .any(|directory| is_owned_scene_asset_path(directory, &path, &sha256))
+        {
+            continue;
+        }
+        let identity = format!(
+            "{}\0{}\0{}\0{}",
+            drawing_delete.before.workspace_id,
+            drawing_delete.before.version_id,
+            drawing_delete.moment.moment_id,
+            path
+        );
+        let asset_delete = dohc_engine_domain::delete_text_in_tx(
+            tx,
+            &DeleteTextFile {
+                workspace_id: drawing_delete.before.workspace_id.clone(),
+                version_id: drawing_delete.before.version_id.clone(),
+                path,
+                moment_id: format!(
+                    "moment-scene-asset-delete-{}",
+                    hex_sha256(identity.as_bytes())
+                ),
+                request_id: None,
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: Some("Deleted drawing asset".to_owned()),
+                metadata_correlation_id: Some(drawing_delete.moment.moment_id.clone()),
+                author_json: drawing_delete.moment.author_json.clone(),
+                now_ms: drawing_delete.moment.recorded_at_ms,
+            },
+        )
+        .map_err(RuntimeError::from)?;
+        delete_file_search_index(
+            tx,
+            &asset_delete.before.workspace_id,
+            &asset_delete.before.version_id,
+            &asset_delete.object.object_id,
+        )
+        .map_err(search_domain)?;
+        if enqueue_binary_delete(tx, &asset_delete).map_err(RuntimeError::from)? {
+            jobs.push((
+                binary_delete_job_id(&asset_delete.moment.moment_id),
+                asset_delete.moment.recorded_at_ms,
+            ));
+        }
+        journal_moment_outbound_in_tx(
+            tx,
+            &asset_delete.before.workspace_id,
+            &asset_delete.moment.moment_id,
+            false,
+        )
+        .map_err(RuntimeError::from)?;
+    }
+    Ok(jobs)
+}
+
+fn scene_asset_delete_jobs_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    drawing_delete: &DeleteResult,
+) -> Result<Vec<(String, i64)>, RuntimeError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT j.job_id, m.recorded_at_ms FROM moments m \
+             JOIN materialization_jobs j ON j.job_id = 'binary-delete-mat_' || m.moment_id \
+             WHERE m.workspace_id = ?1 AND m.version_id = ?2 AND m.operation = 'delete' \
+             AND m.before_content_kind = 'binary' AND m.metadata_origin = 'ydoc' \
+             AND m.metadata_summary = 'Deleted drawing asset' \
+             AND m.metadata_correlation_id = ?3 ORDER BY j.job_id",
+        )
+        .map_err(|error| {
+            RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
+        })?;
+    let rows = statement
+        .query_map(
+            params![
+                drawing_delete.before.workspace_id,
+                drawing_delete.before.version_id,
+                drawing_delete.moment.moment_id
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| {
+            RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
+        })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|error| {
+        RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
+    })
+}
+
+fn is_owned_scene_asset_path(owner_directory: &str, path: &str, sha256: &str) -> bool {
+    let Some(file_name) = path
+        .strip_prefix(owner_directory)
+        .and_then(|tail| tail.strip_prefix('/'))
+    else {
+        return false;
+    };
+    if file_name.contains('/') {
+        return false;
+    }
+    [
+        "svg", "png", "jpg", "gif", "webp", "bmp", "ico", "avif", "jfif", "bin",
+    ]
+    .iter()
+    .any(|extension| file_name == format!("{sha256}.{extension}"))
+}
+
+fn materialize_scene_asset_deletes(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    jobs: &[(String, i64)],
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+) {
+    for (job_id, recorded_at_ms) in jobs {
+        materialize_expected_job(
+            store,
+            root_dir,
+            workspace_id,
+            job_id,
+            self_writes,
+            *recorded_at_ms,
+            faults,
+        );
     }
 }
 
@@ -10862,6 +11155,12 @@ fn versioned_text_rollback_on_store(
         input,
         faults,
         |tx, object_id, restored_text, compensating_moment_id| {
+            cancel_pending_scene_asset_deletes(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &input.mutation_moment_id,
+            )?;
             delete_file_search_index(tx, &input.workspace_id, &input.version_id, object_id)
                 .map_err(search_domain)?;
             if let Some((path, text)) = restored_text {
@@ -11133,6 +11432,27 @@ fn versioned_text_rollback_on_store(
         materialized,
         materialize_outcome,
     })
+}
+
+fn cancel_pending_scene_asset_deletes(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    drawing_delete_moment_id: &str,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "UPDATE materialization_jobs SET status = 'cancelled', completed_at_ms = ( \
+             SELECT recorded_at_ms FROM moments WHERE workspace_id = ?1 AND moment_id = ?3 \
+         ) WHERE status = 'pending' AND operation = 'delete' AND workspace_id = ?1 \
+         AND job_id IN (SELECT 'binary-delete-mat_' || moment_id FROM moments \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND operation = 'delete' \
+             AND before_content_kind = 'binary' AND metadata_origin = 'ydoc' \
+             AND metadata_summary = 'Deleted drawing asset' \
+             AND metadata_correlation_id = ?3)",
+        params![workspace_id, version_id, drawing_delete_moment_id],
+    )
+    .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+    Ok(())
 }
 
 fn versioned_text_merge_on_store(
@@ -11423,6 +11743,8 @@ fn capture_secret_retire_on_store(
 fn capture_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureRetire,
+    root_dir: Option<&std::path::Path>,
+    self_writes: Option<&dyn SelfWriteRecorder>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureRetireResult, RuntimeError> {
@@ -11441,6 +11763,7 @@ fn capture_retire_on_store(
     }
     let outcome = store.write_with(faults, |tx| {
         let result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let mut asset_jobs = Vec::new();
         if !result.deduped
             && let Some(retired) = result.retired.as_ref()
         {
@@ -11453,6 +11776,9 @@ fn capture_retire_on_store(
             .map_err(RuntimeError::from)?;
         }
         if let Some(retired) = result.retired.as_ref() {
+            if !result.deduped && !retired.deduped {
+                asset_jobs = delete_owned_scene_assets_in_tx(tx, retired)?;
+            }
             journal_moment_outbound_in_tx(
                 tx,
                 &input.workspace_id,
@@ -11461,10 +11787,22 @@ fn capture_retire_on_store(
             )
             .map_err(RuntimeError::from)?;
         }
-        Ok::<_, RuntimeError>(result)
+        Ok::<_, RuntimeError>((result, asset_jobs))
     })?;
     match outcome {
-        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Committed((result, asset_jobs)) => {
+            if let (Some(root_dir), Some(self_writes)) = (root_dir, self_writes) {
+                materialize_scene_asset_deletes(
+                    store,
+                    root_dir,
+                    &input.workspace_id,
+                    &asset_jobs,
+                    self_writes,
+                    faults,
+                );
+            }
+            Ok(result)
+        }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }
@@ -11829,6 +12167,7 @@ mod scene_seed_transaction_tests {
             &key,
             "drawing.excalidraw",
             &artifact,
+            "drawing-write",
             2,
             faults.as_ref(),
         );
@@ -11886,6 +12225,7 @@ mod scene_seed_transaction_tests {
             &key,
             "drawing.excalidraw",
             &artifact,
+            "drawing-write",
             2,
             &NoFaults,
         )

@@ -2870,6 +2870,70 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     };
   }
 
+  it("hydrates a live artifact asset by its workspace-scoped blob after its head is retired", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const path = "drawings/asset-recovery.excalidraw";
+    const assetPath = `assets/excalidraw/${"a".repeat(64)}/${"b".repeat(64)}.png`;
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path,
+      text: '{"type":"excalidraw","elements":[],"appState":{},"files":{}}',
+    });
+    loopback.seedBinaryFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: assetPath,
+      bytes: Array.from(bytes),
+      origin: "sync",
+    });
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      daemonOwnsCapture: true,
+      openRustYDocProviderSession: async (options) => {
+        const doc = new Y.Doc();
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "scene",
+          path: options.path,
+          head: "present",
+          lineage: "existing",
+          artifactAssets: [
+            {
+              id: "image-file",
+              mimeType: "image/png",
+              created: 1,
+              ref: assetPath,
+              sha256,
+            },
+          ],
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => ({ sha256: "c".repeat(64), content: "" }) as never,
+          close: async () => undefined,
+        } as never;
+      },
+    });
+    const session = await engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
+    await loopback.sendRequest({
+      id: -1,
+      method: VERSIONED_METHOD.textDelete,
+      workspace: WORKSPACE_ID,
+      params: { versionId: "main", path: assetPath, origin: "api" },
+    });
+
+    await expect(session.readArtifactAsset("image-file")).resolves.toEqual({
+      descriptor: session.artifactAssets?.[0],
+      bytes,
+    });
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
   it("opens a session against the version a running switch is ENTERING, never the one it is leaving", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();

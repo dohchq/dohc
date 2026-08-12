@@ -4651,10 +4651,9 @@ export function createWorkspaceEngineCapture(
                 `The live document does not reference artifact asset ${assetId}.`,
               );
             }
-            const bytes = await engine.readBinaryFile({
+            const bytes = await engine.readBinaryBlob({
               workspaceId,
-              versionId,
-              path: descriptor.ref,
+              sha256: descriptor.sha256,
             });
             if (!bytes) {
               throw new Error(

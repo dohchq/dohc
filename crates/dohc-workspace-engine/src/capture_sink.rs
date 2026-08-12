@@ -672,7 +672,7 @@ impl StoreCaptureSink {
         summary: Option<String>,
         allow_ydoc_origin: bool,
     ) -> Result<(), CaptureError> {
-        match self.actor.capture_retire_blocking(
+        match self.actor.capture_retire_materialized_blocking(
             CaptureRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -685,6 +685,8 @@ impl StoreCaptureSink {
                 only_if_capture_origin: true,
                 allow_ydoc_origin,
             },
+            self.shadow_root.clone(),
+            Arc::new(self.self_writes.clone()),
             Arc::new(NoFaults),
         ) {
             Ok(_) => Ok(()),
