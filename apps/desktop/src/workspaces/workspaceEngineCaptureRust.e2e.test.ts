@@ -570,7 +570,12 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       // durably pending materialization job through the idempotent settle.
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
-        if ((await readFile(absolute, "utf8")) !== "base\n") break;
+        if (
+          (await readFile(absolute, "utf8")) !== "base\n" &&
+          states.includes("saved")
+        ) {
+          break;
+        }
         await delay(200);
       }
       expect(await readFile(absolute, "utf8")).toBe("locked edit\nbase\n");

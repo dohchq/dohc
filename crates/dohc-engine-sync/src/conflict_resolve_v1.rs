@@ -1387,7 +1387,7 @@ fn present_head_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>, Sy
     Ok(keys)
 }
 
-fn conflict_resolve_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>, SyncError> {
+fn unbound_receiver_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>, SyncError> {
     let mut keys = present_head_ydoc_keys(payload)?;
     if payload.current.present().is_none() {
         let current_path_key = DocKey::new(
@@ -1406,6 +1406,11 @@ fn conflict_resolve_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>
             keys.push(current_path_key);
         }
     }
+    Ok(keys)
+}
+
+fn conflict_resolve_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>, SyncError> {
+    let mut keys = unbound_receiver_ydoc_keys(payload)?;
     let result_path_key = DocKey::new(
         &payload.workspace_id,
         &payload.target_version_id,
@@ -1443,7 +1448,7 @@ fn unbound_receiver_lineages_match_reviewed_sides(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
 ) -> Result<bool, SyncError> {
-    for key in present_head_ydoc_keys(payload)? {
+    for key in unbound_receiver_ydoc_keys(payload)? {
         let Some(lineage) = crate::ydoc_apply::complete_ydoc_projection_in_tx(tx, &key)? else {
             continue;
         };
@@ -4086,6 +4091,86 @@ mod tests {
         assert_eq!(open_reviews, 1);
 
         assert_eq!(projected_ydoc_text(&mut store, &key), "current text");
+    }
+
+    #[test]
+    fn absent_lineage_unbound_parent_preserves_a_path_derived_ydoc_for_review() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let derived_key = DocKey::new(
+            "ws",
+            "main",
+            derive_capture_object_id("ws", "main", "doc.md"),
+        )
+        .expect("derived path key");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "DELETE FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "DELETE FROM path_aliases WHERE workspace_id='ws' AND version_id='main' AND path='doc.md'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "DELETE FROM snapshots WHERE workspace_id='ws' AND version_id='main' AND object_id='object-a'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES (?1,?2,?3)",
+                    params![derived_key.workspace_id, derived_key.object_id, 12],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("make the reviewed artifact absent");
+        dohc_engine_collab::ensure_marker(
+            &mut store,
+            &derived_key,
+            ContentKind::Plaintext,
+            dohc_engine_collab::Regime::LocalOnly,
+            &NoFaults,
+            12,
+        )
+        .expect("path-derived marker");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        let update = doc.plaintext_insert(0, "unsettled local draft");
+        dohc_engine_collab::record_local_update(&mut store, &derived_key, &update, &NoFaults, 13)
+            .expect("path-derived local draft");
+
+        let mut payload = built.validated.payload;
+        payload.chosen_from = ResolveChoiceV1::Current;
+        payload.resolution = ResolutionV1::KeptCurrent;
+        payload.current = HeadV1::Absent { path_ref: 0 };
+        payload.result = HeadV1::Absent { path_ref: 0 };
+        payload.effect_context.current_object_created_at_ms = None;
+        payload.effect_context.result_object_created_at_ms = None;
+        payload.effects.clear();
+        payload.lineage_transition = None;
+        let built = build_conflict_resolve_v1(payload).expect("absent lineage-unbound carrier");
+        let parent = imported_envelope(0, "conflict.resolve", built.value);
+
+        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
+            .expect("route the hidden local draft through review");
+
+        assert_eq!(
+            projected_ydoc_text(&mut store, &derived_key),
+            "unsettled local draft"
+        );
+        let open_reviews: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws' AND status='open'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)
+            })
+            .expect("open review count");
+        assert_eq!(open_reviews, 1);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dohc_engine_domain::chats::{
     CHAT_THREAD_HEADER_MESSAGE_ID, chat_thread_display_title, upsert_chat_search_index_row,
@@ -615,6 +616,14 @@ struct AlwaysLive;
 impl LeaseProbe for AlwaysLive {
     fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
         true
+    }
+}
+
+struct FirstLeaseCheckLive(AtomicUsize);
+
+impl LeaseProbe for FirstLeaseCheckLive {
+    fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
+        self.0.fetch_add(1, Ordering::SeqCst) == 0
     }
 }
 
@@ -15154,6 +15163,114 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
             },
         }],
         "MUTATION: the Skipped path must reconstruct the persisted refusal"
+    );
+}
+
+#[test]
+fn pull_reaches_later_cross_origin_work_before_retrying_a_tagged_bundle() {
+    use crate::conflict_resolve_v1::{
+        ConflictResolveV1, EffectContextV1, EffectKindV1, EffectV1, HeadContentKindV1, HeadV1,
+        MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
+    };
+
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let result_text = "resolved after retry";
+    let result_sha = dohc_engine_storage::hex_sha256(result_text.as_bytes());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![result_sha, result_text.len() as i64, result_text],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed result blob");
+    let result = HeadV1::Present(PresentHeadV1 {
+        path_ref: 0,
+        object_id: "retry-object".to_owned(),
+        latest_moment_id: "retry-result-moment".to_owned(),
+        content_kind: HeadContentKindV1::Text,
+        blob_sha256: result_sha,
+        byte_length: result_text.len() as i64,
+        updated_at_ms: 21,
+    });
+    let built = build_conflict_resolve_v1(ConflictResolveV1 {
+        workspace_id: "ws".to_owned(),
+        conflict_id: "retryable-parent-conflict".to_owned(),
+        chosen_from: ResolveChoiceV1::Incoming,
+        resolution: ResolutionV1::AppliedIncoming,
+        target_version_id: "main".to_owned(),
+        source_version_id: "peer".to_owned(),
+        paths: vec!["retry.md".to_owned()],
+        current: HeadV1::Absent { path_ref: 0 },
+        incoming: result.clone(),
+        result,
+        effect_context: EffectContextV1 {
+            recorded_at_ms: 21,
+            metadata: MetadataV1 {
+                origin: "sync".to_owned(),
+                summary: None,
+                correlation_id: None,
+            },
+            author: None,
+            current_object_created_at_ms: None,
+            result_object_created_at_ms: Some(20),
+        },
+        effects: vec![EffectV1 {
+            kind: EffectKindV1::Write,
+            moment_id: "retry-result-moment".to_owned(),
+            payload_sha256: String::new(),
+        }],
+        lineage_transition: None,
+    })
+    .expect("retryable parent carrier");
+    let mut parent = envelope("bundle-peer", 0, "conflict.resolve", built.value);
+    parent.recorded_at_ms = 21;
+    let mut child = envelope(
+        "bundle-peer",
+        1,
+        "moment.append",
+        built.validated.shadows[0].clone(),
+    );
+    child.recorded_at_ms = 22;
+    let mut later =
+        version_create_with_shipped_snapshots("later-peer", "later-version", Vec::new());
+    later.recorded_at_ms = 23;
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![parent, child, later],
+            next_cursor: 3,
+            has_more: false,
+        })),
+    });
+    let leases = FirstLeaseCheckLive(AtomicUsize::new(0));
+
+    let outcome = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &leases, 1_000)
+        .expect("later cross-origin work must run before the bundle retry pass");
+    assert!(
+        matches!(outcome, SyncPassOutcome::Complete { applied: 3, .. }),
+        "parent, later dependency, and tagged child must all apply: {outcome:?}"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "bundle-peer").expect("bundle ack"),
+        1
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "later-peer").expect("later ack"),
+        0
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "retry.md")
+            .expect("resolved head")
+            .expect("resolved head exists")
+            .text,
+        result_text
     );
 }
 
