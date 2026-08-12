@@ -1,0 +1,272 @@
+import * as Y from "yjs";
+
+export const EXCALIDRAW_SCENE_SCHEMA = {
+  version: 1,
+  roots: {
+    revisions: "excalidraw:revisions",
+    appState: "excalidraw:app-state",
+    assets: "excalidraw:assets",
+  },
+} as const;
+
+type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type JsonObject = { [key: string]: JsonValue | undefined };
+
+export interface ElementSnapshot extends JsonObject {
+  id: string;
+  type: string;
+  version: number;
+  versionNonce: number;
+  isDeleted: boolean;
+  index?: string | null;
+}
+
+export interface SceneAsset extends JsonObject {
+  id: string;
+  mimeType: string;
+  created: number;
+  ref: string;
+  lastRetrieved?: number;
+  version?: number;
+}
+
+export interface FoldedScene {
+  elements: ElementSnapshot[];
+  appState: JsonObject;
+  assets: Record<string, SceneAsset>;
+}
+
+const EXPORTABLE_APP_STATE = new Set([
+  "gridSize",
+  "gridStep",
+  "gridModeEnabled",
+  "viewBackgroundColor",
+]);
+
+export class SceneCodecError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SceneCodecError";
+  }
+}
+
+export function declareSceneRoots(doc: Y.Doc) {
+  return {
+    revisions: doc.getMap<string>(EXCALIDRAW_SCENE_SCHEMA.roots.revisions),
+    appState: doc.getMap<string>(EXCALIDRAW_SCENE_SCHEMA.roots.appState),
+    assets: doc.getMap<string>(EXCALIDRAW_SCENE_SCHEMA.roots.assets),
+  };
+}
+
+export function revisionKey(id: string, version: number, versionNonce: number): string {
+  validateIdentity(id, version, versionNonce);
+  return JSON.stringify([id, version, versionNonce]);
+}
+
+export function parseRevisionKey(key: string): readonly [string, number, number] {
+  let tuple: unknown;
+  try {
+    tuple = JSON.parse(key);
+  } catch {
+    throw new SceneCodecError("The element revision key is not valid JSON.");
+  }
+  if (!Array.isArray(tuple) || tuple.length !== 3) {
+    throw new SceneCodecError("The element revision key must be a three-item JSON tuple.");
+  }
+  const [id, version, nonce] = tuple;
+  validateIdentity(id, version, nonce);
+  return [id, version, nonce];
+}
+
+export function insertElementRevision(doc: Y.Doc, input: unknown): string {
+  const element = validateElement(input);
+  const key = revisionKey(element.id, element.version, element.versionNonce);
+  const encoded = stableJson(element);
+  doc.transact(() => {
+    const { revisions } = declareSceneRoots(doc);
+    const existing = revisions.get(key);
+    if (existing !== undefined && existing !== encoded) {
+      throw new SceneCodecError("The element revision tuple already has different content.");
+    }
+    const observed = [...revisions.keys()];
+    revisions.set(key, encoded);
+    for (const observedKey of observed) {
+      const [id, version, nonce] = parseRevisionKey(observedKey);
+      if (id === element.id && dominates(element, version, nonce)) {
+        revisions.delete(observedKey);
+      }
+    }
+  });
+  return key;
+}
+
+export function setAppStateProperty(doc: Y.Doc, key: string, value: JsonValue): void {
+  if (key.length === 0) throw new SceneCodecError("The app-state key must not be empty.");
+  const encoded = stableJson(value);
+  doc.transact(() => declareSceneRoots(doc).appState.set(key, encoded));
+}
+
+export function putSceneAsset(doc: Y.Doc, input: unknown): void {
+  const asset = validateAsset(input);
+  doc.transact(() =>
+    declareSceneRoots(doc).assets.set(asset.id, stableJson(asset)),
+  );
+}
+
+export function foldScene(doc: Y.Doc): FoldedScene {
+  const roots = declareSceneRoots(doc);
+  const winners = new Map<string, ElementSnapshot>();
+  for (const [key, encoded] of roots.revisions) {
+    const tuple = parseRevisionKey(key);
+    const element = validateElement(parseStored(encoded, "element revision"));
+    if (revisionKey(element.id, element.version, element.versionNonce) !== key) {
+      throw new SceneCodecError("The element revision key does not match its snapshot.");
+    }
+    const previous = winners.get(tuple[0]);
+    if (!previous || compareRevision(element, previous) > 0) winners.set(element.id, element);
+  }
+
+  const elements = [...winners.values()].sort(compareElementOrder);
+  const appState: JsonObject = {};
+  for (const [key, encoded] of roots.appState) appState[key] = parseStored(encoded, "app-state value");
+  const assets: Record<string, SceneAsset> = {};
+  for (const [id, encoded] of roots.assets) {
+    const asset = validateAsset(parseStored(encoded, "asset"));
+    if (asset.id !== id) throw new SceneCodecError("The asset key does not match its record.");
+    assets[id] = asset;
+  }
+  return { elements, appState, assets };
+}
+
+export function exportPortableScene(doc: Y.Doc): string {
+  const scene = foldScene(doc);
+  const elements = scene.elements
+    .filter((element) => !element.isDeleted)
+    .map(clearElementForExport);
+  const appState: JsonObject = {};
+  for (const key of Object.keys(scene.appState).sort()) {
+    if (EXPORTABLE_APP_STATE.has(key)) appState[key] = scene.appState[key]!;
+  }
+  const referenced = new Set(
+    elements.map((element) => element.fileId).filter((id): id is string => typeof id === "string"),
+  );
+  const files: Record<string, SceneAsset> = {};
+  for (const id of [...referenced].sort()) {
+    const asset = scene.assets[id];
+    if (asset) files[id] = asset;
+  }
+  return stableJson({ type: "excalidraw", version: 2, source: "dohc", elements, appState, files });
+}
+
+export function stableJson(value: unknown): string {
+  return JSON.stringify(canonicalize(value));
+}
+
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new SceneCodecError("Scene JSON numbers must be finite.");
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (typeof value === "object") {
+    const output: Record<string, unknown> = {};
+    for (const key of Object.keys(value as object).sort()) {
+      const item = (value as Record<string, unknown>)[key];
+      if (item !== undefined) output[key] = canonicalize(item);
+    }
+    return output;
+  }
+  throw new SceneCodecError("Scene data must contain only JSON values.");
+}
+
+function validateElement(input: unknown): ElementSnapshot {
+  if (!isObject(input)) throw new SceneCodecError("The element revision must be a JSON object.");
+  validateIdentity(input.id, input.version, input.versionNonce);
+  if (typeof input.type !== "string" || input.type.length === 0)
+    throw new SceneCodecError("The element type must not be empty.");
+  if (typeof input.isDeleted !== "boolean")
+    throw new SceneCodecError("The element deletion flag must be a Boolean.");
+  if ("index" in input && input.index !== null && typeof input.index !== "string")
+    throw new SceneCodecError("The element index must be a string, null, or missing.");
+  stableJson(input);
+  return input as ElementSnapshot;
+}
+
+function validateIdentity(id: unknown, version: unknown, nonce: unknown): asserts id is string {
+  if (typeof id !== "string" || id.length === 0)
+    throw new SceneCodecError("The element ID must not be empty.");
+  if (!Number.isSafeInteger(version) || (version as number) < 0)
+    throw new SceneCodecError("The element version must be a nonnegative safe integer.");
+  if (!Number.isSafeInteger(nonce) || (nonce as number) < 0)
+    throw new SceneCodecError("The element version nonce must be a nonnegative safe integer.");
+}
+
+function validateAsset(input: unknown): SceneAsset {
+  if (!isObject(input)) throw new SceneCodecError("The asset must be a JSON object.");
+  if (typeof input.id !== "string" || input.id.length === 0)
+    throw new SceneCodecError("The asset ID must not be empty.");
+  if (typeof input.mimeType !== "string" || input.mimeType.length === 0)
+    throw new SceneCodecError("The asset MIME type must not be empty.");
+  if (!Number.isSafeInteger(input.created) || (input.created as number) < 0)
+    throw new SceneCodecError("The asset creation time must be a nonnegative safe integer.");
+  for (const field of ["lastRetrieved", "version"] as const) {
+    const value = input[field];
+    if (value !== undefined && (!Number.isSafeInteger(value) || (value as number) < 0)) {
+      throw new SceneCodecError(`The asset ${field} value must be a nonnegative safe integer.`);
+    }
+  }
+  if (typeof input.ref !== "string" || !isWorkspaceRelativeRef(input.ref))
+    throw new SceneCodecError("The asset reference must be a normalized workspace-relative path.");
+  if ("dataURL" in input) throw new SceneCodecError("The asset record must not contain file bytes.");
+  stableJson(input);
+  return input as SceneAsset;
+}
+
+function isWorkspaceRelativeRef(ref: string): boolean {
+  if (!ref || ref.includes("\\") || ref.startsWith("/") || /^[A-Za-z]:/.test(ref)) return false;
+  const parts = ref.split("/");
+  return parts.every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
+function dominates(element: ElementSnapshot, version: number, nonce: number): boolean {
+  return element.version > version || (element.version === version && element.versionNonce < nonce);
+}
+
+function compareRevision(left: ElementSnapshot, right: ElementSnapshot): number {
+  if (left.version !== right.version) return left.version - right.version;
+  return right.versionNonce - left.versionNonce;
+}
+
+function compareElementOrder(left: ElementSnapshot, right: ElementSnapshot): number {
+  const leftIndex = indexKey(left);
+  const rightIndex = indexKey(right);
+  const indexOrder = leftIndex[0] - rightIndex[0] || leftIndex[1].localeCompare(rightIndex[1]);
+  return indexOrder || left.id.localeCompare(right.id);
+}
+
+function indexKey(element: ElementSnapshot): readonly [number, string] {
+  if (element.index === undefined) return [2, ""];
+  if (element.index === null) return [1, ""];
+  return [0, element.index];
+}
+
+function clearElementForExport(element: ElementSnapshot): ElementSnapshot {
+  if (element.type === "line" || element.type === "arrow") {
+    return { ...element, lastCommittedPoint: null };
+  }
+  return element;
+}
+
+function parseStored(encoded: string, label: string): JsonValue {
+  try {
+    return JSON.parse(encoded) as JsonValue;
+  } catch {
+    throw new SceneCodecError(`The stored ${label} is not valid JSON.`);
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

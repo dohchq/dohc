@@ -362,6 +362,19 @@ importers:
         specifier: ^4.1.10
         version: 4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11))
 
+  packages/excalidraw-scene:
+    dependencies:
+      yjs:
+        specifier: 13.6.30
+        version: 13.6.30
+    devDependencies:
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@26.1.2)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11))
+
   packages/mcp:
     dependencies:
       '@dohc/cli':
