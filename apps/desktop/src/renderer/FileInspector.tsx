@@ -28,6 +28,7 @@ import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { bridge } from "./bridge";
+import { binaryFileDataFromArtifact } from "./excalidrawAssets";
 import {
   useEngineDoc,
   type EngineDocSaveState,
@@ -3449,57 +3450,6 @@ function ImageView({ url, path }: { url: string; path: string }) {
   );
 }
 
-const EXCALIDRAW_ASSET_MIME_TYPES = new Set<BinaryFileData["mimeType"]>([
-  "image/svg+xml",
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/bmp",
-  "image/x-icon",
-  "image/avif",
-  "image/jfif",
-  "application/octet-stream",
-]);
-
-function excalidrawAssetMimeType(
-  value: string,
-): BinaryFileData["mimeType"] | null {
-  return EXCALIDRAW_ASSET_MIME_TYPES.has(value as BinaryFileData["mimeType"])
-    ? (value as BinaryFileData["mimeType"])
-    : null;
-}
-
-function artifactDataUrl(
-  mimeType: BinaryFileData["mimeType"],
-  bytes: Uint8Array,
-): BinaryFileData["dataURL"] {
-  const chunks: string[] = [];
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    chunks.push(
-      String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)),
-    );
-  }
-  return `data:${mimeType};base64,${btoa(chunks.join(""))}` as BinaryFileData["dataURL"];
-}
-
-type ArtifactAssetDescriptor = UseEngineDoc["artifactAssets"][number];
-
-function sameArtifactAssetDescriptor(
-  left: ArtifactAssetDescriptor,
-  right: ArtifactAssetDescriptor,
-): boolean {
-  return (
-    left.id === right.id &&
-    left.mimeType === right.mimeType &&
-    left.created === right.created &&
-    left.ref === right.ref &&
-    left.sha256 === right.sha256 &&
-    left.lastRetrieved === right.lastRetrieved &&
-    left.version === right.version
-  );
-}
-
 function DrawingView({
   body,
   contentHash,
@@ -3685,28 +3635,11 @@ function DrawingView({
       const files: BinaryFileData[] = [];
       for (const descriptor of hydrationSession.descriptors) {
         if (activeHydrationSession.current !== hydrationSession) return [];
-        const mimeType = excalidrawAssetMimeType(descriptor.mimeType);
-        if (!mimeType) continue;
         try {
           const loaded = await hydrationSession.read(descriptor.id);
-          if (
-            activeHydrationSession.current !== hydrationSession ||
-            !sameArtifactAssetDescriptor(loaded.descriptor, descriptor)
-          ) {
-            continue;
-          }
-          files.push({
-            id: descriptor.id as BinaryFileData["id"],
-            mimeType,
-            dataURL: artifactDataUrl(mimeType, loaded.bytes),
-            created: descriptor.created,
-            ...(descriptor.lastRetrieved === undefined
-              ? {}
-              : { lastRetrieved: descriptor.lastRetrieved }),
-            ...(descriptor.version === undefined
-              ? {}
-              : { version: descriptor.version }),
-          });
+          if (activeHydrationSession.current !== hydrationSession) continue;
+          const file = binaryFileDataFromArtifact(descriptor, loaded);
+          if (file) files.push(file);
         } catch {
           // One missing asset cannot stop the drawing or its other assets.
         }
@@ -4257,6 +4190,12 @@ export function FileInspector(props: {
       message={
         engine.readOnlyWhileEditing
           ? "This document became read-only before your edit saved. Copy your text to keep it."
+          : kind === "drawing" && engine.deletedWhileEditing
+            ? engine.deletedRecoveryAssets?.state === "loading"
+              ? `dohc is adding ${engine.deletedRecoveryAssets.count} ${engine.deletedRecoveryAssets.count === 1 ? "image" : "images"} to your set-aside drawing. Wait before you copy it.`
+              : engine.deletedRecoveryAssets?.state === "missing"
+                ? `dohc could not recover ${engine.deletedRecoveryAssets.count} ${engine.deletedRecoveryAssets.count === 1 ? "image" : "images"}. Copy your set-aside drawing to keep the rest.`
+                : "This drawing was deleted. Copy your set-aside drawing to keep it."
           : undefined
       }
     />

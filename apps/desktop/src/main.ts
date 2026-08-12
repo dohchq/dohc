@@ -8539,9 +8539,11 @@ function registerIpcHandlers(
       const entry = engineYDocSessions.get(
         engineYDocSessionKey(event.sender.id, input.sessionId),
       );
+      // Deletion marks this entry before the renderer can capture its recovery
+      // draft. Keep the version-bound asset reader available until the normal
+      // session close so an image-bearing drawing can finish that recovery.
       if (
         !entry ||
-        entry.deleted ||
         entry.sender !== event.sender ||
         entry.generation !== rendererGeneration(event.sender.id)
       ) {

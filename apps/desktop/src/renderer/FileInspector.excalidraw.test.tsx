@@ -56,7 +56,10 @@ vi.mock("./ExcalidrawCanvas", () => ({
 }));
 
 import { classifyForView, FileInspector } from "./FileInspector";
-import { EMPTY_EXCALIDRAW_DOCUMENT } from "./excalidrawDocument";
+import {
+  EMPTY_EXCALIDRAW_DOCUMENT,
+  parseExcalidrawDocument,
+} from "./excalidrawDocument";
 
 const CONTENT_HASH = "a".repeat(64);
 const WRITTEN_HASH = "b".repeat(64);
@@ -98,6 +101,16 @@ function largeValidPng(): Uint8Array {
   return png;
 }
 
+function base64(bytes: Uint8Array): string {
+  const chunks: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    chunks.push(
+      String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)),
+    );
+  }
+  return btoa(chunks.join(""));
+}
+
 const ARTIFACT_DESCRIPTOR = {
   id: "file-1",
   mimeType: "image/png",
@@ -134,6 +147,7 @@ function drawing(source: string, withFile = false): string {
 function bridgeFor(
   text = drawing("first", true),
   engineScene?: Y.Doc,
+  artifactAssets: readonly (typeof ARTIFACT_DESCRIPTOR)[] = [],
 ) {
   const saveStateListeners = new Set<
     (event: EngineYDocSaveStateEvent) => void
@@ -151,7 +165,11 @@ function bridgeFor(
     openEngineYDocSession: vi.fn<DohcDesktopBridge["openEngineYDocSession"]>(async (payload) => {
       sessionId = payload.sessionId;
       return engineScene
-        ? { available: true, initialUpdate: Y.encodeStateAsUpdate(engineScene) }
+        ? {
+            available: true,
+            initialUpdate: Y.encodeStateAsUpdate(engineScene),
+            artifactAssets: [...artifactAssets],
+          }
         : { available: false };
     }),
     closeEngineYDocSession: vi.fn(async () => undefined),
@@ -183,6 +201,19 @@ describe("FileInspector Excalidraw view", () => {
     vi.clearAllMocks();
     canvas.props = null;
     resetOrphanedDrafts();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: vi.fn(async (text: string) => {
+          Object.defineProperty(navigator.clipboard, "lastText", {
+            configurable: true,
+            value: text,
+            writable: true,
+          });
+        }),
+        lastText: "",
+      },
+    });
   });
 
   afterEach(() => {
@@ -349,12 +380,7 @@ describe("FileInspector Excalidraw view", () => {
       index: "a0",
     });
     putSceneAsset(scene, ARTIFACT_DESCRIPTOR);
-    const bridge = bridgeFor(drawing("engine"), scene);
-    bridge.openEngineYDocSession = vi.fn(async () => ({
-      available: true,
-      initialUpdate: Y.encodeStateAsUpdate(scene),
-      artifactAssets: [ARTIFACT_DESCRIPTOR],
-    }));
+    const bridge = bridgeFor(drawing("engine"), scene, [ARTIFACT_DESCRIPTOR]);
     bridge.readEngineYDocArtifactAsset = vi.fn(async () => ({
       descriptor: ARTIFACT_DESCRIPTOR,
       bytes,
@@ -393,6 +419,93 @@ describe("FileInspector Excalidraw view", () => {
     });
     expect(Y.encodeStateAsUpdate(doc, beforeHydration)).toHaveLength(2);
     expect(Y.encodeStateAsUpdate(doc).byteLength).toBeLessThan(4 * 1024);
+  });
+
+  it("upgrades a deleted drawing recovery with a verified large PNG", async () => {
+    const bytes = largeValidPng();
+    expect(bytes.byteLength).toBeGreaterThan(48 * 1024);
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    insertElementRevision(scene, {
+      id: "image-1",
+      type: "image",
+      fileId: ARTIFACT_DESCRIPTOR.id,
+      version: 1,
+      versionNonce: 1,
+      isDeleted: false,
+      index: "a0",
+    });
+    putSceneAsset(scene, ARTIFACT_DESCRIPTOR);
+    let resolveAsset!: (value: {
+      descriptor: typeof ARTIFACT_DESCRIPTOR;
+      bytes: Uint8Array;
+    }) => void;
+    const pendingAsset = new Promise<{
+      descriptor: typeof ARTIFACT_DESCRIPTOR;
+      bytes: Uint8Array;
+    }>((resolve) => {
+      resolveAsset = resolve;
+    });
+    const bridge = bridgeFor(drawing("engine"), scene, [ARTIFACT_DESCRIPTOR]);
+    bridge.readEngineYDocArtifactAsset = vi.fn(() => pendingAsset);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+
+    await screen.findByTestId("mock-excalidraw-canvas");
+    const doc = (canvas.props as unknown as ExcalidrawCanvasProps).sceneDoc!;
+    act(() =>
+      insertElementRevision(doc, {
+        id: "image-1",
+        type: "image",
+        fileId: ARTIFACT_DESCRIPTOR.id,
+        version: 2,
+        versionNonce: 2,
+        isDeleted: false,
+        index: "a0",
+        x: 40,
+      }),
+    );
+    act(() => bridge.emitSaveState("deleted", 1));
+
+    const notice = await screen.findByTestId("orphaned-draft-notice");
+    expect(notice.textContent).toContain(
+      "dohc is adding 1 image to your set-aside drawing.",
+    );
+    expect(bridge.readEngineYDocArtifactAsset).toHaveBeenCalledWith({
+      sessionId: expect.any(String),
+      assetId: ARTIFACT_DESCRIPTOR.id,
+    });
+
+    await act(async () => {
+      resolveAsset({ descriptor: ARTIFACT_DESCRIPTOR, bytes });
+      await pendingAsset;
+    });
+    await waitFor(() =>
+      expect(notice.textContent).toContain(
+        "This drawing was deleted. Copy your set-aside drawing to keep it.",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    const text = (navigator.clipboard as Clipboard & { lastText: string })
+      .lastText;
+    const recovered = parseExcalidrawDocument(text);
+    expect(recovered.elements).toContainEqual(
+      expect.objectContaining({
+        id: "image-1",
+        fileId: ARTIFACT_DESCRIPTOR.id,
+        x: 40,
+      }),
+    );
+    expect(recovered.files).toEqual({
+      [ARTIFACT_DESCRIPTOR.id]: {
+        id: ARTIFACT_DESCRIPTOR.id,
+        mimeType: ARTIFACT_DESCRIPTOR.mimeType,
+        dataURL: `data:image/png;base64,${base64(bytes)}`,
+        created: ARTIFACT_DESCRIPTOR.created,
+        lastRetrieved: ARTIFACT_DESCRIPTOR.lastRetrieved,
+        version: ARTIFACT_DESCRIPTOR.version,
+      },
+    });
   });
 
   it.each([
@@ -616,6 +729,7 @@ describe("FileInspector Excalidraw view", () => {
     render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
 
     const view = await screen.findByTestId("mock-excalidraw-canvas");
+    const closesBeforeTransition = bridge.closeEngineYDocSession.mock.calls.length;
     const boundDoc = (canvas.props as unknown as ExcalidrawCanvasProps).sceneDoc!;
     act(() =>
       insertElementRevision(boundDoc, {
@@ -639,7 +753,9 @@ describe("FileInspector Excalidraw view", () => {
     expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
       "This document became read-only before your edit saved.",
     );
-    expect(bridge.closeEngineYDocSession).toHaveBeenCalledOnce();
+    expect(bridge.closeEngineYDocSession).toHaveBeenCalledTimes(
+      closesBeforeTransition + 1,
+    );
 
     const sent = bridge.applyEngineYDocUpdate.mock.calls.length;
     act(() =>

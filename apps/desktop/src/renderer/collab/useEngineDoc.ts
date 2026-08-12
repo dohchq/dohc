@@ -4,10 +4,13 @@ import type { LiveDocumentKind } from "@dohc/workspace-contracts/live-documents"
 import {
   declareSceneRoots,
   exportPortableScene,
+  stableJson,
 } from "@dohc/excalidraw-scene";
+import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { bridge } from "../bridge";
+import { binaryFileDataFromArtifact } from "../excalidrawAssets";
 import {
   captureOrphanedDraft,
   replaceOrphanedDraft,
@@ -61,6 +64,40 @@ function sceneFromSnapshot(snapshot: Uint8Array): string {
   declareSceneRoots(rebuilt);
   Y.applyUpdate(rebuilt, snapshot);
   return exportPortableScene(rebuilt);
+}
+
+type SceneRecoveryWork = {
+  immediateText: string;
+  requiredAssetCount: number;
+  completed: Promise<{ text: string; missingAssetCount: number }>;
+};
+
+function portableSceneRecovery(
+  snapshot: Uint8Array,
+  files: Readonly<Record<string, BinaryFileData>>,
+): { text: string; requiredAssetIds: readonly string[] } {
+  const scene = JSON.parse(sceneFromSnapshot(snapshot)) as {
+    elements: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const requiredAssetIds = new Set<string>();
+  for (const element of scene.elements) {
+    if (element.type === "image" && typeof element.fileId === "string") {
+      requiredAssetIds.add(element.fileId);
+    }
+  }
+  const available = new Set(Object.keys(files));
+  const elements = scene.elements.map((element) =>
+    element.type === "image" &&
+    typeof element.fileId === "string" &&
+    !available.has(element.fileId)
+      ? { ...element, fileId: null }
+      : element,
+  );
+  return {
+    text: stableJson({ ...scene, elements, files }),
+    requiredAssetIds: [...requiredAssetIds],
+  };
 }
 
 function recoveryTextFromSnapshot(
@@ -207,6 +244,12 @@ export type UseEngineDoc = {
   deletedWhileEditing: boolean;
   // The recovery row created for this deletion, if it still exists.
   deletedDraftId: number | null;
+  // Image recovery for a deleted drawing. While loading, the immediate draft
+  // remains valid but has null file references. A missing result is final.
+  deletedRecoveryAssets:
+    | { state: "loading"; count: number }
+    | { state: "missing"; count: number }
+    | null;
   // Main refused a live edit because this workspace became read-only after
   // the session opened. The rejected document is retained for recovery only.
   readOnlyWhileEditing: boolean;
@@ -367,6 +410,11 @@ export function useEngineDoc(input: {
   const [readOnlyTransition, setReadOnlyTransition] = useState<{
     token: number;
   } | null>(null);
+  const [deletionAssetRecovery, setDeletionAssetRecovery] = useState<{
+    token: number;
+    state: "loading" | "missing";
+    count: number;
+  } | null>(null);
   const saveStateRef = useRef<EngineDocSaveState>("saved");
   // Monotonic per-open token: only the newest open may set state (the async-
   // state invariant — a stale workspace/path response never repaints).
@@ -407,6 +455,13 @@ export function useEngineDoc(input: {
   const deletedWhileEditing =
     settled?.kind === "bound" && deletion?.token === settled.token;
   const deletedDraftId = deletedWhileEditing ? deletion.draftId : null;
+  const deletedRecoveryAssets =
+    deletedWhileEditing && deletionAssetRecovery?.token === settled.token
+      ? {
+          state: deletionAssetRecovery.state,
+          count: deletionAssetRecovery.count,
+        }
+      : null;
   const readOnlyWhileEditing =
     settled?.kind === "bound" && readOnlyTransition?.token === settled.token;
   const writesRefused = useRef(false);
@@ -436,6 +491,7 @@ export function useEngineDoc(input: {
     const token = ++openTokenRef.current;
     setDeletion(null);
     setReadOnlyTransition(null);
+    setDeletionAssetRecovery(null);
     let cancelled = false;
     let binding: EngineYDocBinding | null = null;
     let detachSaveObserver: (() => void) | null = null;
@@ -453,6 +509,11 @@ export function useEngineDoc(input: {
     let recoveryIsDeletion = false;
     let deletionPending = false;
     let releaseStarted = false;
+    let recoveryRevision = 0;
+    const recoveryAssetReads = new Map<
+      string,
+      Promise<BinaryFileData | null>
+    >();
 
     const sessionId = nextSessionId();
     const localSeq = { current: 0 };
@@ -474,6 +535,48 @@ export function useEngineDoc(input: {
       setSaveError(error);
     };
 
+    const prepareSceneRecovery = (
+      bytes: Uint8Array,
+      bound: EngineYDocBinding,
+    ): SceneRecoveryWork => {
+      const initial = portableSceneRecovery(bytes, {});
+      const descriptors = new Map(
+        bound.artifactAssets.map((descriptor) => [descriptor.id, descriptor]),
+      );
+      const reads = initial.requiredAssetIds.map((assetId) => {
+        let read = recoveryAssetReads.get(assetId);
+        if (!read) {
+          const descriptor = descriptors.get(assetId);
+          read = descriptor
+            ? bound
+                .readArtifactAsset(assetId)
+                .then((loaded) =>
+                  binaryFileDataFromArtifact(descriptor, loaded),
+                )
+                .catch(() => null)
+            : Promise.resolve(null);
+          recoveryAssetReads.set(assetId, read);
+        }
+        return read.then((file) => [assetId, file] as const);
+      });
+      return {
+        immediateText: initial.text,
+        requiredAssetCount: initial.requiredAssetIds.length,
+        completed: Promise.all(reads).then((results) => {
+          const files: Record<string, BinaryFileData> = {};
+          let missingAssetCount = 0;
+          for (const [assetId, file] of results) {
+            if (file) files[assetId] = file;
+            else missingAssetCount += 1;
+          }
+          return {
+            text: portableSceneRecovery(bytes, files).text,
+            missingAssetCount,
+          };
+        }),
+      };
+    };
+
     // `forceCreate` false means: nothing was unsettled at the moment this
     // snapshot was taken (the dominant delete path, settled before removal)
     // — no draft is worth creating for it. A later snapshot always forces
@@ -482,10 +585,25 @@ export function useEngineDoc(input: {
       bytes: Uint8Array,
       forceCreate: boolean,
       reportDeletion: boolean,
+      sceneRecovery: SceneRecoveryWork | null = null,
     ): void => {
+      const revision = ++recoveryRevision;
+      if (reportDeletion && sceneRecovery) {
+        setDeletionAssetRecovery(
+          sceneRecovery.requiredAssetCount === 0
+            ? null
+            : {
+                token,
+                state: "loading",
+                count: sceneRecovery.requiredAssetCount,
+              },
+        );
+      }
       recoveryQueue = recoveryQueue
         .then(async () => {
-          const text = await recoveryTextFromSnapshot(documentKind, bytes);
+          const text =
+            sceneRecovery?.immediateText ??
+            (await recoveryTextFromSnapshot(documentKind, bytes));
           if (recoveryDraftId === null) {
             if (!forceCreate) return;
             recoveryDraftId = captureOrphanedDraft(workspaceId, path, text);
@@ -498,6 +616,32 @@ export function useEngineDoc(input: {
           if (reportDeletion && token === openTokenRef.current) {
             setDeletion({ token, draftId: recoveryDraftId });
           }
+          if (!sceneRecovery) return;
+          // Asset I/O must not hold the recovery queue. A later scene update
+          // must replace the immediate draft now, even if this older image
+          // read is slow. Only the newest snapshot may apply its async result.
+          void sceneRecovery.completed.then((recovered) => {
+            if (revision !== recoveryRevision || recoveryDraftId === null) {
+              return;
+            }
+            replaceOrphanedDraft(
+              workspaceId,
+              path,
+              recoveryDraftId,
+              recovered.text,
+            );
+            if (reportDeletion && token === openTokenRef.current) {
+              setDeletionAssetRecovery(
+                recovered.missingAssetCount === 0
+                  ? null
+                  : {
+                      token,
+                      state: "missing",
+                      count: recovered.missingAssetCount,
+                    },
+              );
+            }
+          });
         })
         .catch((error: unknown) => {
           // This draft is the last copy of the user's text — a load failure
@@ -518,6 +662,10 @@ export function useEngineDoc(input: {
       const bytes = Y.encodeStateAsUpdate(doc);
       recoverySnapshotBytes = bytes;
       const forceCreate = saveStateRef.current !== "saved";
+      const sceneRecovery =
+        forceCreate && documentKind === "scene" && binding
+          ? prepareSceneRecovery(bytes, binding)
+          : null;
       if (forceCreate) {
         // Persisted NOW, before the projection module is even guaranteed to
         // load: a renderer close/reload/crash while that import is still in
@@ -528,12 +676,32 @@ export function useEngineDoc(input: {
         recoveryDraftId = captureOrphanedDraft(
           workspaceId,
           path,
-          crudeRecoveryText(documentKind, doc),
+          sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc),
         );
       }
       setDeletion({ token, draftId: recoveryDraftId });
       reportSaveState("deleted");
-      enqueueRecoverySnapshot(bytes, forceCreate, true);
+      enqueueRecoverySnapshot(bytes, forceCreate, true, sceneRecovery);
+    };
+
+    const captureReadOnlyTransition = (doc: Y.Doc): void => {
+      writesRefused.current = true;
+      const bytes = Y.encodeStateAsUpdate(doc);
+      recoverySnapshotBytes = bytes;
+      const sceneRecovery =
+        documentKind === "scene" && binding
+          ? prepareSceneRecovery(bytes, binding)
+          : null;
+      // Main sends this state only after it has discarded a local update.
+      // Persist the rejected document synchronously before the session closes.
+      recoveryDraftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc),
+      );
+      setReadOnlyTransition({ token });
+      reportSaveState("read-only");
+      enqueueRecoverySnapshot(bytes, true, false, sceneRecovery);
     };
 
     const refreshRecoveryDraft = (doc: Y.Doc): void => {
@@ -541,7 +709,24 @@ export function useEngineDoc(input: {
       const bytes = Y.encodeStateAsUpdate(doc);
       if (snapshotsEqual(bytes, recoverySnapshotBytes)) return;
       recoverySnapshotBytes = bytes;
-      enqueueRecoverySnapshot(bytes, true, recoveryIsDeletion);
+      const sceneRecovery =
+        documentKind === "scene" && binding
+          ? prepareSceneRecovery(bytes, binding)
+          : null;
+      if (sceneRecovery && recoveryDraftId !== null) {
+        replaceOrphanedDraft(
+          workspaceId,
+          path,
+          recoveryDraftId,
+          sceneRecovery.immediateText,
+        );
+      }
+      enqueueRecoverySnapshot(
+        bytes,
+        true,
+        recoveryIsDeletion,
+        sceneRecovery,
+      );
     };
 
     const capturePermanentFailure = (
@@ -551,31 +736,19 @@ export function useEngineDoc(input: {
       writesRefused.current = true;
       const bytes = Y.encodeStateAsUpdate(doc);
       recoverySnapshotBytes = bytes;
+      const sceneRecovery =
+        documentKind === "scene" && binding
+          ? prepareSceneRecovery(bytes, binding)
+          : null;
       recoveryDraftId = captureOrphanedDraft(
         workspaceId,
         path,
-        crudeRecoveryText(documentKind, doc),
+        sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc),
       );
       if (!cancelled && token === openTokenRef.current) {
         reportSaveState("error", error.message);
       }
-      enqueueRecoverySnapshot(bytes, true, false);
-    };
-
-    const captureReadOnlyTransition = (doc: Y.Doc): void => {
-      writesRefused.current = true;
-      const bytes = Y.encodeStateAsUpdate(doc);
-      recoverySnapshotBytes = bytes;
-      // Main sends this state only after it has discarded a local update.
-      // Persist the rejected document synchronously before the session closes.
-      recoveryDraftId = captureOrphanedDraft(
-        workspaceId,
-        path,
-        crudeRecoveryText(documentKind, doc),
-      );
-      setReadOnlyTransition({ token });
-      reportSaveState("read-only");
-      enqueueRecoverySnapshot(bytes, true, false);
+      enqueueRecoverySnapshot(bytes, true, false, sceneRecovery);
     };
 
     const releaseBinding = (): void => {
@@ -767,6 +940,7 @@ export function useEngineDoc(input: {
     engineMayHoldDocument,
     deletedWhileEditing,
     deletedDraftId,
+    deletedRecoveryAssets,
     readOnlyWhileEditing,
     removalInProgress,
     artifactAssets,
