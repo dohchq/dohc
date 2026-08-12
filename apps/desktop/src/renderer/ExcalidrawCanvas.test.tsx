@@ -24,6 +24,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
   serializeAsJSON: excalidraw.serializeAsJSON,
   Excalidraw: (props: {
     viewModeEnabled?: boolean;
+    autoFocus?: boolean;
     onLinkOpen?: (
       element: { id: string; link: string },
       event: { preventDefault(): void },
@@ -39,6 +40,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
         type="button"
         data-testid="mock-upstream-excalidraw"
         data-read-only={String(props.viewModeEnabled)}
+        data-auto-focus={String(props.autoFocus)}
         onClick={() =>
           props.onChange?.(
             [{ id: "image-1", type: "image", fileId: "file-1" }],
@@ -113,6 +115,16 @@ describe("ExcalidrawCanvas", () => {
     );
     fireEvent.click(screen.getByTestId("mock-upstream-excalidraw"));
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("does not focus an editable canvas when its editor group is inactive", () => {
+    render(
+      <ExcalidrawCanvas document={document} readOnly={false} autoFocus={false} />,
+    );
+
+    expect(screen.getByTestId("mock-upstream-excalidraw").dataset.autoFocus).toBe(
+      "false",
+    );
   });
 
   it("opens links through the audited desktop bridge", () => {

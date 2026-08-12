@@ -16,6 +16,7 @@ export const MENU_COMMANDS = [
   "settings",
   "check-updates",
   "install-update",
+  "new-editor-group-right",
   "close-tab",
 ] as const;
 
@@ -73,6 +74,8 @@ export function isExplorerMenuCommand(
 // selected command id, validated here before it can route to existing shell
 // actions.
 export const WORKBENCH_MENU_COMMANDS = [
+  "move-tab-to-new-group",
+  "close-editor-group",
   "close-tab",
   "close-other-tabs",
   "copy-path",

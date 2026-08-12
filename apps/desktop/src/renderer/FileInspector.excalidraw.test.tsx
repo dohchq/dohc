@@ -192,6 +192,23 @@ describe("FileInspector Excalidraw view", () => {
     expect(classifyForView("plans/architecture.EXCALIDRAW")).toBe("drawing");
   });
 
+  it("does not let an inactive editor-group drawing claim focus", async () => {
+    const bridge = bridgeFor();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="plans/architecture.excalidraw"
+        autoFocus={false}
+      />,
+    );
+
+    await screen.findByTestId("mock-excalidraw-canvas");
+    expect((canvas.props as unknown as ExcalidrawCanvasProps).autoFocus).toBe(
+      false,
+    );
+  });
+
   it("loads embedded files and saves canvas changes through the file writer", async () => {
     const bridge = bridgeFor();
     vi.stubGlobal("dohcDesktop", bridge);

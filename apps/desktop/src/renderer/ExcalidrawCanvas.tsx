@@ -31,6 +31,7 @@ import {
 export type ExcalidrawCanvasProps = {
   document: ExcalidrawDocument;
   readOnly: boolean;
+  autoFocus?: boolean;
   onChange?: (serialized: string) => void;
   sceneDoc?: Y.Doc;
   hydrateAssets?: () => Promise<readonly BinaryFileData[]>;
@@ -186,7 +187,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
           });
         }}
         viewModeEnabled={props.readOnly}
-        autoFocus={!props.readOnly}
+        autoFocus={!props.readOnly && (props.autoFocus ?? true)}
         aiEnabled={false}
         validateEmbeddable={false}
         onLinkOpen={(element, event) => {

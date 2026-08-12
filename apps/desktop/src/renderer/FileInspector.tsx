@@ -1291,6 +1291,9 @@ function MarkdownView(props: {
   // docs toggle the read-only source projection; the legacy autosave editor
   // switches its existing (editable) source mode.
   registerSourceToggle?: (toggle: (() => void) | null) => void;
+  // Only the active editor group may claim focus when its source textarea
+  // mounts. Omitted preserves the single-editor behavior for existing callers.
+  autoFocus?: boolean;
   // The engine refused the open because the path is not in this workspace's
   // version (#534). `discardedEdit` is true when the user had typed and that
   // draft was thrown away rather than written — the inspector owes them that
@@ -2841,7 +2844,7 @@ function MarkdownView(props: {
         <textarea
           data-testid="markdown-editor"
           ref={editorRef}
-          autoFocus
+          autoFocus={props.autoFocus ?? true}
           value={draft}
           readOnly={readOnly}
           onChange={(e) => onDraft(e.target.value)}
@@ -3491,6 +3494,7 @@ function DrawingView({
   workspaceId,
   path,
   readOnly,
+  autoFocus,
   truncated,
   reopenKey,
   switchReadPending,
@@ -3512,6 +3516,7 @@ function DrawingView({
   workspaceId: string;
   path: string;
   readOnly: boolean;
+  autoFocus?: boolean;
   truncated: boolean;
   reopenKey?: number;
   switchReadPending: boolean;
@@ -3778,6 +3783,7 @@ function DrawingView({
               hydrateAssets={hydrateAssets}
               presence={presence}
               readOnly={canvasReadOnly}
+              autoFocus={autoFocus}
               onAssetRefusedChange={setAssetRefused}
               onChange={canvasReadOnly || engineMode ? undefined : editor.setDraft}
             />
@@ -4039,7 +4045,7 @@ export function FileInspector(props: {
   // A pending file/section mention or fragment-link jump. Unlike a search
   // target this stays in the rich editor and lands on the rendered heading.
   headingTarget?: HeadingTarget;
-  onScrollConsumed?: () => void;
+  onScrollConsumed?: (nonce: number) => void;
   // Editor save-state seam for the tab strip's dirty indicator. Editable
   // source/table/document views all report through the same small contract.
   onSaveStateChange?: (state: FileSaveState) => void;
@@ -4064,6 +4070,9 @@ export function FileInspector(props: {
   // Registers the mounted markdown view's "view source" toggle with the shell
   // (command palette seam) — registerDraftFlush precedent.
   registerSourceToggle?: (toggle: (() => void) | null) => void;
+  // Editor groups keep inactive inspectors mounted. They pass false so a
+  // source textarea mounting there cannot steal focus from the active group.
+  autoFocus?: boolean;
 }) {
   const kind = classifyForView(props.path);
   const isText =
@@ -4203,7 +4212,7 @@ export function FileInspector(props: {
     !isText || engineDocBound || (text !== null && loadedPath === props.path);
   useEffect(() => {
     if (scrollTarget && scrollTarget.path === props.path && textReady) {
-      onScrollConsumed?.();
+      onScrollConsumed?.(scrollTarget.nonce);
     }
   }, [scrollTarget, props.path, textReady, onScrollConsumed]);
   const url = assetUrl(props.workspaceId, props.path, props.refreshKey ?? 0);
@@ -4317,6 +4326,7 @@ export function FileInspector(props: {
             switchUnresyncedRef={switchUnresyncedRef}
             refreshKey={props.refreshKey}
             registerSourceToggle={props.registerSourceToggle}
+            autoFocus={props.autoFocus}
             onPendingDraftChange={setPendingDraft}
             engine={engine}
             onRetryEngineOpen={retryEngineOpen}
@@ -4335,6 +4345,7 @@ export function FileInspector(props: {
           workspaceId={props.workspaceId}
           path={props.path}
           readOnly={!!props.readOnly}
+          autoFocus={props.autoFocus}
           truncated={truncated}
           reopenKey={props.engineVersionKey}
           switchReadPending={switchReadPending.current}

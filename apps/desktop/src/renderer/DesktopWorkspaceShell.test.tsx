@@ -33,6 +33,7 @@ import type {
   ListEngineMomentsResult,
   ListWorkspaceVersionsResult,
   McpConfigResult,
+  ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
   RefreshSharedViewResult,
   StartAgentRunResult,
@@ -132,15 +133,32 @@ const READY_UPDATE_STATE: UpdateStateEvent = {
 };
 
 const STORED_STATE: WorkspaceUiState = {
-  version: 1,
+  version: 2,
   activeView: "explorer",
   sidebarVisible: true,
   sidebarWidth: 320,
-  tabs: ["b.md"],
-  activeTab: "b.md",
+  editorGroups: [
+    { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 1 },
+  ],
+  activeEditorGroup: "primary",
   chatsVisible: true,
   chatsWidth: 360,
 };
+
+function storedStateWithTabs(
+  tabs: string[],
+  activeTab: string | null = tabs[0] ?? null,
+): WorkspaceUiState {
+  return {
+    ...STORED_STATE,
+    editorGroups: [{ id: "primary", tabs, activeTab, size: 1 }],
+    activeEditorGroup: "primary",
+  };
+}
+
+function storedTabs(state: WorkspaceUiState): string[] {
+  return state.editorGroups.flatMap((group) => group.tabs);
+}
 
 // One canonical DM, as the graph node a click starts a navigation from and as
 // the record syncDms answers with.
@@ -318,7 +336,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       drivers: [],
       session: null,
     })),
-    readWorkspaceText: vi.fn(async () => ({
+    readWorkspaceText: vi.fn(async (_payload: ReadWorkspaceTextPayload) => ({
       text: "# Doc\n",
       truncated: false as const,
       contentHash: "a".repeat(64),
@@ -810,6 +828,159 @@ describe("global letter shortcut ownership", () => {
   });
 });
 
+describe("editor groups", () => {
+  function fileTreeRow(path: string): HTMLElement {
+    return screen
+      .getAllByTestId("tree-row")
+      .find((row) => row.dataset.path === path)!;
+  }
+
+  it("creates an editor group right with Ctrl+\\ and collapses it after its last tab closes", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    renderShell(bridge);
+    expect(await screen.findByTestId("view-markdown")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(2),
+    );
+    expect(screen.getByRole("region", { name: "Editor group 2" }).dataset.active).toBe(
+      "true",
+    );
+
+    await userEvent.click(fileTreeRow("b.md"));
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    await waitFor(
+      () => {
+        const persisted = bridge.setWorkspaceUiState.mock.calls
+          .map(([payload]) => payload.state)
+          .find(
+            (state) =>
+              state.editorGroups.length === 2 &&
+              state.editorGroups[0]?.tabs.includes("a.md") &&
+              state.editorGroups[1]?.tabs.includes("b.md"),
+          );
+        expect(persisted?.activeEditorGroup).toBe(persisted?.editorGroups[1]?.id);
+      },
+      { timeout: 2_000 },
+    );
+    fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
+    );
+    expect(screen.queryByTestId("tab-b.md")).toBeNull();
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+  });
+
+  it("closes an empty editor group from its visible control", async () => {
+    renderShell(
+      makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md"))),
+    );
+    expect(await screen.findByTestId("view-markdown")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(2),
+    );
+    await userEvent.click(
+      within(screen.getByRole("region", { name: "Editor group 2" })).getByRole(
+        "button",
+        { name: "Close editor group" },
+      ),
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
+    );
+    expect(screen.queryByRole("button", { name: "Close editor group" })).toBeNull();
+  });
+
+  it("keeps different surfaces visible and routes new opens to the focused group", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: [
+        { path: "a.md", kind: "file" as const },
+        { path: "b.md", kind: "file" as const },
+        { path: "data.csv", kind: "file" as const },
+        { path: "other.csv", kind: "file" as const },
+      ],
+      folders: [] as string[],
+    }));
+    bridge.readWorkspaceText = vi.fn(async (payload: ReadWorkspaceTextPayload) => ({
+      text: payload.relativePath.endsWith(".csv") ? "name,value\nAda,1\n" : "# Doc\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("view-markdown");
+
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = await screen.findByRole("region", { name: "Editor group 2" });
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+
+    await user.click(fileTreeRow("data.csv"));
+    expect(await within(right).findByTestId("view-csv")).toBeTruthy();
+    expect(within(left).getByTestId("view-markdown")).toBeTruthy();
+
+    fireEvent.pointerDown(left);
+    await user.click(fileTreeRow("other.csv"));
+    expect(await within(left).findByTestId("tab-other.csv")).toBeTruthy();
+    expect(within(right).getByTestId("tab-data.csv")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+    await waitFor(() => expect(screen.queryByTestId("tab-other.csv")).toBeNull());
+    expect(screen.getByTestId("tab-data.csv")).toBeTruthy();
+  });
+
+  it("does not keep save-first state after a dirty editor unmounts", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
+    );
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "v2",
+          name: "Draft two",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: "main",
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
+    await screen.findByTestId("tab-dirty");
+
+    await user.click(screen.getByTestId("tab-b.md"));
+    await waitFor(() => expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true"));
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    expect(screen.queryByTestId("version-switch-save-confirm")).toBeNull();
+  });
+});
+
 describe("application menu command routing", () => {
   it("toggles the Chats panel when the command exists", async () => {
     const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
@@ -1248,6 +1419,22 @@ const SKIPPED_RECORD = {
 };
 
 describe("ui-state merge-on-load", () => {
+  it("restores saved state after a no-op focus before the load resolves", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+
+    fireEvent.pointerDown(
+      await screen.findByRole("region", { name: "Editor group 1" }),
+    );
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+  });
+
   it("a user open QUEUED before the load resolves wins over stored state (the exact stale-ref race)", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
@@ -1276,7 +1463,7 @@ describe("ui-state merge-on-load", () => {
           ([payload]) => payload.state,
         );
         expect(
-          states.some((state) => state.tabs.includes("a.md")),
+          states.some((state) => storedTabs(state).includes("a.md")),
         ).toBe(true);
       },
       { timeout: 2000 },
@@ -1288,11 +1475,9 @@ describe("ui-state merge-on-load", () => {
   // because nothing reconciled the restored tabs against the workspace.
   it("restores only the tabs whose files still exist", async () => {
     const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["assets/alpha-renamed.png", "b.md"],
-        activeTab: "b.md",
-      }),
+      Promise.resolve(
+        storedStateWithTabs(["assets/alpha-renamed.png", "b.md"], "b.md"),
+      ),
     );
     renderShell(bridge);
 
@@ -1308,7 +1493,7 @@ describe("ui-state merge-on-load", () => {
       const states = bridge.setWorkspaceUiState.mock.calls.map(
         ([payload]) => payload.state,
       );
-      expect(states.some((state) => state.tabs.join() === "b.md")).toBe(true);
+      expect(states.some((state) => storedTabs(state).join() === "b.md")).toBe(true);
     });
   });
 
@@ -1323,11 +1508,7 @@ describe("ui-state merge-on-load", () => {
         folders: [] as string[],
       }));
     const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["b.md", "shared-gone.md"],
-        activeTab: "b.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["b.md", "shared-gone.md"], "b.md")),
     );
     // The pre-pull listing still carries the file the granter deleted.
     bridge.listWorkspaceFiles = listing("a.md", "b.md", "shared-gone.md");
@@ -1364,7 +1545,7 @@ describe("ui-state merge-on-load", () => {
   // the success path would keep it invisible until a lucky refresh.
   it("shows a refusal recorded by a refresh that then failed", async () => {
     const bridge = makeBridge(
-      Promise.resolve({ ...STORED_STATE, tabs: [], activeTab: null }),
+      Promise.resolve(storedStateWithTabs([])),
     );
     bridge.refreshSharedView = vi.fn(async () => {
       throw new Error("relay went away mid-page");
@@ -1411,7 +1592,7 @@ describe("ui-state merge-on-load", () => {
   // snapshot in props would show it only after the workspace is reopened.
   it("shows a refusal recorded by a refresh that ran while the shell was open", async () => {
     const bridge = makeBridge(
-      Promise.resolve({ ...STORED_STATE, tabs: [], activeTab: null }),
+      Promise.resolve(storedStateWithTabs([])),
     );
     let recorded = false;
     bridge.refreshSharedView = vi.fn(async () => {
@@ -1474,7 +1655,7 @@ describe("ui-state merge-on-load", () => {
   // not clear it and a restart must not lose it.
   it("says so when a share's record holds ops its pulls skipped", async () => {
     const bridge = makeBridge(
-      Promise.resolve({ ...STORED_STATE, tabs: [], activeTab: null }),
+      Promise.resolve(storedStateWithTabs([])),
     );
     // A refresh that finds nothing new. The warning must survive it.
     bridge.refreshSharedView = vi.fn(async () => ({
@@ -1567,7 +1748,7 @@ describe("ui-state merge-on-load", () => {
     });
     const user = userEvent.setup();
     const bridge = makeBridge(
-      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     renderShell(bridge);
 
@@ -1609,11 +1790,7 @@ describe("ui-state merge-on-load", () => {
     }>();
     let issued = 0;
     const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["b.md", "pulled.md"],
-        activeTab: "b.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["b.md", "pulled.md"], "b.md")),
     );
     bridge.listWorkspaceFiles = vi.fn(() =>
       ++issued === 1 ? older.promise : newer.promise,
@@ -1655,11 +1832,7 @@ describe("ui-state merge-on-load", () => {
   it("marks file-open-start when closing the active tab hands over to a survivor", async () => {
     const mark = vi.spyOn(rendererMarks, "mark");
     const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["b.md", "gone.md"],
-        activeTab: "gone.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["b.md", "gone.md"], "gone.md")),
     );
     renderShell(bridge);
 
@@ -1701,11 +1874,7 @@ describe("ui-state merge-on-load", () => {
     }>();
     let issued = 0;
     const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["b.md", "gone.md"],
-        activeTab: "b.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["b.md", "gone.md"], "b.md")),
     );
     bridge.listWorkspaceFiles = vi.fn(() => {
       issued += 1;
@@ -1769,11 +1938,7 @@ describe("ui-state merge-on-load", () => {
     }>();
     let issued = 0;
     const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["b.md", "pulled.md"],
-        activeTab: "b.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["b.md", "pulled.md"], "b.md")),
     );
     bridge.listWorkspaceFiles = vi.fn(() => {
       issued += 1;
@@ -1845,11 +2010,7 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeEngineBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["b.md", "gone.md"],
-        activeTab: "gone.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["b.md", "gone.md"], "gone.md")),
     );
     // The listing is held so the close cannot happen before the navigation.
     bridge.listWorkspaceFiles = vi.fn(() => listing.promise);
@@ -2288,9 +2449,7 @@ describe("ui-state merge-on-load", () => {
     > = [];
     const bridge = makeEngineBridge(
       Promise.resolve({
-        ...STORED_STATE,
-        tabs: [CHATS_TAB_PATH],
-        activeTab: CHATS_TAB_PATH,
+        ...storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
         chatsVisible: false,
       }),
     );
@@ -2454,9 +2613,7 @@ describe("ui-state merge-on-load", () => {
   }
 
   const CHATS_PAGE_STATE: WorkspaceUiState = {
-    ...STORED_STATE,
-    tabs: [CHATS_TAB_PATH],
-    activeTab: CHATS_TAB_PATH,
+    ...storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
     chatsVisible: false,
   };
 
@@ -2727,9 +2884,7 @@ describe("ui-state merge-on-load", () => {
     const user = userEvent.setup();
     const bridge = makeEngineBridge(
       Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["a.md"],
-        activeTab: "a.md",
+        ...storedStateWithTabs(["a.md"], "a.md"),
         chatsVisible: false,
       }),
     );
@@ -2827,11 +2982,7 @@ describe("ui-state merge-on-load", () => {
     const newer = deferred<Listing>();
     let issued = 0;
     const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["b.md", "live.md"],
-        activeTab: "b.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["b.md", "live.md"], "b.md")),
     );
     bridge.listWorkspaceFiles = vi.fn(() =>
       ++issued === 1 ? older.promise : newer.promise,
@@ -2890,11 +3041,7 @@ describe("ui-state merge-on-load", () => {
     await screen.findByText("a.md");
 
     await act(async () => {
-      stored.resolve({
-        ...STORED_STATE,
-        tabs: ["b.md", "ghost.md"],
-        activeTab: "b.md",
-      });
+      stored.resolve(storedStateWithTabs(["b.md", "ghost.md"], "b.md"));
       await Promise.resolve();
     });
 
@@ -2906,8 +3053,8 @@ describe("ui-state merge-on-load", () => {
       const states = bridge.setWorkspaceUiState.mock.calls.map(
         ([payload]) => payload.state,
       );
-      expect(states.some((state) => state.tabs.includes("ghost.md"))).toBe(false);
-      expect(states.some((state) => state.tabs.join() === "b.md")).toBe(true);
+      expect(states.some((state) => storedTabs(state).includes("ghost.md"))).toBe(false);
+      expect(states.some((state) => storedTabs(state).join() === "b.md")).toBe(true);
     });
   });
 
@@ -2995,6 +3142,38 @@ describe("workspace shell errors", () => {
 // active row used to mark anyway — no remount/measure follows, so the stale
 // mark corrupts the NEXT open's latency measure.
 describe("file-open-start marking", () => {
+  it("focuses an already-mounted Open Editors tab without marking a file open", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "primary", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-a.md");
+    const openStartCalls = () =>
+      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+    const before = openStartCalls();
+    await user.click(
+      within(screen.getAllByTestId("open-editor-group")[0]!).getByTitle("a.md"),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("region", { name: "Editor group 1" }).dataset.active).toBe(
+        "true",
+      ),
+    );
+    expect(openStartCalls()).toBe(before);
+    mark.mockRestore();
+  });
+
   it("marks on a real open, but NOT on a no-op click on the already-active file", async () => {
     const mark = vi.spyOn(rendererMarks, "mark");
     const bridge = makeBridge(Promise.resolve(null));
@@ -3018,6 +3197,76 @@ describe("file-open-start marking", () => {
     await screen.findByTestId("tab-b.md");
     expect(openStartCalls()).toBe(2);
 
+    mark.mockRestore();
+  });
+
+  it("marks when a close hands a non-focused group to another document", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md", "b.md"], activeTab: "b.md", size: 0.5 },
+          { id: "right", tabs: ["c.md"], activeTab: "c.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-c.md");
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const before = mark.mock.calls.filter(
+      ([name]) => name === "file-open-start",
+    ).length;
+    await userEvent.click(
+      within(left).getByRole("button", { name: "Close b.md" }),
+    );
+
+    await screen.findByTestId("tab-a.md");
+    expect(
+      mark.mock.calls.filter(([name]) => name === "file-open-start"),
+    ).toHaveLength(before + 1);
+    mark.mockRestore();
+  });
+
+  it("does not mark when closing a group reveals an already-mounted neighbor", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-b.md");
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const before = mark.mock.calls.filter(
+      ([name]) => name === "file-open-start",
+    ).length;
+    await userEvent.click(
+      within(left).getByRole("button", { name: "Close a.md" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
+    );
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(
+      mark.mock.calls.filter(([name]) => name === "file-open-start"),
+    ).toHaveLength(before);
     mark.mockRestore();
   });
 });
@@ -3083,11 +3332,7 @@ describe("dirty tab close boundaries", () => {
 
   it("keeps every tab when close-all cannot flush the active tab", async () => {
     const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["a.md", "b.md"],
-        activeTab: "a.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
     );
     bridge.writeWorkspaceText = vi.fn(async () => {
       throw new Error("disk full");
@@ -3154,11 +3399,7 @@ describe("dirty tab close boundaries", () => {
   it("does not close a tab reopened while close-all waits", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
     const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["a.md", "b.md"],
-        activeTab: "a.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
     );
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
     const { user } = await openDirtyMarkdown(bridge);
@@ -3188,14 +3429,124 @@ describe("dirty tab close boundaries", () => {
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
   });
 
-  it("closes an inactive tab synchronously while the active flush is pending", async () => {
+  it("does not close a requested tab after it moves to another group", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
     const bridge = makeBridge(
       Promise.resolve({
         ...STORED_STATE,
-        tabs: ["a.md", "b.md"],
-        activeTab: "a.md",
+        editorGroups: [
+          { id: "left", tabs: ["a.md", "b.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["c.md"], activeTab: "c.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
       }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-c.md");
+    await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(2));
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Draft!");
+    await within(screen.getByTestId("tab-a.md")).findByTestId("tab-dirty");
+    await user.click(
+      within(left).getByRole("button", { name: "Close editor group" }),
+    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+
+    fireEvent.contextMenu(screen.getByTestId("tab-b.md"));
+    await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(3),
+    );
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-c.md")).toBeTruthy();
+  });
+
+  it("flushes an editor again when it changes while another close-all save waits", async () => {
+    const heldSave = deferred<{ status: "written"; contentHash: string }>();
+    let firstPath: string | null = null;
+    let heldPath: string | null = null;
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.writeWorkspaceText = vi.fn(
+      async (payload: { relativePath: string }) => {
+        if (firstPath === null) {
+          firstPath = payload.relativePath;
+          return { status: "written" as const, contentHash: "b".repeat(64) };
+        }
+        if (payload.relativePath !== firstPath && heldPath === null) {
+          heldPath = payload.relativePath;
+          return heldSave.promise;
+        }
+        if (payload.relativePath === firstPath) throw new Error("disk full");
+        return { status: "written" as const, contentHash: "c".repeat(64) };
+      },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(2));
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Left draft");
+    await user.click(within(right).getByTestId("markdown-edit-toggle"));
+    await user.type(within(right).getByTestId("markdown-editor"), "Right draft");
+    await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
+
+    await user.click(screen.getByRole("button", { name: "Close all editors" }));
+    await waitFor(() => expect(heldPath).not.toBeNull());
+    await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(1));
+
+    const firstEditor = firstPath === "a.md"
+      ? within(left).getByTestId("markdown-editor")
+      : within(right).getByTestId("markdown-editor");
+    await user.type(firstEditor, " changed again");
+    await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
+
+    await act(async () => {
+      heldSave.resolve({ status: "written", contentHash: "d".repeat(64) });
+      await heldSave.promise;
+    });
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "disk full",
+    );
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(firstEditor.isConnected).toBe(true);
+  });
+
+  it("closes an inactive tab synchronously while the active flush is pending", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
     );
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
     const { editor } = await openDirtyMarkdown(bridge);
@@ -3223,11 +3574,7 @@ describe("dirty tab close boundaries", () => {
 
   it("keeps every tab when close-others cannot flush the active tab", async () => {
     const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["a.md", "b.md"],
-        activeTab: "a.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
     );
     bridge.showWorkbenchMenu.mockResolvedValue("close-other-tabs");
     bridge.writeWorkspaceText = vi.fn(async () => {
@@ -3834,11 +4181,7 @@ describe("explorer destructive change flush boundaries", () => {
     let writes = 0;
     const bridge = Object.assign(
       makeBridge(
-        Promise.resolve({
-          ...STORED_STATE,
-          tabs: ["a.md", "b.md"],
-          activeTab: "a.md",
-        }),
+        Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
       ),
       { moveWorkspacePath: vi.fn(() => move.promise) },
     );
@@ -3916,11 +4259,7 @@ describe("explorer destructive change flush boundaries", () => {
     let writes = 0;
     const bridge = Object.assign(
       makeBridge(
-        Promise.resolve({
-          ...STORED_STATE,
-          tabs: ["a.md", "b.md"],
-          activeTab: "a.md",
-        }),
+        Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
       ),
       { deleteWorkspacePath: vi.fn(() => deletion.promise) },
     );
@@ -7312,11 +7651,7 @@ describe("shared view versions surface", () => {
   it("keeps the real compare page for a persisted compare tab outside a shared view", async () => {
     const comparePath = versionCompareTabPath("v-old");
     const bridge = makeEngineBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [comparePath],
-        activeTab: comparePath,
-      }),
+      Promise.resolve(storedStateWithTabs([comparePath], comparePath)),
     );
     renderShell(bridge);
 
@@ -7327,11 +7662,7 @@ describe("shared view versions surface", () => {
   it("states the capability for a persisted compare tab instead of a page that can only fail", async () => {
     const comparePath = versionCompareTabPath("v-old");
     const bridge = makeShareBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [comparePath],
-        activeTab: comparePath,
-      }),
+      Promise.resolve(storedStateWithTabs([comparePath], comparePath)),
     );
     renderShell(bridge, SHARE_VIEW);
 
@@ -7533,11 +7864,7 @@ describe("versions surface after a failed capture build", () => {
     const comparePath = versionCompareTabPath("v-old");
     const status = deferred<typeof FAILED_STATUS>();
     const bridge = makeEngineBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [comparePath],
-        activeTab: comparePath,
-      }),
+      Promise.resolve(storedStateWithTabs([comparePath], comparePath)),
     );
     bridge.openWorkspace = vi.fn(() => status.promise);
     bridge.getSyncStatus = vi.fn(() => status.promise);
@@ -7732,11 +8059,7 @@ describe("shared view chats surface", () => {
 
   it("states the capability for a persisted Chats tab instead of a page that can only fail", async () => {
     const bridge = makeShareBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [CHATS_TAB_PATH],
-        activeTab: CHATS_TAB_PATH,
-      }),
+      Promise.resolve(storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH)),
     );
     renderShell(bridge, SHARE_VIEW);
 
@@ -7918,11 +8241,7 @@ describe("shared view chats surface", () => {
   it("states the shared-view fact for a persisted Chats tab before any status arrives", async () => {
     const status = deferred<typeof SHARE_STATUS>();
     const bridge = makeShareBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [CHATS_TAB_PATH],
-        activeTab: CHATS_TAB_PATH,
-      }),
+      Promise.resolve(storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH)),
     );
     bridge.openWorkspace = vi.fn(() => status.promise);
     bridge.getSyncStatus = vi.fn(() => status.promise);
@@ -8021,11 +8340,9 @@ describe("chats surface after a failed capture build", () => {
 
   it("states the fact for a persisted Chats tab instead of a page that can only fail", async () => {
     const bridge = makeFailedCaptureBridge();
-    bridge.getWorkspaceUiState = vi.fn(async () => ({
-      ...STORED_STATE,
-      tabs: [CHATS_TAB_PATH],
-      activeTab: CHATS_TAB_PATH,
-    }));
+    bridge.getWorkspaceUiState = vi.fn(async () =>
+      storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
+    );
     renderShell(bridge);
 
     const placeholder = await screen.findByTestId("chats-page-off");
@@ -8080,11 +8397,7 @@ describe("shared view moment-diff tab", () => {
 
   it("states the capability for a persisted moment-diff tab instead of a page that can only fail", async () => {
     const bridge = makeShareBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [MOMENT_TAB],
-        activeTab: MOMENT_TAB,
-      }),
+      Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
     renderShell(bridge, SHARE_VIEW);
 
@@ -8103,11 +8416,7 @@ describe("shared view moment-diff tab", () => {
 
   it("keeps the real diff page for a persisted moment-diff tab outside a shared view", async () => {
     const bridge = makeEngineBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [MOMENT_TAB],
-        activeTab: MOMENT_TAB,
-      }),
+      Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
     renderShell(bridge);
 
@@ -8127,11 +8436,7 @@ describe("shared view moment-diff tab", () => {
   it("states the shared-view fact before any status arrives", async () => {
     const status = deferred<typeof SHARE_STATUS>();
     const bridge = makeShareBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [MOMENT_TAB],
-        activeTab: MOMENT_TAB,
-      }),
+      Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
     bridge.openWorkspace = vi.fn(() => status.promise);
     bridge.getSyncStatus = vi.fn(() => status.promise);
@@ -8160,11 +8465,7 @@ describe("moment-diff tab after a failed capture build", () => {
   it("states the capability instead of a page that can only fail", async () => {
     const status = deferred<typeof FAILED_STATUS>();
     const bridge = makeEngineBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [MOMENT_TAB],
-        activeTab: MOMENT_TAB,
-      }),
+      Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
     bridge.openWorkspace = vi.fn(() => status.promise);
     bridge.getSyncStatus = vi.fn(() => status.promise);
@@ -8211,11 +8512,7 @@ describe("moment-diff tab after a failed capture build", () => {
   it("states nothing while the settings read is still in flight", async () => {
     const settings = deferred<WorkspaceSettingsResult>();
     const bridge = makeEngineBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [MOMENT_TAB],
-        activeTab: MOMENT_TAB,
-      }),
+      Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
     bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
     renderShell(bridge);
@@ -8260,11 +8557,7 @@ describe("moment-diff tab after a failed capture build", () => {
   // leave this tab spinning for the rest of the session.
   it("states the capability once the settings read fails", async () => {
     const bridge = makeEngineBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: [MOMENT_TAB],
-        activeTab: MOMENT_TAB,
-      }),
+      Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
     bridge.getWorkspaceSettings = vi.fn(async (): Promise<never> => {
       throw new Error("transient read failure");
@@ -8737,6 +9030,25 @@ describe("file transfers", () => {
 });
 
 describe("native workbench context menus", () => {
+  it("moves the selected tab into a new group", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
+    );
+    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+    renderShell(bridge);
+    await screen.findByTestId("tab-a.md");
+
+    fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
+
+    const right = await screen.findByRole("region", { name: "Editor group 2" });
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(
+      within(screen.getByRole("region", { name: "Editor group 1" })).getByTestId(
+        "tab-b.md",
+      ),
+    ).toBeTruthy();
+  });
+
   it("routes tab context menu commands through existing tab actions", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.showWorkbenchMenu.mockResolvedValue("close-other-tabs");
@@ -8754,10 +9066,28 @@ describe("native workbench context menus", () => {
         workspaceId: "ws-shell-test",
         context: "tab",
         path: "a.md",
+        groupId: "primary",
+        canCloseEditorGroup: false,
       });
     });
     await waitFor(() => expect(screen.queryByTestId("tab-b.md")).toBeNull());
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+  });
+
+  it("keeps the last editor group when the native menu returns close-editor-group", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
+    );
+    bridge.showWorkbenchMenu.mockResolvedValue("close-editor-group");
+    renderShell(bridge);
+    await screen.findByTestId("tab-a.md");
+
+    fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
+
+    await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalled());
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1);
   });
 
   it("opens the native editor context menu from the inspector area", async () => {
@@ -8772,6 +9102,8 @@ describe("native workbench context menus", () => {
       expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
         workspaceId: "ws-shell-test",
         context: "editor",
+        path: "a.md",
+        groupId: "primary",
       });
     });
   });
@@ -9053,7 +9385,7 @@ describe("set-aside draft recovery", () => {
   it("keeps the notice reachable when the open file is renamed mid-notice", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(
-      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     Object.assign(bridge, {
       moveWorkspacePath: vi.fn(async () => undefined),
@@ -9091,7 +9423,7 @@ describe("set-aside draft recovery", () => {
   it("marks the tab with recovery but lets a version switch proceed without a save promise", async () => {
     const user = userEvent.setup();
     const bridge = makeEngineBridge(
-      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [
@@ -9143,7 +9475,7 @@ describe("set-aside draft recovery", () => {
   it("treats a deleted live document as terminal instead of save-first dirty", async () => {
     const user = userEvent.setup();
     const bridge = makeEngineBridge(
-      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [
@@ -9211,11 +9543,7 @@ describe("set-aside draft recovery", () => {
   // marker or the user forgets the draft exists.
   it("marks an inactive tab that holds a set-aside draft", async () => {
     const bridge = makeEngineBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        tabs: ["a.md", "b.md"],
-        activeTab: "a.md",
-      }),
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
     );
     captureOrphanedDraft(WORKSPACE.workspaceId, "b.md", "Kept!");
     renderShell(bridge);
@@ -9253,7 +9581,7 @@ describe("set-aside draft recovery", () => {
   it("reopens the document when a switch fails after its IPC started", async () => {
     const user = userEvent.setup();
     const bridge = makeEngineBridge(
-      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [
@@ -9328,7 +9656,7 @@ describe("set-aside draft recovery", () => {
   it("reopens once when a successful switch's selector refresh fails", async () => {
     const user = userEvent.setup();
     const bridge = makeEngineBridge(
-      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     let switched = false;
     let refreshFailed = false;
@@ -9496,7 +9824,7 @@ describe("set-aside draft recovery", () => {
   it("does not set the draft aside when a failed switch never left the version", async () => {
     const user = userEvent.setup();
     const bridge = makeEngineBridge(
-      Promise.resolve({ ...STORED_STATE, tabs: ["a.md"], activeTab: "a.md" }),
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [

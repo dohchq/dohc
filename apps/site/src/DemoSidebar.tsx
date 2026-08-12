@@ -20,7 +20,8 @@ import {
 export type DemoPanelId = ViewId | "chats";
 
 // The demo has no editing pipeline, so no path ever holds a set-aside draft.
-const EMPTY_RECOVERY_PATHS: ReadonlySet<string> = new Set();
+const NO_PATHS: ReadonlySet<string> = new Set();
+const DEMO_EDITOR_GROUP_ID = "demo-editor-group";
 
 export type DemoWorkspaceDocument = {
   path: string;
@@ -140,18 +141,25 @@ export function DemoSidebar(props: {
           workspaceId="marketing-demo"
           files={files}
           folders={folders}
-          activeTab={props.activePath}
-          openTabs={openTabs.map((path) => ({ path }))}
-          dirtyTab={null}
-          recoveryPaths={EMPTY_RECOVERY_PATHS}
+          editorGroups={[
+            {
+              id: DEMO_EDITOR_GROUP_ID,
+              tabs: openTabs.map((path) => ({ path })),
+              activeTab: props.activePath,
+              size: 1,
+            },
+          ]}
+          activeEditorGroup={DEMO_EDITOR_GROUP_ID}
+          dirtyPaths={NO_PATHS}
+          recoveryPaths={NO_PATHS}
           expandedFolders={expandedFolders}
           pinned={[]}
           openEditorsHeight={openEditorsHeight}
           onOpenEditorsHeightChange={setOpenEditorsHeight}
           createRequest={null}
           onOpenFile={open}
-          onActivateTab={open}
-          onCloseTab={(path) =>
+          onActivateTab={(_groupId, path) => open(path)}
+          onCloseTab={(_groupId, path) =>
             setOpenTabs((current) => current.filter((entry) => entry !== path))
           }
           onCloseAllTabs={() => setOpenTabs([])}
