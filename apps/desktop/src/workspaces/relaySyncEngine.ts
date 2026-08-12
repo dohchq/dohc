@@ -4,6 +4,7 @@ import {
   type PullWorkspaceFromRelayResult,
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
+  type SharingDeclined,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -67,6 +68,7 @@ export interface CloudSyncSnapshot {
   pendingChangeCount: number;
   conflictCount: number;
   authExpired: boolean;
+  sharingDeclined: SharingDeclined[];
   syncFailing?: boolean;
 }
 
@@ -93,6 +95,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let bootstrapPullPending = options.joinBootstrap === true;
   let authExpired = false;
   let syncFailing = false;
+  let sharingDeclined: SharingDeclined[] = [];
   let stopped = false;
   let consecutiveFailures = 0;
   let nextBackoffMs = initialBackoffMs;
@@ -148,13 +151,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   async function doPass(): Promise<void> {
     const beforePending = pendingChangeCount;
     const bootstrapPass = bootstrapPullPending;
-    const sharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
+    const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(async () => {
       // A join-bootstrap engine is pull-only until its first pull succeeds:
       // a fresh join must never append ops before it has the remote state.
       if (!bootstrapPass) {
         try {
-          sharingDeclined.push(...(await operations.push()).sharingDeclined);
+          passSharingDeclined.push(...(await operations.push()).sharingDeclined);
         } catch (error) {
           if (!(error instanceof RelayOriginDivergedError)) throw error;
           // The local engine.db was restored-from-older or cloned, so its
@@ -162,7 +165,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           // onto a fresh origin — preserving local-only work as conflicts where
           // it clashes, never dropping it — then push under the fresh origin.
           await operations.recoverOrigin();
-          sharingDeclined.push(...(await operations.push()).sharingDeclined);
+          passSharingDeclined.push(...(await operations.push()).sharingDeclined);
         }
       }
       try {
@@ -174,7 +177,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         // and retry the pass instead of backing off against the same page.
         await operations.recoverOrigin();
         if (!bootstrapPass) {
-          sharingDeclined.push(...(await operations.push()).sharingDeclined);
+          passSharingDeclined.push(...(await operations.push()).sharingDeclined);
         }
         return operations.pull();
       }
@@ -210,15 +213,18 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         console.error(`[desktop] shared channel sync failed for ${options.rootDir}:`, error);
       }
     }
-    sharingDeclined.push(...(pullResult.sharingDeclined ?? []));
-    for (const declined of sharingDeclined) {
-      console.warn(
-        `[desktop] ${options.rootDir}: File ${declined.path} is too large to share. ${declined.constraint} allows ${declined.limitBytes} bytes; the encoded base uses ${declined.observedBytes} bytes. The edit is saved. Reduce the file to share it.`,
-      );
+    passSharingDeclined.push(...(pullResult.sharingDeclined ?? []));
+    const declinedByPath = new Map<string, SharingDeclined>();
+    for (const declined of passSharingDeclined) {
+      declinedByPath.set(declined.path, declined);
     }
+    const nextSharingDeclined = [...declinedByPath.values()].sort((a, b) =>
+      a.path.localeCompare(b.path),
+    );
     conflictCount = options.countOpenConflicts
       ? await options.countOpenConflicts()
       : conflictCount + pullResult.conflictsOpened;
+    sharingDeclined = nextSharingDeclined;
     pendingChangeCount = Math.max(0, pendingChangeCount - beforePending);
     lastSyncedAtMs = nowMs();
     consecutiveFailures = 0;
@@ -280,6 +286,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         pendingChangeCount,
         conflictCount,
         authExpired,
+        sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
         ...(syncFailing ? { syncFailing: true } : {}),
       };
     },

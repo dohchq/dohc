@@ -247,6 +247,14 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
         pendingChangeCount: 0,
         conflictCount: 0,
         authExpired: false,
+        sharingDeclined: [
+          {
+            path: "notes/large.md",
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limitBytes: 262_144,
+            observedBytes: 280_001,
+          },
+        ],
       }),
       stop: async () => {},
     };
@@ -259,7 +267,8 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     activity.queueCloudSync("activity-test");
     expect(queued).toBe(0);
 
-    await activity.open(workspace());
+    const status = await activity.open(workspace());
+    expect(status.sharingDeclined).toEqual(engine.snapshot().sharingDeclined);
     activity.queueCloudSync("activity-test");
     expect(queued).toBe(1);
     await activity.stopAll();
@@ -278,6 +287,7 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
         pendingChangeCount: 0,
         conflictCount: 0,
         authExpired: false,
+        sharingDeclined: [],
       }),
       stop: async () => {
         stopped += 1;

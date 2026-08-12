@@ -295,7 +295,7 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
   });
 
-  it("logs equal-sized sharing declines for each affected path", async () => {
+  it("keeps every sharing decline in the workspace snapshot", async () => {
     const result = pullResult();
     result.sharingDeclined = [
       {
@@ -311,21 +311,19 @@ describe("relaySyncEngine", () => {
         observedBytes: 21,
       },
     ];
-    pullMock.mockResolvedValueOnce(result);
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    pullMock
+      .mockResolvedValueOnce(result)
+      .mockResolvedValueOnce(pullResult());
     const sync = engine({ capture: capture() });
 
     await sync.start();
 
-    expect(warning).toHaveBeenNthCalledWith(
-      1,
-      "[desktop] /tmp/workspace: File notes/first.md is too large to share. MAX_YDOC_UPDATE_BYTES allows 20 bytes; the encoded base uses 21 bytes. The edit is saved. Reduce the file to share it.",
-    );
-    expect(warning).toHaveBeenNthCalledWith(
-      2,
-      "[desktop] /tmp/workspace: File notes/second.md is too large to share. MAX_YDOC_UPDATE_BYTES allows 20 bytes; the encoded base uses 21 bytes. The edit is saved. Reduce the file to share it.",
-    );
-    warning.mockRestore();
+    expect(sync.snapshot().sharingDeclined).toEqual(result.sharingDeclined);
+
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(pullMock).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().sharingDeclined).toEqual([]);
     await sync.stop();
   });
 

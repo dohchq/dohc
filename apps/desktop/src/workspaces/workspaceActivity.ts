@@ -153,6 +153,7 @@ export function createWorkspaceActivity(
       ...(w?.settingsWarning ? { settingsWarning: w.settingsWarning } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,
+      sharingDeclined: snap?.sharingDeclined ?? [],
       syncFailing: snap?.syncFailing ?? false,
     };
   }

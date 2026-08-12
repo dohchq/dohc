@@ -15167,7 +15167,34 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
 }
 
 #[test]
-fn pull_reaches_later_cross_origin_work_before_retrying_a_tagged_bundle() {
+fn pull_keeps_a_genuine_origin_gap_hard() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let mut gap =
+        version_create_with_shipped_snapshots("gapped-peer", "must-not-apply", Vec::new());
+    gap.origin_seq = 1;
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![gap],
+            next_cursor: 1,
+            has_more: false,
+        })),
+    });
+
+    assert!(matches!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        Err(RelayError::Local(_))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "gapped-peer").expect("gap ack"),
+        -1,
+        "a gap without an earlier retryable coordinate must remain unacked"
+    );
+}
+
+#[test]
+fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
     use crate::conflict_resolve_v1::{
         ConflictResolveV1, EffectContextV1, EffectKindV1, EffectV1, HeadContentKindV1, HeadV1,
         MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
@@ -15236,14 +15263,18 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_tagged_bundle() {
         built.validated.shadows[0].clone(),
     );
     child.recorded_at_ms = 22;
+    let mut same_origin_later =
+        version_create_with_shipped_snapshots("bundle-peer", "same-origin-version", Vec::new());
+    same_origin_later.origin_seq = 2;
+    same_origin_later.recorded_at_ms = 23;
     let mut later =
         version_create_with_shipped_snapshots("later-peer", "later-version", Vec::new());
-    later.recorded_at_ms = 23;
+    later.recorded_at_ms = 24;
     let client = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
-            ops: vec![parent, child, later],
-            next_cursor: 3,
+            ops: vec![parent, child, same_origin_later, later],
+            next_cursor: 4,
             has_more: false,
         })),
     });
@@ -15251,14 +15282,14 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_tagged_bundle() {
 
     let outcome = client
         .pull_chat_workspace(&mut engine, "ws", &NoFaults, &leases, 1_000)
-        .expect("later cross-origin work must run before the bundle retry pass");
+        .expect("later cross-origin work must run before the deferred origin retry pass");
     assert!(
-        matches!(outcome, SyncPassOutcome::Complete { applied: 3, .. }),
-        "parent, later dependency, and tagged child must all apply: {outcome:?}"
+        matches!(outcome, SyncPassOutcome::Complete { applied: 4, .. }),
+        "the parent, its whole origin suffix, and later cross-origin work must apply: {outcome:?}"
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "bundle-peer").expect("bundle ack"),
-        1
+        2
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "later-peer").expect("later ack"),

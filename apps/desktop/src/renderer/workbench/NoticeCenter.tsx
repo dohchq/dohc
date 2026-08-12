@@ -243,6 +243,18 @@ export function NoticeCenter(props: {
       });
     }
 
+    for (const [index, declined] of (
+      props.syncStatus?.sharingDeclined ?? []
+    ).entries()) {
+      next.push({
+        id: `sharing-declined-${index}`,
+        tone: "warning",
+        title: "File is too large to sync",
+        body: `Your edit is saved on this machine. "${declined.path}" uses ${declined.observedBytes.toLocaleString("en-US")} bytes after encoding. Sync allows ${declined.limitBytes.toLocaleString("en-US")} bytes. Reduce the file to sync it.`,
+        Icon: AlertTriangle,
+      });
+    }
+
     // Persistent while true (PR 0M-7): the flagged workspace's engine capture
     // is its sole history recorder, so a failing capture means History is
     // silently incomplete. Main clears the flag when a later capture

@@ -202,6 +202,36 @@ describe("sync status surface", () => {
 });
 
 describe("notice center", () => {
+  it("keeps a clear notice for each file that is too large to sync", async () => {
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+        sharingDeclined: [
+          {
+            path: "notes/large.md",
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limitBytes: 262_144,
+            observedBytes: 280_001,
+          },
+        ],
+      },
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+
+    const notice = screen.getByTestId("notice-sharing-declined-0");
+    expect(notice.textContent).toContain("File is too large to sync");
+    expect(notice.textContent).toContain("notes/large.md");
+    expect(notice.textContent).toContain("280,001 bytes");
+    expect(notice.textContent).toContain("262,144 bytes");
+    expect(notice.textContent).toContain("Your edit is saved on this machine.");
+    expect(notice.textContent).toContain("Reduce the file to sync it.");
+  });
+
   it("collects conflict, agent, and update notices in one popover", async () => {
     const onOpenConflicts = vi.fn();
     const onOpenHistory = vi.fn();

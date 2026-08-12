@@ -748,6 +748,19 @@ export const SyncStatusResult = z.object({
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),
+  // Additive: files that are safe locally but cannot fit in the relay's
+  // encoded payload limit. The notice center keeps this visible until a
+  // later successful sync no longer reports the path.
+  sharingDeclined: z
+    .array(
+      z.object({
+        path: PATH_STRING,
+        constraint: z.string().min(1).max(200),
+        limitBytes: z.number().int().nonnegative(),
+        observedBytes: z.number().int().nonnegative(),
+      }),
+    )
+    .optional(),
 });
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 

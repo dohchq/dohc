@@ -709,22 +709,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut sharing_declined = Vec::new();
         let mut changed_paths = BTreeMap::new();
         let mut retryable = Vec::new();
-        let mut retryable_conflict_parents = BTreeSet::new();
+        let mut deferred_origins = BTreeSet::new();
         for op in &ordered {
             match crate::apply_replication_envelope(store, op, faults, leases) {
                 Err(SyncError::RetryableState { .. }) => {
-                    if let Some(coordinate) = retryable_conflict_parent_coordinate(op) {
-                        retryable_conflict_parents.insert(coordinate);
-                    }
+                    deferred_origins.insert(op.origin_id.clone());
                     retryable.push(op);
                 }
-                Err(error)
-                    if tagged_child_waits_for_retryable_parent(
-                        op,
-                        &error,
-                        &retryable_conflict_parents,
-                    ) =>
-                {
+                Err(SyncError::SequenceGap) if deferred_origins.contains(&op.origin_id) => {
                     retryable.push(op);
                 }
                 Err(error) => return Err(local(error)),
@@ -744,22 +736,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         while !retryable.is_empty() {
             let mut still_retryable = Vec::new();
-            let mut still_retryable_conflict_parents = BTreeSet::new();
+            let mut still_deferred_origins = BTreeSet::new();
             let mut made_progress = false;
             for op in retryable {
                 match crate::apply_replication_envelope(store, op, faults, leases) {
                     Err(SyncError::RetryableState { .. }) => {
-                        if let Some(coordinate) = retryable_conflict_parent_coordinate(op) {
-                            still_retryable_conflict_parents.insert(coordinate);
-                        }
+                        still_deferred_origins.insert(op.origin_id.clone());
                         still_retryable.push(op);
                     }
-                    Err(error)
-                        if tagged_child_waits_for_retryable_parent(
-                            op,
-                            &error,
-                            &still_retryable_conflict_parents,
-                        ) =>
+                    Err(SyncError::SequenceGap)
+                        if still_deferred_origins.contains(&op.origin_id) =>
                     {
                         still_retryable.push(op);
                     }
@@ -2387,36 +2373,6 @@ fn merge_by_origin(ops: Vec<ReplicationEnvelope>) -> Vec<ReplicationEnvelope> {
         }
     }
     merged
-}
-
-type EnvelopeCoordinate = (String, String, i64);
-
-fn retryable_conflict_parent_coordinate(op: &ReplicationEnvelope) -> Option<EnvelopeCoordinate> {
-    (op.op_kind == "conflict.resolve")
-        .then(|| (op.workspace_id.clone(), op.origin_id.clone(), op.origin_seq))
-}
-
-fn tagged_child_waits_for_retryable_parent(
-    op: &ReplicationEnvelope,
-    error: &SyncError,
-    retryable_parents: &BTreeSet<EnvelopeCoordinate>,
-) -> bool {
-    if !matches!(error, SyncError::SequenceGap) || op.op_kind != "moment.append" {
-        return false;
-    }
-    let Ok(owner) = crate::moment_apply::validate_tagged_shadow_payload(&op.payload) else {
-        return false;
-    };
-    let Ok(effect_index) = i64::try_from(owner.effect_index) else {
-        return false;
-    };
-    let Some(offset) = effect_index.checked_add(1) else {
-        return false;
-    };
-    let Some(parent_seq) = op.origin_seq.checked_sub(offset) else {
-        return false;
-    };
-    retryable_parents.contains(&(op.workspace_id.clone(), op.origin_id.clone(), parent_seq))
 }
 
 fn list_workspace_origins(
