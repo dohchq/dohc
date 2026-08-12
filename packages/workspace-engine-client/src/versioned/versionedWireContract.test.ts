@@ -3249,6 +3249,20 @@ describe("versioned result decoder rejection", () => {
       }),
     ).toThrow(VersionedProtocolShapeError);
   });
+
+  it("strips accepted over-cap metadata from in-band blob results", () => {
+    const result = {
+      bytesBase64: "YWJj",
+      byteLength: 3,
+      inbandLimitBytes: 48 * 1024,
+    };
+    expect(decodeVersionedBinaryReadBlobResult(result)).toEqual({
+      bytesBase64: "YWJj",
+    });
+    expect(decodeVersionedTextReadBlobResult(result)).toEqual({
+      bytesBase64: "YWJj",
+    });
+  });
 });
 
 describe("versionedText.list hasYdocMarker", () => {

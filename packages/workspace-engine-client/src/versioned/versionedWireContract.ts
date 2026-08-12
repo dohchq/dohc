@@ -1006,7 +1006,11 @@ const BinaryReadResultSchema = Schema.NullOr(
   ]),
 );
 const BlobReadResultSchema = Schema.Union([
-  mutableStruct({ bytesBase64: Schema.String }),
+  mutableStruct({
+    bytesBase64: Schema.String,
+    byteLength: Schema.optionalKey(Schema.Int),
+    inbandLimitBytes: Schema.optionalKey(Schema.Int),
+  }),
   mutableStruct({
     bytesBase64: Schema.Null,
     byteLength: Schema.Int,
@@ -1207,20 +1211,26 @@ export function decodeVersionedBinaryReadResult(value: JsonValue): VersionedBina
   ) as VersionedBinaryReadResult;
 }
 
-export function decodeVersionedBinaryReadBlobResult(value: JsonValue): VersionedBinaryReadBlobResult {
-  return decodeVersionedSchema(
+function decodeBlobReadResult(
+  value: JsonValue,
+  label: string,
+): VersionedBinaryReadBlobResult {
+  const decoded = decodeVersionedSchema(
     BlobReadResultSchema,
     value,
-    "versionedBinary.readBlob result",
-  ) as VersionedBinaryReadBlobResult;
+    label,
+  );
+  return typeof decoded.bytesBase64 === "string"
+    ? { bytesBase64: decoded.bytesBase64 }
+    : decoded;
+}
+
+export function decodeVersionedBinaryReadBlobResult(value: JsonValue): VersionedBinaryReadBlobResult {
+  return decodeBlobReadResult(value, "versionedBinary.readBlob result");
 }
 
 export function decodeVersionedTextReadBlobResult(value: JsonValue): VersionedTextReadBlobResult {
-  return decodeVersionedSchema(
-    BlobReadResultSchema,
-    value,
-    "versionedText.readBlob result",
-  ) as VersionedTextReadBlobResult;
+  return decodeBlobReadResult(value, "versionedText.readBlob result");
 }
 
 export function decodeSecretWriteResult(value: JsonValue): SecretWriteResult {
