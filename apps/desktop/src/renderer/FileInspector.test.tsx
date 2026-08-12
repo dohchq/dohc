@@ -1371,6 +1371,15 @@ describe("markdown editor unmount flush", () => {
       truncated: false,
       contentHash: TEST_CONTENT_HASH,
     });
+    let finishWrite!: () => void;
+    const heldWrite = new Promise<{
+      status: "written";
+      contentHash: string;
+    }>((resolve) => {
+      finishWrite = () =>
+        resolve({ status: "written", contentHash: "c".repeat(64) });
+    });
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
     const user = userEvent.setup();
     render(
       <>
@@ -1385,6 +1394,13 @@ describe("markdown editor unmount flush", () => {
     const buffer = getSharedLocalDocument(
       localDocumentKey("ws-1", "notes/conflict.txt", undefined),
     );
+    // Make the state under test explicit. Under combined-suite load, typing
+    // can span the debounce and the default instant writer can legitimately
+    // clean the buffer before the forced reread arrives.
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+    expect(buffer.getSnapshot().dirty).toBe(true);
 
     act(() => {
       expect(buffer.acceptRead("disk after", "b".repeat(64), {}, true)).toBe(
@@ -1405,6 +1421,10 @@ describe("markdown editor unmount flush", () => {
           .every((editor) => editor.textContent?.includes("before peer draft")),
       ).toBe(true),
     );
+    await act(async () => {
+      finishWrite();
+      await heldWrite;
+    });
   });
 
   it("keeps a later-started duplicate read when an older pane answers last", async () => {
