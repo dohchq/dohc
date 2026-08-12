@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const repoRoot = resolve(import.meta.dirname, "../../..");
-const cleanForegroundSignals = new Set(["SIGINT", "SIGTERM", "SIGBREAK"]);
+const cleanForegroundSignals = new Set(["SIGINT", "SIGTERM"]);
 const windowsControlC = 0xc000013a;
 
 export function desktopDevEnvironment(source) {
@@ -40,6 +40,14 @@ export function workspaceEngineBuildArguments(root) {
     "--bin",
     "dohc-workspace-engine",
   ];
+}
+
+export function electronViteSpawnOptions(source) {
+  return {
+    cwd: resolve(import.meta.dirname, ".."),
+    env: desktopDevEnvironment(source),
+    stdio: "inherit",
+  };
 }
 
 function electronViteCliPath() {
@@ -82,11 +90,7 @@ function run() {
   const devServer = spawnSync(
     process.execPath,
     [electronViteCliPath(), "dev", ...process.argv.slice(2)],
-    {
-      cwd: resolve(import.meta.dirname, ".."),
-      env: desktopDevEnvironment(process.env),
-      stdio: "inherit",
-    },
+    electronViteSpawnOptions(process.env),
   );
   if (devServer.error) fail("start electron-vite", devServer.error);
   process.exit(foregroundExitCode(devServer));

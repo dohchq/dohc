@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   desktopDevEnvironment,
+  electronViteSpawnOptions,
   foregroundExitCode,
   workspaceEngineBuildArguments,
 } from "./dev.mjs";
@@ -21,6 +22,7 @@ test("desktop dev launches Electron outside Node mode", () => {
 });
 
 test("desktop dev does not report an interrupted foreground process as a launch failure", () => {
+  assert.equal(foregroundExitCode({ status: 0, signal: null }), 0);
   assert.equal(foregroundExitCode({ status: null, signal: "SIGINT" }), 0);
   assert.equal(foregroundExitCode({ status: null, signal: "SIGTERM" }), 0);
   assert.equal(foregroundExitCode({ status: 0xc000013a, signal: null }), 0);
@@ -28,6 +30,14 @@ test("desktop dev does not report an interrupted foreground process as a launch 
   assert.equal(foregroundExitCode({ status: null, signal: "SIGKILL" }), 1);
   assert.equal(foregroundExitCode({ status: null, signal: null }), 1);
   assert.equal(foregroundExitCode({ status: 1, signal: null }), 1);
+});
+
+test("desktop dev starts electron-vite from the desktop package", () => {
+  const options = electronViteSpawnOptions({ KEEP_ME: "yes" });
+
+  assert.equal(options.cwd, resolve(import.meta.dirname, ".."));
+  assert.deepEqual(options.env, { KEEP_ME: "yes" });
+  assert.equal(options.stdio, "inherit");
 });
 
 test("desktop dev builds the engine where Electron loads it", () => {
