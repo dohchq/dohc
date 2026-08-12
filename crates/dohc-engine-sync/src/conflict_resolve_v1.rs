@@ -1400,6 +1400,21 @@ fn conflict_resolve_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>
             keys.push(key);
         }
     }
+    let result_path_key = DocKey::new(
+        &payload.workspace_id,
+        &payload.target_version_id,
+        derive_capture_object_id(
+            &payload.workspace_id,
+            &payload.target_version_id,
+            &payload.paths[payload.result.path_ref()],
+        ),
+    )
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "conflict.resolve Y.Doc coordinates are invalid",
+    })?;
+    if !keys.iter().any(|candidate| candidate == &result_path_key) {
+        keys.push(result_path_key);
+    }
     Ok(keys)
 }
 
@@ -1423,7 +1438,13 @@ fn unbound_receiver_lineages_match_reviewed_sides(
     payload: &ConflictResolveV1,
 ) -> Result<bool, SyncError> {
     for key in conflict_resolve_ydoc_keys(payload)? {
-        let Some(projection) = crate::ydoc_apply::complete_ydoc_projection_in_tx(tx, &key)? else {
+        let Some(lineage) = crate::ydoc_apply::complete_ydoc_projection_in_tx(tx, &key)? else {
+            continue;
+        };
+        if lineage.claim_status.has_claimed_base() {
+            return Ok(false);
+        }
+        let Some(projection) = lineage.markdown else {
             continue;
         };
         let projection_sha256 = dohc_engine_storage::hex_sha256(projection.as_bytes());
@@ -3919,7 +3940,7 @@ mod tests {
     }
 
     #[test]
-    fn lineage_unbound_parent_rewrites_the_receivers_closed_ydoc() {
+    fn lineage_unbound_parent_preserves_a_claimed_receiver_for_review() {
         let (_scratch, mut store, key, built) = receiver_fixture();
         let mut payload = built.validated.payload;
         payload.lineage_transition = None;
@@ -3929,13 +3950,75 @@ mod tests {
         crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
             .expect("apply lineage-unbound parent");
 
-        let marker = dohc_engine_collab::read_marker(&store, &key)
+        assert_eq!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", "doc.md")
+                .expect("current head")
+                .expect("current head remains")
+                .text,
+            "current text",
+        );
+        let open_reviews: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws' AND status='open'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)
+            })
+            .expect("open review count");
+        assert_eq!(open_reviews, 1);
+
+        assert_eq!(projected_ydoc_text(&mut store, &key), "current text");
+    }
+
+    #[test]
+    fn lineage_unbound_parent_rewrites_an_unclaimed_receivers_closed_ydoc() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "DELETE FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("remove claimed receiver lineage");
+        dohc_engine_collab::ensure_marker(
+            &mut store,
+            &key,
+            ContentKind::Plaintext,
+            dohc_engine_collab::Regime::LocalOnly,
+            &NoFaults,
+            12,
+        )
+        .expect("unclaimed marker");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        let update = doc.plaintext_insert(0, "current text");
+        dohc_engine_collab::record_local_update(&mut store, &key, &update, &NoFaults, 13)
+            .expect("unclaimed receiver content");
+
+        let mut payload = built.validated.payload;
+        payload.lineage_transition = None;
+        let built = build_conflict_resolve_v1(payload).expect("lineage-unbound carrier");
+        let parent = imported_envelope(0, "conflict.resolve", built.value);
+
+        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
+            .expect("apply lineage-unbound parent");
+
+        assert_eq!(projected_ydoc_text(&mut store, &key), "resolved text");
+    }
+
+    fn projected_ydoc_text(store: &mut EngineStore, key: &DocKey) -> String {
+        let marker = dohc_engine_collab::read_marker(store, key)
             .expect("read receiver marker")
             .expect("receiver lineage remains present");
         let projected = store
             .write_with(&NoFaults, |tx| {
                 let doc =
-                    dohc_engine_collab::load_doc_in_tx(tx, &key).map_err(map_local_collab_error)?;
+                    dohc_engine_collab::load_doc_in_tx(tx, key).map_err(map_local_collab_error)?;
                 doc.project(marker.content_kind)
                     .map(|projection| projection.markdown)
                     .map_err(map_local_collab_error)
@@ -3944,10 +4027,7 @@ mod tests {
         let dohc_engine_storage::TxnOutcome::Committed(projected) = projected else {
             panic!("projection transaction cannot crash without an injected fault");
         };
-        assert_eq!(
-            projected, "resolved text",
-            "the compound parent must not leave the canonical receiver Y.Doc behind its file head",
-        );
+        projected
     }
 
     #[test]
@@ -3956,7 +4036,12 @@ mod tests {
             moved_object_receiver_fixture();
         let parent = imported_envelope(0, "conflict.resolve", built.value);
         let leases = dohc_engine_collab::LeaseRegistry::new();
-        let _held = leases.acquire(&result_key).expect("hold destination live");
+        let destination = derive_capture_object_id("ws", "main", "moved.md");
+        assert_ne!(destination, result_key.object_id);
+        let destination_key = DocKey::new("ws", "main", destination).expect("destination key");
+        let _held = leases
+            .acquire(&destination_key)
+            .expect("hold absent destination live");
 
         assert!(matches!(
             crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &leases),

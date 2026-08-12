@@ -1086,9 +1086,14 @@ async fn moved_text_and_binary_results_archive_the_full_predecessor_without_a_su
             conflict_answer_budget_bytes: usize::MAX,
         };
         let leases = dohc_engine_collab::LeaseRegistry::new();
-        let held_destination = if moved_path.is_some() {
-            let destination =
-                DocKey::new(WS, "main", &input.object_id).expect("destination Y.Doc key");
+        let held_destination = if let Some(moved_path) = moved_path {
+            let destination = DocKey::new(
+                WS,
+                "main",
+                dohc_engine_domain::derive_capture_object_id(WS, "main", moved_path),
+            )
+            .expect("absent destination Y.Doc key");
+            assert_ne!(destination.object_id, input.object_id);
             Some(leases.acquire(&destination).expect("hold destination live"))
         } else {
             None

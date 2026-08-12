@@ -619,13 +619,17 @@ pub(crate) fn ensure_ydoc_lineage_complete_in_tx(
     }
 }
 
-/// Project one closed lineage after proving that none of its durable updates
-/// are deferred or dependency-incomplete. A missing or content-free marker
-/// has no canonical projection to bind.
+pub(crate) struct CompleteYdocProjection {
+    pub markdown: Option<String>,
+    pub claim_status: dohc_engine_collab::LineageClaimStatus,
+}
+
+/// Inspect one closed lineage after proving that none of its durable updates
+/// are deferred or dependency-incomplete.
 pub(crate) fn complete_ydoc_projection_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
-) -> Result<Option<String>, SyncError> {
+) -> Result<Option<CompleteYdocProjection>, SyncError> {
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
     let Some((marker, doc)) = complete.state.as_ref() else {
         return Ok(None);
@@ -633,14 +637,21 @@ pub(crate) fn complete_ydoc_projection_in_tx(
     let has_content = marker.lineage_claim_status.has_claimed_base()
         || marker.head_update_seq > 0
         || marker.head_snapshot_seq > 0;
-    if !has_content {
-        return Ok(None);
-    }
-    doc.project(marker.content_kind)
-        .map(|projection| Some(projection.markdown))
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc projection exceeds materialization cap",
-        })
+    let markdown = if has_content {
+        Some(
+            doc.project(marker.content_kind)
+                .map_err(|_| SyncError::InvalidInput {
+                    reason: "ydoc projection exceeds materialization cap",
+                })?
+                .markdown,
+        )
+    } else {
+        None
+    };
+    Ok(Some(CompleteYdocProjection {
+        markdown,
+        claim_status: marker.lineage_claim_status,
+    }))
 }
 
 /// Reconcile a strict conflict parent with a receiver-local closed lineage.
