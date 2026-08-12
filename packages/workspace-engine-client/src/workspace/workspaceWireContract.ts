@@ -429,6 +429,11 @@ function decodeWorkspaceSchema<S extends Schema.ConstraintDecoder<unknown>>(
     onExcessProperty: "error",
   })(value);
   if (Result.isFailure(decoded)) {
+    if (decoded.failure.message === "Expected object") {
+      throw new WorkspaceProtocolShapeError(
+        `${label} must be a JSON object.`,
+      );
+    }
     throw new WorkspaceProtocolShapeError(`${label}: ${decoded.failure.message}`);
   }
   return decoded.success;

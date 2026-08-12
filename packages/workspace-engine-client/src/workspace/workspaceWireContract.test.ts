@@ -53,6 +53,12 @@ const conflict = {
 };
 
 describe("workspace wire schemas", () => {
+  it("preserves the public object-shape error", () => {
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryPage, []),
+    ).toThrow("must be a JSON object");
+  });
+
   it("rejects nested excess fields", () => {
     expect(() =>
       decodeConflictRecord({
