@@ -1,5 +1,6 @@
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
 import * as Struct from "effect/Struct";
 import type { JsonValue } from "./generated/serde_json/JsonValue";
 
@@ -136,17 +137,15 @@ function decodeYdocSchema<S extends Schema.ConstraintDecoder<unknown>>(
 ): S["Type"] {
   const decoded = Schema.decodeUnknownResult(schema)(value);
   if (Result.isFailure(decoded)) {
-    const message = decoded.failure.message;
-    const pathAt = message.lastIndexOf("\n  at ");
-    if (pathAt !== -1) {
-      const path = message
-        .slice(pathAt + 6)
-        .replace(/\["([^"]+)"\]/gu, ".$1");
-      throw new YdocProtocolShapeError(
-        `${label}${path}: ${message.slice(0, pathAt)}`,
-      );
-    }
-    throw new YdocProtocolShapeError(`${label}: ${message}`);
+    const issue = SchemaIssue.makeFormatterStandardSchemaV1()(
+      decoded.failure.issue,
+    ).issues[0];
+    const path = issue?.path?.map((part) =>
+      typeof part === "number" ? `[${part}]` : `.${String(part)}`,
+    ).join("") ?? "";
+    throw new YdocProtocolShapeError(
+      `${label}${path}: ${issue?.message ?? decoded.failure.message}`,
+    );
   }
   return decoded.success;
 }

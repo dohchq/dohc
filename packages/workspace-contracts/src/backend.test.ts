@@ -43,6 +43,12 @@ describe("WorkspacePath", () => {
     expect(() => decodeWorkspacePath("finance/../private.md")).toThrow(
       "workspace paths cannot contain ..",
     );
+    expect(() => decodeWorkspacePath("..\\private.md")).toThrow(
+      "workspace paths must use / separators",
+    );
+    expect(() => decodeWorkspacePath("C:/private.md")).toThrow(
+      "workspace paths cannot be drive-qualified",
+    );
   });
 });
 

@@ -9,7 +9,10 @@ const PreferredNameForIpc = z
   .string()
   .trim()
   .min(1, "Enter the name your agent should use.")
-  .max(MAX_PREFERRED_NAME_LENGTH)
+  .max(
+    MAX_PREFERRED_NAME_LENGTH,
+    `Names must contain ${MAX_PREFERRED_NAME_LENGTH} characters or fewer.`,
+  )
   .refine((value) => !hasPreferredNameControlCharacters(value), {
     message: "Names cannot contain control characters.",
   }) satisfies z.ZodType<PreferredName>;

@@ -1,5 +1,6 @@
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
 import * as Struct from "effect/Struct";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
@@ -743,17 +744,15 @@ function decodeChatsSchema<S extends Schema.ConstraintDecoder<unknown>>(
     onExcessProperty: "error",
   })(value);
   if (Result.isFailure(decoded)) {
-    const message = decoded.failure.message;
-    const pathAt = message.lastIndexOf("\n  at ");
-    if (pathAt !== -1) {
-      const path = message
-        .slice(pathAt + 6)
-        .replace(/\["([^"]+)"\]/gu, ".$1");
-      throw new ChatsProtocolShapeError(
-        `${label}${path}: ${message.slice(0, pathAt)}`,
-      );
-    }
-    throw new ChatsProtocolShapeError(`${label}: ${message}`);
+    const issue = SchemaIssue.makeFormatterStandardSchemaV1()(
+      decoded.failure.issue,
+    ).issues[0];
+    const path = issue?.path?.map((part) =>
+      typeof part === "number" ? `[${part}]` : `.${String(part)}`,
+    ).join("") ?? "";
+    throw new ChatsProtocolShapeError(
+      `${label}${path}: ${issue?.message ?? decoded.failure.message}`,
+    );
   }
   return decoded.success;
 }
@@ -1097,19 +1096,10 @@ const ChatsResultSchemas = {
   fail: mutableStruct({ failed: Schema.Literal(true) }),
 } as const;
 
-function objectValue(value: JsonValue, label: string, keys?: readonly string[]): ChatsJsonObject {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new ChatsProtocolShapeError(`${label} must be a JSON object.`);
-  }
-  if (keys) {
-    for (const key of Object.keys(value)) {
-      if (!keys.includes(key)) {
-        throw new ChatsProtocolShapeError(`${label}.${key} is not allowed.`);
-      }
-    }
-  }
-  return value as ChatsJsonObject;
-}
+const RunRecordsPageSchema = mutableStruct({
+  runs: Schema.Record(Schema.String, ChatRunSchema),
+  ...NextCursorFields,
+});
 
 export function decodeChatActor(value: JsonValue, label = "chat actor"): ChatActor {
   return decodeChatsSchema(ChatActorSchema, value, label) as ChatActor;
@@ -1162,24 +1152,10 @@ export function decodeUnreadFileThreads(
 }
 
 function decodeRunRecordsForThread(value: JsonValue, label: string): ChatThreadRunsPage {
-  const object = objectValue(value, label, ["runs", "nextCursor"]);
-  const runsObject = objectValue(object.runs ?? null, `${label}.runs`);
+  const decoded = decodeChatsSchema(RunRecordsPageSchema, value, label);
   const runs: Record<string, ChatRun> = Object.create(null);
-  for (const [messageId, run] of Object.entries(runsObject)) {
-    runs[messageId] = decodeChatsSchema(
-      ChatRunSchema,
-      run ?? null,
-      `${label}.runs.${messageId}`,
-    ) as ChatRun;
-  }
-  return {
-    runs,
-    nextCursor: decodeChatsSchema(
-      NullableString,
-      object.nextCursor as JsonValue,
-      `${label}.nextCursor`,
-    ),
-  };
+  Object.assign(runs, decoded.runs);
+  return { runs, nextCursor: decoded.nextCursor };
 }
 
 export function decodeChatsResult<M extends ChatsMethod>(

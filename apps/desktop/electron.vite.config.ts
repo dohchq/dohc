@@ -32,7 +32,8 @@ function effectFree(surface: "preload" | "renderer"): Plugin {
     name: `effect-free-${surface}`,
     enforce: "pre",
     resolveId(source) {
-      if (source === "effect" || source.startsWith("effect/")) {
+      const moduleId = source.replace(/[?#].*$/u, "");
+      if (moduleId === "effect" || moduleId.startsWith("effect/")) {
         throw new Error(
           `${surface} cannot import ${source}. Move shared values to an Effect-free module.`,
         );

@@ -4,12 +4,6 @@ import {
   hasPreferredNameControlCharacters,
 } from "./chatIdentityValues";
 
-export {
-  MAX_PREFERRED_NAME_LENGTH,
-  agentDisplayLabel,
-  preferredNameFromInput,
-} from "./chatIdentityValues";
-
 /**
  * The human-readable owner name used by chat authorship surfaces. This value is
  * display-only: authorization continues to use opaque, verified user ids.

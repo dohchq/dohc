@@ -15,6 +15,12 @@ export const WorkspacePath = NonEmptyString.check(
   Schema.makeFilter((path) => !path.startsWith("/"), {
     message: "workspace paths are relative",
   }),
+  Schema.makeFilter((path) => !/^[a-z]:/iu.test(path), {
+    message: "workspace paths cannot be drive-qualified",
+  }),
+  Schema.makeFilter((path) => !path.includes("\\"), {
+    message: "workspace paths must use / separators",
+  }),
   Schema.makeFilter((path) => !path.split("/").includes(".."), {
     message: "workspace paths cannot contain ..",
   }),

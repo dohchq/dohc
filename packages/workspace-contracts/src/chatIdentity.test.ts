@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import { PreferredName } from "./chatIdentity";
 import {
   MAX_PREFERRED_NAME_LENGTH,
-  PreferredName,
   agentDisplayLabel,
   preferredNameFromInput,
-} from "./chatIdentity";
+} from "./chatIdentityValues";
 
 describe("chat identity", () => {
   const decodePreferredName = Schema.decodeUnknownResult(PreferredName);
@@ -14,6 +14,9 @@ describe("chat identity", () => {
   it("normalizes a configured owner name", () => {
     expect(preferredNameFromInput("  Ice de Vera  ")).toBe("Ice de Vera");
     expect(preferredNameFromInput("   ")).toBeUndefined();
+
+    const decoded = decodePreferredName("  Ice de Vera  ");
+    expect(Result.isSuccess(decoded) && decoded.success).toBe("Ice de Vera");
   });
 
   it("bounds and validates names", () => {

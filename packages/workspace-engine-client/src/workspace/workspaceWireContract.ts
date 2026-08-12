@@ -424,16 +424,18 @@ function decodeWorkspaceSchema<S extends Schema.ConstraintDecoder<unknown>>(
   schema: S,
   value: JsonValue,
   label: string,
+  expectObject = true,
 ): S["Type"] {
+  if (
+    expectObject &&
+    (value === null || typeof value !== "object" || Array.isArray(value))
+  ) {
+    throw new WorkspaceProtocolShapeError(`${label} must be a JSON object.`);
+  }
   const decoded = Schema.decodeUnknownResult(schema, {
     onExcessProperty: "error",
   })(value);
   if (Result.isFailure(decoded)) {
-    if (decoded.failure.message === "Expected object") {
-      throw new WorkspaceProtocolShapeError(
-        `${label} must be a JSON object.`,
-      );
-    }
     throw new WorkspaceProtocolShapeError(`${label}: ${decoded.failure.message}`);
   }
   return decoded.success;
@@ -486,5 +488,6 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
     schema,
     value,
     `${method} result`,
+    method !== WORKSPACE_METHOD.searchQuery,
   ) as WorkspaceMethodResultMap[M];
 }

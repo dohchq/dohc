@@ -75,6 +75,24 @@ describe("decodeYdocSettleResult", () => {
       decodeYdocSettleResult(settleResult({ materialized: "yes" })),
     ).toThrow(YdocProtocolShapeError);
   });
+
+  it("reports a wrong-typed nested projection field path", () => {
+    expect(() =>
+      decodeYdocSettleResult(settleResult({
+        projection: {
+          contentKind: "richdoc",
+          sourceStateVectorSha256: 7,
+          destructive: false,
+        },
+      })),
+    ).toThrowError(
+      expect.objectContaining<Partial<YdocProtocolShapeError>>({
+        message: expect.stringContaining(
+          "ydoc.settle result.projection.sourceStateVectorSha256",
+        ),
+      }),
+    );
+  });
 });
 
 // #534. Two INDEPENDENT facts gate the open consumer's refusal. `head` says

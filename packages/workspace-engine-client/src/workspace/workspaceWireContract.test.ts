@@ -57,6 +57,9 @@ describe("workspace wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryPage, []),
     ).toThrow("must be a JSON object");
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.searchQuery, null),
+    ).toThrow("Expected array");
   });
 
   it("rejects nested excess fields", () => {

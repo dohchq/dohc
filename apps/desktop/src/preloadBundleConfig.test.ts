@@ -54,6 +54,15 @@ describe("preload bundle config", () => {
         `${surface} cannot import effect/Schema`,
       );
       expect(() => resolveId("effect")).toThrow(`${surface} cannot import effect`);
+      expect(() => resolveId("effect?raw")).toThrow(
+        `${surface} cannot import effect?raw`,
+      );
+      expect(() => resolveId("effect#schema")).toThrow(
+        `${surface} cannot import effect#schema`,
+      );
+      expect(() => resolveId("effect/Schema?raw")).toThrow(
+        `${surface} cannot import effect/Schema?raw`,
+      );
       expect(resolveId("zod")).toBeUndefined();
     }
   });
