@@ -260,11 +260,14 @@ pub fn drain_deferred_ydoc_for_key(
         let established_kind = dohc_engine_collab::read_marker(store, key)
             .map_err(map_collab_hard_error)?
             .map(|marker| marker.content_kind);
-        let content_kind_refusal = established_kind
-            .is_some_and(|kind| {
-                kind != dohc_engine_collab::ContentKind::parse(&payload.content_kind)
-            })
-            .then_some("ydoc.update content kind does not match the established lineage");
+        let content_kind_refusal =
+            match dohc_engine_collab::ContentKind::parse(&payload.content_kind) {
+                Ok(payload_kind) if established_kind.is_some_and(|kind| kind != payload_kind) => {
+                    Some("ydoc.update content kind does not match the established lineage")
+                }
+                Ok(_) => None,
+                Err(_) => Some("ydoc.update content kind must be `plaintext` or `richdoc`"),
+            };
         // Once the base arrives it establishes the authoritative path. A
         // queued payload naming another path is still refused, but its valid
         // CRDT bytes must enter the lineage first so descendants do not retain
@@ -991,7 +994,8 @@ pub fn apply_ydoc_envelope(
         // before apply_envelope_with would persist the marker/base for an
         // envelope the sequence/divergence checks then reject (out-of-order
         // or divergent redelivery), leaving state for an unacked coordinate.
-        let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind);
+        let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind)
+            .map_err(map_collab_hard_error)?;
         let sv_bytes = {
             let doc = dohc_engine_collab::Ydoc::wire();
             if doc.apply(&bytes).is_err() {

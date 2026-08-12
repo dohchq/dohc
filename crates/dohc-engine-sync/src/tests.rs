@@ -8248,7 +8248,10 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             .expect("persisted lineage");
         let projected = persisted
             .doc
-            .project(dohc_engine_collab::ContentKind::parse(base_kind))
+            .project(
+                dohc_engine_collab::ContentKind::parse(base_kind)
+                    .expect("established content kind"),
+            )
             .expect("project established kind");
         assert!(projected.markdown.contains("base"));
         assert!(

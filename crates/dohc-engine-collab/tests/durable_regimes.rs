@@ -1376,6 +1376,101 @@ fn leases_are_process_local_per_registry() {
 
 // ---- settle -----------------------------------------------------------------
 
+fn assert_unknown_content_kind(error: CollabError) {
+    assert_eq!(error.code(), "unsupported-content-kind");
+    assert_eq!(
+        error.to_string(),
+        "unsupported durable Y.Doc content kind `scene`; supported kinds are `plaintext` and `richdoc`"
+    );
+}
+
+#[test]
+fn unknown_marker_content_kind_cannot_project_append_or_settle_as_richdoc() {
+    let mut ts = fresh_store("unknown-marker-kind");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("richdoc marker"),
+    );
+    let doc = Ydoc::wire();
+    let first_update = doc.richdoc_append_paragraph("existing drawing-shaped state");
+    committed(
+        record_local_update(&mut ts.store, &key, &first_update, &NoFaults, 1_100)
+            .expect("richdoc update"),
+    );
+    let rejected_update = doc.richdoc_append_paragraph("must not land");
+
+    committed(
+        ts.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch("PRAGMA ignore_check_constraints = ON")
+                    .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "UPDATE ydoc_docs SET content_kind = 'scene' \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute_batch("PRAGMA ignore_check_constraints = OFF")
+                    .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("replace marker content kind"),
+    );
+
+    assert_unknown_content_kind(read_marker(&ts.store, &key).expect_err("marker must refuse"));
+    assert_unknown_content_kind(
+        load_persisted(&ts.store, &key).expect_err("projection source must refuse"),
+    );
+    assert_unknown_content_kind(
+        record_local_update(&mut ts.store, &key, &rejected_update, &NoFaults, 1_200)
+            .expect_err("append must refuse"),
+    );
+    assert_unknown_content_kind(
+        settle(
+            &mut ts.store,
+            &key,
+            "notes/drawing.excalidraw",
+            &NoFaults,
+            1_300,
+        )
+        .expect_err("settle must refuse"),
+    );
+
+    assert_eq!(
+        count(&ts.store, "ydoc_updates", &key),
+        1,
+        "the rejected append must not mutate the lineage"
+    );
+    assert_eq!(
+        ts.store.pending_materialization_count().expect("jobs"),
+        0,
+        "the rejected settle must not enqueue artifact materialization"
+    );
+    let (settle_seq, last_settled_sha): (i64, Option<String>) = ts
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT settle_seq, last_settled_sha FROM ydoc_docs \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("settle marker state");
+    assert_eq!(settle_seq, 0);
+    assert_eq!(last_settled_sha, None);
+}
+
 #[test]
 fn settle_projects_and_enqueues_an_idempotent_job() {
     let mut ts = fresh_store("settle");

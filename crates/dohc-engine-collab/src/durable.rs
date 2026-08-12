@@ -1220,22 +1220,35 @@ fn binary_blob_for_gate(conn: &Connection, sha: &str) -> Result<Vec<u8>, CollabE
 }
 
 pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Marker>, CollabError> {
-    conn.query_row(
-        "SELECT content_kind, regime, head_update_seq, head_snapshot_seq, base_claimed \
+    let row = conn
+        .query_row(
+            "SELECT content_kind, regime, head_update_seq, head_snapshot_seq, base_claimed \
          FROM ydoc_docs WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-        |r| {
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get::<_, i64>(4)? != 0,
+                ))
+            },
+        )
+        .optional()
+        .map_err(map_sql)?;
+    row.map(
+        |(content_kind, regime, head_update_seq, head_snapshot_seq, base_claimed)| {
             Ok(Marker {
-                content_kind: ContentKind::parse(&r.get::<_, String>(0)?),
-                regime: Regime::parse(&r.get::<_, String>(1)?),
-                head_update_seq: r.get(2)?,
-                head_snapshot_seq: r.get(3)?,
-                base_claimed: r.get::<_, i64>(4)? != 0,
+                content_kind: ContentKind::parse(&content_kind)?,
+                regime: Regime::parse(&regime),
+                head_update_seq,
+                head_snapshot_seq,
+                base_claimed,
             })
         },
     )
-    .optional()
-    .map_err(map_sql)
+    .transpose()
 }
 
 /// The sha of the content the last settle materialized (or `None` if never

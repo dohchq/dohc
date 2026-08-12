@@ -50,6 +50,13 @@ pub enum CollabError {
     #[error("Y.Doc content kind does not match the existing lineage")]
     ContentKindMismatch,
 
+    /// A durable marker names a content kind this engine cannot interpret.
+    /// The engine must not guess a projection schema for unknown state.
+    #[error(
+        "unsupported durable Y.Doc content kind `{kind}`; supported kinds are `plaintext` and `richdoc`"
+    )]
+    UnsupportedContentKind { kind: String },
+
     /// A replicated lineage already has its single base; a second base is
     /// rejected (base-once). The caller must resume the existing lineage.
     #[error("replicated lineage already has a base (base-once)")]
@@ -118,6 +125,7 @@ impl CollabError {
             CollabError::ProjectionTooComplex { .. } => "projection-too-complex",
             CollabError::InvalidIdentifier { .. } => "invalid-identifier",
             CollabError::ContentKindMismatch => "content-kind-mismatch",
+            CollabError::UnsupportedContentKind { .. } => "unsupported-content-kind",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::BaseStateDiverged => "base-state-diverged",
             CollabError::LeaseHeld => "lease-held",

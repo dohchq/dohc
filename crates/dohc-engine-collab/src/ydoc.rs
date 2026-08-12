@@ -84,12 +84,14 @@ impl ContentKind {
         }
     }
 
-    /// Parse the column string (unknown → richdoc, matching the TS driver).
-    pub fn parse(raw: &str) -> Self {
-        if raw == "plaintext" {
-            ContentKind::Plaintext
-        } else {
-            ContentKind::Richdoc
+    /// Parse the durable column string.
+    pub fn parse(raw: &str) -> Result<Self, CollabError> {
+        match raw {
+            "plaintext" => Ok(ContentKind::Plaintext),
+            "richdoc" => Ok(ContentKind::Richdoc),
+            kind => Err(CollabError::UnsupportedContentKind {
+                kind: kind.to_owned(),
+            }),
         }
     }
 }

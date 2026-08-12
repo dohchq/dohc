@@ -36,7 +36,8 @@ use crate::search::{
 };
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
-    AppendOutcome, CloseOutcome, ContentKind, DocKey, LeaseRegistry, Projection, Regime, Ydoc,
+    AppendOutcome, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry, Projection,
+    Regime, Ydoc,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -8712,7 +8713,7 @@ fn ydoc_version_unsettled_content_kind_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let lineages: Vec<(String, ContentKind, bool)> = store.read_with(|conn| {
+    let raw_lineages: Vec<(String, String, bool)> = store.read_with(|conn| {
         let mut statement = conn
             .prepare(
                 "SELECT docs.object_id, docs.content_kind, EXISTS ( \
@@ -8734,13 +8735,22 @@ fn ydoc_version_unsettled_content_kind_on_store(
             .map_err(StorageError::corrupt_public)?;
         let rows = statement
             .query_map(params![workspace_id, version_id], |row| {
-                let content_kind = row.get::<_, String>(1)?;
-                Ok((row.get(0)?, ContentKind::parse(&content_kind), row.get(2)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })
             .map_err(StorageError::corrupt_public)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::corrupt_public)
     })?;
+    let lineages = raw_lineages
+        .into_iter()
+        .map(|(object_id, content_kind, has_deferred_updates)| {
+            Ok((
+                object_id,
+                ContentKind::parse(&content_kind)?,
+                has_deferred_updates,
+            ))
+        })
+        .collect::<Result<Vec<_>, CollabError>>()?;
 
     for (object_id, content_kind, has_deferred_updates) in lineages {
         if token.is_cancelled() {

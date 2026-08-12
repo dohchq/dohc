@@ -49,7 +49,7 @@ fn setup_parity_store(tag: &str, regime: Regime) -> (TempStore, dohc_engine_coll
 }
 
 fn content_kind(fx: &Fixture) -> ContentKind {
-    ContentKind::parse(&fx.content_kind)
+    ContentKind::parse(&fx.content_kind).expect("fixture content kind")
 }
 
 /// Drive a fixture's yjs update lineage through the durable local-only pipeline
