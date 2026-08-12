@@ -1,40 +1,27 @@
-import { z } from "zod";
+import * as Schema from "effect/Schema";
+import {
+  MAX_PREFERRED_NAME_LENGTH,
+  hasPreferredNameControlCharacters,
+} from "./chatIdentityValues";
 
-export const MAX_PREFERRED_NAME_LENGTH = 80;
-
-// Control characters, Unicode formatting controls (including bidi overrides
-// and isolates), and explicit line/paragraph separators can spoof or split a
-// visible author label even though the underlying authorization id is safe.
-// ZWNJ and ZWJ are the two intentional exceptions: they are required for
-// ordinary Persian orthography and joined emoji sequences, respectively.
-const CONTROL_CHARACTERS = /(?:[\p{Cc}\p{Zl}\p{Zp}]|(?![\u200c\u200d])\p{Cf})/u;
+export {
+  MAX_PREFERRED_NAME_LENGTH,
+  agentDisplayLabel,
+  preferredNameFromInput,
+} from "./chatIdentityValues";
 
 /**
  * The human-readable owner name used by chat authorship surfaces. This value is
  * display-only: authorization continues to use opaque, verified user ids.
  */
-export const PreferredName = z
-  .string()
-  .trim()
-  .min(1, "Enter the name your agent should use.")
-  .max(MAX_PREFERRED_NAME_LENGTH)
-  .refine((value) => !CONTROL_CHARACTERS.test(value), {
+export const PreferredName = Schema.Trim.check(
+  Schema.isNonEmpty({ message: "Enter the name your agent should use." }),
+  Schema.isMaxLength(MAX_PREFERRED_NAME_LENGTH, {
+    message: `Names must contain ${MAX_PREFERRED_NAME_LENGTH} characters or fewer.`,
+  }),
+  Schema.makeFilter((value) => !hasPreferredNameControlCharacters(value), {
     message: "Names cannot contain control characters.",
-  });
+  }),
+);
 
-export type PreferredName = z.infer<typeof PreferredName>;
-
-export function preferredNameFromInput(value: string): PreferredName | undefined {
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? undefined : PreferredName.parse(trimmed);
-}
-
-/**
- * Agent rows store the owner's raw display name. Every presentation surface
- * calls this helper so old already-suffixed rows do not become "agent's agent".
- */
-export function agentDisplayLabel(ownerDisplayName: string): string {
-  const owner = ownerDisplayName.trim();
-  if (/['’]s agent$/i.test(owner)) return owner;
-  return `${owner}'s agent`;
-}
+export type PreferredName = typeof PreferredName.Type;

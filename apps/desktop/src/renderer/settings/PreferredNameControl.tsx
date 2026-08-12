@@ -3,7 +3,7 @@ import {
   MAX_PREFERRED_NAME_LENGTH,
   agentDisplayLabel,
   preferredNameFromInput,
-} from "@dohc/workspace-contracts/chat-identity";
+} from "@dohc/workspace-contracts/chat-identity-values";
 
 export function PreferredNameControl(props: {
   value?: string;

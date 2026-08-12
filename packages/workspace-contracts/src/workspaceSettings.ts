@@ -1,4 +1,18 @@
-import { z } from "zod";
+import * as Effect from "effect/Effect";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
+import { NonEmptyString } from "./baseSchemas";
+import {
+  ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
+  ATTACHMENT_LOCATIONS,
+  DEFAULT_DRIVER_ID_MAX_LENGTH,
+  DEFAULT_MODEL_MAX_LENGTH,
+  WORKSPACE_PREVIEW_MODES,
+  WORKSPACE_SETTINGS_DEFAULTS,
+} from "./workspaceSettingsValues";
+
+export { ATTACHMENT_FOLDER_NAME_MAX_LENGTH } from "./workspaceSettingsValues";
 
 // The on-disk contract for `<workspace>/.dohc/settings.local.json`.
 //
@@ -20,21 +34,50 @@ import { z } from "zod";
 // re-parses and THROWS on an over-long value, and it is called straight from a
 // React change handler — so an unbounded input would turn a long paste into an
 // unhandled exception instead of a rejected edit.
-export const ATTACHMENT_FOLDER_NAME_MAX_LENGTH = 100;
+const WorkspaceAgentsSettings = Schema.Struct({
+  mcpAutoStart: Schema.Boolean,
+  defaultDriverId: Schema.NullOr(
+    NonEmptyString.check(
+      Schema.isMaxLength(DEFAULT_DRIVER_ID_MAX_LENGTH, {
+        message: `Default driver IDs must contain ${DEFAULT_DRIVER_ID_MAX_LENGTH} characters or fewer.`,
+      }),
+    ),
+  ),
+  defaultModel: Schema.NullOr(
+    NonEmptyString.check(
+      Schema.isMaxLength(DEFAULT_MODEL_MAX_LENGTH, {
+        message: `Default models must contain ${DEFAULT_MODEL_MAX_LENGTH} characters or fewer.`,
+      }),
+    ),
+  ),
+}).mapFields(Struct.map(Schema.mutableKey));
 
-export const WorkspaceSettings = z.object({
-  version: z.literal(1),
-  agents: z.object({
-    mcpAutoStart: z.boolean(),
-    defaultDriverId: z.string().min(1).max(120).nullable(),
-    defaultModel: z.string().min(1).max(200).nullable(),
-  }).strict(),
-  sites: z.object({
-    defaultPreviewMode: z.enum(["auto", "static", "dev", "build"]),
-  }).strict(),
-  privacy: z.object({
-    confirmExternalLinks: z.boolean(),
-  }).strict(),
+const WorkspaceSitesSettings = Schema.Struct({
+  defaultPreviewMode: Schema.Literals(WORKSPACE_PREVIEW_MODES),
+}).mapFields(Struct.map(Schema.mutableKey));
+
+const WorkspacePrivacySettings = Schema.Struct({
+  confirmExternalLinks: Schema.Boolean,
+}).mapFields(Struct.map(Schema.mutableKey));
+
+const WorkspaceExperimentalSettings = Schema.Struct({
+  workspaceEngineAlpha: Schema.Boolean,
+}).mapFields(Struct.map(Schema.mutableKey));
+
+const WorkspaceFilesSettings = Schema.Struct({
+  attachmentLocation: Schema.Literals(ATTACHMENT_LOCATIONS),
+  attachmentFolderName: Schema.String.check(
+    Schema.isMaxLength(ATTACHMENT_FOLDER_NAME_MAX_LENGTH, {
+      message: `Attachment folder names must contain ${ATTACHMENT_FOLDER_NAME_MAX_LENGTH} characters or fewer.`,
+    }),
+  ),
+}).mapFields(Struct.map(Schema.mutableKey));
+
+export const WorkspaceSettings = Schema.Struct({
+  version: Schema.Literal(1),
+  agents: WorkspaceAgentsSettings,
+  sites: WorkspaceSitesSettings,
+  privacy: WorkspacePrivacySettings,
   // Defaulted, not required: the top-level schema is .strict() and a failed
   // parse silently resets the whole file, so settings written before this
   // group existed must keep parsing as-is (see the old-shape regression test).
@@ -46,9 +89,9 @@ export const WorkspaceSettings = z.object({
   // DEFAULT_WORKSPACE_SETTINGS below are the single source for the flip —
   // every reader (engineCaptureGate, MCP, renderer) resolves through them or
   // mirrors their absent-reads-as-on rule.
-  experimental: z.object({
-    workspaceEngineAlpha: z.boolean(),
-  }).strict().default({ workspaceEngineAlpha: true }),
+  experimental: WorkspaceExperimentalSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(WORKSPACE_SETTINGS_DEFAULTS.experimental)),
+  ),
   // Defaulted like `experimental` above so settings files written before this
   // group existed keep parsing as-is (a failed parse silently resets the whole
   // file). Controls where pasted/uploaded attachments (images/files) are saved,
@@ -60,34 +103,16 @@ export const WorkspaceSettings = z.object({
   // name (global-folder); it is ignored for same-folder. Stored loosely (any
   // string) and sanitized to a single safe path segment at use time — an
   // invalid value falls back to "assets" rather than resetting the file.
-  files: z.object({
-    attachmentLocation: z.enum(["per-document", "global-folder", "same-folder"]),
-    attachmentFolderName: z.string().max(ATTACHMENT_FOLDER_NAME_MAX_LENGTH),
-  }).strict().default({ attachmentLocation: "per-document", attachmentFolderName: "assets" }),
-}).strict();
-export type WorkspaceSettings = z.infer<typeof WorkspaceSettings>;
+  files: WorkspaceFilesSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(WORKSPACE_SETTINGS_DEFAULTS.files)),
+  ),
+})
+  .mapFields(Struct.map(Schema.mutableKey))
+  .annotate({ parseOptions: { onExcessProperty: "error" } });
+export type WorkspaceSettings = typeof WorkspaceSettings.Type;
+const decodeWorkspaceSettings = Schema.decodeUnknownResult(WorkspaceSettings);
 
-export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
-  version: 1,
-  agents: {
-    mcpAutoStart: false,
-    defaultDriverId: null,
-    defaultModel: null,
-  },
-  sites: {
-    defaultPreviewMode: "auto",
-  },
-  privacy: {
-    confirmExternalLinks: true,
-  },
-  experimental: {
-    workspaceEngineAlpha: true,
-  },
-  files: {
-    attachmentLocation: "per-document",
-    attachmentFolderName: "assets",
-  },
-};
+export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = WORKSPACE_SETTINGS_DEFAULTS;
 
 // The one verdict every reader asks of the file's parsed JSON. Three states,
 // not two — the contract is stated at the top of this file.
@@ -97,12 +122,9 @@ export type WorkspaceEngineSetting =
   | { state: "untrusted"; cause: string };
 
 export function workspaceEngineSetting(raw: unknown): WorkspaceEngineSetting {
-  const parsed = WorkspaceSettings.safeParse(raw);
-  if (!parsed.success) {
-    const [issue] = parsed.error.issues;
-    if (!issue) return { state: "untrusted", cause: "the body does not match the schema" };
-    const at = issue.path.join(".");
-    return { state: "untrusted", cause: at ? `${at}: ${issue.message}` : issue.message };
+  const parsed = decodeWorkspaceSettings(raw);
+  if (Result.isFailure(parsed)) {
+    return { state: "untrusted", cause: parsed.failure.message };
   }
-  return { state: parsed.data.experimental.workspaceEngineAlpha ? "on" : "off" };
+  return { state: parsed.success.experimental.workspaceEngineAlpha ? "on" : "off" };
 }

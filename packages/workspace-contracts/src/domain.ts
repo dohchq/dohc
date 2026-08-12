@@ -1,22 +1,24 @@
-import { z } from "zod";
+import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
+import { NonEmptyString } from "./baseSchemas";
 
-export const WorkspaceId = z.string().min(1);
-export const UserId = z.string().min(1);
-export const AtomId = z.string().min(1);
-export const FolderId = z.string().min(1);
-export const AssetId = z.string().min(1);
-export const DatabaseId = z.string().min(1);
+export { SITE_SOURCE_CODE_EXT_RE } from "./domainValues";
 
-export const WorkspacePath = z
-  .string()
-  .min(1)
-  .refine((path) => !path.startsWith("/"), "workspace paths are relative")
-  .refine(
-    (path) => !path.split("/").includes(".."),
-    "workspace paths cannot contain ..",
-  );
+export const WorkspaceId = NonEmptyString;
+export const UserId = NonEmptyString;
+export const AtomId = NonEmptyString;
+export const FolderId = NonEmptyString;
+export const AssetId = NonEmptyString;
+export const DatabaseId = NonEmptyString;
 
-export const SITE_SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|[cm][jt]s|s?css|json|html?)$/i;
+export const WorkspacePath = NonEmptyString.check(
+  Schema.makeFilter((path) => !path.startsWith("/"), {
+    message: "workspace paths are relative",
+  }),
+  Schema.makeFilter((path) => !path.split("/").includes(".."), {
+    message: "workspace paths cannot contain ..",
+  }),
+);
 
 export const APPROVAL_ERROR_REASONS = [
   "approval-required",
@@ -30,14 +32,15 @@ export function isApprovalErrorReason(reason: string | undefined): reason is App
   return reason !== undefined && APPROVAL_ERROR_REASON_SET.has(reason);
 }
 
-export const AtomKind = z.enum([
+export const AtomKind = Schema.Literals([
   "markdown",
   "text",
   "csv",
   "json",
   "html",
 ]);
-export type AtomKind = z.infer<typeof AtomKind>;
+export type AtomKind = typeof AtomKind.Type;
+const isAtomKind = Schema.is(AtomKind);
 
 // Intentional split string: active-source no-legacy gates scan for retired
 // app-model tokens, but pre-launch local rows may still need this migration.
@@ -46,16 +49,15 @@ export type AtomKind = z.infer<typeof AtomKind>;
 const LEGACY_ATOM_KIND_APP_SOURCE = `${"app"}-${"source"}`;
 export function normalizeAtomKind(kind: unknown): AtomKind {
   const normalized = kind === LEGACY_ATOM_KIND_APP_SOURCE ? "text" : kind;
-  const parsed = AtomKind.safeParse(normalized);
-  if (!parsed.success) {
+  if (!isAtomKind(normalized)) {
     throw new Error(
-      `Unknown atom kind: ${String(kind)}. Valid kinds: ${AtomKind.options.join(", ")}`,
+      `Unknown atom kind: ${String(kind)}. Valid kinds: ${AtomKind.literals.join(", ")}`,
     );
   }
-  return parsed.data;
+  return normalized;
 }
 
-export const AssetKind = z.enum([
+export const AssetKind = Schema.Literals([
   "image",
   "audio",
   "video",
@@ -65,15 +67,15 @@ export const AssetKind = z.enum([
   "sqlite",
   "file",
 ]);
-export type AssetKind = z.infer<typeof AssetKind>;
+export type AssetKind = typeof AssetKind.Type;
 
-export const WorkspaceFile = z.object({
-  id: z.string(),
+export const WorkspaceFile = Schema.Struct({
+  id: Schema.String,
   workspaceId: WorkspaceId,
   path: WorkspacePath,
-  kind: z.enum(["atom", "asset", "database"]),
-  contentType: z.string(),
-  revision: z.string(),
-  updatedAt: z.number(),
-});
-export type WorkspaceFile = z.infer<typeof WorkspaceFile>;
+  kind: Schema.Literals(["atom", "asset", "database"]),
+  contentType: Schema.String,
+  revision: Schema.String,
+  updatedAt: Schema.Finite,
+}).mapFields(Struct.map(Schema.mutableKey));
+export type WorkspaceFile = typeof WorkspaceFile.Type;

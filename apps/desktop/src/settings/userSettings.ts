@@ -1,5 +1,18 @@
 import { z } from "zod";
-import { PreferredName } from "@dohc/workspace-contracts/chat-identity";
+import type { PreferredName } from "@dohc/workspace-contracts/chat-identity";
+import {
+  MAX_PREFERRED_NAME_LENGTH,
+  hasPreferredNameControlCharacters,
+} from "@dohc/workspace-contracts/chat-identity-values";
+
+const PreferredNameForIpc = z
+  .string()
+  .trim()
+  .min(1, "Enter the name your agent should use.")
+  .max(MAX_PREFERRED_NAME_LENGTH)
+  .refine((value) => !hasPreferredNameControlCharacters(value), {
+    message: "Names cannot contain control characters.",
+  }) satisfies z.ZodType<PreferredName>;
 
 export const THEME_MODES = ["system", "light", "dark"] as const;
 export type ThemeMode = (typeof THEME_MODES)[number];
@@ -32,7 +45,7 @@ export const DesktopUserSettings = z.object({
   // files migrate in place instead of failing the strict top-level parse and
   // resetting unrelated preferences.
   profile: z.object({
-    preferredName: PreferredName.optional(),
+    preferredName: PreferredNameForIpc.optional(),
   }).strict().default({}),
   appearance: z.object({
     themeMode: z.enum(THEME_MODES),

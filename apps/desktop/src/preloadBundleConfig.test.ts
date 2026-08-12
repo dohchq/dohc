@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import {
+import desktopConfig, {
   mainBundledWorkspaceDeps,
   preloadBundledRuntimeDeps,
+  effectFree,
 } from "../electron.vite.config";
 
 describe("main bundle config", () => {
@@ -21,5 +22,23 @@ describe("preload bundle config", () => {
         "zod",
       ]),
     );
+  });
+
+  it("rejects Effect from sandboxed and browser bundles", () => {
+    expect(desktopConfig.main?.plugins).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "effect-free-preload" })]),
+    );
+    expect(desktopConfig.preload?.plugins).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "effect-free-preload" })]),
+    );
+
+    for (const surface of ["preload", "renderer"] as const) {
+      const resolveId = effectFree(surface).resolveId as (source: string) => unknown;
+      expect(() => resolveId("effect/Schema")).toThrow(
+        `${surface} cannot import effect/Schema`,
+      );
+      expect(() => resolveId("effect")).toThrow(`${surface} cannot import effect`);
+      expect(resolveId("zod")).toBeUndefined();
+    }
   });
 });

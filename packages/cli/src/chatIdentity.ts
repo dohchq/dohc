@@ -1,4 +1,4 @@
-import { agentDisplayLabel } from "@dohc/workspace-contracts/chat-identity";
+import { agentDisplayLabel } from "@dohc/workspace-contracts/chat-identity-values";
 
 export interface CliChatAuthor {
   kind: "human" | "agent";
