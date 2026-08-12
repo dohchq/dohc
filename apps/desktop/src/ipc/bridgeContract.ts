@@ -3089,7 +3089,7 @@ const WorkspaceEditorGroup = z
 
 export const WorkspaceUiState = z.object({
   version: z.literal(2),
-  activeView: z.enum(VIEW_IDS),
+  activeView: z.enum(VIEW_IDS).catch("explorer"),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   editorGroups: z.array(WorkspaceEditorGroup).min(1),

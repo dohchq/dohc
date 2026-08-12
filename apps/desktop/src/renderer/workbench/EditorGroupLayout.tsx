@@ -26,7 +26,7 @@ export function EditorGroupLayout(props: {
     leftGroupId: string;
     rightGroupId: string;
     leftSize: number;
-    rightSize: number;
+    totalSize: number;
   } | null>(null);
 
   const resizeFromPointer = (event: PointerEvent<HTMLDivElement>) => {
@@ -36,8 +36,8 @@ export function EditorGroupLayout(props: {
       resize.current = null;
       return;
     }
-    const combined = state.leftSize + state.rightSize;
-    const delta = ((event.clientX - state.startX) / state.width) * combined;
+    const delta =
+      ((event.clientX - state.startX) / state.width) * state.totalSize;
     props.onResizeGroups(
       state.leftGroupId,
       state.rightGroupId,
@@ -108,7 +108,10 @@ export function EditorGroupLayout(props: {
                     leftGroupId: group.id,
                     rightGroupId: next.id,
                     leftSize: group.size,
-                    rightSize: next.size,
+                    totalSize: props.groups.reduce(
+                      (sum, candidate) => sum + candidate.size,
+                      0,
+                    ),
                   };
                 }}
                 onPointerMove={resizeFromPointer}

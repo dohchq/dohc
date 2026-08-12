@@ -470,57 +470,6 @@ export function createEditorGroupRight(
   return { ...state, editorGroups, activeEditorGroup: newGroupId };
 }
 
-export function moveTabToGroup(
-  state: WorkbenchState,
-  sourceGroupId: string,
-  targetGroupId: string,
-  path: string,
-  toIndex: number,
-): WorkbenchState {
-  if (!Number.isInteger(toIndex)) return state;
-  if (sourceGroupId === targetGroupId) {
-    const group = state.editorGroups.find((candidate) => candidate.id === sourceGroupId);
-    if (!group) return state;
-    return moveTab(
-      state,
-      sourceGroupId,
-      group.tabs.findIndex((tab) => tab.path === path),
-      toIndex,
-    );
-  }
-  const sourceIndex = state.editorGroups.findIndex(
-    (group) => group.id === sourceGroupId,
-  );
-  const targetIndex = state.editorGroups.findIndex(
-    (group) => group.id === targetGroupId,
-  );
-  if (sourceIndex === -1 || targetIndex === -1) return state;
-  const source = state.editorGroups[sourceIndex];
-  const tabIndex = source.tabs.findIndex((tab) => tab.path === path);
-  if (tabIndex === -1) return state;
-  const tab = source.tabs[tabIndex];
-  const sourceTabs = source.tabs.filter((candidate) => candidate !== tab);
-  const sourceActiveTab =
-    source.activeTab === path
-      ? ((sourceTabs[tabIndex] ?? sourceTabs[tabIndex - 1])?.path ?? null)
-      : source.activeTab;
-  const target = state.editorGroups[targetIndex];
-  const targetTabs = [...target.tabs];
-  targetTabs.splice(Math.min(Math.max(toIndex, 0), targetTabs.length), 0, tab);
-  const editorGroups = [...state.editorGroups];
-  editorGroups[sourceIndex] = {
-    ...source,
-    tabs: sourceTabs,
-    activeTab: sourceActiveTab,
-  };
-  editorGroups[targetIndex] = {
-    ...target,
-    tabs: targetTabs,
-    activeTab: path,
-  };
-  return { ...state, editorGroups, activeEditorGroup: targetGroupId };
-}
-
 // Resize an adjacent pair. `leftSize` is the left group's normalized size;
 // the right group receives the pair's remaining size.
 export function resizeEditorGroups(

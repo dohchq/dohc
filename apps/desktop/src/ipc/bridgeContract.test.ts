@@ -612,6 +612,15 @@ describe("workspace UI state IPC contract", () => {
     }
   });
 
+  it("falls back to Explorer when a saved view no longer exists", () => {
+    const parsed = WorkspaceUiState.parse({
+      ...validState,
+      activeView: "retired-view",
+    });
+    expect(parsed.activeView).toBe("explorer");
+    expect(parsed.editorGroups).toEqual(validState.editorGroups);
+  });
+
   it("rejects the replaced version-1 flat-tab contract", () => {
     expect(
       WorkspaceUiState.safeParse({

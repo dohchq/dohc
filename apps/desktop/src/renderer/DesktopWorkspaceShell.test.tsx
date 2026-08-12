@@ -860,6 +860,29 @@ describe("editor groups", () => {
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
   });
 
+  it("closes an empty editor group from its visible control", async () => {
+    renderShell(
+      makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md"))),
+    );
+    expect(await screen.findByTestId("view-markdown")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(2),
+    );
+    await userEvent.click(
+      within(screen.getByRole("region", { name: "Editor group 2" })).getByRole(
+        "button",
+        { name: "Close editor group" },
+      ),
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
+    );
+    expect(screen.queryByRole("button", { name: "Close editor group" })).toBeNull();
+  });
+
   it("keeps different surfaces visible and routes new opens to the focused group", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
@@ -899,6 +922,48 @@ describe("editor groups", () => {
     fireEvent.keyDown(window, { key: "w", ctrlKey: true });
     await waitFor(() => expect(screen.queryByTestId("tab-other.csv")).toBeNull());
     expect(screen.getByTestId("tab-data.csv")).toBeTruthy();
+  });
+
+  it("does not keep save-first state after a dirty editor unmounts", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
+    );
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+        {
+          id: "v2",
+          name: "Draft two",
+          kind: "named" as const,
+          createdAtMs: 1,
+          canMergeIntoMain: true,
+        },
+      ],
+      activeVersionId: "main",
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
+    await screen.findByTestId("tab-dirty");
+
+    await user.click(screen.getByTestId("tab-b.md"));
+    await waitFor(() => expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true"));
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const item = (await screen.findAllByTestId("version-item")).find(
+      (candidate) => candidate.dataset.versionId === "v2",
+    );
+    await user.click(item!);
+
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    expect(screen.queryByTestId("version-switch-save-confirm")).toBeNull();
   });
 });
 

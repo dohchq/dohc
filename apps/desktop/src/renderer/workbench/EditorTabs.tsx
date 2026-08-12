@@ -227,6 +227,7 @@ export function EditorTabs(props: {
   onContextMenu: (path: string) => void;
   onMove: (path: string, toIndex: number) => void;
   onCreateGroupRight: () => void;
+  onCloseGroup?: () => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
   const [dragPreview, setDragPreview] = useState<{
@@ -341,6 +342,17 @@ export function EditorTabs(props: {
             tab interrupts it. */}
         <div aria-hidden className="min-w-4 flex-1 border-b border-line" />
       </div>
+      {props.onCloseGroup ? (
+        <button
+          type="button"
+          aria-label="Close editor group"
+          title="Close editor group"
+          onClick={props.onCloseGroup}
+          className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-line/50 hover:text-ink"
+        >
+          <X size={14} aria-hidden />
+        </button>
+      ) : null}
       <button
         type="button"
         data-testid="create-editor-group-right"

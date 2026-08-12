@@ -70,6 +70,43 @@ describe("EditorGroupLayout", () => {
     expect(onResizeGroups).toHaveBeenCalledTimes(1);
   });
 
+  it("tracks pointer movement against the full layout with three groups", () => {
+    const onResizeGroups = vi.fn();
+    render(
+      <EditorGroupLayout
+        groups={[
+          { id: "left", size: 1 / 3, content: "Left" },
+          { id: "middle", size: 1 / 3, content: "Middle" },
+          { id: "right", size: 1 / 3, content: "Right" },
+        ]}
+        activeGroupId="left"
+        onFocusGroup={vi.fn()}
+        onResizeGroups={onResizeGroups}
+      />,
+    );
+    const layout = screen.getByTestId("editor-group-layout");
+    Object.defineProperty(layout, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ width: 900 }),
+    });
+    const separator = screen.getAllByRole("separator", {
+      name: "Resize editor groups",
+    })[0];
+    Object.defineProperty(separator, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+
+    fireEvent.pointerDown(separator, { button: 0, pointerId: 7, clientX: 300 });
+    fireEvent.pointerMove(separator, {
+      pointerId: 7,
+      buttons: 1,
+      clientX: 450,
+    });
+
+    expect(onResizeGroups).toHaveBeenCalledWith("left", "middle", 0.5);
+  });
+
   it("supports keyboard resizing", () => {
     const { onResizeGroups } = renderLayout();
     const separator = screen.getByRole("separator", { name: "Resize editor groups" });

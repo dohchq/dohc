@@ -31,7 +31,6 @@ import {
   isSiteTabPath,
   isVirtualTabPath,
   moveTab,
-  moveTabToGroup,
   openTab,
   parseHistoryDiffTabPath,
   parseSiteTabPath,
@@ -198,22 +197,6 @@ describe("tabs", () => {
     state = focusEditorGroup(state, DEFAULT_EDITOR_GROUP_ID);
     state = openTab(state, "b.md");
     expect(allTabs(state).filter((tab) => tab.path === "b.md")).toHaveLength(1);
-    expect(state.activeEditorGroup).toBe("right");
-  });
-
-  it("moves a tab between groups and repairs the source activation", () => {
-    let state = moveTabToNewGroup(
-      withTabs("a.md", "b.md", "c.md"),
-      DEFAULT_EDITOR_GROUP_ID,
-      "c.md",
-      "right",
-    );
-    state = activateTab(state, DEFAULT_EDITOR_GROUP_ID, "b.md");
-    const moved = state.editorGroups[0].tabs[1];
-    state = moveTabToGroup(state, DEFAULT_EDITOR_GROUP_ID, "right", "b.md", 0);
-    expect(state.editorGroups[0].activeTab).toBe("a.md");
-    expect(state.editorGroups[1].tabs[0]).toBe(moved);
-    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["b.md", "c.md"]);
     expect(state.activeEditorGroup).toBe("right");
   });
 

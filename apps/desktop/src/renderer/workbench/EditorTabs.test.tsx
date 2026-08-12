@@ -192,6 +192,7 @@ describe("EditorTabs overlay scrollbar", () => {
 
   it("labels group-scoped controls and moves the active tab into a new group", () => {
     const onCreateGroupRight = vi.fn();
+    const onCloseGroup = vi.fn();
     render(
       <EditorTabs
         groupNumber={2}
@@ -204,6 +205,7 @@ describe("EditorTabs overlay scrollbar", () => {
         onContextMenu={noop}
         onMove={noop}
         onCreateGroupRight={onCreateGroupRight}
+        onCloseGroup={onCloseGroup}
       />,
     );
 
@@ -215,5 +217,7 @@ describe("EditorTabs overlay scrollbar", () => {
       screen.getByRole("button", { name: "New editor group right" }),
     );
     expect(onCreateGroupRight).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Close editor group" }));
+    expect(onCloseGroup).toHaveBeenCalledOnce();
   });
 });

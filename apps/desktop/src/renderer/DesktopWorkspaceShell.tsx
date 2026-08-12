@@ -133,6 +133,7 @@ import {
   closeTab,
   closeEditorGroup,
   createEditorGroupRight,
+  focusEditorGroup,
   clampChatsWidth,
   isVersionCompareTabPath,
   parseVersionCompareTabPath,
@@ -1373,6 +1374,9 @@ export function DesktopWorkspaceShell(props: {
           setDirtyRevision((revision) => revision + 1);
         },
         registerDraftFlush: (flush) => {
+          if (flush === null && dirtyTabsRef.current.delete(tab)) {
+            setDirtyRevision((revision) => revision + 1);
+          }
           updateRegistration("flush", flush);
           if (flush) {
             for (const scope of draftOperationScopesRef.current) {
@@ -2881,8 +2885,8 @@ export function DesktopWorkspaceShell(props: {
   // flip while typing). Capture the requested tab objects before the flush:
   // closing and reopening the same path creates a later tab that must stay.
   const closeTabsAfterFlush = useCallback(
-    (targets: readonly { groupId: string; tab: WorkbenchTab }[]) => {
-      const requested = new Set(targets.map((target) => target.tab));
+    (tabs: readonly WorkbenchTab[]) => {
+      const requested = new Set(tabs);
       if (requested.size === 0) return;
 
       const closeRequestedTabs = (state: WorkbenchState): WorkbenchState => {
@@ -2942,7 +2946,7 @@ export function DesktopWorkspaceShell(props: {
         (candidate) => candidate.id === groupId,
       );
       const tab = group?.tabs.find((candidate) => candidate.path === path);
-      if (tab) void closeTabsAfterFlush([{ groupId, tab }]);
+      if (tab) void closeTabsAfterFlush([tab]);
     },
     [closeTabsAfterFlush],
   );
@@ -2952,18 +2956,14 @@ export function DesktopWorkspaceShell(props: {
     const group = activeGroup(current);
     const tab = group.tabs.find((candidate) => candidate.path === group.activeTab);
     if (tab) {
-      void closeTabsAfterFlush([{ groupId: group.id, tab }]);
+      void closeTabsAfterFlush([tab]);
     } else if (current.editorGroups.length > 1) {
       mutateWb((state) => closeEditorGroup(state, group.id));
     }
   }, [closeTabsAfterFlush, mutateWb]);
 
   const closeAllTabs = useCallback(() => {
-    void closeTabsAfterFlush(
-      wbRef.current.editorGroups.flatMap((group) =>
-        group.tabs.map((tab) => ({ groupId: group.id, tab })),
-      ),
-    );
+    void closeTabsAfterFlush(wbRef.current.editorGroups.flatMap((group) => group.tabs));
   }, [closeTabsAfterFlush]);
 
   const closeOtherTabs = useCallback(
@@ -2972,9 +2972,7 @@ export function DesktopWorkspaceShell(props: {
       const group = current.editorGroups.find((candidate) => candidate.id === groupId);
       if (!group?.tabs.some((tab) => tab.path === path)) return;
       void closeTabsAfterFlush(
-        group.tabs
-          .filter((tab) => tab.path !== path)
-          .map((tab) => ({ groupId, tab })),
+        group.tabs.filter((tab) => tab.path !== path),
       );
     },
     [closeTabsAfterFlush],
@@ -3315,7 +3313,7 @@ export function DesktopWorkspaceShell(props: {
         mutateWb((state) => closeEditorGroup(state, groupId));
         return;
       }
-      void closeTabsAfterFlush(group.tabs.map((tab) => ({ groupId, tab })));
+      void closeTabsAfterFlush(group.tabs);
     },
     [closeTabsAfterFlush, mutateWb],
   );
@@ -3515,7 +3513,7 @@ export function DesktopWorkspaceShell(props: {
         // CommandOrControl+Shift+W native accelerator.
         event.preventDefault();
         closeActiveTab();
-      } else if (event.key === "\\" && !event.shiftKey) {
+      } else if (key === "\\") {
         event.preventDefault();
         openEditorGroupRight();
       }
@@ -4245,7 +4243,7 @@ export function DesktopWorkspaceShell(props: {
                     <EditorTabs
                       tabs={editorGroup.tabs}
                       activeTab={tabPath}
-                      activeTabDirty={!!tab && dirtyTabsRef.current.has(tab)}
+                      activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
                       onActivate={(path) => activateEditorTab(editorGroup.id, path)}
@@ -4257,6 +4255,9 @@ export function DesktopWorkspaceShell(props: {
                         moveFileTab(editorGroup.id, path, toIndex)
                       }
                       onCreateGroupRight={() => openEditorGroupRight(editorGroup.id)}
+                      {...(wb.editorGroups.length > 1
+                        ? { onCloseGroup: () => closeGroupAfterFlush(editorGroup.id) }
+                        : {})}
                     />
                     <div
                       className="flex min-h-0 flex-1 flex-col"
@@ -4537,11 +4538,7 @@ export function DesktopWorkspaceShell(props: {
             })}
             activeGroupId={wb.activeEditorGroup}
             onFocusGroup={(groupId) =>
-              mutateWb((state) =>
-                state.activeEditorGroup === groupId
-                  ? state
-                  : { ...state, activeEditorGroup: groupId },
-              )
+              mutateWb((state) => focusEditorGroup(state, groupId))
             }
             onResizeGroups={(leftGroupId, rightGroupId, leftSize) =>
               mutateWb((state) =>
