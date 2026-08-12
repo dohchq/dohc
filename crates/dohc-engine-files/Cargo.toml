@@ -53,6 +53,8 @@ file-id = "0.2"
 # agent reads first. `search_policy::js_property_order` puts the array-index half
 # of that rule back; document order is the half only the parser can supply.
 toml = { version = "1.1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
 # Safe descriptor-relative filesystem operations. On Linux this also exposes
@@ -62,8 +64,6 @@ rustix = { version = "1.1", features = ["fs"] }
 [dev-dependencies]
 # The differential harness parses the shared workspace-kernel golden fixtures
 # (independently-computed hashes) and the crate's extended goldens.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 # Drives the async FilesActor traces (cancellation + deadline through the tokio
 # loop). Also recomputes expected hashes via a second code path (non-tautology).
 sha2 = "0.11"

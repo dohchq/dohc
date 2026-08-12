@@ -43,6 +43,7 @@ pub mod policy;
 pub mod reconcile;
 pub mod scan;
 pub mod search_policy;
+pub mod search_text;
 pub mod watch;
 
 pub use actor::{FilesActor, FilesHandle, FilesStats, LifecycleState};

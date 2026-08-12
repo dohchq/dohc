@@ -17,6 +17,7 @@ use crate::search::{SearchError, THREAD_HEADER_MESSAGE_ID};
 use dohc_engine_domain::chats::{
     chat_message_search_text, chat_thread_display_title, upsert_chat_search_index_row,
 };
+use dohc_engine_files::search_text::extract_search_text;
 use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
 use rusqlite::{Connection, params};
 use std::path::Path;
@@ -39,12 +40,10 @@ fn should_crash(faults: &dyn FaultInjector, point: FaultPoint) -> bool {
 /// closed rather than building an unbounded in-flight statement stream.
 const MAX_REBUILD_ROWS: usize = 5_000_000;
 
-/// Reserved `indexed_at_ms` value certifying the chat-index generation that
-/// transactionally indexes replicated writes. Older builds stored ordinary
-/// nonnegative timestamps, so their otherwise-healthy rows rebuild exactly once
-/// after upgrade without a schema migration. A future chat-index change can
-/// bump this sentinel again.
-const CHAT_INDEX_CERTIFICATION: i64 = -1;
+/// Reserved `indexed_at_ms` value certifying the current file and chat index
+/// generation. The previous `-1` generation indexed raw Excalidraw JSON, so it
+/// must rebuild once. A future index-format change can bump this sentinel again.
+const SEARCH_INDEX_CERTIFICATION: i64 = -2;
 
 /// Stored title (`""` = untitled) + first message body -> display title. Ports
 /// `threadDisplayTitle` (`chatThreadTitle.ts`).
@@ -132,7 +131,15 @@ pub fn upsert_file_search_index(
     if !path_is_search_indexed(&policy, path) {
         return Ok(());
     }
-    insert_file_index_row(conn, workspace_id, version_id, object_id, path, text)
+    let search_text = extract_search_text(path, text);
+    insert_file_index_row(
+        conn,
+        workspace_id,
+        version_id,
+        object_id,
+        path,
+        &search_text,
+    )
 }
 
 /// Unconditionally delete a file's FTS row (`deleteFileSearchIndex`).
@@ -240,7 +247,15 @@ fn rebuild_file_index_for_version(
         if !path_is_search_indexed(policy, &path) {
             continue;
         }
-        insert_file_index_row(conn, workspace_id, version_id, &object_id, &path, &text)?;
+        let search_text = extract_search_text(&path, &text);
+        insert_file_index_row(
+            conn,
+            workspace_id,
+            version_id,
+            &object_id,
+            &path,
+            &search_text,
+        )?;
     }
     Ok(())
 }
@@ -356,9 +371,9 @@ fn rebuild_chat_index_for_workspace(
 /// **Durable generation markers.**
 /// `engine_search_index_state.file_policy_degraded` records whether a generation
 /// was built under a broken FILE policy, while `indexed_at_ms` carries the
-/// reserved [`CHAT_INDEX_CERTIFICATION`] sentinel for the current chat-index
-/// generation. Legacy rows contain timestamps instead, forcing one rebuild after
-/// upgrade without a migration. Work happens only when there is no current
+/// reserved [`SEARCH_INDEX_CERTIFICATION`] sentinel for the current index
+/// generation. Older rows force one rebuild after an index-format change.
+/// Work happens only when there is no current
 /// certification OR the degraded status CHANGED since the last build:
 /// - healthy build: wipe+rebuild the version's files, rebuild chat, mark `0`.
 /// - degraded build: FREEZE the file FTS (leave every row — nothing dropped),
@@ -380,8 +395,8 @@ pub fn ensure_search_index_for_version(
     let policy = read_engine_search_policy(root_dir);
     let current_degraded = policy.is_degraded();
 
-    // The last-built degraded status and chat generation for this version, if
-    // any. A legacy timestamp is deliberately not a current certification.
+    // The last-built degraded status and index generation for this version, if
+    // any. An older marker is deliberately not a current certification.
     let stored_state: Option<(bool, bool)> = conn
         .query_row(
             "SELECT file_policy_degraded, indexed_at_ms FROM engine_search_index_state \
@@ -390,7 +405,7 @@ pub fn ensure_search_index_for_version(
             |row| {
                 Ok((
                     row.get::<_, i64>(0)? != 0,
-                    row.get::<_, i64>(1)? == CHAT_INDEX_CERTIFICATION,
+                    row.get::<_, i64>(1)? == SEARCH_INDEX_CERTIFICATION,
                 ))
             },
         )
@@ -478,7 +493,7 @@ fn rebuild_within_savepoint(
         params![
             workspace_id,
             version_id,
-            CHAT_INDEX_CERTIFICATION,
+            SEARCH_INDEX_CERTIFICATION,
             i64::from(current_degraded)
         ],
     )?;
