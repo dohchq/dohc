@@ -75,6 +75,8 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   }, [props.document, props.sceneDoc]);
   const lastSerialized = useRef(initial.serialized);
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
+  const mountedRef = useRef(false);
+  const [readyApi, setReadyApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [presenceBound, setPresenceBound] = useState(false);
   const remoteEchoes = useRef<SceneRemoteEchoes>(new Map());
   const hydratedFileIds = useRef<Set<string>>(new Set());
@@ -86,11 +88,18 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     hydratedFileIds.current.clear();
   }
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const renderSceneDoc = useCallback(() => {
-    if (!props.sceneDoc || !apiRef.current) return;
+    if (!props.sceneDoc || !readyApi) return;
     const scene = sceneForCanvas(props.sceneDoc);
     rememberRemoteScene(scene.elements, remoteEchoes.current);
-    apiRef.current.updateScene({
+    readyApi.updateScene({
       elements: scene.elements as unknown as Parameters<
         ExcalidrawImperativeAPI["updateScene"]
       >[0]["elements"],
@@ -99,7 +108,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
       >[0]["appState"],
       captureUpdate: CaptureUpdateAction.NEVER,
     });
-  }, [props.sceneDoc]);
+  }, [props.sceneDoc, readyApi]);
 
   useEffect(() => {
     const doc = props.sceneDoc;
@@ -115,7 +124,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
 
   useEffect(() => {
     hydratedFileIds.current.clear();
-    const api = apiRef.current;
+    const api = readyApi;
     if (!props.sceneDoc || !props.hydrateAssets || !api) return;
     let active = true;
     void props
@@ -129,15 +138,11 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     return () => {
       active = false;
     };
-  }, [props.hydrateAssets, props.sceneDoc]);
-
-  useEffect(() => () => {
-    apiRef.current = null;
-  }, []);
+  }, [props.hydrateAssets, props.sceneDoc, readyApi]);
 
   useEffect(() => {
     setPresenceBound(false);
-    if (!props.sceneDoc || !props.presence || !apiRef.current) return;
+    if (!props.sceneDoc || !props.presence || !readyApi) return;
     let binding: ExcalidrawPresenceBinding;
     try {
       binding = bindExcalidrawPresence({
@@ -146,7 +151,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
         topic: props.presence.topic,
         clientId: props.presence.clientId,
         displayName: props.presence.displayName,
-        getApi: () => apiRef.current,
+        getApi: () => (apiRef.current === readyApi ? readyApi : null),
       });
     } catch {
       // Presence is optional. A binding failure cannot affect the scene.
@@ -156,10 +161,9 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     setPresenceBound(true);
     return () => {
       if (presenceBinding.current === binding) presenceBinding.current = null;
-      setPresenceBound(false);
       binding.destroy();
     };
-  }, [props.presence, props.sceneDoc]);
+  }, [props.presence, props.sceneDoc, readyApi]);
 
   return (
     <div className="absolute inset-0" data-testid="excalidraw-canvas">
@@ -176,6 +180,10 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
         }
         excalidrawAPI={(api) => {
           apiRef.current = api;
+          queueMicrotask(() => {
+            if (!mountedRef.current || apiRef.current !== api) return;
+            setReadyApi(api);
+          });
         }}
         viewModeEnabled={props.readOnly}
         autoFocus={!props.readOnly}

@@ -2,10 +2,14 @@
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { declareSceneRoots, foldScene, insertElementRevision } from "@dohc/excalidraw-scene";
+import { StrictMode } from "react";
 import * as Y from "yjs";
+import type { PresenceTransport } from "./collab/presenceChannel";
 
 const excalidraw = vi.hoisted(() => {
   let rendering = false;
+  let apiHeld = false;
+  let pendingApiCallback: ((api: unknown) => void) | null = null;
   const updateScene = vi.fn(() => {
     if (rendering) {
       throw new Error("The Excalidraw API was used during child render.");
@@ -23,6 +27,27 @@ const excalidraw = vi.hoisted(() => {
     endRender: () => {
       rendering = false;
     },
+    holdApi: () => {
+      apiHeld = true;
+    },
+    deliverApi: () => {
+      apiHeld = false;
+      const callback = pendingApiCallback;
+      pendingApiCallback = null;
+      callback?.(excalidraw.api);
+    },
+    receiveApiCallback: (callback: ((api: unknown) => void) | undefined) => {
+      if (!callback) return;
+      if (apiHeld) {
+        pendingApiCallback = callback;
+      } else {
+        callback(excalidraw.api);
+      }
+    },
+    resetApiDelivery: () => {
+      apiHeld = false;
+      pendingApiCallback = null;
+    },
   };
 });
 
@@ -32,8 +57,8 @@ vi.mock("@excalidraw/excalidraw", () => ({
     excalidraw.props = props;
     excalidraw.beginRender();
     try {
-      (props.excalidrawAPI as ((api: unknown) => void) | undefined)?.(
-        excalidraw.api,
+      excalidraw.receiveApiCallback(
+        props.excalidrawAPI as ((api: unknown) => void) | undefined,
       );
     } finally {
       excalidraw.endRender();
@@ -59,30 +84,190 @@ function rectangle(version: number, nonce: number, x: number) {
   };
 }
 
+function trackedPresenceTransport() {
+  let pollCalls = 0;
+  let leaveCalls = 0;
+  const activePolls = new Set<AbortSignal>();
+  const transport: PresenceTransport = {
+    async publish() {
+      return { version: 1, peers: [] };
+    },
+    async leave() {
+      leaveCalls += 1;
+    },
+    poll: ({ signal }) => {
+      pollCalls += 1;
+      activePolls.add(signal);
+      return new Promise((resolve) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            activePolls.delete(signal);
+            resolve({ version: 1, peers: [] });
+          },
+          { once: true },
+        );
+      });
+    },
+  };
+  return {
+    transport,
+    activePolls: () => activePolls.size,
+    pollCalls: () => pollCalls,
+    leaveCalls: () => leaveCalls,
+  };
+}
+
 afterEach(() => {
   cleanup();
   excalidraw.updateScene.mockReset();
   excalidraw.addFiles.mockReset();
   excalidraw.props = null;
+  excalidraw.resetApiDelivery();
 });
 
-it("waits until commit before using the Excalidraw API", () => {
+it("starts the scene, hydration, and presence after a delayed API callback", async () => {
   const doc = new Y.Doc();
   declareSceneRoots(doc);
+  insertElementRevision(doc, rectangle(1, 10, 20));
+  const presence = trackedPresenceTransport();
+  const hydrateAssets = vi.fn(async () => [
+    { id: "image", dataURL: "data:image/png;base64,QQ==" },
+  ] as never);
+  excalidraw.holdApi();
 
-  expect(() =>
-    render(
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+      hydrateAssets={hydrateAssets}
+      presence={{
+        topic: "scene-1",
+        clientId: "client-1",
+        displayName: "Alice",
+        transport: presence.transport,
+      }}
+    />,
+  );
+
+  expect(excalidraw.updateScene).not.toHaveBeenCalled();
+  expect(hydrateAssets).not.toHaveBeenCalled();
+  expect(presence.pollCalls()).toBe(0);
+
+  await act(async () => {
+    excalidraw.deliverApi();
+    await Promise.resolve();
+  });
+
+  await waitFor(() => {
+    expect(excalidraw.updateScene).toHaveBeenCalledWith(
+      expect.objectContaining({
+        elements: [expect.objectContaining({ id: "shape", x: 20 })],
+      }),
+    );
+    expect(excalidraw.addFiles).toHaveBeenCalledOnce();
+    expect(excalidraw.props?.isCollaborating).toBe(true);
+    expect(presence.activePolls()).toBe(1);
+  });
+});
+
+it("keeps one scene, hydration, and presence binding through Strict Mode replay", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  const presence = trackedPresenceTransport();
+  const hydrateAssets = vi.fn(async () => [
+    { id: "image", dataURL: "data:image/png;base64,QQ==" },
+  ] as never);
+
+  render(
+    <StrictMode>
       <ExcalidrawCanvas
         document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
         readOnly={false}
         sceneDoc={doc}
-      />,
-    ),
-  ).not.toThrow();
-  expect(excalidraw.updateScene).toHaveBeenCalled();
+        hydrateAssets={hydrateAssets}
+        presence={{
+          topic: "scene-1",
+          clientId: "client-1",
+          displayName: "Alice",
+          transport: presence.transport,
+        }}
+      />
+    </StrictMode>,
+  );
+
+  await waitFor(() => {
+    expect(excalidraw.addFiles).toHaveBeenCalledOnce();
+    expect(presence.activePolls()).toBe(1);
+  });
+  expect(presence.pollCalls()).toBe(1);
+
+  excalidraw.updateScene.mockClear();
+  act(() => insertElementRevision(doc, rectangle(1, 10, 20)));
+  expect(excalidraw.updateScene).toHaveBeenCalledWith(
+    expect.objectContaining({
+      elements: [expect.objectContaining({ id: "shape", x: 20 })],
+      captureUpdate: "never",
+    }),
+  );
+  expect(presence.activePolls()).toBe(1);
+  expect(presence.pollCalls()).toBe(1);
 });
 
-it("renders remote scene updates without echoing them", () => {
+it("destroys the old presence binding on a scene switch and unmount", async () => {
+  const firstDoc = new Y.Doc();
+  const secondDoc = new Y.Doc();
+  declareSceneRoots(firstDoc);
+  declareSceneRoots(secondDoc);
+  const firstPresence = trackedPresenceTransport();
+  const secondPresence = trackedPresenceTransport();
+  const view = render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={firstDoc}
+      presence={{
+        topic: "scene-1",
+        clientId: "client-1",
+        displayName: "Alice",
+        transport: firstPresence.transport,
+      }}
+    />,
+  );
+  await waitFor(() => expect(firstPresence.activePolls()).toBe(1));
+
+  view.rerender(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={secondDoc}
+      presence={{
+        topic: "scene-2",
+        clientId: "client-1",
+        displayName: "Alice",
+        transport: secondPresence.transport,
+      }}
+    />,
+  );
+
+  await waitFor(() => {
+    expect(firstPresence.activePolls()).toBe(0);
+    expect(firstPresence.leaveCalls()).toBe(1);
+    expect(secondPresence.activePolls()).toBe(1);
+  });
+  expect(firstPresence.pollCalls()).toBe(1);
+  expect(secondPresence.pollCalls()).toBe(1);
+
+  view.unmount();
+  await waitFor(() => {
+    expect(secondPresence.activePolls()).toBe(0);
+    expect(secondPresence.leaveCalls()).toBe(1);
+  });
+  expect(secondPresence.pollCalls()).toBe(1);
+});
+
+it("renders remote scene updates without echoing them", async () => {
   const doc = new Y.Doc();
   declareSceneRoots(doc);
   render(
@@ -92,6 +277,7 @@ it("renders remote scene updates without echoing them", () => {
       sceneDoc={doc}
     />,
   );
+  await waitFor(() => expect(excalidraw.updateScene).toHaveBeenCalled());
   excalidraw.updateScene.mockClear();
 
   act(() => insertElementRevision(doc, rectangle(1, 10, 20)));
@@ -185,7 +371,7 @@ it("records native undo output as a new higher revision", () => {
   expect(declareSceneRoots(doc).revisions.size).toBe(1);
 });
 
-it("removes a refused image while keeping an ordinary scene change", () => {
+it("removes a refused image while keeping an ordinary scene change", async () => {
   const doc = new Y.Doc();
   declareSceneRoots(doc);
   const onAssetRefusedChange = vi.fn();
@@ -197,6 +383,7 @@ it("removes a refused image while keeping an ordinary scene change", () => {
       onAssetRefusedChange={onAssetRefusedChange}
     />,
   );
+  await waitFor(() => expect(excalidraw.updateScene).toHaveBeenCalled());
   excalidraw.updateScene.mockClear();
   const onChange = excalidraw.props?.onChange as (
     elements: readonly unknown[],
