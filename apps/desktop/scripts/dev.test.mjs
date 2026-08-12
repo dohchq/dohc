@@ -21,8 +21,13 @@ test("desktop dev launches Electron outside Node mode", () => {
 });
 
 test("desktop dev does not report an interrupted foreground process as a launch failure", () => {
-  assert.equal(foregroundExitCode({ status: null }), 0);
-  assert.equal(foregroundExitCode({ status: 1 }), 1);
+  assert.equal(foregroundExitCode({ status: null, signal: "SIGINT" }), 0);
+  assert.equal(foregroundExitCode({ status: null, signal: "SIGTERM" }), 0);
+  assert.equal(foregroundExitCode({ status: 0xc000013a, signal: null }), 0);
+  assert.equal(foregroundExitCode({ status: -1073741510, signal: null }), 0);
+  assert.equal(foregroundExitCode({ status: null, signal: "SIGKILL" }), 1);
+  assert.equal(foregroundExitCode({ status: null, signal: null }), 1);
+  assert.equal(foregroundExitCode({ status: 1, signal: null }), 1);
 });
 
 test("desktop dev builds the engine where Electron loads it", () => {

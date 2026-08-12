@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const repoRoot = resolve(import.meta.dirname, "../../..");
+const cleanForegroundSignals = new Set(["SIGINT", "SIGTERM", "SIGBREAK"]);
+const windowsControlC = 0xc000013a;
 
 export function desktopDevEnvironment(source) {
   const environment = { ...source };
@@ -19,7 +21,13 @@ export function desktopDevEnvironment(source) {
 }
 
 export function foregroundExitCode(result) {
-  return result.status ?? 0;
+  if (result.status !== null) {
+    return result.status === windowsControlC || result.status === windowsControlC - 2 ** 32
+      ? 0
+      : result.status;
+  }
+
+  return result.signal !== null && cleanForegroundSignals.has(result.signal) ? 0 : 1;
 }
 
 export function workspaceEngineBuildArguments(root) {
@@ -75,6 +83,7 @@ function run() {
     process.execPath,
     [electronViteCliPath(), "dev", ...process.argv.slice(2)],
     {
+      cwd: resolve(import.meta.dirname, ".."),
       env: desktopDevEnvironment(process.env),
       stdio: "inherit",
     },
