@@ -203,6 +203,9 @@ export type UseEngineDoc = {
   deletedWhileEditing: boolean;
   // The recovery row created for this deletion, if it still exists.
   deletedDraftId: number | null;
+  // Main refused a live edit because this workspace became read-only after
+  // the session opened. The rejected document is retained for recovery only.
+  readOnlyWhileEditing: boolean;
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
@@ -356,6 +359,9 @@ export function useEngineDoc(input: {
     token: number;
     draftId: number | null;
   } | null>(null);
+  const [readOnlyTransition, setReadOnlyTransition] = useState<{
+    token: number;
+  } | null>(null);
   const saveStateRef = useRef<EngineDocSaveState>("saved");
   // Monotonic per-open token: only the newest open may set state (the async-
   // state invariant — a stale workspace/path response never repaints).
@@ -396,13 +402,19 @@ export function useEngineDoc(input: {
   const deletedWhileEditing =
     settled?.kind === "bound" && deletion?.token === settled.token;
   const deletedDraftId = deletedWhileEditing ? deletion.draftId : null;
+  const readOnlyWhileEditing =
+    settled?.kind === "bound" && readOnlyTransition?.token === settled.token;
   const writesRefused = useRef(false);
   const writesRefusedKey = useRef(requestKey);
   if (writesRefusedKey.current !== requestKey) {
     writesRefusedKey.current = requestKey;
     writesRefused.current = false;
   }
-  if (deletedWhileEditing || removalInProgress !== null) {
+  if (
+    deletedWhileEditing ||
+    readOnlyWhileEditing ||
+    removalInProgress !== null
+  ) {
     writesRefused.current = true;
   }
 
@@ -417,20 +429,23 @@ export function useEngineDoc(input: {
     const key = requestKey;
     const token = ++openTokenRef.current;
     setDeletion(null);
+    setReadOnlyTransition(null);
     let cancelled = false;
     let binding: EngineYDocBinding | null = null;
     let detachSaveObserver: (() => void) | null = null;
     let unsubscribeSaveState: (() => void) | null = null;
-    // The last snapshot taken for this deletion lifecycle (for change dedup)
+    // The last snapshot taken for this terminal lifecycle (for change dedup)
     // and the draft it produced, once the async serialize+capture lands.
-    let deletionSnapshotBytes: Uint8Array | null = null;
-    let deletionDraftId: number | null = null;
-    // Serializes deletion snapshots in the order they were taken: a later
+    let recoverySnapshotBytes: Uint8Array | null = null;
+    let recoveryDraftId: number | null = null;
+    let deletionLifecycle = false;
+    // Serializes recovery snapshots in the order they were taken: a later
     // snapshot's capture must never be overwritten by an earlier one that
     // resolves late (the projection import, and each markdown conversion,
     // are async now).
-    let deletionQueue: Promise<void> = Promise.resolve();
+    let recoveryQueue: Promise<void> = Promise.resolve();
     let deletionPending = false;
+    let releaseStarted = false;
 
     const sessionId = nextSessionId();
     const localSeq = { current: 0 };
@@ -452,31 +467,31 @@ export function useEngineDoc(input: {
     // snapshot was taken (the dominant delete path, settled before removal)
     // — no draft is worth creating for it. A later snapshot always forces
     // creation: it only runs because the doc changed since the last one.
-    const enqueueDeletionSnapshot = (
+    const enqueueRecoverySnapshot = (
       bytes: Uint8Array,
       forceCreate: boolean,
     ): void => {
-      deletionQueue = deletionQueue
+      recoveryQueue = recoveryQueue
         .then(async () => {
           const text = await recoveryTextFromSnapshot(documentKind, bytes);
-          if (deletionDraftId === null) {
+          if (recoveryDraftId === null) {
             if (!forceCreate) return;
-            deletionDraftId = captureOrphanedDraft(workspaceId, path, text);
+            recoveryDraftId = captureOrphanedDraft(workspaceId, path, text);
           } else {
-            replaceOrphanedDraft(workspaceId, path, deletionDraftId, text);
+            replaceOrphanedDraft(workspaceId, path, recoveryDraftId, text);
           }
           // Only the LOCAL render state is guarded by the open token — the
           // draft itself is already durable in the module-level store above,
           // unmount or not.
-          if (token === openTokenRef.current) {
-            setDeletion({ token, draftId: deletionDraftId });
+          if (deletionLifecycle && token === openTokenRef.current) {
+            setDeletion({ token, draftId: recoveryDraftId });
           }
         })
         .catch((error: unknown) => {
           // This draft is the last copy of the user's text — a load failure
           // here must not disappear silently.
           console.error(
-            `[desktop] could not write a recovery draft for ${workspaceId}:${path} after deletion:`,
+            `[desktop] could not write a recovery draft for ${workspaceId}:${path}:`,
             error,
           );
         });
@@ -484,11 +499,12 @@ export function useEngineDoc(input: {
 
     const captureDeletion = (doc: Y.Doc): void => {
       writesRefused.current = true;
+      deletionLifecycle = true;
       // Snapshot NOW, synchronously: the doc can be destroyed (unmount) or
       // the caller's reference can go stale before a lazily-loaded
       // serializer would otherwise get to read it.
       const bytes = Y.encodeStateAsUpdate(doc);
-      deletionSnapshotBytes = bytes;
+      recoverySnapshotBytes = bytes;
       const forceCreate = saveStateRef.current !== "saved";
       if (forceCreate) {
         // Persisted NOW, before the projection module is even guaranteed to
@@ -497,23 +513,48 @@ export function useEngineDoc(input: {
         // closure, with the file already gone and no draft for the recovery
         // close guard to find. The queue below upgrades this row to the
         // faithful markdown a microtask later; it never creates a second one.
-        deletionDraftId = captureOrphanedDraft(
+        recoveryDraftId = captureOrphanedDraft(
           workspaceId,
           path,
           crudeRecoveryText(documentKind, doc),
         );
       }
-      setDeletion({ token, draftId: deletionDraftId });
+      setDeletion({ token, draftId: recoveryDraftId });
       reportSaveState("deleted");
-      enqueueDeletionSnapshot(bytes, forceCreate);
+      enqueueRecoverySnapshot(bytes, forceCreate);
     };
 
-    const refreshDeletionDraft = (doc: Y.Doc): void => {
-      if (deletionSnapshotBytes === null) return;
+    const captureReadOnlyTransition = (doc: Y.Doc): void => {
+      writesRefused.current = true;
       const bytes = Y.encodeStateAsUpdate(doc);
-      if (snapshotsEqual(bytes, deletionSnapshotBytes)) return;
-      deletionSnapshotBytes = bytes;
-      enqueueDeletionSnapshot(bytes, true);
+      recoverySnapshotBytes = bytes;
+      // Main sends this state only after it has discarded a local update.
+      // Persist the rejected document synchronously before the session closes.
+      recoveryDraftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        crudeRecoveryText(documentKind, doc),
+      );
+      setReadOnlyTransition({ token });
+      reportSaveState("read-only");
+      enqueueRecoverySnapshot(bytes, true);
+    };
+
+    const refreshRecoveryDraft = (doc: Y.Doc): void => {
+      if (recoverySnapshotBytes === null) return;
+      const bytes = Y.encodeStateAsUpdate(doc);
+      if (snapshotsEqual(bytes, recoverySnapshotBytes)) return;
+      recoverySnapshotBytes = bytes;
+      enqueueRecoverySnapshot(bytes, true);
+    };
+
+    const releaseBinding = (): void => {
+      if (!binding || releaseStarted) return;
+      releaseStarted = true;
+      // The rejected apply is an acknowledged no-op. destroy() drains that
+      // acknowledgement, refuses queued follow-ups through writesRefused, and
+      // then closes the main session instead of leaving it alive to retry.
+      void binding.destroy();
     };
 
     const onSaveState = (event: EngineYDocSaveStateEvent): void => {
@@ -526,8 +567,8 @@ export function useEngineDoc(input: {
           writesRefused.current = true;
           return;
         }
-        if (deletionSnapshotBytes !== null) {
-          refreshDeletionDraft(doc);
+        if (recoverySnapshotBytes !== null) {
+          refreshRecoveryDraft(doc);
           return;
         }
         captureDeletion(doc);
@@ -537,13 +578,21 @@ export function useEngineDoc(input: {
       // flight can report after main's deletion notice, but it no longer
       // describes a path that exists and must not repaint this state.
       if (writesRefused.current) return;
+      if (event.state === "read-only") {
+        const doc = binding?.doc;
+        // Unlike deletion, this report answers a local update, so it cannot
+        // precede the binding that allowed that update.
+        if (!doc) return;
+        captureReadOnlyTransition(doc);
+        releaseBinding();
+        return;
+      }
       if (event.state === "file-locked") {
         if (event.seq >= localSeq.current) reportSaveState(event.state);
         return;
       }
       if (
         event.state === "error" ||
-        event.state === "read-only" ||
         event.state === "changed-on-disk"
       ) {
         reportSaveState(event.state);
@@ -576,7 +625,7 @@ export function useEngineDoc(input: {
         // Preload, don't block: by the time any real deletion can arrive,
         // the module is very likely already resolved, so a draft's markdown
         // lands within the same microtask as its snapshot. The snapshot in
-        // captureDeletion/refreshDeletionDraft keeps a genuinely cold start
+        // captureDeletion/refreshRecoveryDraft keeps a genuinely cold start
         // (import still in flight) correct regardless.
         if (documentKind === "richdoc") void loadProjectionModule();
         if (!bound.available || !bound.doc) {
@@ -608,7 +657,7 @@ export function useEngineDoc(input: {
         const onUpdate = () => {
           if (cancelled) return;
           if (writesRefused.current) {
-            refreshDeletionDraft(doc);
+            refreshRecoveryDraft(doc);
             return;
           }
           reportSaveState("saving");
@@ -639,7 +688,7 @@ export function useEngineDoc(input: {
       // guards a mutation landing between `cancelled = true` and
       // `detachSaveObserver()` — narrower than reachable through the public
       // API today, kept for what a future change to that ordering could open.
-      if (binding?.doc) refreshDeletionDraft(binding.doc);
+      if (binding?.doc) refreshRecoveryDraft(binding.doc);
       cancelled = true;
       unsubscribeSaveState?.();
       detachSaveObserver?.();
@@ -681,6 +730,7 @@ export function useEngineDoc(input: {
     engineMayHoldDocument,
     deletedWhileEditing,
     deletedDraftId,
+    readOnlyWhileEditing,
     removalInProgress,
     artifactAssets,
     readArtifactAsset,

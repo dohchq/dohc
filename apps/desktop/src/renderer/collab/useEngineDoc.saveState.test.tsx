@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { declareSceneRoots, insertElementRevision } from "@dohc/excalidraw-scene";
@@ -29,6 +29,7 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   >();
   const applied: Array<{ sessionId: string; seq: number }> = [];
   const applyAttempts: Array<{ sessionId: string; seq: number }> = [];
+  const closed: string[] = [];
   let rejectedApplyAttempts = 0;
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
@@ -83,7 +84,8 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       saveStateListeners.add(listener);
       return () => saveStateListeners.delete(listener);
     },
-    async closeEngineYDocSession() {
+    async closeEngineYDocSession(payload: { sessionId: string }) {
+      closed.push(payload.sessionId);
       return undefined;
     },
   };
@@ -106,7 +108,13 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   }
 
   function emit(
-    state: "settling" | "saved" | "error" | "file-locked" | "deleted",
+    state:
+      | "settling"
+      | "saved"
+      | "error"
+      | "file-locked"
+      | "read-only"
+      | "deleted",
     seq: number,
     sessionId?: string,
   ): void {
@@ -119,7 +127,13 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   }
 
   function emitNow(
-    state: "settling" | "saved" | "error" | "file-locked" | "deleted",
+    state:
+      | "settling"
+      | "saved"
+      | "error"
+      | "file-locked"
+      | "read-only"
+      | "deleted",
     seq: number,
   ): void {
     if (openedSessionId === null) throw new Error("session not open yet");
@@ -135,6 +149,7 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     emitRemoteEdit,
     applied,
     applyAttempts,
+    closed,
     sessionId: () => openedSessionId,
     rejectNextApplyAttempts(count: number) {
       rejectedApplyAttempts = count;
@@ -154,6 +169,7 @@ function Harness(props: {
   enabled?: boolean;
   kind?: "richdoc" | "scene";
 }) {
+  const sceneVersion = useRef(1);
   const [retryKey, setRetryKey] = useState(0);
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
@@ -168,6 +184,9 @@ function Harness(props: {
       <span data-testid="state">{engine.saveState}</span>
       <span data-testid="available">{String(engine.available)}</span>
       <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
+      <span data-testid="read-only-transition">
+        {String(engine.readOnlyWhileEditing)}
+      </span>
       <span data-testid="draft">{drafts.at(-1)?.text ?? "none"}</span>
       <span data-testid="removal-operation">
         {engine.removalInProgress?.operation ?? "none"}
@@ -180,14 +199,15 @@ function Harness(props: {
         data-testid="type"
         onClick={() => {
           if (props.kind === "scene" && engine.doc) {
+            sceneVersion.current += 1;
             insertElementRevision(engine.doc, {
               id: "recovered-shape",
               type: "rectangle",
-              version: 2,
-              versionNonce: 2,
+              version: sceneVersion.current,
+              versionNonce: sceneVersion.current,
               isDeleted: false,
               index: "a0",
-              x: 10,
+              x: (sceneVersion.current - 1) * 10,
             });
             return;
           }
@@ -290,6 +310,44 @@ it("refuses transport writes synchronously after main reports deletion", async (
 
   harness.emit("error", harness.applied.at(-1)!.seq);
   expect(screen.getByTestId("state").textContent).toBe("deleted");
+});
+
+it("sets aside a refused scene, freezes writes, and releases the session", async () => {
+  harness = harnessBridge("scene");
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1]);
+
+  // Main acknowledged sequence 1 as an inert no-op after the workspace
+  // became shared read-only. One last editor callback can run before React
+  // commits view mode; the synchronous refusal must stop it at the transport.
+  act(() => {
+    harness.emitNow("read-only", 1);
+    screen.getByTestId("type").click();
+  });
+  await flushLocalBatch();
+
+  expect(screen.getByTestId("state").textContent).toBe("read-only");
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1]);
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  await waitFor(() => {
+    const recovered = JSON.parse(screen.getByTestId("draft").textContent!);
+    expect(recovered).toMatchObject({
+      type: "excalidraw",
+      source: "https://excalidraw.com",
+      elements: [expect.objectContaining({ id: "recovered-shape", x: 20 })],
+      files: {},
+    });
+  });
 });
 
 it("replaces the same deletion's draft when a keystroke lands before read-only commits", async () => {

@@ -11,6 +11,7 @@ import * as Y from "yjs";
 import type { ExcalidrawCanvasProps } from "./ExcalidrawCanvas";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import type { EngineYDocSaveStateEvent } from "../ipc/channels";
+import { resetOrphanedDrafts } from "./orphanedDrafts";
 
 const canvas = vi.hoisted(() => ({
   props: null as null | Record<string, unknown>,
@@ -181,11 +182,13 @@ describe("FileInspector Excalidraw view", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     canvas.props = null;
+    resetOrphanedDrafts();
   });
 
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    resetOrphanedDrafts();
   });
 
   it("classifies .excalidraw files as drawings", () => {
@@ -594,6 +597,64 @@ describe("FileInspector Excalidraw view", () => {
     expect(chip.dataset.state).toBe("file-locked");
     expect(chip.textContent).toBe("File in use");
     expect(chip.title).toContain("retries until the file is free");
+  });
+
+  it("freezes and sets aside a drawing when its workspace becomes read-only", async () => {
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    insertElementRevision(scene, {
+      id: "shape",
+      type: "rectangle",
+      version: 1,
+      versionNonce: 1,
+      isDeleted: false,
+      index: "a0",
+      x: 0,
+    });
+    const bridge = bridgeFor(drawing("engine"), scene);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+
+    const view = await screen.findByTestId("mock-excalidraw-canvas");
+    const boundDoc = (canvas.props as unknown as ExcalidrawCanvasProps).sceneDoc!;
+    act(() =>
+      insertElementRevision(boundDoc, {
+        id: "shape",
+        type: "rectangle",
+        version: 2,
+        versionNonce: 2,
+        isDeleted: false,
+        index: "a0",
+        x: 40,
+      }),
+    );
+    await waitFor(() => expect(bridge.applyEngineYDocUpdate).toHaveBeenCalledOnce());
+
+    act(() => bridge.emitSaveState("read-only", 1));
+
+    await waitFor(() => expect(view.dataset.readOnly).toBe("true"));
+    const chip = screen.getByTestId("drawing-save-state");
+    expect(chip.dataset.state).toBe("read-only");
+    expect(chip.title).toContain("edit was set aside");
+    expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
+      "This document became read-only before your edit saved.",
+    );
+    expect(bridge.closeEngineYDocSession).toHaveBeenCalledOnce();
+
+    const sent = bridge.applyEngineYDocUpdate.mock.calls.length;
+    act(() =>
+      insertElementRevision(boundDoc, {
+        id: "shape",
+        type: "rectangle",
+        version: 3,
+        versionNonce: 3,
+        isDeleted: false,
+        index: "a0",
+        x: 80,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(bridge.applyEngineYDocUpdate).toHaveBeenCalledTimes(sent);
   });
 
   it("keeps a truncated drawing non-writable while its scene opens", async () => {

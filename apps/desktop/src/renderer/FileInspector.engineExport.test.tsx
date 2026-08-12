@@ -28,6 +28,7 @@ const engineDocState: UseEngineDoc = {
   engineMayHoldDocument: false,
   deletedWhileEditing: false,
   deletedDraftId: null,
+  readOnlyWhileEditing: false,
   removalInProgress: null,
   artifactAssets: [],
   readArtifactAsset: async () => {

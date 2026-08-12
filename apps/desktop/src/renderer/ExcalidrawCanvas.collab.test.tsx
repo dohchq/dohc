@@ -315,6 +315,53 @@ it("keeps presence dormant when no collaboration is available", () => {
   expect(excalidraw.props?.onPointerUpdate).toBeUndefined();
 });
 
+it("blocks a stale canvas callback as soon as the scene becomes read-only", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  const presence = trackedPresenceTransport();
+  const collaboration = {
+    topic: "scene-1",
+    clientId: "client-1",
+    displayName: "Alice",
+    transport: presence.transport,
+  };
+  const document = parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT);
+  const view = render(
+    <ExcalidrawCanvas
+      document={document}
+      readOnly={false}
+      sceneDoc={doc}
+      presence={collaboration}
+    />,
+  );
+  await waitFor(() => expect(presence.activePolls()).toBe(1));
+  const staleOnChange = excalidraw.props?.onChange as (
+    elements: readonly unknown[],
+    appState: Record<string, unknown>,
+    files: Record<string, unknown>,
+  ) => void;
+  const before = Y.encodeStateVector(doc);
+
+  view.rerender(
+    <ExcalidrawCanvas
+      document={document}
+      readOnly
+      sceneDoc={doc}
+      presence={collaboration}
+    />,
+  );
+
+  expect(excalidraw.props?.viewModeEnabled).toBe(true);
+  expect(excalidraw.props?.onChange).toBeUndefined();
+  act(() => staleOnChange([rectangle(1, 10, 20)], {}, {}));
+  expect(Y.encodeStateAsUpdate(doc, before)).toHaveLength(2);
+  await waitFor(() => {
+    expect(excalidraw.props?.isCollaborating).toBe(false);
+    expect(presence.activePolls()).toBe(0);
+  });
+  expect(presence.leaveCalls()).toBe(1);
+});
+
 it("reports collaboration only after presence binds", async () => {
   const doc = new Y.Doc();
   declareSceneRoots(doc);

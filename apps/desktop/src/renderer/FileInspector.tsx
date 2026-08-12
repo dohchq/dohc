@@ -658,7 +658,11 @@ const DELETED_WITH_SET_ASIDE_EDIT_NOTICE =
 const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
   "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.";
 
-function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
+function OrphanedDraftNotices(props: {
+  workspaceId: string;
+  path: string;
+  message?: string;
+}) {
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   if (drafts.length === 0) return null;
   return (
@@ -670,8 +674,8 @@ function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
           className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
         >
           <span className="text-danger">
-            This document reopened before your last edit saved. Copy your text
-            to keep it.
+            {props.message ??
+              "This document reopened before your last edit saved. Copy your text to keep it."}
           </span>
           <div className="flex items-center gap-2">
             <CopySourceButton
@@ -1251,6 +1255,11 @@ const ENGINE_CHIP: Record<
       "A set-aside edit is not saved. Copy or dismiss it in the notice below.",
   },
 };
+const READ_ONLY_TRANSITION_CHIP = {
+  label: "Read-only",
+  title:
+    "This document became read-only. Your edit was set aside in the notice below.",
+};
 
 function MarkdownView(props: {
   body: string;
@@ -1613,6 +1622,9 @@ function MarkdownView(props: {
     engine.saveState === "saved" && orphanedDrafts.length > 0
       ? ("recovery" as const)
       : engine.saveState;
+  const engineChip = engine.readOnlyWhileEditing
+    ? READ_ONLY_TRANSITION_CHIP
+    : ENGINE_CHIP[engineChipState];
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -1759,6 +1771,7 @@ function MarkdownView(props: {
     !!props.forceReadOnly ||
     engine.notInVersion ||
     engine.deletedWhileEditing ||
+    engine.readOnlyWhileEditing ||
     engine.removalInProgress !== null ||
     // #564: the engine open hit its retry deadline. The plain editor stays
     // read-only — its autosave would race the session the engine may still
@@ -2571,7 +2584,7 @@ function MarkdownView(props: {
                 title={
                   engineChipState === "deleted" && hasSetAsideEdit
                     ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
-                    : ENGINE_CHIP[engineChipState].title
+                    : engineChip.title
                 }
                 className={`font-mono text-[11px] ${
                   engineChipState === "saved" || engineChipState === "saving"
@@ -2579,7 +2592,7 @@ function MarkdownView(props: {
                     : "text-danger"
                 }`}
               >
-                {ENGINE_CHIP[engineChipState].label}
+                {engineChip.label}
               </span>
               <button
                 type="button"
@@ -3534,6 +3547,7 @@ function DrawingView({
   const engineReadOnly =
     engine.opening ||
     engine.deletedWhileEditing ||
+    engine.readOnlyWhileEditing ||
     engine.engineMayHoldDocument ||
     engine.removalInProgress !== null;
   const editor = useAutosavedTextDraft({
@@ -3706,7 +3720,9 @@ function DrawingView({
         : engineMode
           ? engine.saveState
           : editor.saveState;
-  const drawingChip = ENGINE_CHIP[drawingChipState];
+  const drawingChip = engine.readOnlyWhileEditing
+    ? READ_ONLY_TRANSITION_CHIP
+    : ENGINE_CHIP[drawingChipState];
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
@@ -4182,6 +4198,7 @@ export function FileInspector(props: {
     engine.engineMayHoldDocument ||
     switchUnresyncedRef.current ||
     engine.deletedWhileEditing ||
+    engine.readOnlyWhileEditing ||
     engine.removalInProgress !== null;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
@@ -4228,7 +4245,15 @@ export function FileInspector(props: {
   // view, and Copy/Dismiss must exist wherever the marker shows. The markdown
   // branch renders its own copy inside its header layout.
   const recoveryNotices = (
-    <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+    <OrphanedDraftNotices
+      workspaceId={props.workspaceId}
+      path={props.path}
+      message={
+        engine.readOnlyWhileEditing
+          ? "This document became read-only before your edit saved. Copy your text to keep it."
+          : undefined
+      }
+    />
   );
 
   if (notInVersion) {

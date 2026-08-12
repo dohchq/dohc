@@ -75,6 +75,8 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     };
   }, [props.document, props.sceneDoc]);
   const lastSerialized = useRef(initial.serialized);
+  const readOnlyRef = useRef(props.readOnly);
+  readOnlyRef.current = props.readOnly;
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const mountedRef = useRef(false);
   const [readyApi, setReadyApi] = useState<ExcalidrawImperativeAPI | null>(null);
@@ -143,7 +145,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
 
   useEffect(() => {
     setPresenceBound(false);
-    if (!props.sceneDoc || !props.presence || !readyApi) return;
+    if (props.readOnly || !props.sceneDoc || !props.presence || !readyApi) return;
     let binding: ExcalidrawPresenceBinding;
     try {
       binding = bindExcalidrawPresence({
@@ -164,7 +166,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
       if (presenceBinding.current === binding) presenceBinding.current = null;
       binding.destroy();
     };
-  }, [props.presence, props.sceneDoc, readyApi]);
+  }, [props.presence, props.readOnly, props.sceneDoc, readyApi]);
 
   return (
     <div className="absolute inset-0" data-testid="excalidraw-canvas">
@@ -173,10 +175,12 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
         isCollaborating={presenceBound}
         onPointerUpdate={
           presenceBound
-            ? (update) =>
+            ? (update) => {
+                if (readOnlyRef.current) return;
                 presenceBinding.current?.updatePointer(
                   update as ExcalidrawPointerUpdate,
-                )
+                );
+              }
             : undefined
         }
         excalidrawAPI={(api) => {
@@ -211,6 +215,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
           props.readOnly
             ? undefined
             : (elements, appState, files) => {
+                if (readOnlyRef.current) return;
                 presenceBinding.current?.updateSelection(
                   appState.selectedElementIds,
                 );
