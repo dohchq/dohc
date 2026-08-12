@@ -461,6 +461,146 @@ async fn default_close_settles_and_releases_a_seeded_image_scene_after_an_edit()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let element = |id: &str, index: Option<Value>| {
+        let mut element = serde_json::Map::from_iter([
+            ("id".to_owned(), json!(id)),
+            ("type".to_owned(), json!("rectangle")),
+            ("version".to_owned(), json!(1)),
+            ("versionNonce".to_owned(), json!(1)),
+            ("isDeleted".to_owned(), json!(false)),
+            ("x".to_owned(), json!(0)),
+            ("y".to_owned(), json!(0)),
+            ("width".to_owned(), json!(100)),
+            ("height".to_owned(), json!(100)),
+        ]);
+        if let Some(index) = index {
+            element.insert("index".to_owned(), index);
+        }
+        Value::Object(element)
+    };
+    let source_order = [
+        "z-missing",
+        "z-null",
+        "z-duplicate",
+        "a-duplicate",
+        "later-lower",
+        "last",
+    ];
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [
+            element(source_order[0], None),
+            element(source_order[1], Some(Value::Null)),
+            element(source_order[2], Some(json!("a1"))),
+            element(source_order[3], Some(json!("a1"))),
+            element(source_order[4], Some(json!("a0"))),
+            element(source_order[5], Some(json!("a2"))),
+        ],
+        "appState": {},
+        "files": {}
+    }))
+    .expect("legacy scene");
+    write_file(
+        scratch.path(),
+        "drawings/legacy-order.excalidraw",
+        artifact.as_bytes(),
+    );
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-order", 77).await;
+    let open = |id: u64| {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": "drawings/legacy-order.excalidraw",
+                "contentKind": "scene",
+                "seedFromArtifact": true
+            }),
+        )
+    };
+    let opened = open(78).await;
+    let fold_opened = |value: &Value| {
+        let update = base64::engine::general_purpose::STANDARD
+            .decode(
+                value["initialUpdateBase64"]
+                    .as_str()
+                    .expect("initial update"),
+            )
+            .expect("base64 update");
+        let doc = Ydoc::wire();
+        doc.apply(&update).expect("scene update applies");
+        doc.fold_scene()
+    };
+    let seeded = fold_opened(&opened);
+    assert_eq!(
+        seeded
+            .elements
+            .iter()
+            .filter_map(|element| element["id"].as_str())
+            .collect::<Vec<_>>(),
+        source_order
+    );
+
+    call(
+        &transport,
+        &handle,
+        79,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    let settled: Value = serde_json::from_slice(
+        &std::fs::read(scratch.path().join("drawings/legacy-order.excalidraw"))
+            .expect("settled scene"),
+    )
+    .expect("portable scene");
+    let settled_elements = settled["elements"].as_array().expect("elements");
+    assert_eq!(
+        settled_elements
+            .iter()
+            .filter_map(|element| element["id"].as_str())
+            .collect::<Vec<_>>(),
+        source_order
+    );
+    let settled_indices = settled_elements
+        .iter()
+        .map(|element| element["index"].as_str().expect("repaired index"))
+        .collect::<Vec<_>>();
+    assert!(
+        settled_indices.windows(2).all(|pair| pair[0] < pair[1]),
+        "repaired indices must encode source order: {settled_indices:?}"
+    );
+
+    let reopened = open(80).await;
+    assert_eq!(
+        fold_opened(&reopened)
+            .elements
+            .iter()
+            .filter_map(|element| element["id"].as_str())
+            .collect::<Vec<_>>(),
+        source_order
+    );
+    call(
+        &transport,
+        &handle,
+        81,
+        "ydoc.evict",
+        json!({ "sessionId": reopened["sessionId"] }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_rebind_with_seed_disabled_never_resurrects_the_portable_artifact() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");

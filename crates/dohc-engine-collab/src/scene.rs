@@ -239,8 +239,8 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
             });
         }
     };
-    let mut revisions = BTreeMap::new();
-    let mut image_file_ids = BTreeSet::new();
+    let mut elements = Vec::with_capacity(element_values.len());
+    let mut element_keys = Vec::with_capacity(element_values.len());
     for element in element_values {
         let element_object = element.as_object().ok_or(SceneImportError::Invalid {
             reason: "each element must be an object",
@@ -275,6 +275,14 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
                 reason: "an element has an invalid native snapshot shape",
             });
         }
+        elements.push(element.clone());
+        element_keys.push(key);
+    }
+    repair_imported_element_indices(&mut elements)?;
+
+    let mut revisions = BTreeMap::new();
+    let mut image_file_ids = BTreeSet::new();
+    for (element, key) in elements.iter().zip(element_keys) {
         let revision_key =
             canonical_json_string(&json_revision_key(&key)).ok_or(SceneImportError::Invalid {
                 reason: "an element revision key could not be encoded",
@@ -287,10 +295,10 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
                 reason: "element revision tuples must be unique",
             });
         }
-        if element_object.get("type").and_then(Value::as_str) == Some("image")
-            && element_object.get("isDeleted").and_then(Value::as_bool) == Some(false)
+        if element.get("type").and_then(Value::as_str) == Some("image")
+            && element.get("isDeleted").and_then(Value::as_bool) == Some(false)
         {
-            if let Some(file_id) = element_object.get("fileId").and_then(Value::as_str) {
+            if let Some(file_id) = element.get("fileId").and_then(Value::as_str) {
                 image_file_ids.insert(file_id.to_owned());
             }
         }
@@ -350,6 +358,437 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
         initial_update,
         files,
     })
+}
+
+fn repair_imported_element_indices(elements: &mut [Value]) -> Result<(), SceneImportError> {
+    // Excalidraw v0.18 restores the source array, keeps valid indices as
+    // anchors, and repairs each invalid run before any index-based ordering.
+    // Do the same while the portable array still exists. The revision Y.Map
+    // cannot recover that source order after the seed is encoded. This is seed
+    // normalization, not an edit to an existing revision, so the source
+    // version and nonce remain its initial identity.
+    let indices = elements
+        .iter()
+        .map(|element| {
+            element
+                .get("index")
+                .and_then(Value::as_str)
+                .filter(|index| !index.is_empty())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    for group in invalid_index_groups(&indices) {
+        let lower = group.lower.and_then(|index| indices[index].as_deref());
+        let upper = group
+            .upper
+            .filter(|index| *index < indices.len())
+            .and_then(|index| indices[index].as_deref());
+        let repaired =
+            generate_n_keys_between(lower, upper, group.elements.len()).map_err(|()| {
+                SceneImportError::Invalid {
+                    reason: "element indices cannot be repaired in source order",
+                }
+            })?;
+        for (element_index, repaired_index) in group.elements.into_iter().zip(repaired) {
+            elements[element_index]
+                .as_object_mut()
+                .ok_or(SceneImportError::Invalid {
+                    reason: "each element must be an object",
+                })?
+                .insert("index".to_owned(), Value::String(repaired_index));
+        }
+    }
+    Ok(())
+}
+
+struct InvalidIndexGroup {
+    lower: Option<usize>,
+    elements: Vec<usize>,
+    upper: Option<usize>,
+}
+
+fn invalid_index_groups(indices: &[Option<String>]) -> Vec<InvalidIndexGroup> {
+    let mut groups = Vec::new();
+    let mut lower_bound = None;
+    let mut upper_bound = Some(0);
+    let mut index = 0;
+
+    while index < indices.len() {
+        lower_bound = imported_index_lower_bound(indices, lower_bound, index);
+        upper_bound = imported_index_upper_bound(indices, upper_bound, index);
+        if imported_index_is_valid(
+            indices[index].as_deref(),
+            lower_bound.and_then(|bound| indices[bound].as_deref()),
+            upper_bound
+                .filter(|bound| *bound < indices.len())
+                .and_then(|bound| indices[bound].as_deref()),
+        ) {
+            index += 1;
+            continue;
+        }
+
+        let mut elements = vec![index];
+        index += 1;
+        while index < indices.len() {
+            let next_lower = imported_index_lower_bound(indices, lower_bound, index);
+            let next_upper = imported_index_upper_bound(indices, upper_bound, index);
+            if imported_index_is_valid(
+                indices[index].as_deref(),
+                next_lower.and_then(|bound| indices[bound].as_deref()),
+                next_upper
+                    .filter(|bound| *bound < indices.len())
+                    .and_then(|bound| indices[bound].as_deref()),
+            ) {
+                break;
+            }
+            lower_bound = next_lower;
+            upper_bound = next_upper;
+            elements.push(index);
+            index += 1;
+        }
+        groups.push(InvalidIndexGroup {
+            lower: lower_bound,
+            elements,
+            upper: upper_bound,
+        });
+    }
+    groups
+}
+
+fn imported_index_lower_bound(
+    indices: &[Option<String>],
+    cached: Option<usize>,
+    index: usize,
+) -> Option<usize> {
+    let cached_value = cached.and_then(|bound| indices[bound].as_deref());
+    let candidate = index
+        .checked_sub(1)
+        .and_then(|bound| indices[bound].as_deref());
+    match (cached_value, candidate) {
+        (None, Some(_)) => index.checked_sub(1),
+        (Some(lower), Some(candidate)) if candidate > lower => index.checked_sub(1),
+        _ => cached,
+    }
+}
+
+fn imported_index_upper_bound(
+    indices: &[Option<String>],
+    cached: Option<usize>,
+    index: usize,
+) -> Option<usize> {
+    let cached_index = cached.unwrap_or(indices.len());
+    let cached_value = cached
+        .filter(|bound| *bound < indices.len())
+        .and_then(|bound| indices[bound].as_deref());
+    if cached_value.is_some() && index < cached_index {
+        return cached;
+    }
+    ((cached_index + 1)..indices.len()).find(|candidate_index| {
+        let candidate = indices[*candidate_index].as_deref();
+        matches!(
+            (cached_value, candidate),
+            (None, Some(_)) | (Some(_), Some(_))
+        ) && cached_value
+            .zip(candidate)
+            .is_none_or(|(upper, candidate)| candidate > upper)
+    })
+}
+
+fn imported_index_is_valid(
+    current: Option<&str>,
+    predecessor: Option<&str>,
+    successor: Option<&str>,
+) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    match (predecessor, successor) {
+        (Some(predecessor), Some(successor)) => predecessor < current && current < successor,
+        (None, Some(successor)) => current < successor,
+        (Some(predecessor), None) => predecessor < current,
+        (None, None) => true,
+    }
+}
+
+const FRACTIONAL_INDEX_DIGITS: &[u8] =
+    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+// Ported from fractional-indexing 3.2.0 at commit 9e55f979 (CC0). Excalidraw
+// v0.18 pins that package, so a different fractional key format is not valid.
+fn generate_n_keys_between(
+    lower: Option<&str>,
+    upper: Option<&str>,
+    count: usize,
+) -> Result<Vec<String>, ()> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if count == 1 {
+        return Ok(vec![generate_key_between(lower, upper)?]);
+    }
+    if upper.is_none() {
+        let mut key = generate_key_between(lower, None)?;
+        let mut keys = vec![key.clone()];
+        for _ in 1..count {
+            key = generate_key_between(Some(&key), None)?;
+            keys.push(key.clone());
+        }
+        return Ok(keys);
+    }
+    if lower.is_none() {
+        let mut key = generate_key_between(None, upper)?;
+        let mut keys = vec![key.clone()];
+        for _ in 1..count {
+            key = generate_key_between(None, Some(&key))?;
+            keys.push(key.clone());
+        }
+        keys.reverse();
+        return Ok(keys);
+    }
+
+    let middle = count / 2;
+    let key = generate_key_between(lower, upper)?;
+    let mut keys = generate_n_keys_between(lower, Some(&key), middle)?;
+    keys.push(key.clone());
+    keys.extend(generate_n_keys_between(
+        Some(&key),
+        upper,
+        count - middle - 1,
+    )?);
+    Ok(keys)
+}
+
+fn generate_key_between(lower: Option<&str>, upper: Option<&str>) -> Result<String, ()> {
+    if let Some(lower) = lower {
+        validate_order_key(lower)?;
+    }
+    if let Some(upper) = upper {
+        validate_order_key(upper)?;
+    }
+    if lower
+        .zip(upper)
+        .is_some_and(|(lower, upper)| lower >= upper)
+    {
+        return Err(());
+    }
+
+    let Some(lower) = lower else {
+        let Some(upper) = upper else {
+            return Ok("a0".to_owned());
+        };
+        let upper_integer = integer_part(upper)?;
+        let upper_fraction = &upper[upper_integer.len()..];
+        if upper_integer == format!("A{}", "0".repeat(26)) {
+            return Ok(format!(
+                "{upper_integer}{}",
+                fractional_midpoint("", Some(upper_fraction))?
+            ));
+        }
+        if upper_integer < upper {
+            return Ok(upper_integer.to_owned());
+        }
+        return decrement_integer(upper_integer);
+    };
+
+    let Some(upper) = upper else {
+        let lower_integer = integer_part(lower)?;
+        let lower_fraction = &lower[lower_integer.len()..];
+        return match increment_integer(lower_integer)? {
+            Some(integer) => Ok(integer),
+            None => Ok(format!(
+                "{lower_integer}{}",
+                fractional_midpoint(lower_fraction, None)?
+            )),
+        };
+    };
+
+    let lower_integer = integer_part(lower)?;
+    let lower_fraction = &lower[lower_integer.len()..];
+    let upper_integer = integer_part(upper)?;
+    let upper_fraction = &upper[upper_integer.len()..];
+    if lower_integer == upper_integer {
+        return Ok(format!(
+            "{lower_integer}{}",
+            fractional_midpoint(lower_fraction, Some(upper_fraction))?
+        ));
+    }
+    let incremented = increment_integer(lower_integer)?.ok_or(())?;
+    if incremented.as_str() < upper {
+        Ok(incremented)
+    } else {
+        Ok(format!(
+            "{lower_integer}{}",
+            fractional_midpoint(lower_fraction, None)?
+        ))
+    }
+}
+
+fn fractional_midpoint(lower: &str, upper: Option<&str>) -> Result<String, ()> {
+    if upper.is_some_and(|upper| lower >= upper)
+        || lower.ends_with('0')
+        || upper.is_some_and(|upper| upper.ends_with('0'))
+    {
+        return Err(());
+    }
+    if let Some(upper) = upper {
+        let lower_bytes = lower.as_bytes();
+        let upper_bytes = upper.as_bytes();
+        let mut prefix = 0;
+        while prefix < upper_bytes.len()
+            && lower_bytes.get(prefix).copied().unwrap_or(b'0') == upper_bytes[prefix]
+        {
+            prefix += 1;
+        }
+        if prefix > 0 {
+            return Ok(format!(
+                "{}{}",
+                &upper[..prefix],
+                fractional_midpoint(&lower[prefix.min(lower.len())..], Some(&upper[prefix..]))?
+            ));
+        }
+    }
+
+    let lower_digit = lower
+        .as_bytes()
+        .first()
+        .map_or(Some(0), |byte| fractional_digit(*byte))
+        .ok_or(())?;
+    let upper_digit = match upper.and_then(|upper| upper.as_bytes().first().copied()) {
+        Some(byte) => fractional_digit(byte).ok_or(())?,
+        None => FRACTIONAL_INDEX_DIGITS.len(),
+    };
+    if upper_digit > lower_digit + 1 {
+        let middle = (lower_digit + upper_digit).div_ceil(2);
+        return Ok(char::from(FRACTIONAL_INDEX_DIGITS[middle]).to_string());
+    }
+    if let Some(upper) = upper {
+        if upper.len() > 1 {
+            return Ok(upper[..1].to_owned());
+        }
+    }
+    let head = char::from(FRACTIONAL_INDEX_DIGITS[lower_digit]);
+    Ok(format!(
+        "{head}{}",
+        fractional_midpoint(lower.get(1..).unwrap_or(""), None)?
+    ))
+}
+
+fn fractional_digit(byte: u8) -> Option<usize> {
+    FRACTIONAL_INDEX_DIGITS
+        .iter()
+        .position(|candidate| *candidate == byte)
+}
+
+fn integer_part(key: &str) -> Result<&str, ()> {
+    let length = integer_length(*key.as_bytes().first().ok_or(())?)?;
+    key.get(..length).ok_or(())
+}
+
+fn integer_length(head: u8) -> Result<usize, ()> {
+    match head {
+        b'a'..=b'z' => Ok(usize::from(head - b'a') + 2),
+        b'A'..=b'Z' => Ok(usize::from(b'Z' - head) + 2),
+        _ => Err(()),
+    }
+}
+
+fn validate_order_key(key: &str) -> Result<(), ()> {
+    if key == format!("A{}", "0".repeat(26)) {
+        return Err(());
+    }
+    let integer = integer_part(key)?;
+    validate_integer(integer)?;
+    if key[integer.len()..].ends_with('0')
+        || !key[integer.len()..]
+            .bytes()
+            .all(|byte| fractional_digit(byte).is_some())
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn validate_integer(integer: &str) -> Result<(), ()> {
+    if integer.len() == integer_length(*integer.as_bytes().first().ok_or(())?)?
+        && integer[1..]
+            .bytes()
+            .all(|byte| fractional_digit(byte).is_some())
+    {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+fn increment_integer(integer: &str) -> Result<Option<String>, ()> {
+    validate_integer(integer)?;
+    let mut bytes = integer.as_bytes().to_vec();
+    let head = bytes[0];
+    let mut carry = true;
+    for byte in bytes[1..].iter_mut().rev() {
+        if !carry {
+            break;
+        }
+        let digit = fractional_digit(*byte).ok_or(())? + 1;
+        if digit == FRACTIONAL_INDEX_DIGITS.len() {
+            *byte = FRACTIONAL_INDEX_DIGITS[0];
+        } else {
+            *byte = FRACTIONAL_INDEX_DIGITS[digit];
+            carry = false;
+        }
+    }
+    if carry {
+        if head == b'Z' {
+            return Ok(Some("a0".to_owned()));
+        }
+        if head == b'z' {
+            return Ok(None);
+        }
+        bytes[0] += 1;
+        if bytes[0] > b'a' {
+            bytes.push(b'0');
+        } else {
+            bytes.pop();
+        }
+    }
+    String::from_utf8(bytes).map(Some).map_err(|_| ())
+}
+
+fn decrement_integer(integer: &str) -> Result<String, ()> {
+    validate_integer(integer)?;
+    let mut bytes = integer.as_bytes().to_vec();
+    let head = bytes[0];
+    let mut borrow = true;
+    for byte in bytes[1..].iter_mut().rev() {
+        if !borrow {
+            break;
+        }
+        let digit = fractional_digit(*byte).ok_or(())?;
+        if digit == 0 {
+            *byte = *FRACTIONAL_INDEX_DIGITS.last().ok_or(())?;
+        } else {
+            *byte = FRACTIONAL_INDEX_DIGITS[digit - 1];
+            borrow = false;
+        }
+    }
+    if borrow {
+        if head == b'a' {
+            return Ok(format!(
+                "Z{}",
+                char::from(*FRACTIONAL_INDEX_DIGITS.last().ok_or(())?)
+            ));
+        }
+        if head == b'A' {
+            return Err(());
+        }
+        bytes[0] -= 1;
+        if bytes[0] < b'Z' {
+            bytes.push(*FRACTIONAL_INDEX_DIGITS.last().ok_or(())?);
+        } else {
+            bytes.pop();
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| ())
 }
 
 /// Encode validated durable asset records as a Yjs v1 update for the scene
@@ -1218,6 +1657,72 @@ mod tests {
         assert_eq!(folded.elements[0]["y"], json!(0));
         assert_eq!(folded.elements[0]["angle"], json!(1e-7));
         assert_eq!(folded.app_state["gridSize"], json!(1e20));
+    }
+
+    #[test]
+    fn native_import_repairs_invalid_indices_in_source_order() {
+        let element = |id: &str, index: Option<Value>| {
+            let mut element = Map::from_iter([
+                ("id".to_owned(), json!(id)),
+                ("isDeleted".to_owned(), json!(false)),
+                ("type".to_owned(), json!("rectangle")),
+                ("version".to_owned(), json!(1)),
+                ("versionNonce".to_owned(), json!(1)),
+            ]);
+            if let Some(index) = index {
+                element.insert("index".to_owned(), index);
+            }
+            Value::Object(element)
+        };
+        let source_order = [
+            "z-missing",
+            "z-null",
+            "z-duplicate",
+            "a-duplicate",
+            "later-lower",
+            "last",
+        ];
+        let content = canonical(json!({
+            "type":"excalidraw",
+            "elements":[
+                element(source_order[0], None),
+                element(source_order[1], Some(Value::Null)),
+                element(source_order[2], Some(json!("a1"))),
+                element(source_order[3], Some(json!("a1"))),
+                element(source_order[4], Some(json!("a0"))),
+                element(source_order[5], Some(json!("a2")))
+            ]
+        }));
+
+        let imported = import_portable_scene(&content).expect("legacy indices repair");
+        let doc = crate::Ydoc::wire();
+        doc.apply(&imported.initial_update).expect("initial update");
+        let folded = doc.fold_scene();
+        assert_eq!(
+            folded
+                .elements
+                .iter()
+                .filter_map(|element| element["id"].as_str())
+                .collect::<Vec<_>>(),
+            source_order
+        );
+        assert_eq!(
+            folded
+                .elements
+                .iter()
+                .filter_map(|element| element["index"].as_str())
+                .collect::<Vec<_>>(),
+            ["Zz", "a0", "a1", "a1G", "a1V", "a2"]
+        );
+        assert_eq!(
+            generate_n_keys_between(None, Some("a0"), 5).expect("keys before a0"),
+            ["Zv", "Zw", "Zx", "Zy", "Zz"]
+        );
+        assert_eq!(
+            generate_n_keys_between(Some("Zz"), Some("a01"), 4)
+                .expect("keys across integer boundary"),
+            ["ZzG", "ZzV", "a0", "a00V"]
+        );
     }
 
     #[test]
