@@ -245,18 +245,17 @@ function makeTransport(
           : {}),
       };
     },
-    applyLocalUpdate(update) {
-      if (writesRefused.current) return;
-      // Fire-and-forget: main journals + settles. A transient IPC error never
-      // tears the editor down; the mirror doc keeps the edit and the next update
-      // (or close) re-converges. The seq is NOT rolled back on that failure —
-      // the edit is genuinely unsaved until a later settle covers it, and the
-      // indicator must keep saying so.
+    async applyLocalUpdate(update) {
+      if (writesRefused.current) {
+        throw new Error("The live document no longer accepts local updates.");
+      }
+      // Main journals + settles. The provider owns the asynchronous delivery
+      // tail and repairs a rejected delta with the full mirror state before
+      // close. The seq is NOT rolled back on failure — the edit is genuinely
+      // unsaved until that repair or a later settle covers it.
       localSeq.current += 1;
       const seq = localSeq.current;
-      void bridge()
-        .applyEngineYDocUpdate({ sessionId, update, seq })
-        .catch(() => undefined);
+      await bridge().applyEngineYDocUpdate({ sessionId, update, seq });
     },
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
@@ -455,6 +454,34 @@ function createEngineDocSession(
     enqueueDeletionSnapshot(bytes, forceCreate);
   };
 
+  const captureUndeliveredSnapshot = (bytes: Uint8Array): void => {
+    const rebuilt = new Y.Doc();
+    Y.applyUpdate(rebuilt, bytes);
+    const fallback = crudeMarkdownFromDoc(rebuilt);
+    rebuilt.destroy();
+    if (deletionDraftId === null) {
+      deletionDraftId = captureOrphanedDraft(workspaceId, path, fallback);
+    } else {
+      replaceOrphanedDraft(workspaceId, path, deletionDraftId, fallback);
+    }
+    const draftId = deletionDraftId;
+    deletionQueue = deletionQueue
+      .then(async () => {
+        const text = await markdownFromSnapshot(bytes);
+        replaceOrphanedDraft(workspaceId, path, draftId, text);
+      })
+      .catch((error: unknown) => {
+        console.error(
+          "[desktop] could not refine the recovery draft for " +
+            workspaceId +
+            ":" +
+            path +
+            " after update delivery failed:",
+          error,
+        );
+      });
+  };
+
   const refreshDeletionDraft = (doc: Y.Doc): void => {
     if (deletionSnapshotBytes === null) return;
     const bytes = Y.encodeStateAsUpdate(doc);
@@ -523,7 +550,9 @@ function createEngineDocSession(
           // Main can publish deletion after registering the live session but
           // before open returns, so subscribe before opening the transport.
           unsubscribeSaveState = bridge().onEngineYDocSaveState(onSaveState);
-          const bound = await bindEngineYDoc(transport);
+          const bound = await bindEngineYDoc(transport, {
+            onDeliveryFailure: captureUndeliveredSnapshot,
+          });
           binding = bound;
           if (disposed) {
             await destroyBinding();

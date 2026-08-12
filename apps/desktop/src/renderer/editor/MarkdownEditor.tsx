@@ -117,6 +117,7 @@ import {
 } from "./OutlinePanel";
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
+import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
 
 export type MarkdownEditorHandle = {
   focus: (position?: "start" | "end") => void;
@@ -180,6 +181,7 @@ export type MarkdownEditorProps = {
 type CollaborationExtension = typeof import("@tiptap/extension-collaboration").Collaboration;
 type CollaborationCaretExtension =
   typeof import("@tiptap/extension-collaboration-caret").CollaborationCaret;
+type YTiptap = typeof import("@tiptap/y-tiptap");
 
 // Both extensions bind to the same ydoc/awareness pair and are only ever
 // used together, so they load as one lazy bundle — a caller with an
@@ -189,6 +191,7 @@ type CollaborationCaretExtension =
 type CollaborationExtensions = {
   Collaboration: CollaborationExtension;
   CollaborationCaret: CollaborationCaretExtension;
+  yTiptap: YTiptap;
 };
 
 let collaborationExtensionsPromise: Promise<CollaborationExtensions> | null = null;
@@ -198,9 +201,11 @@ async function loadCollaborationExtensions(): Promise<CollaborationExtensions> {
     collaborationExtensionsPromise = Promise.all([
       import("@tiptap/extension-collaboration"),
       import("@tiptap/extension-collaboration-caret"),
-    ]).then(([collaboration, collaborationCaret]) => ({
+      import("@tiptap/y-tiptap"),
+    ]).then(([collaboration, collaborationCaret, yTiptap]) => ({
       Collaboration: collaboration.Collaboration,
       CollaborationCaret: collaborationCaret.CollaborationCaret,
+      yTiptap,
     }));
   }
   return collaborationExtensionsPromise;
@@ -590,6 +595,19 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       [],
     );
 
+    const collaborationHistory = useMemo(() => {
+      if (!collab?.ydoc || !collaborationExtensions) return null;
+      const protectedNodes = new Set(["paragraph"]);
+      return createCollaborationHistoryHandle(collab.ydoc, {
+        trackedOrigin: collaborationExtensions.yTiptap.ySyncPluginKey,
+        deleteFilter: (item) =>
+          collaborationExtensions.yTiptap.defaultDeleteFilter(
+            item,
+            protectedNodes,
+          ),
+      });
+    }, [collab?.ydoc, collaborationExtensions]);
+
     const extensions = useMemo(
       () => {
         const collabYDoc = collab?.ydoc ?? null;
@@ -604,6 +622,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 collaborationExtensions!.Collaboration.configure({
                   document: collabYDoc,
                   field: "body",
+                  yUndoOptions: { undoManager: collaborationHistory! },
                 }),
                 // Additive: only wired when the caller hands us an Awareness
                 // bound to this same ydoc (docPresence.ts's bindDocPresence).
@@ -626,7 +645,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           linkMenuExtension,
         ];
       },
-      [collab?.ydoc, collab?.awareness, collaborationExtensions, dohcPlugins, linkMenuExtension],
+      [
+        collab?.ydoc,
+        collab?.awareness,
+        collaborationExtensions,
+        collaborationHistory,
+        dohcPlugins,
+        linkMenuExtension,
+      ],
     );
 
     const collabActive = Boolean(collab?.ydoc && collaborationExtensions);
@@ -677,6 +703,12 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             handleImagePaste(view, event, pasteContextRef.current),
           handleDrop: (view, event) =>
             handleImageDrop(view, event as DragEvent, pasteContextRef.current),
+          handleDOMEvents: {
+            focus: () => {
+              collaborationHistory?.stopCapturing();
+              return false;
+            },
+          },
         },
         immediatelyRender: true,
         onUpdate() {

@@ -145,7 +145,7 @@ describe("SharedLocalDocument", () => {
       body: "unsaved",
       contentHash: null,
       dirty: true,
-      saveState: "saving",
+      saveState: "error",
     });
     release();
   });

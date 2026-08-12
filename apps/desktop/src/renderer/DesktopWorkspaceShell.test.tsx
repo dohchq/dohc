@@ -1244,6 +1244,127 @@ describe("editor groups", () => {
     },
   );
 
+  it.each([
+    { destination: "a split group", navigate: "split" as const },
+    { destination: "an existing group", navigate: "move" as const },
+    { destination: "a new group", navigate: "move-new" as const },
+  ])(
+    "keeps $destination focused when an older duplicate-file open finishes flushing",
+    async ({ navigate }) => {
+      const save = deferred<{ status: "written"; contentHash: string }>();
+      const bridge = makeBridge(
+        Promise.resolve({
+          ...STORED_STATE,
+          editorGroups: [
+            {
+              id: "left",
+              tabs: ["race-a.md"],
+              activeTab: "race-a.md",
+              size: 0.5,
+            },
+            {
+              id: "right",
+              tabs: ["b.md"],
+              activeTab: "b.md",
+              size: 0.5,
+            },
+          ],
+          activeEditorGroup: "right",
+        }),
+      );
+      bridge.listWorkspaceFiles = vi.fn(async () => ({
+        files: ["race-a.md", "b.md"].map((path) => ({
+          path,
+          kind: "file" as const,
+        })),
+        folders: [],
+      }));
+      bridge.readWorkspaceText = vi.fn(async () => ({
+        text: "# Doc\n\n",
+        truncated: false as const,
+        contentHash: "a".repeat(64),
+      }));
+      bridge.writeWorkspaceText = vi.fn(() => save.promise);
+      bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+      Object.defineProperty(Element.prototype, "setPointerCapture", {
+        configurable: true,
+        value: vi.fn(),
+      });
+      Object.defineProperty(Element.prototype, "hasPointerCapture", {
+        configurable: true,
+        value: vi.fn(() => false),
+      });
+      const user = userEvent.setup();
+      renderShell(bridge);
+
+      await waitFor(() =>
+        expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+      );
+      const left = screen.getByRole("region", { name: "Editor group 1" });
+      const right = screen.getByRole("region", { name: "Editor group 2" });
+      await user.click(within(left).getByTestId("markdown-edit-toggle"));
+      await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+      await waitFor(() =>
+        expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
+      );
+
+      fireEvent.pointerDown(right);
+      await waitFor(() => expect(right.dataset.active).toBe("true"));
+      await user.click(fileTreeRow("race-a.md"));
+      await waitFor(() =>
+        expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      );
+
+      if (navigate === "split") {
+        await user.click(within(right).getByTestId("create-editor-group-right"));
+      } else if (navigate === "move-new") {
+        fireEvent.contextMenu(within(right).getByTestId("tab-b.md"));
+      } else {
+        Object.defineProperty(document, "elementFromPoint", {
+          configurable: true,
+          value: vi.fn(() => left),
+        });
+        const source = within(right).getByTestId("tab-b.md");
+        fireEvent.pointerDown(source, {
+          button: 0,
+          pointerId: 9,
+          clientX: 10,
+        });
+        fireEvent.pointerMove(source, {
+          pointerId: 9,
+          buttons: 1,
+          clientX: 30,
+          clientY: 40,
+        });
+        fireEvent.pointerUp(source, {
+          pointerId: 9,
+          clientX: 30,
+          clientY: 40,
+        });
+      }
+
+      const destination =
+        navigate === "move"
+          ? left
+          : await screen.findByRole("region", { name: "Editor group 3" });
+      await waitFor(() => expect(destination.dataset.active).toBe("true"));
+      expect(within(destination).getByTestId("tab-b.md").dataset.active).toBe(
+        "true",
+      );
+
+      await act(async () => {
+        save.resolve({ status: "written", contentHash: "b".repeat(64) });
+        await save.promise;
+      });
+
+      await waitFor(() => expect(destination.dataset.active).toBe("true"));
+      expect(within(destination).getByTestId("tab-b.md").dataset.active).toBe(
+        "true",
+      );
+      expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
+    },
+  );
+
   it("moves a tab into an empty editor group by pointer drag", async () => {
     const bridge = makeBridge(
       Promise.resolve({

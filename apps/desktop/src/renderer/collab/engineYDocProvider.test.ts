@@ -34,7 +34,7 @@ function mockTransport(seedMarkdownLines: string[] = ["Start."]): {
     async open() {
       return { available: true, initialUpdate: Y.encodeStateAsUpdate(mainDoc) };
     },
-    applyLocalUpdate(update) {
+    async applyLocalUpdate(update) {
       shipped.push(update);
       // Reflect the shipped edit into the "main" doc, like recordUpdate +
       // apply would, so a subsequent remote diff is computed against it.
@@ -114,7 +114,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       async open() {
         return { available: false };
       },
-      applyLocalUpdate() {},
+      async applyLocalUpdate() {},
       onRemoteUpdate() {
         return () => undefined;
       },
@@ -141,5 +141,71 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     // Idempotent.
     await binding.destroy();
+  });
+
+  it("waits for an in-flight local update before closing", async () => {
+    const mock = mockTransport();
+    let releaseUpdate!: () => void;
+    const pendingUpdate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    mock.transport.applyLocalUpdate = async (update) => {
+      await pendingUpdate;
+      Y.applyUpdate(mock.mainDoc, update);
+    };
+    const binding = await bindEngineYDoc(mock.transport);
+    typeIntoBody(binding.doc!, "Final edit.");
+
+    const destroying = binding.destroy();
+    await Promise.resolve();
+    expect(mock.closed()).toBe(false);
+
+    releaseUpdate();
+    await destroying;
+    expect(mock.closed()).toBe(true);
+    expect(bodyText(mock.mainDoc)).toContain("Final edit.");
+  });
+
+  it("repairs a rejected incremental update with the final full mirror state", async () => {
+    const mock = mockTransport();
+    let attempts = 0;
+    mock.transport.applyLocalUpdate = async (update) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("delivery failed");
+      Y.applyUpdate(mock.mainDoc, update);
+    };
+    const binding = await bindEngineYDoc(mock.transport);
+    typeIntoBody(binding.doc!, "Recovered edit.");
+
+    await binding.destroy();
+
+    expect(attempts).toBe(2);
+    expect(bodyText(mock.mainDoc)).toContain("Recovered edit.");
+    expect(mock.closed()).toBe(true);
+  });
+
+  it("captures the final mirror before close when delivery stays unavailable", async () => {
+    const mock = mockTransport();
+    const order: string[] = [];
+    mock.transport.applyLocalUpdate = async () => {
+      throw new Error("delivery stayed unavailable");
+    };
+    mock.transport.close = async () => {
+      order.push("close");
+    };
+    const binding = await bindEngineYDoc(mock.transport, {
+      onDeliveryFailure(snapshot) {
+        const recovered = new Y.Doc();
+        Y.applyUpdate(recovered, snapshot);
+        expect(bodyText(recovered)).toContain("Set aside edit.");
+        recovered.destroy();
+        order.push("recovery");
+      },
+    });
+    typeIntoBody(binding.doc!, "Set aside edit.");
+
+    await binding.destroy();
+
+    expect(order).toEqual(["recovery", "close"]);
   });
 });

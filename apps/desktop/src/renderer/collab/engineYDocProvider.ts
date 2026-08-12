@@ -49,7 +49,9 @@ export interface EngineYDocTransport {
     removalInProgress?: EngineRemovalInProgress;
   }>;
   // Ship a local editor update to main, where it is journaled via recordUpdate.
-  applyLocalUpdate(update: Uint8Array): void;
+  // Resolution acknowledges that main accepted the update. The binding joins
+  // every acknowledgement before close, so teardown cannot outrun an edit.
+  applyLocalUpdate(update: Uint8Array): Promise<void>;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
   // through the engine). Returns an unsubscribe function.
   onRemoteUpdate(listener: (update: Uint8Array) => void): () => void;
@@ -77,10 +79,20 @@ export interface EngineYDocBinding {
   destroy(): Promise<void>;
 }
 
+type EngineYDocBindingOptions = {
+  // If both ordinary delivery and the final full-state retry fail, preserve
+  // the canonical mirror before close destroys it.
+  onDeliveryFailure?: (
+    snapshot: Uint8Array,
+    error: unknown,
+  ) => void | Promise<void>;
+};
+
 // Bind a mirror Y.Doc to an engine session over `transport`. On success the
 // returned binding's `doc` is ready for the Collaboration extension.
 export async function bindEngineYDoc(
   transport: EngineYDocTransport,
+  options: EngineYDocBindingOptions = {},
 ): Promise<EngineYDocBinding> {
   const opened = await transport.open();
   if (!opened.available || !opened.initialUpdate) {
@@ -105,6 +117,8 @@ export async function bindEngineYDoc(
   Y.applyUpdate(doc, opened.initialUpdate, ENGINE_SOURCED_ORIGIN);
 
   let destroyed = false;
+  let destroyPromise: Promise<void> | null = null;
+  let deliveryTail: Promise<void> = Promise.resolve();
 
   // Ship every LOCAL editor edit to main. A Tiptap edit carries a non-ENGINE
   // origin; an engine-sourced apply carries ENGINE_SOURCED_ORIGIN and is
@@ -112,7 +126,25 @@ export async function bindEngineYDoc(
   const onUpdate = (update: Uint8Array, origin: unknown): void => {
     if (destroyed) return;
     if (origin === ENGINE_SOURCED_ORIGIN) return;
-    transport.applyLocalUpdate(update);
+    let delivery: Promise<void>;
+    try {
+      // Start synchronously, as before. Main owns update ordering; the tail
+      // below is the teardown join, not a second delivery queue.
+      delivery = transport.applyLocalUpdate(update);
+    } catch (error: unknown) {
+      delivery = Promise.reject(error);
+    }
+    const previous = deliveryTail;
+    deliveryTail = Promise.allSettled([previous, delivery]).then((results) => {
+      const rejected = results.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      if (rejected) throw rejected.reason;
+    });
+    // Teardown joins and handles the failure. This observer must not create an
+    // unhandled rejection while the document remains open.
+    void deliveryTail.catch(() => undefined);
   };
   doc.on("update", onUpdate);
 
@@ -129,15 +161,44 @@ export async function bindEngineYDoc(
     notInVersion: false,
     engineMayHoldDocument: false,
     removalInProgress: null,
-    async destroy() {
-      if (destroyed) return;
+    destroy() {
+      if (destroyPromise) return destroyPromise;
       destroyed = true;
       doc.off("update", onUpdate);
       unsubscribe();
-      // Close the engine session first (it settles the converged state), then
-      // drop the mirror doc.
-      await transport.close().catch(() => undefined);
-      doc.destroy();
+      const finalSnapshot = Y.encodeStateAsUpdate(doc);
+      destroyPromise = (async () => {
+        let deliveryError: unknown = null;
+        let recoveryError: unknown = null;
+        try {
+          await deliveryTail;
+        } catch {
+          try {
+            // Full state, not the failed delta: this also covers every edit
+            // made while the failed delivery was in flight.
+            await transport.applyLocalUpdate(finalSnapshot);
+          } catch (error: unknown) {
+            deliveryError = error;
+            try {
+              await options.onDeliveryFailure?.(finalSnapshot, error);
+            } catch (captureError: unknown) {
+              recoveryError = captureError;
+            }
+          }
+        }
+
+        // Main settles the converged state on close. A close failure is still
+        // retained and retried by main, so it stays best-effort here.
+        await transport.close().catch(() => undefined);
+        doc.destroy();
+
+        if (recoveryError !== null) throw recoveryError;
+        // Generic bindings without a recovery owner must not hide loss.
+        if (deliveryError !== null && !options.onDeliveryFailure) {
+          throw deliveryError;
+        }
+      })();
+      return destroyPromise;
     },
   };
 }

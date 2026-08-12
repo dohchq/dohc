@@ -2133,17 +2133,30 @@ function MarkdownView(props: {
         );
         setSaveState("saved");
       }
-      props.localBuffer.reset(
-        props.body,
-        props.contentHash,
-        localSource.current,
-      );
+      const sharedBeforeResync = props.localBuffer.getSnapshot();
+      const peerDraftPending =
+        sharedBeforeResync.dirty &&
+        sharedBeforeResync.source !== localSource.current;
+      if (!peerDraftPending) {
+        props.localBuffer.reset(
+          props.body,
+          props.contentHash,
+          localSource.current,
+        );
+      }
+      const resyncBody = peerDraftPending
+        ? sharedBeforeResync.body
+        : props.body;
+      const resyncContentHash = peerDraftPending
+        ? sharedBeforeResync.contentHash
+        : props.contentHash;
       draftRevision.current += 1;
-      setDraft(props.body);
-      setSavedBody(props.body);
-      latestDraft.current = props.body;
-      baseContentHash.current = props.contentHash;
+      setDraft(resyncBody);
+      setSavedBody(resyncBody);
+      latestDraft.current = resyncBody;
+      baseContentHash.current = resyncContentHash;
       baseContentRequestId.current = props.contentRequestId;
+      if (peerDraftPending) setSaveState(sharedBeforeResync.saveState);
       acceptedRequestFloor.current = Math.max(
         acceptedRequestFloor.current,
         props.contentRequestId,

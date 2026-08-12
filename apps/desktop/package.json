@@ -77,6 +77,7 @@
     "@tiptap/pm": "^3.29.2",
     "@tiptap/react": "3.29.2",
     "@tiptap/starter-kit": "^3.29.2",
+    "@tiptap/y-tiptap": "3.0.8",
     "@vscode/ripgrep": "^1.18.0",
     "electron-updater": "^6.8.9",
     "highlight.js": "~11.11.1",

@@ -884,6 +884,133 @@ describe("MarkdownEditor history", () => {
     }
   });
 
+  it("shares one ordered undo history across duplicate collaboration views", async () => {
+    const ydoc = markdownToYDoc("seed");
+    const user = userEvent.setup();
+    const collab = {
+      ydoc,
+      status: "connected" as const,
+      peerCount: 0,
+      synced: true,
+    };
+    const editorProps = {
+      value: "seed",
+      onDirty: vi.fn(),
+      workspaceId: "workspace-1",
+      path: "notes/duplicate.md",
+      knownFiles: [],
+      collab,
+    };
+    const paneARef = createRef<MarkdownEditorHandle>();
+    const paneBRef = createRef<MarkdownEditorHandle>();
+    const paneAElement = () =>
+      createElement(MarkdownEditor, {
+        ...editorProps,
+        key: "pane-a",
+        ref: paneARef,
+      });
+    const paneBElement = () =>
+      createElement(MarkdownEditor, {
+        ...editorProps,
+        key: "pane-b",
+        ref: paneBRef,
+      });
+    const view = render(createElement("div", null, paneAElement()));
+
+    try {
+      const paneA = await screen.findByTestId("markdown-editor");
+      expect(paneA).toBeTruthy();
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seed");
+      });
+
+      await waitFor(() => {
+        paneARef.current?.focus("end");
+        expect(document.activeElement).toBe(paneA);
+      });
+      await user.keyboard("A");
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seedA");
+      });
+
+      view.rerender(
+        createElement("div", null, paneAElement(), paneBElement()),
+      );
+      await waitFor(() => {
+        expect(screen.getAllByTestId("markdown-editor")).toHaveLength(2);
+      });
+      const [, paneB] = screen.getAllByTestId("markdown-editor");
+      expect(paneB).toBeTruthy();
+      await waitFor(() => {
+        expect(paneB!.textContent).toBe("seedA");
+      });
+
+      await waitFor(() => {
+        paneBRef.current?.focus("end");
+        expect(document.activeElement).toBe(paneB);
+      });
+      await user.keyboard("B");
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seedAB");
+        expect(paneB!.textContent).toBe("seedAB");
+      });
+
+      fireEvent.keyDown(paneA!, {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+      });
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seedA");
+        expect(paneB!.textContent).toBe("seedA");
+      });
+
+      fireEvent.keyDown(paneB!, {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+      });
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seed");
+        expect(paneB!.textContent).toBe("seed");
+      });
+
+      fireEvent.keyDown(paneA!, {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+      });
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seed");
+        expect(paneB!.textContent).toBe("seed");
+      });
+
+      view.rerender(createElement("div", null, paneBElement()));
+      await waitFor(() => {
+        expect(screen.getAllByTestId("markdown-editor")).toHaveLength(1);
+      });
+      await waitFor(() => {
+        paneBRef.current?.focus("end");
+        expect(document.activeElement).toBe(paneB);
+      });
+      await user.keyboard("C");
+      await waitFor(() => {
+        expect(paneB!.textContent).toBe("seedC");
+      });
+      fireEvent.keyDown(paneB!, {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+      });
+      await waitFor(() => {
+        expect(paneB!.textContent).toBe("seed");
+      });
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+    }
+  });
+
   it("keeps local StarterKit undo working outside collaboration mode", async () => {
     const user = userEvent.setup();
     render(

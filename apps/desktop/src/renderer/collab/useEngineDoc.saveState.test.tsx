@@ -28,6 +28,9 @@ function harnessBridge() {
     (event: { sessionId: string; update: Uint8Array }) => void
   >();
   const applied: Array<{ sessionId: string; seq: number }> = [];
+  let applyAttempts = 0;
+  let applyFailuresRemaining = 0;
+  let closeCount = 0;
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
   doc.getMap("meta").set("contentKind", "plain-text");
@@ -51,7 +54,17 @@ function harnessBridge() {
       }
       return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) };
     },
-    async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
+    async applyEngineYDocUpdate(payload: {
+      sessionId: string;
+      update: Uint8Array;
+      seq: number;
+    }) {
+      applyAttempts += 1;
+      if (applyFailuresRemaining > 0) {
+        applyFailuresRemaining -= 1;
+        throw new Error("renderer update delivery failed");
+      }
+      Y.applyUpdate(doc, payload.update);
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
     },
     onEngineYDocRemoteUpdate: (
@@ -65,6 +78,7 @@ function harnessBridge() {
       return () => saveStateListeners.delete(listener);
     },
     async closeEngineYDocSession() {
+      closeCount += 1;
       return undefined;
     },
   };
@@ -115,12 +129,17 @@ function harnessBridge() {
     emitNow,
     emitRemoteEdit,
     applied,
+    applyAttempts: () => applyAttempts,
+    closeCount: () => closeCount,
     sessionId: () => openedSessionId,
     setRemovalInProgress(value: typeof removalInProgress) {
       removalInProgress = value;
     },
     setEmitDeletedDuringOpen(value: boolean) {
       emitDeletedDuringOpen = value;
+    },
+    failNextApply(count = 1) {
+      applyFailuresRemaining = count;
     },
   };
 }
@@ -138,6 +157,7 @@ function Harness(props: { workspaceId: string; path: string; enabled?: boolean }
     <div>
       <span data-testid="state">{engine.saveState}</span>
       <span data-testid="available">{String(engine.available)}</span>
+      <span data-testid="text">{engine.doc?.getText("plainText").toString() ?? "none"}</span>
       <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
       <span data-testid="draft">{drafts.at(-1)?.text ?? "none"}</span>
       <span data-testid="removal-operation">
@@ -219,6 +239,83 @@ it("shows the failure when a settle fails, instead of reading Saved", async () =
     await vi.advanceTimersByTimeAsync(10_000);
   });
   expect(screen.getByTestId("state").textContent).toBe("error");
+});
+
+it("delivers the final mirror state before the final consumer closes and reopens", async () => {
+  const view = render(
+    <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  harness.failNextApply();
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  await waitFor(() => expect(harness.applyAttempts()).toBe(1));
+  expect(harness.applied).toHaveLength(0);
+
+  view.unmount();
+  await waitFor(() => expect(harness.closeCount()).toBe(1));
+
+  render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  expect(screen.getByTestId("text").textContent).toBe("seed!");
+  expect(harness.applyAttempts()).toBe(2);
+  expect(harness.applied).toHaveLength(1);
+});
+
+it("delivers a rejected edit before retry replaces the live session", async () => {
+  render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  harness.failNextApply();
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  await waitFor(() => expect(harness.applyAttempts()).toBe(1));
+  act(() => {
+    screen.getByTestId("retry").click();
+  });
+
+  await waitFor(() => expect(harness.closeCount()).toBe(1));
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  expect(screen.getByTestId("text").textContent).toBe("seed!");
+  expect(harness.applyAttempts()).toBe(2);
+  expect(harness.applied).toHaveLength(1);
+});
+
+it("sets aside the final mirror when both delivery attempts fail", async () => {
+  const view = render(
+    <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  harness.failNextApply(2);
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  await waitFor(() => expect(harness.applyAttempts()).toBe(1));
+  view.unmount();
+  await waitFor(() => expect(harness.closeCount()).toBe(1));
+
+  render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  expect(screen.getByTestId("text").textContent).toBe("seed");
+  expect(screen.getByTestId("draft").textContent).toBe("seed!");
+  expect(harness.applyAttempts()).toBe(2);
+  expect(harness.applied).toHaveLength(0);
 });
 
 it("refuses transport writes synchronously after main reports deletion", async () => {

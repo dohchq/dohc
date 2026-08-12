@@ -1690,6 +1690,15 @@ export function DesktopWorkspaceShell(props: {
     );
     return sequence;
   }, []);
+  const invalidateDeferredFileOpenForGroupChange = useCallback(
+    (previousGroupId: string, nextGroupId: string) => {
+      invalidateDeferredFileOpen(previousGroupId);
+      if (nextGroupId !== previousGroupId) {
+        invalidateDeferredFileOpen(nextGroupId);
+      }
+    },
+    [invalidateDeferredFileOpen],
+  );
   const scrollNonce = useRef(0);
   const consumeSearchScrollTarget = useCallback((nonce: number) => {
     setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
@@ -3197,6 +3206,10 @@ export function DesktopWorkspaceShell(props: {
         ) {
           return;
         }
+        invalidateDeferredFileOpenForGroupChange(
+          current.activeEditorGroup,
+          targetGroupId,
+        );
         mutateWb((state) =>
           moveTabToGroup(
             state,
@@ -3215,7 +3228,11 @@ export function DesktopWorkspaceShell(props: {
         commitMove,
       );
     },
-    [commitAfterTabFlush, mutateWb],
+    [
+      commitAfterTabFlush,
+      invalidateDeferredFileOpenForGroupChange,
+      mutateWb,
+    ],
   );
 
   const showPathInExplorer = useCallback(
@@ -3492,10 +3509,15 @@ export function DesktopWorkspaceShell(props: {
       // it, so generating inside would produce two IDs for one command.
       const newGroupId = crypto.randomUUID();
       const commitMove = () => {
-        const live = wbRef.current.editorGroups
+        const current = wbRef.current;
+        const live = current.editorGroups
           .find((candidate) => candidate.id === groupId)
           ?.tabs.find((candidate) => candidate.path === tabPath);
         if (live !== tab) return;
+        invalidateDeferredFileOpenForGroupChange(
+          current.activeEditorGroup,
+          newGroupId,
+        );
         mutateWb((state) => moveTabToNewGroup(state, groupId, tabPath, newGroupId));
       };
       commitAfterTabFlush(
@@ -3505,7 +3527,11 @@ export function DesktopWorkspaceShell(props: {
         commitMove,
       );
     },
-    [commitAfterTabFlush, mutateWb],
+    [
+      commitAfterTabFlush,
+      invalidateDeferredFileOpenForGroupChange,
+      mutateWb,
+    ],
   );
 
   const openEditorGroupRight = useCallback(
@@ -3519,13 +3545,18 @@ export function DesktopWorkspaceShell(props: {
       if (!group || !tab) return;
       const newGroupId = crypto.randomUUID();
       const commitSplit = () => {
-        const liveGroup = wbRef.current.editorGroups.find(
+        const current = wbRef.current;
+        const liveGroup = current.editorGroups.find(
           (candidate) => candidate.id === groupId,
         );
         const liveTab = liveGroup?.tabs.find(
           (candidate) => candidate.path === liveGroup.activeTab,
         );
         if (liveTab !== tab) return;
+        invalidateDeferredFileOpenForGroupChange(
+          current.activeEditorGroup,
+          newGroupId,
+        );
         mutateWb((state) => createEditorGroupRight(state, groupId, newGroupId));
       };
       commitAfterTabFlush(
@@ -3535,7 +3566,11 @@ export function DesktopWorkspaceShell(props: {
         commitSplit,
       );
     },
-    [commitAfterTabFlush, mutateWb],
+    [
+      commitAfterTabFlush,
+      invalidateDeferredFileOpenForGroupChange,
+      mutateWb,
+    ],
   );
 
   const closeGroupAfterFlush = useCallback(

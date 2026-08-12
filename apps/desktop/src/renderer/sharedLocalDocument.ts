@@ -196,6 +196,7 @@ export class SharedLocalDocument {
         };
       }
       if (candidate.contentHash === null) {
+        this.markError();
         return { status: "no-baseline", body: candidate.body };
       }
       this.replace(
