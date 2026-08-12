@@ -387,6 +387,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
     handle
         .ydoc_close_session(
             key.clone(),
+            PATH.to_owned(),
             40,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -731,6 +732,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
     let prune_refused = handle
         .ydoc_close_session(
             key.clone(),
+            PATH.to_owned(),
             60,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -848,6 +850,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
     let prune_refused = handle
         .ydoc_close_session(
             key.clone(),
+            PATH.to_owned(),
             40,
             Arc::new(NoFaults),
             CancellationToken::new(),

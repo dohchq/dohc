@@ -349,6 +349,118 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_close_settles_and_releases_a_seeded_image_scene_after_an_edit() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let image_bytes = valid_png_with_text_padding(512);
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let scene = |version: u64, background: &str| {
+        serde_json::to_string(&json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [{
+                "id": "image-element",
+                "type": "image",
+                "version": version,
+                "versionNonce": version,
+                "isDeleted": false,
+                "index": "a0",
+                "fileId": "image-file"
+            }],
+            "appState": { "viewBackgroundColor": background },
+            "files": {
+                "image-file": {
+                    "id": "image-file",
+                    "mimeType": "image/png",
+                    "dataURL": format!("data:image/png;base64,{image_base64}"),
+                    "created": 12
+                }
+            }
+        }))
+        .expect("portable image scene")
+    };
+    write_file(
+        scratch.path(),
+        "drawings/close.excalidraw",
+        scene(1, "#ffffff").as_bytes(),
+    );
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-close", 71).await;
+    let opened = call(
+        &transport,
+        &handle,
+        72,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "drawings/close.excalidraw",
+            "contentKind": "scene",
+            "seedFromArtifact": true
+        }),
+    )
+    .await;
+    let edited = dohc_engine_collab::import_portable_scene(&scene(2, "#eeeeee"))
+        .expect("edited scene import");
+    call(
+        &transport,
+        &handle,
+        73,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": opened["sessionId"],
+            "updateBase64": base64::engine::general_purpose::STANDARD
+                .encode(edited.initial_update)
+        }),
+    )
+    .await;
+
+    call(
+        &transport,
+        &handle,
+        74,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    let settled: Value = serde_json::from_slice(
+        &std::fs::read(scratch.path().join("drawings/close.excalidraw"))
+            .expect("settled scene artifact"),
+    )
+    .expect("settled portable JSON");
+    assert_eq!(settled["elements"][0]["version"], json!(2));
+    assert_eq!(
+        settled["files"]["image-file"]["dataURL"],
+        json!(format!("data:image/png;base64,{image_base64}"))
+    );
+    let reopened = call(
+        &transport,
+        &handle,
+        75,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "drawings/close.excalidraw",
+            "contentKind": "scene",
+            "seedFromArtifact": true
+        }),
+    )
+    .await;
+    assert_eq!(reopened["lineage"], json!("existing"));
+    assert_eq!(reopened["artifactAssets"][0]["id"], json!("image-file"));
+    call(
+        &transport,
+        &handle,
+        76,
+        "ydoc.evict",
+        json!({ "sessionId": reopened["sessionId"] }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_rebind_with_seed_disabled_never_resurrects_the_portable_artifact() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");

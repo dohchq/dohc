@@ -150,7 +150,7 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
         .expect("seed the colliding cross-workspace job");
 
     let out = committed(
-        close_session(&mut ts.store, &key, false, &NoFaults, 1_400)
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400)
             .expect("another workspace's backlog must not block this close"),
     );
     assert!(
@@ -231,7 +231,7 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
         .expect("seed this workspace's own pending job");
     assert!(
         matches!(
-            close_session(&mut ts2.store, &key2, false, &NoFaults, 1_400),
+            close_session(&mut ts2.store, &key2, false, None, &NoFaults, 1_400),
             Err(CollabError::UnsettledClose)
         ),
         "this workspace's own pending job must still hold the prune"
@@ -331,7 +331,7 @@ fn assert_pending_job_of_kind_blocks_close(job_id_prefix: &str) {
 
     assert!(
         matches!(
-            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400),
             Err(CollabError::UnsettledClose)
         ),
         "a pending '{job_id_prefix}' job must hold the prune"
@@ -378,7 +378,7 @@ fn local_only_close_prunes_the_cache() {
 
     // A close BEFORE settling refuses to prune (would discard unsettled edits).
     assert!(matches!(
-        close_session(&mut ts.store, &key, false, &NoFaults, 1_500),
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_500),
         Err(CollabError::UnsettledClose)
     ));
     assert_eq!(
@@ -389,8 +389,9 @@ fn local_only_close_prunes_the_cache() {
 
     // Settle the head, THEN close — now the .md covers the head, safe to prune.
     committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_800).expect("settle"));
-    let out =
-        committed(close_session(&mut ts.store, &key, false, &NoFaults, 2_000).expect("close"));
+    let out = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 2_000).expect("close"),
+    );
     assert!(
         matches!(out, CloseOutcome::Pruned { .. }),
         "local-only prunes"
@@ -506,8 +507,9 @@ fn a_captured_head_lets_a_never_settled_local_close_prune() {
     committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
     seed_head(&mut ts.store, &key, "what the user typed", None);
 
-    let out =
-        committed(close_session(&mut ts.store, &key, false, &NoFaults, 1_400).expect("close"));
+    let out = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400).expect("close"),
+    );
     assert!(
         matches!(out, CloseOutcome::Pruned { .. }),
         "a head that already holds the projection covers the prune: {out:?}"
@@ -542,7 +544,7 @@ fn a_head_holding_other_bytes_still_refuses_the_local_close() {
 
     assert!(
         matches!(
-            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400),
             Err(CollabError::UnsettledClose)
         ),
         "a head that holds OTHER bytes proves nothing about this document"
@@ -598,7 +600,7 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
 
     assert!(
         matches!(
-            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400),
             Err(CollabError::UnsettledClose)
         ),
         "a head whose materialization conflicted is not on disk, whatever it holds"
@@ -639,7 +641,7 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
     );
     assert!(
         matches!(
-            close_session(&mut settled.store, &key2, false, &NoFaults, 1_400),
+            close_session(&mut settled.store, &key2, false, None, &NoFaults, 1_400,),
             Err(CollabError::UnsettledClose)
         ),
         "an engine-written head answers through the settle marker, not this fallback"
@@ -689,8 +691,9 @@ fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
     // reproduces exactly that, leaving the completed job row untouched.
     seed_head(&mut ts.store, &key, "what the user typed", None);
 
-    let out =
-        committed(close_session(&mut ts.store, &key, false, &NoFaults, 1_400).expect("close"));
+    let out = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400).expect("close"),
+    );
     assert!(
         matches!(out, CloseOutcome::Pruned { .. }),
         "a genuine capture discharges despite a leftover completed job row: {out:?}"
@@ -755,7 +758,7 @@ fn a_binary_head_refuses_the_close_by_name_instead_of_failing_internally() {
 
     assert!(
         matches!(
-            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400),
             Err(CollabError::UnsettledClose)
         ),
         "a binary head holds none of this document's text, and the refusal must say so"
@@ -787,8 +790,9 @@ fn replicated_close_never_prunes_the_lineage() {
         .expect("m")
         .doc
         .canonical_content_sha256();
-    let out =
-        committed(close_session(&mut ts.store, &key, false, &NoFaults, 2_000).expect("close"));
+    let out = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 2_000).expect("close"),
+    );
     assert!(
         matches!(out, CloseOutcome::Compacted(_)),
         "replicated compacts, not prunes"
@@ -853,8 +857,9 @@ fn local_to_shared_transition_keeps_the_base() {
     assert_eq!(count(&ts.store, "ydoc_snapshots", &key), 1, "base claimed");
 
     // Close must now COMPACT (not prune), preserving the base for peers.
-    let out =
-        committed(close_session(&mut ts.store, &key, false, &NoFaults, 2_000).expect("close"));
+    let out = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 2_000).expect("close"),
+    );
     assert!(
         matches!(out, CloseOutcome::Compacted(_)),
         "shared close compacts"

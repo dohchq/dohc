@@ -772,6 +772,7 @@ async fn closing_a_session_that_originated_mid_flight_keeps_the_base() {
     handle
         .ydoc_close_session(
             key.clone(),
+            PATH.to_owned(),
             300,
             Arc::new(NoFaults),
             CancellationToken::new(),

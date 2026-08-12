@@ -1028,11 +1028,14 @@ pub fn settle(
 
 /// Close a session: regime-dependent. Replicated (or persist-closed-state)
 /// compacts and KEEPS the lineage durable; local-only prunes every CRDT row to
-/// the bare marker (the workspace file is the artifact).
+/// the bare marker (the workspace file is the artifact). A caller that uses a
+/// store-backed projector supplies its digest; scenes refuse the generic
+/// projection because their portable files resolve from versioned storage.
 pub fn close_session(
     store: &mut EngineStore,
     key: &DocKey,
     persist_closed_state: bool,
+    authoritative_projection_sha256: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<CloseOutcome>, CollabError> {
@@ -1052,14 +1055,22 @@ pub fn close_session(
     // must exist before the cache is thrown away). A doc with no edits
     // (`head_update_seq == 0`) has nothing to lose and prunes freely.
     if marker.head_update_seq > 0 {
-        let persisted = load_persisted(store, key)?.ok_or(CollabError::NoMarker)?;
-        let content_sha = crate::hex_sha256(
-            persisted
-                .doc
-                .project(marker.content_kind)?
-                .content
-                .as_bytes(),
-        );
+        let content_sha = match authoritative_projection_sha256 {
+            Some(content_sha) => content_sha.to_owned(),
+            None if marker.content_kind == ContentKind::Scene => {
+                return Err(CollabError::UnsettledClose);
+            }
+            None => {
+                let persisted = load_persisted(store, key)?.ok_or(CollabError::NoMarker)?;
+                crate::hex_sha256(
+                    persisted
+                        .doc
+                        .project(marker.content_kind)?
+                        .content
+                        .as_bytes(),
+                )
+            }
+        };
         // TWO ways the artifact can already hold these bytes, and both count.
         // A settle records itself in `last_settled_sha`. A CAPTURE of the file
         // moves the HEAD to them and touches no marker column — it reads the

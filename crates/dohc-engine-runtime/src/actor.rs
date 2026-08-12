@@ -1232,6 +1232,7 @@ enum Command {
     },
     YdocCloseSession {
         key: DocKey,
+        path: String,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -3473,6 +3474,7 @@ impl ActorHandle {
     pub async fn ydoc_close_session(
         &self,
         key: DocKey,
+        path: String,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -3481,6 +3483,7 @@ impl ActorHandle {
         self.tx
             .send(Command::YdocCloseSession {
                 key,
+                path,
                 now_ms,
                 faults,
                 token,
@@ -7545,13 +7548,20 @@ fn worker_main(
             }
             Command::YdocCloseSession {
                 key,
+                path,
                 now_ms,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    ydoc_close_session_on_store(&mut store, &key, now_ms, faults.as_ref(), &token);
+                let outcome = ydoc_close_session_on_store(
+                    &mut store,
+                    &key,
+                    &path,
+                    now_ms,
+                    faults.as_ref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::MaterializeReplayPending {
@@ -10321,6 +10331,7 @@ fn ydoc_resync_on_store(
 fn ydoc_close_session_on_store(
     store: &mut EngineStore,
     key: &DocKey,
+    path: &str,
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -10337,10 +10348,21 @@ fn ydoc_close_session_on_store(
     // Keeping the closed CRDT authoritative here would shadow external file
     // edits on reopen: existing lineage, no seedContent, stale document.
     let persist_closed_state = false;
+    let authoritative_projection_sha256 =
+        if marker.regime == Regime::LocalOnly && marker.head_update_seq > 0 {
+            let persisted = dohc_engine_collab::load_persisted(store, key)?
+                .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
+            let projection =
+                project_ydoc_on_store(store, key, path, &persisted.doc, marker.content_kind)?;
+            Some(hex_sha256(projection.content.as_bytes()))
+        } else {
+            None
+        };
     let outcome = match dohc_engine_collab::close_session(
         store,
         key,
         persist_closed_state,
+        authoritative_projection_sha256.as_deref(),
         faults,
         now_ms,
     )? {
