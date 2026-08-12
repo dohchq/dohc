@@ -60,12 +60,15 @@ Start every description with the attribution required by `AGENTS.md`. Put the
 human section immediately after it:
 
 ```markdown
-> Written by <model name>.
+> Written by <exact model slug>.
 
 ## For humans
 
 <Explain the problem in plain language. Then explain what now happens instead.>
 ```
+
+Resolve the exact model slug as `AGENTS.md` requires. Do not use the model
+family from the system prompt.
 
 Write two to four sentences when that is enough. Anchor the explanation in the
 user's request, then verify every claim against the diff.
