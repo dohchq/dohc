@@ -25,6 +25,7 @@ function sharedBridge() {
     (event: { sessionId: string; update: Uint8Array }) => void
   >();
   const openedSessionIds: string[] = [];
+  let closeGate: Promise<void> | null = null;
   const source = new Y.Doc();
   source.getMap("meta").set("contentKind", "plain-text");
   source.getText("plainText").insert(0, "seed");
@@ -50,7 +51,9 @@ function sharedBridge() {
       saveStateListeners.add(listener);
       return () => saveStateListeners.delete(listener);
     },
-    closeEngineYDocSession: vi.fn(async () => undefined),
+    closeEngineYDocSession: vi.fn(async () => {
+      await closeGate;
+    }),
   };
 
   function emit(
@@ -66,7 +69,21 @@ function sharedBridge() {
     });
   }
 
-  return { api, emit, openedSessionIds };
+  return {
+    api,
+    emit,
+    openedSessionIds,
+    holdClose() {
+      let release!: () => void;
+      closeGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        closeGate = null;
+        release();
+      };
+    },
+  };
 }
 
 const renderedDocs = new Map<string, Y.Doc | null>();
@@ -196,6 +213,41 @@ it("keeps one lease through React StrictMode's effect replay", async () => {
   view.unmount();
   await waitFor(() =>
     expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(1),
+  );
+});
+
+it.each([
+  { request: "retry", reopenKey: 0, retryKey: 1 },
+  { request: "active version change", reopenKey: 1, retryKey: 0 },
+])("closes the final consumer before a $request replacement", async (next) => {
+  const view = render(<Consumer id="first" reopenKey={0} retryKey={0} />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available-first").textContent).toBe("true"),
+  );
+  const releaseClose = harness.holdClose();
+
+  view.rerender(
+    <Consumer
+      id="first"
+      reopenKey={next.reopenKey}
+      retryKey={next.retryKey}
+    />,
+  );
+  await waitFor(() =>
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(1),
+  );
+
+  try {
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("available-first").textContent).toBe("false");
+  } finally {
+    releaseClose();
+  }
+  await waitFor(() =>
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(2),
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available-first").textContent).toBe("true"),
   );
 });
 

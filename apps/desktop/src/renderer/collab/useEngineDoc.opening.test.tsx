@@ -192,6 +192,9 @@ it("re-enters opening on the FIRST render of a version switch, not one frame lat
 
   // And it stays that way until the NEW open answers.
   expect(screen.getByTestId("opening").textContent).toBe("true");
+  await waitFor(() =>
+    expect(bridge.api.openEngineYDocSession).toHaveBeenCalledTimes(2),
+  );
   bridge.bind();
   await waitFor(() =>
     expect(screen.getByTestId("available").textContent).toBe("true"),

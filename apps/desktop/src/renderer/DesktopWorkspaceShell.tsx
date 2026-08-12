@@ -1678,6 +1678,18 @@ export function DesktopWorkspaceShell(props: {
       sequenceByGroup: new Map<string, number>(),
     };
   }
+  const invalidateDeferredFileOpen = useCallback((groupId: string) => {
+    const requests = fileOpenRequests.current;
+    const sequence = (requests.sequenceByGroup.get(groupId) ?? 0) + 1;
+    requests.sequenceByGroup.set(groupId, sequence);
+    setHeadingTarget((current) =>
+      current?.groupId === groupId ? null : current,
+    );
+    setSearchScrollTarget((current) =>
+      current?.groupId === groupId ? null : current,
+    );
+    return sequence;
+  }, []);
   const scrollNonce = useRef(0);
   const consumeSearchScrollTarget = useCallback((nonce: number) => {
     setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
@@ -2636,12 +2648,7 @@ export function DesktopWorkspaceShell(props: {
       scrollTarget?: Omit<ScrollTarget, "path">,
     ) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
-      const requestSequence =
-        (fileOpenRequests.current.sequenceByGroup.get(targetGroupId) ?? 0) + 1;
-      fileOpenRequests.current.sequenceByGroup.set(
-        targetGroupId,
-        requestSequence,
-      );
+      const requestSequence = invalidateDeferredFileOpen(targetGroupId);
       const isCurrentRequest = () =>
         fileOpenRequests.current.workspaceId === workspaceId &&
         fileOpenRequests.current.sequenceByGroup.get(targetGroupId) ===
@@ -2704,7 +2711,13 @@ export function DesktopWorkspaceShell(props: {
           );
         });
     },
-    [flushStableDrafts, mutateWb, reportShellError, workspaceId],
+    [
+      flushStableDrafts,
+      invalidateDeferredFileOpen,
+      mutateWb,
+      reportShellError,
+      workspaceId,
+    ],
   );
   const openPathWithHeading = useCallback(
     (path: string, target?: string | HeadingTarget) => {
@@ -2919,16 +2932,21 @@ export function DesktopWorkspaceShell(props: {
   );
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
+      const current = wbRef.current;
+      const group = current.editorGroups.find(
+        (candidate) => candidate.id === groupId,
+      );
+      if (!group?.tabs.some((tab) => tab.path === path)) return;
+      invalidateDeferredFileOpen(groupId);
+      if (current.activeEditorGroup !== groupId) {
+        invalidateDeferredFileOpen(current.activeEditorGroup);
+      }
       if (isVirtualTabPath(path)) {
         mutateWb((state) => activateTab(state, groupId, path));
         return;
       }
       setHeadingTarget(null);
       if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
-      const group = wbRef.current.editorGroups.find(
-        (candidate) => candidate.id === groupId,
-      );
-      if (!group?.tabs.some((tab) => tab.path === path)) return;
       if (group.activeTab !== path) {
         rendererMarks.mark("file-open-start");
       }
@@ -2936,7 +2954,22 @@ export function DesktopWorkspaceShell(props: {
         recordRecentFile(activateTab(state, groupId, path), path),
       );
     },
-    [mutateWb],
+    [invalidateDeferredFileOpen, mutateWb],
+  );
+  const focusWorkbenchEditorGroup = useCallback(
+    (groupId: string) => {
+      const current = wbRef.current;
+      if (
+        current.activeEditorGroup === groupId ||
+        !current.editorGroups.some((group) => group.id === groupId)
+      ) {
+        return;
+      }
+      invalidateDeferredFileOpen(current.activeEditorGroup);
+      invalidateDeferredFileOpen(groupId);
+      mutateWb((state) => focusEditorGroup(state, groupId));
+    },
+    [invalidateDeferredFileOpen, mutateWb],
   );
 
   // Chats view "Files" grouping cross-link: a file-linked Chat opens where
@@ -4741,9 +4774,7 @@ export function DesktopWorkspaceShell(props: {
               };
             })}
             activeGroupId={wb.activeEditorGroup}
-            onFocusGroup={(groupId) =>
-              mutateWb((state) => focusEditorGroup(state, groupId))
-            }
+            onFocusGroup={focusWorkbenchEditorGroup}
             onResizeGroups={(leftGroupId, rightGroupId, leftSize) =>
               mutateWb((state) =>
                 resizeEditorGroups(state, leftGroupId, rightGroupId, leftSize),

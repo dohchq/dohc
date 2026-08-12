@@ -299,9 +299,10 @@ type EngineDocSession = {
   dispose: () => Promise<void>;
 };
 
-type EngineDocLease = EngineDocSession & {
+type EngineDocLease = Omit<EngineDocSession, "start"> & {
   documentKey: string;
   versionKey: string;
+  startAfter: (barrier: Promise<void> | undefined) => void;
   retain: () => void;
   release: () => void;
   disposeIfReleased: () => boolean;
@@ -314,7 +315,23 @@ type EngineDocLease = EngineDocSession & {
 };
 
 const engineDocLeases = new Map<string, EngineDocLease>();
+const engineDocDisposalBarriers = new Map<string, Promise<void>>();
 let engineDocLeaseCounter = 0;
+
+function trackEngineDocDisposal(lease: EngineDocLease): Promise<void> {
+  const disposal = lease.dispose();
+  const previous = engineDocDisposalBarriers.get(lease.documentKey);
+  const barrier = previous
+    ? Promise.all([previous, disposal]).then(() => undefined)
+    : disposal;
+  engineDocDisposalBarriers.set(lease.documentKey, barrier);
+  void barrier.then(() => {
+    if (engineDocDisposalBarriers.get(lease.documentKey) === barrier) {
+      engineDocDisposalBarriers.delete(lease.documentKey);
+    }
+  });
+  return barrier;
+}
 
 function createEngineDocSession(
   input: EngineDocInput,
@@ -623,7 +640,7 @@ function createEngineDocLease(
       return false;
     }
     engineDocLeases.delete(versionKey);
-    void lease.dispose().catch(() => undefined);
+    void trackEngineDocDisposal(lease).catch(() => undefined);
     return true;
   };
 
@@ -694,10 +711,21 @@ function createEngineDocLease(
     getSnapshot() {
       return snapshot;
     },
-    start() {
+    startAfter(barrier) {
       if (started) return;
       started = true;
-      attach(initialSession);
+      if (!barrier) {
+        attach(initialSession);
+        return;
+      }
+      const generation = transitionGeneration;
+      transition = barrier.then(async () => {
+        if (disposed || generation !== transitionGeneration) {
+          await initialSession.dispose();
+          return;
+        }
+        attach(initialSession);
+      });
     },
     dispose() {
       if (disposePromise) return disposePromise;
@@ -725,7 +753,12 @@ function createEngineDocLease(
 export async function disposeEngineDocLeasesForTests(): Promise<void> {
   const leases = [...new Set(engineDocLeases.values())];
   engineDocLeases.clear();
-  await Promise.all(leases.map((lease) => lease.dispose()));
+  const barriers = [...new Set(engineDocDisposalBarriers.values())];
+  await Promise.all([
+    ...barriers,
+    ...leases.map((lease) => lease.dispose()),
+  ]);
+  engineDocDisposalBarriers.clear();
 }
 
 function retainEngineDocLease(
@@ -755,7 +788,7 @@ function retainEngineDocLease(
       retryGeneration,
     );
     engineDocLeases.set(versionKey, lease);
-    lease.start();
+    lease.startAfter(engineDocDisposalBarriers.get(documentKey));
   } else {
     lease.reopenForRetry(input, requestKey, consumer, retryGeneration);
   }

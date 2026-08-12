@@ -1048,6 +1048,96 @@ describe("editor groups", () => {
     expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
   });
 
+  it.each([
+    { destination: "an existing tab", navigate: "tab" as const },
+    { destination: "another editor group", navigate: "group" as const },
+  ])(
+    "keeps $destination selected when an older duplicate-file open finishes flushing",
+    async ({ navigate }) => {
+      const save = deferred<{ status: "written"; contentHash: string }>();
+      const bridge = makeBridge(
+        Promise.resolve({
+          ...STORED_STATE,
+          editorGroups: [
+            {
+              id: "left",
+              tabs: ["race-a.md"],
+              activeTab: "race-a.md",
+              size: 0.5,
+            },
+            {
+              id: "right",
+              tabs: ["b.md", "c.md"],
+              activeTab: "c.md",
+              size: 0.5,
+            },
+          ],
+          activeEditorGroup: "right",
+        }),
+      );
+      bridge.listWorkspaceFiles = vi.fn(async () => ({
+        files: ["race-a.md", "b.md", "c.md"].map((path) => ({
+          path,
+          kind: "file" as const,
+        })),
+        folders: [],
+      }));
+      bridge.readWorkspaceText = vi.fn(async () => ({
+        text: "# Doc\n\n",
+        truncated: false as const,
+        contentHash: "a".repeat(64),
+      }));
+      bridge.writeWorkspaceText = vi.fn(() => save.promise);
+      const user = userEvent.setup();
+      renderShell(bridge);
+
+      await waitFor(() =>
+        expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+      );
+      const left = screen.getByRole("region", { name: "Editor group 1" });
+      const right = screen.getByRole("region", { name: "Editor group 2" });
+      await user.click(within(left).getByTestId("markdown-edit-toggle"));
+      await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+      await waitFor(() =>
+        expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
+      );
+
+      fireEvent.pointerDown(right);
+      await waitFor(() => expect(right.dataset.active).toBe("true"));
+      await user.click(fileTreeRow("race-a.md"));
+      await waitFor(() =>
+        expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      );
+
+      if (navigate === "tab") {
+        await user.click(within(right).getByTestId("tab-b.md"));
+        expect(within(right).getByTestId("tab-b.md").dataset.active).toBe(
+          "true",
+        );
+      } else {
+        fireEvent.pointerDown(left);
+        await waitFor(() => expect(left.dataset.active).toBe("true"));
+      }
+
+      await act(async () => {
+        save.resolve({ status: "written", contentHash: "b".repeat(64) });
+        await save.promise;
+      });
+
+      if (navigate === "tab") {
+        await waitFor(() =>
+          expect(within(right).getByTestId("tab-b.md").dataset.active).toBe(
+            "true",
+          ),
+        );
+      } else {
+        await waitFor(() => expect(left.dataset.active).toBe("true"));
+        expect(right.dataset.active).not.toBe("true");
+      }
+      expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
+    },
+  );
+
   it("moves a tab into an empty editor group by pointer drag", async () => {
     const bridge = makeBridge(
       Promise.resolve({

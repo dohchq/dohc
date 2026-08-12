@@ -48,6 +48,7 @@ export class SharedLocalDocument {
   private listeners = new Set<() => void>();
   private tail: Promise<void> = Promise.resolve();
   private writers = 0;
+  private latestReadTicket = 0;
   private snapshot: LocalDocumentSnapshot = {
     initialized: false,
     body: "",
@@ -79,6 +80,22 @@ export class SharedLocalDocument {
 
   getSnapshot = (): LocalDocumentSnapshot => this.snapshot;
 
+  beginRead(): number {
+    this.latestReadTicket += 1;
+    return this.latestReadTicket;
+  }
+
+  initializeRead(
+    body: string,
+    contentHash: string | null,
+    readTicket: number,
+  ): boolean {
+    if (readTicket !== this.latestReadTicket || this.initialized) return false;
+    this.initialized = true;
+    this.replace({ body, contentHash }, null, false, "saved");
+    return true;
+  }
+
   initialize(body: string, contentHash: string | null): void {
     if (this.initialized) return;
     this.initialized = true;
@@ -105,8 +122,32 @@ export class SharedLocalDocument {
     contentHash: string | null,
     source: object,
     force = false,
+    readTicket?: number,
   ): boolean {
-    if (!force && (this.snapshot.dirty || this.writers > 0)) return false;
+    if (readTicket !== undefined && readTicket !== this.latestReadTicket) {
+      return false;
+    }
+    if (this.snapshot.dirty || this.writers > 0) {
+      const ownedByCaller = this.snapshot.source === source;
+      if (force && !ownedByCaller) {
+        this.replace(
+          {
+            body: this.snapshot.body,
+            contentHash: this.snapshot.contentHash,
+          },
+          this.snapshot.source,
+          this.snapshot.dirty,
+          "error",
+        );
+      }
+      if (force && ownedByCaller && this.writers === 0) {
+        // The caller already set aside its own conflicting draft. Accepting
+        // the reread is the existing single-pane recovery path. A peer-owned
+        // or queued draft must stay canonical until its own writer settles.
+      } else {
+        return false;
+      }
+    }
     this.initialized = true;
     this.replace(
       { body, contentHash },
@@ -117,10 +158,10 @@ export class SharedLocalDocument {
     return true;
   }
 
-  markError(source: object): void {
+  markError(): void {
     this.replace(
       { body: this.snapshot.body, contentHash: this.snapshot.contentHash },
-      source,
+      this.snapshot.source,
       this.snapshot.dirty,
       "error",
     );
@@ -158,7 +199,7 @@ export class SharedLocalDocument {
       try {
         const written = await writer(body, expectedContentHash);
         if (written.status === "conflict") {
-          this.markError(source);
+          this.markError();
           return { ...written, body, expectedContentHash };
         }
         const newerDraft = this.snapshot.body !== body;
@@ -170,7 +211,7 @@ export class SharedLocalDocument {
         );
         return { ...written, body, expectedContentHash };
       } catch (error: unknown) {
-        this.markError(source);
+        this.markError();
         throw error;
       }
     };

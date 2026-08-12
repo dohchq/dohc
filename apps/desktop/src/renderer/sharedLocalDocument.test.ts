@@ -118,6 +118,54 @@ describe("SharedLocalDocument", () => {
     release();
   });
 
+  it("preserves a queued peer draft when a conflict reread is forced", async () => {
+    const buffer = getSharedLocalDocument(localDocumentKey("ws", "conflict.txt", 1));
+    const release = buffer.retain();
+    const writerSource = {};
+    const peer = {};
+    buffer.initialize("disk before", "hash-1");
+    buffer.publishDraft("writer draft", writerSource);
+    let finishWrite!: () => void;
+    const writePending = new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    });
+    const writing = buffer.write(writerSource, async () => {
+      await writePending;
+      return { status: "conflict", currentContentHash: "hash-2" };
+    });
+    buffer.publishDraft("peer draft", peer);
+    finishWrite();
+    await writing;
+
+    expect(
+      buffer.acceptRead("disk after", "hash-2", writerSource, true),
+    ).toBe(false);
+
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "peer draft",
+      contentHash: "hash-1",
+      dirty: true,
+      saveState: "error",
+    });
+    release();
+  });
+
+  it("rejects an older shared read after a newer request starts", () => {
+    const buffer = getSharedLocalDocument(localDocumentKey("ws", "ordered.txt", 1));
+    const release = buffer.retain();
+    const older = buffer.beginRead();
+    const newer = buffer.beginRead();
+
+    expect(buffer.acceptRead("newer", "hash-2", {}, false, newer)).toBe(true);
+    expect(buffer.acceptRead("older", "hash-1", {}, false, older)).toBe(false);
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "newer",
+      contentHash: "hash-2",
+      dirty: false,
+    });
+    release();
+  });
+
   it("isolates the same path across workspaces and version reopen keys", () => {
     const first = getSharedLocalDocument(localDocumentKey("ws-a", "a.txt", 1));
     const otherWorkspace = getSharedLocalDocument(

@@ -450,6 +450,7 @@ function useTextContent(
   path: string,
   enabled: boolean,
   refreshKey: number,
+  localBuffer: SharedLocalDocument,
 ) {
   const [conflictRefreshKey, setConflictRefreshKey] = useState(0);
   const refreshAfterConflict = useCallback(() => {
@@ -462,13 +463,15 @@ function useTextContent(
     refreshKey: -1,
     conflictRefreshKey: -1,
     id: 0,
+    localBuffer: null as SharedLocalDocument | null,
   });
   const requestChanged =
     requestRef.current.workspaceId !== workspaceId ||
     requestRef.current.path !== path ||
     requestRef.current.enabled !== enabled ||
     requestRef.current.refreshKey !== refreshKey ||
-    requestRef.current.conflictRefreshKey !== conflictRefreshKey;
+    requestRef.current.conflictRefreshKey !== conflictRefreshKey ||
+    requestRef.current.localBuffer !== localBuffer;
   if (requestChanged) {
     requestRef.current = {
       workspaceId,
@@ -477,6 +480,7 @@ function useTextContent(
       refreshKey,
       conflictRefreshKey,
       id: requestRef.current.id + 1,
+      localBuffer,
     };
   }
   const requestId = requestRef.current.id;
@@ -489,6 +493,7 @@ function useTextContent(
     truncated: boolean;
     contentHash: string | null;
     requestId: number;
+    readTicket: number;
   } | null>(null);
   const [error, setError] = useState(false);
   // Bumped once per ANSWERED read. The dispatcher uses it to tell "the reread
@@ -503,6 +508,7 @@ function useTextContent(
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
+    const readTicket = localBuffer.beginRead();
     // Blank when switching workspaces or files. An activity refresh at the
     // same location swaps content in place instead of flashing it away.
     if (
@@ -524,6 +530,7 @@ function useTextContent(
           truncated: r.truncated,
           contentHash: r.contentHash,
           requestId,
+          readTicket,
         });
         setError(false);
         setReadSeq((seq) => seq + 1);
@@ -541,7 +548,15 @@ function useTextContent(
     };
     // refreshKey bumps on workspace activity so an open file re-reads when it
     // changes on disk (e.g. an agent edits it).
-  }, [workspaceId, path, enabled, refreshKey, conflictRefreshKey, requestId]);
+  }, [
+    workspaceId,
+    path,
+    enabled,
+    refreshKey,
+    conflictRefreshKey,
+    requestId,
+    localBuffer,
+  ]);
   const currentContent =
     content?.loadedWorkspaceId === workspaceId && content.loadedPath === path
       ? content
@@ -552,6 +567,7 @@ function useTextContent(
     truncated: currentContent?.truncated ?? false,
     contentHash: currentContent?.contentHash ?? null,
     contentRequestId: currentContent?.requestId ?? 0,
+    contentReadTicket: currentContent?.readTicket ?? 0,
     latestContentRequestId: requestId,
     error,
     readSeq,
@@ -755,6 +771,7 @@ function useAutosavedTextDraft(props: {
   body: string;
   contentHash: string | null;
   contentRequestId: number;
+  contentReadTicket: number;
   latestContentRequestId: number;
   workspaceId: string;
   path: string;
@@ -792,11 +809,13 @@ function useAutosavedTextDraft(props: {
     body: props.body,
     contentHash: props.contentHash,
     requestId: props.contentRequestId,
+    readTicket: props.contentReadTicket,
   });
   latestSnapshot.current = {
     body: props.body,
     contentHash: props.contentHash,
     requestId: props.contentRequestId,
+    readTicket: props.contentReadTicket,
   };
   const latestContentRequestId = useRef(props.latestContentRequestId);
   latestContentRequestId.current = props.latestContentRequestId;
@@ -895,7 +914,12 @@ function useAutosavedTextDraft(props: {
   }
 
   function acceptSnapshot(
-    snapshot: { body: string; contentHash: string | null; requestId: number },
+    snapshot: {
+      body: string;
+      contentHash: string | null;
+      requestId: number;
+      readTicket: number;
+    },
     state: SaveState,
   ) {
     if (
@@ -904,6 +928,7 @@ function useAutosavedTextDraft(props: {
         snapshot.contentHash,
         localSource.current,
         state === "error",
+        snapshot.readTicket,
       )
     ) {
       return;
@@ -1343,6 +1368,7 @@ function MarkdownView(props: {
   body: string;
   contentHash: string | null;
   contentRequestId: number;
+  contentReadTicket: number;
   latestContentRequestId: number;
   refreshAfterConflict: () => void;
   workspaceId: string;
@@ -1506,11 +1532,13 @@ function MarkdownView(props: {
     body: props.body,
     contentHash: props.contentHash,
     requestId: props.contentRequestId,
+    readTicket: props.contentReadTicket,
   });
   latestSnapshot.current = {
     body: props.body,
     contentHash: props.contentHash,
     requestId: props.contentRequestId,
+    readTicket: props.contentReadTicket,
   };
   const latestContentRequestId = useRef(props.latestContentRequestId);
   latestContentRequestId.current = props.latestContentRequestId;
@@ -1620,7 +1648,12 @@ function MarkdownView(props: {
   }
 
   function acceptSnapshot(
-    snapshot: { body: string; contentHash: string | null; requestId: number },
+    snapshot: {
+      body: string;
+      contentHash: string | null;
+      requestId: number;
+      readTicket: number;
+    },
     state: SaveState,
   ) {
     if (
@@ -1629,6 +1662,7 @@ function MarkdownView(props: {
         snapshot.contentHash,
         localSource.current,
         state === "error",
+        snapshot.readTicket,
       )
     ) {
       return;
@@ -3147,6 +3181,7 @@ function CsvView({
   body,
   contentHash,
   contentRequestId,
+  contentReadTicket,
   latestContentRequestId,
   refreshAfterConflict,
   workspaceId,
@@ -3166,6 +3201,7 @@ function CsvView({
   body: string;
   contentHash: string | null;
   contentRequestId: number;
+  contentReadTicket: number;
   latestContentRequestId: number;
   refreshAfterConflict: () => void;
   workspaceId: string;
@@ -3183,6 +3219,7 @@ function CsvView({
     body,
     contentHash,
     contentRequestId,
+    contentReadTicket,
     latestContentRequestId,
     refreshAfterConflict,
     workspaceId,
@@ -3630,6 +3667,7 @@ function TextEditorView({
   body,
   contentHash,
   contentRequestId,
+  contentReadTicket,
   latestContentRequestId,
   refreshAfterConflict,
   testId,
@@ -3653,6 +3691,7 @@ function TextEditorView({
   body: string;
   contentHash: string | null;
   contentRequestId: number;
+  contentReadTicket: number;
   latestContentRequestId: number;
   refreshAfterConflict: () => void;
   testId: string;
@@ -3673,6 +3712,7 @@ function TextEditorView({
     body,
     contentHash,
     contentRequestId,
+    contentReadTicket,
     latestContentRequestId,
     refreshAfterConflict,
     workspaceId,
@@ -3920,6 +3960,7 @@ export function FileInspector(props: {
     truncated,
     contentHash,
     contentRequestId,
+    contentReadTicket,
     latestContentRequestId,
     error,
     readSeq,
@@ -3929,6 +3970,7 @@ export function FileInspector(props: {
     props.path,
     isText,
     props.refreshKey ?? 0,
+    localBuffer,
   );
   const switchReadPending = useRef(false);
   useEffect(() => {
@@ -3942,8 +3984,16 @@ export function FileInspector(props: {
     ) {
       return;
     }
-    localBuffer.initialize(text, contentHash);
-  }, [contentHash, loadedPath, localBuffer, props.path, readSeq, text]);
+    localBuffer.initializeRead(text, contentHash, contentReadTicket);
+  }, [
+    contentHash,
+    contentReadTicket,
+    loadedPath,
+    localBuffer,
+    props.path,
+    readSeq,
+    text,
+  ]);
   // THE ENGINE OPEN LIVES HERE, above every branch that swaps the body out.
   // It used to live in MarkdownView, which the loading/error branch below
   // unmounts — and a version switch that removes the file bumps refreshKey and
@@ -4137,6 +4187,7 @@ export function FileInspector(props: {
             body={text ?? ""}
             contentHash={contentHash}
             contentRequestId={contentRequestId}
+            contentReadTicket={contentReadTicket}
             latestContentRequestId={latestContentRequestId}
             refreshAfterConflict={refreshAfterConflict}
             workspaceId={props.workspaceId}
@@ -4184,6 +4235,7 @@ export function FileInspector(props: {
             body={text ?? ""}
             contentHash={contentHash}
             contentRequestId={contentRequestId}
+            contentReadTicket={contentReadTicket}
             latestContentRequestId={latestContentRequestId}
             refreshAfterConflict={refreshAfterConflict}
             workspaceId={props.workspaceId}
@@ -4215,6 +4267,7 @@ export function FileInspector(props: {
             body={text ?? ""}
             contentHash={contentHash}
             contentRequestId={contentRequestId}
+            contentReadTicket={contentReadTicket}
             latestContentRequestId={latestContentRequestId}
             refreshAfterConflict={refreshAfterConflict}
             testId={kind === "json" ? "view-json" : "view-text"}
