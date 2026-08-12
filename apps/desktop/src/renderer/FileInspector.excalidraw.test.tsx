@@ -375,6 +375,37 @@ describe("FileInspector Excalidraw view", () => {
     expect(Y.encodeStateAsUpdate(doc).byteLength).toBeLessThan(4 * 1024);
   });
 
+  it.each([
+    "image/bmp",
+    "image/x-icon",
+    "image/avif",
+    "image/jfif",
+  ] as const)("hydrates upstream's native %s asset type", async (mimeType) => {
+    const descriptor = { ...ARTIFACT_DESCRIPTOR, mimeType };
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    putSceneAsset(scene, descriptor);
+    const bridge = bridgeFor(drawing("engine"), scene);
+    bridge.openEngineYDocSession = vi.fn(async () => ({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(scene),
+      artifactAssets: [descriptor],
+    }));
+    bridge.readEngineYDocArtifactAsset = vi.fn(async () => ({
+      descriptor,
+      bytes: new Uint8Array([1, 2, 3]),
+    }));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+
+    await screen.findByTestId("mock-excalidraw-canvas");
+    const props = canvas.props as unknown as ExcalidrawCanvasProps;
+    const [file] = await props.hydrateAssets!();
+
+    expect(file?.mimeType).toBe(mimeType);
+    expect(file?.dataURL).toBe(`data:${mimeType};base64,AQID`);
+  });
+
   it("keeps the drawing editable when an artifact asset cannot load", async () => {
     const scene = new Y.Doc();
     declareSceneRoots(scene);

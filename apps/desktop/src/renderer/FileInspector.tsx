@@ -3437,6 +3437,10 @@ const EXCALIDRAW_ASSET_MIME_TYPES = new Set<BinaryFileData["mimeType"]>([
   "image/jpeg",
   "image/gif",
   "image/webp",
+  "image/bmp",
+  "image/x-icon",
+  "image/avif",
+  "image/jfif",
   "application/octet-stream",
 ]);
 
