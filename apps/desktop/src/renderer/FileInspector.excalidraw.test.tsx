@@ -9,6 +9,7 @@ import {
 import * as Y from "yjs";
 import type { ExcalidrawCanvasProps } from "./ExcalidrawCanvas";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
+import type { EngineYDocSaveStateEvent } from "../ipc/channels";
 
 vi.mock("./ExcalidrawCanvas", () => ({
   default: (props: ExcalidrawCanvasProps) => (
@@ -74,7 +75,14 @@ function drawing(source: string, withFile = false): string {
   });
 }
 
-function bridgeFor(text = drawing("first", true)) {
+function bridgeFor(
+  text = drawing("first", true),
+  engineScene?: Y.Doc,
+) {
+  const saveStateListeners = new Set<
+    (event: EngineYDocSaveStateEvent) => void
+  >();
+  let sessionId: string | null = null;
   return {
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
       text,
@@ -84,11 +92,27 @@ function bridgeFor(text = drawing("first", true)) {
     writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
       async () => ({ status: "written", contentHash: WRITTEN_HASH }),
     ),
-    openEngineYDocSession: vi.fn(async () => ({ available: false })),
+    openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
+      sessionId = payload.sessionId;
+      return engineScene
+        ? { available: true, initialUpdate: Y.encodeStateAsUpdate(engineScene) }
+        : { available: false };
+    }),
     closeEngineYDocSession: vi.fn(async () => undefined),
     applyEngineYDocUpdate: vi.fn(async () => undefined),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
-    onEngineYDocSaveState: vi.fn(() => () => undefined),
+    onEngineYDocSaveState: vi.fn(
+      (listener: (event: EngineYDocSaveStateEvent) => void) => {
+        saveStateListeners.add(listener);
+        return () => saveStateListeners.delete(listener);
+      },
+    ),
+    emitSaveState(state: EngineYDocSaveStateEvent["state"], seq: number) {
+      if (!sessionId) throw new Error("The scene session is not open.");
+      for (const listener of saveStateListeners) {
+        listener({ sessionId, state, seq });
+      }
+    },
     openFileExternally: vi.fn(async () => undefined),
   };
 }
@@ -310,6 +334,22 @@ describe("FileInspector Excalidraw view", () => {
     const canvas = await screen.findByTestId("mock-excalidraw-canvas");
     expect(canvas.dataset.sceneDoc).toBe("true");
     expect(canvas.dataset.presenceTopic).toBe("");
+  });
+
+  it("shows the engine's exact save state for a drawing", async () => {
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    const bridge = bridgeFor(drawing("engine"), scene);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+
+    const chip = await screen.findByTestId("drawing-save-state");
+    await waitFor(() => expect(chip.textContent).toBe("Saved"));
+    act(() => bridge.emitSaveState("file-locked", 1));
+
+    expect(chip.dataset.state).toBe("file-locked");
+    expect(chip.textContent).toBe("File in use");
+    expect(chip.title).toContain("retries until the file is free");
   });
 
   it("keeps a truncated drawing non-writable while its scene opens", async () => {

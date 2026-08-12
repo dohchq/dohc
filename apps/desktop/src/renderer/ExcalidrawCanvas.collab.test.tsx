@@ -5,13 +5,24 @@ import { declareSceneRoots, foldScene, insertElementRevision } from "@dohc/excal
 import * as Y from "yjs";
 
 const excalidraw = vi.hoisted(() => {
-  const updateScene = vi.fn();
+  let rendering = false;
+  const updateScene = vi.fn(() => {
+    if (rendering) {
+      throw new Error("The Excalidraw API was used during child render.");
+    }
+  });
   const addFiles = vi.fn();
   return {
     updateScene,
     addFiles,
     api: { updateScene, addFiles },
     props: null as null | Record<string, unknown>,
+    beginRender: () => {
+      rendering = true;
+    },
+    endRender: () => {
+      rendering = false;
+    },
   };
 });
 
@@ -19,9 +30,14 @@ vi.mock("@excalidraw/excalidraw", () => ({
   CaptureUpdateAction: { NEVER: "never" },
   Excalidraw: (props: Record<string, unknown>) => {
     excalidraw.props = props;
-    (props.excalidrawAPI as ((api: unknown) => void) | undefined)?.(
-      excalidraw.api,
-    );
+    excalidraw.beginRender();
+    try {
+      (props.excalidrawAPI as ((api: unknown) => void) | undefined)?.(
+        excalidraw.api,
+      );
+    } finally {
+      excalidraw.endRender();
+    }
     return null;
   },
   restore: vi.fn(),
@@ -48,6 +64,22 @@ afterEach(() => {
   excalidraw.updateScene.mockReset();
   excalidraw.addFiles.mockReset();
   excalidraw.props = null;
+});
+
+it("waits until commit before using the Excalidraw API", () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+
+  expect(() =>
+    render(
+      <ExcalidrawCanvas
+        document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+        readOnly={false}
+        sceneDoc={doc}
+      />,
+    ),
+  ).not.toThrow();
+  expect(excalidraw.updateScene).toHaveBeenCalled();
 });
 
 it("renders remote scene updates without echoing them", () => {
@@ -233,4 +265,53 @@ it("hydrates an engine-bound image outside the Y.Doc", async () => {
   expect(new TextDecoder().decode(Y.encodeStateAsUpdate(doc))).not.toContain(
     payload.slice(-1024),
   );
+});
+
+it("drops asset hydration that resolves after the scene changes", async () => {
+  const firstDoc = new Y.Doc();
+  const secondDoc = new Y.Doc();
+  declareSceneRoots(firstDoc);
+  declareSceneRoots(secondDoc);
+  let resolveFirst!: (files: never) => void;
+  let resolveSecond!: (files: never) => void;
+  const first = new Promise<never>((resolve) => {
+    resolveFirst = resolve;
+  });
+  const second = new Promise<never>((resolve) => {
+    resolveSecond = resolve;
+  });
+  const view = render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={firstDoc}
+      hydrateAssets={() => first}
+    />,
+  );
+  view.rerender(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={secondDoc}
+      hydrateAssets={() => second}
+    />,
+  );
+
+  await act(async () => {
+    resolveSecond([
+      { id: "current", dataURL: "data:image/png;base64,Qg==" },
+    ] as never);
+    await second;
+  });
+  await act(async () => {
+    resolveFirst([
+      { id: "stale", dataURL: "data:image/png;base64,QQ==" },
+    ] as never);
+    await first;
+  });
+
+  expect(excalidraw.addFiles).toHaveBeenCalledTimes(1);
+  expect(excalidraw.addFiles).toHaveBeenCalledWith([
+    expect.objectContaining({ id: "current" }),
+  ]);
 });

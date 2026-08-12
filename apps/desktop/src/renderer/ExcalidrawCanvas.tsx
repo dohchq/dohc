@@ -75,7 +75,6 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   }, [props.document, props.sceneDoc]);
   const lastSerialized = useRef(initial.serialized);
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
-  const [api, setApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [presenceBound, setPresenceBound] = useState(false);
   const remoteEchoes = useRef<SceneRemoteEchoes>(new Map());
   const hydratedFileIds = useRef<Set<string>>(new Set());
@@ -116,6 +115,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
 
   useEffect(() => {
     hydratedFileIds.current.clear();
+    const api = apiRef.current;
     if (!props.sceneDoc || !props.hydrateAssets || !api) return;
     let active = true;
     void props
@@ -129,11 +129,15 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     return () => {
       active = false;
     };
-  }, [api, props.hydrateAssets, props.sceneDoc]);
+  }, [props.hydrateAssets, props.sceneDoc]);
+
+  useEffect(() => () => {
+    apiRef.current = null;
+  }, []);
 
   useEffect(() => {
     setPresenceBound(false);
-    if (!props.sceneDoc || !props.presence || !api) return;
+    if (!props.sceneDoc || !props.presence || !apiRef.current) return;
     let binding: ExcalidrawPresenceBinding;
     try {
       binding = bindExcalidrawPresence({
@@ -155,7 +159,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
       setPresenceBound(false);
       binding.destroy();
     };
-  }, [api, props.presence, props.sceneDoc]);
+  }, [props.presence, props.sceneDoc]);
 
   return (
     <div className="absolute inset-0" data-testid="excalidraw-canvas">
@@ -171,9 +175,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
             : undefined
         }
         excalidrawAPI={(api) => {
-          if (apiRef.current !== api) setApi(api);
           apiRef.current = api;
-          renderSceneDoc();
         }}
         viewModeEnabled={props.readOnly}
         autoFocus={!props.readOnly}

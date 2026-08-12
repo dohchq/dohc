@@ -3539,7 +3539,6 @@ function DrawingView({
     );
   }, [engineMode, engine.saveState, onSaveStateChange]);
 
-  const visibleSaveState = engineMode ? engine.saveState : editor.saveState;
   const canvasReadOnly = readOnly || engineReadOnly;
   const drawingReady = engineMode || document.value !== null;
   const presence = useMemo(() => {
@@ -3576,6 +3575,15 @@ function DrawingView({
     presenceFactory,
     workspaceId,
   ]);
+  const drawingChipState =
+    engineMode && engine.saveState === "deleted"
+      ? "deleted"
+      : readOnly || (truncated && !engineMode) || engineReadOnly
+        ? "read-only"
+        : engineMode
+          ? engine.saveState
+          : editor.saveState;
+  const drawingChip = ENGINE_CHIP[drawingChipState];
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
@@ -3587,16 +3595,17 @@ function DrawingView({
         actions={
           <span
             data-testid="drawing-save-state"
-            data-state={visibleSaveState}
-            className={`text-[11px] ${visibleSaveState === "error" ? "text-danger" : "text-subtle"}`}
+            data-state={drawingChipState}
+            title={drawingChip.title}
+            className={`text-[11px] ${
+              drawingChipState === "saved" ||
+              drawingChipState === "saving" ||
+              drawingChipState === "read-only"
+                ? "text-subtle"
+                : "text-danger"
+            }`}
           >
-            {readOnly || (truncated && !engineMode) || engineReadOnly
-              ? "Read-only"
-              : visibleSaveState === "saved"
-                ? "Saved"
-                : visibleSaveState === "saving"
-                  ? "Saving..."
-                  : "Couldn't save"}
+            {drawingChip.label}
           </span>
         }
       />
