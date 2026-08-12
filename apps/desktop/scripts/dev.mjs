@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { dirname, join, normalize, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
@@ -63,8 +63,8 @@ export function validateWorkspaceEngineBuild(
   root,
   platform = process.platform,
 ) {
-  const build = parseWorkspaceEngineBuildOutput(output);
-  const executable = build.executable;
+  const executable = workspaceEngineExecutable(output);
+  // Keep this in sync with defaultEngineBinaryPath's unpackaged branch.
   const expected = resolve(root, "target", "debug", engineBinaryName(platform));
   if (!executable) {
     throw new Error(
@@ -72,21 +72,20 @@ export function validateWorkspaceEngineBuild(
     );
   }
 
-  const observed = normalize(resolve(executable));
+  const observed = resolve(executable);
   const comparableObserved = platform === "win32" ? observed.toLowerCase() : observed;
   const comparableExpected = platform === "win32" ? expected.toLowerCase() : expected;
   if (comparableObserved !== comparableExpected) {
     throw new Error(
-      `Cargo target configuration built the Rust workspace engine at ${observed}, but Electron loads ${expected}. Remove [build].target from Cargo configuration; the desktop launcher already selects the native engine target.`,
+      `Cargo target configuration built the Rust workspace engine at ${observed}, but Electron loads ${expected}. Remove [build].target from Cargo configuration; the desktop launcher builds for the host target and loads target/debug.`,
     );
   }
 
-  return { diagnostics: build.diagnostics, executable: observed };
+  return observed;
 }
 
-function parseWorkspaceEngineBuildOutput(output) {
+function workspaceEngineExecutable(output) {
   let executable;
-  const diagnostics = [];
   for (const line of output.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let message;
@@ -94,9 +93,6 @@ function parseWorkspaceEngineBuildOutput(output) {
       message = JSON.parse(line);
     } catch {
       continue;
-    }
-    if (message.reason === "compiler-message" && message.message?.rendered) {
-      diagnostics.push(message.message.rendered);
     }
     if (
       message.reason === "compiler-artifact" &&
@@ -107,7 +103,7 @@ function parseWorkspaceEngineBuildOutput(output) {
       executable = message.executable;
     }
   }
-  return { diagnostics, executable };
+  return executable;
 }
 
 export function electronViteSpawnOptions(source) {
@@ -145,22 +141,26 @@ function buildWorkspaceEngine() {
     cwd: repoRoot,
     encoding: "utf8",
     env: workspaceEngineBuildEnvironment(process.env),
+    maxBuffer: Infinity,
     stdio: ["inherit", "pipe", "inherit"],
   });
   if (result.error) fail("build the Rust workspace engine", result.error);
 
   const output = result.stdout ?? "";
-  const parsedBuild = parseWorkspaceEngineBuildOutput(output);
-  for (const diagnostic of parsedBuild.diagnostics) process.stderr.write(diagnostic);
-
   const exitCode = foregroundExitCode(result);
-  if (exitCode !== 0) {
-    console.error(
-      `Desktop development could not build the Rust workspace engine. cargo exited with code ${exitCode}.`,
-    );
+  if (result.status !== 0) {
+    if (exitCode !== 0) {
+      const outcome = result.signal
+        ? `was terminated by ${result.signal}`
+        : result.status === null
+          ? "terminated without an exit code"
+          : `exited with code ${result.status}`;
+      console.error(
+        `Desktop development could not build the Rust workspace engine. cargo ${outcome}.`,
+      );
+    }
     process.exit(exitCode);
   }
-  if (result.status !== 0) process.exit(0);
 
   try {
     validateWorkspaceEngineBuild(output, repoRoot);

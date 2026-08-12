@@ -77,7 +77,18 @@ test("desktop dev verifies Cargo built the executable Electron loads", () => {
     executable: expected,
   });
 
-  assert.equal(validateWorkspaceEngineBuild(output, root, "win32").executable, expected);
+  assert.equal(validateWorkspaceEngineBuild(output, root, "win32"), expected);
+  assert.doesNotThrow(() =>
+    validateWorkspaceEngineBuild(
+      JSON.stringify({
+        reason: "compiler-artifact",
+        target: { kind: ["bin"], name: "dohc-workspace-engine" },
+        executable: expected.toUpperCase(),
+      }),
+      root,
+      "win32",
+    ),
+  );
 
   const redirected = join(
     root,
@@ -98,5 +109,9 @@ test("desktop dev verifies Cargo built the executable Electron loads", () => {
         "win32",
       ),
     /Cargo target configuration.*Remove \[build\]\.target/,
+  );
+  assert.throws(
+    () => validateWorkspaceEngineBuild("", root, "win32"),
+    /did not report.*Expected/,
   );
 });
