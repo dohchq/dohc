@@ -57,31 +57,24 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
-    let rows: Vec<(String, String, Option<String>, String)> = collect_rows(
+    let rows: Vec<(String, String, Option<String>)> = collect_rows(
         tx,
-        "SELECT d.version_id, d.object_id, COALESCE(s.path,d.path), \
-                d.lineage_claim_status \
+        "SELECT d.version_id, d.object_id, COALESCE(s.path,d.path) \
          FROM ydoc_docs d LEFT JOIN snapshots s \
            ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
           AND s.object_id=d.object_id \
-         WHERE d.workspace_id=?1 AND d.lineage_claim_status <> 'exact' \
+         WHERE d.workspace_id=?1 AND d.lineage_claim_status = 'unclaimed' \
          ORDER BY d.version_id, d.object_id",
         workspace_id,
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let mut sharing_declined = Vec::new();
-    for (version_id, object_id, path, status) in rows {
-        if status != "unclaimed" {
-            return Err(SyncError::corrupt(
-                dohc_engine_collab::CollabError::LineageClaimUnresolved { status },
-            ));
-        }
-        let path = path.ok_or_else(|| {
-            SyncError::corrupt(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unclaimed Y.Doc path is NULL at {workspace_id}/{version_id}/{object_id}"),
-            ))
-        })?;
+    for (version_id, object_id, path) in rows {
+        let Some(path) = path else {
+            // Legacy never-settled rows can predate durable Y.Doc paths. A
+            // later local update supplies the path and retries origination.
+            continue;
+        };
         let key = DocKey {
             workspace_id: workspace_id.to_owned(),
             version_id,
@@ -1396,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn enrolment_rejects_an_unclaimed_ydoc_without_a_path() {
+    fn enrolment_leaves_an_unclaimed_ydoc_without_a_path_for_a_later_retry() {
         let (_scratch, mut store) = store();
         seed_main(&mut store);
         let key = DocKey::new("ws", "main", "legacy-orphan").expect("key");
@@ -1404,14 +1397,17 @@ mod tests {
         let update = doc.plaintext_insert(0, "local edit");
         record_unsettled_ydoc(&mut store, &key, &update, None, None);
 
-        let error = enroll(&mut store).expect_err("a missing Y.Doc path must fail enrolment");
-        let message = format!("{error:?}");
-        assert!(message.contains("ws/main/legacy-orphan"), "{message}");
+        enroll(&mut store).expect("a legacy pathless Y.Doc must not block enrolment");
         assert!(
             local_ops(&store)
                 .iter()
                 .all(|(kind, _)| kind != "ydoc.update"),
-            "the corrupt lineage must not be silently dropped or journaled"
+            "the pathless lineage must remain local until a retry supplies its path"
+        );
+        assert_eq!(
+            ydoc_path(&store, "legacy-orphan"),
+            None,
+            "enrolment must not invent or mutate a legacy Y.Doc path"
         );
     }
 
@@ -2262,5 +2258,88 @@ mod tests {
             next_declines, declines,
             "the unresolved base remains visible on every successful sync pass"
         );
+    }
+
+    #[test]
+    fn legacy_claimed_and_pathless_lineages_do_not_block_sync() {
+        let (_scratch, mut store) = store();
+        seed_main(&mut store);
+        enroll(&mut store).expect("enroll before seeding legacy lineages");
+        store
+            .write_with(&NoFaults, |tx| {
+                for (object_id, status, path) in [
+                    ("legacy-ambiguous", "ambiguous", Some("legacy-ambiguous.md")),
+                    ("legacy-missing", "missing", Some("legacy-missing.md")),
+                    ("legacy-pathless", "unclaimed", None),
+                ] {
+                    tx.execute(
+                        "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                         VALUES ('ws',?1,1)",
+                        [object_id],
+                    )
+                    .map_err(SyncError::persist)?;
+                    tx.execute(
+                        "INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime, \
+                         head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms,path) \
+                         VALUES ('ws','main',?1,'plaintext',?2,0,0,?3,1,?4)",
+                        rusqlite::params![
+                            object_id,
+                            if status == "unclaimed" {
+                                "local-only"
+                            } else {
+                                "replicated"
+                            },
+                            status,
+                            path,
+                        ],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+
+                let ambiguous = crate::originate_ydoc_base_in_tx(
+                    tx,
+                    &DocKey {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "legacy-ambiguous".to_owned(),
+                    },
+                    "legacy-ambiguous.md",
+                    2,
+                )?;
+                let missing = crate::originate_ydoc_base_in_tx(
+                    tx,
+                    &DocKey {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "legacy-missing".to_owned(),
+                    },
+                    "legacy-missing.md",
+                    2,
+                )?;
+                Ok::<_, SyncError>((ambiguous, missing))
+            })
+            .map(|outcome| match outcome {
+                dohc_engine_storage::TxnOutcome::Committed(outcomes) => outcomes,
+                dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+            })
+            .map(|(ambiguous, missing)| {
+                assert_eq!(ambiguous, BaseOrigination::NothingToDo);
+                assert_eq!(missing, BaseOrigination::NothingToDo);
+            })
+            .expect("legacy claimed lineages are not re-originated");
+
+        let cursor = crate::RelayCursor {
+            cursor: 0,
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            refusal_report_id: None,
+        };
+        let declines = match crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, 3)
+            .expect("legacy lineages do not block cursor commit")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        };
+        assert!(declines.is_empty());
     }
 }

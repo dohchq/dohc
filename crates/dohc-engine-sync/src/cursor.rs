@@ -107,8 +107,15 @@ pub fn commit_relay_cursor(
                 ],
             )
             .map_err(SyncError::persist)?;
-            let sharing_declined =
-                backfill_after_first_position(tx, workspace_id, was_enrolled, now_ms)?;
+            let sharing_declined = if was_enrolled {
+                crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
+                    tx,
+                    workspace_id,
+                    now_ms,
+                )?
+            } else {
+                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)?
+            };
             // Refusals can also be created OUTSIDE a pull when open/resync/
             // close drains an already-ACKed Y.Doc coordinate. Delete only the
             // rows that this exact pull claimed and surfaced. A later drain is
@@ -198,7 +205,7 @@ fn backfill_after_first_position(
     now_ms: i64,
 ) -> Result<Vec<crate::SharingDeclined>, SyncError> {
     if was_enrolled {
-        return crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms);
+        return Ok(Vec::new());
     }
     crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)
 }
