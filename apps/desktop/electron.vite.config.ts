@@ -27,7 +27,7 @@ export const preloadBundledRuntimeDeps = [
   "zod",
 ];
 
-export function effectFree(surface: "preload" | "renderer"): Plugin {
+function effectFree(surface: "preload" | "renderer"): Plugin {
   return {
     name: `effect-free-${surface}`,
     enforce: "pre",
