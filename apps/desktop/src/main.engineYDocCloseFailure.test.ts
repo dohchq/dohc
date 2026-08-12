@@ -125,7 +125,7 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     // reachable only by the quit sweep.
     const handler = handlerSource("engineYDocOpen");
     const hookAt = handler.indexOf("engineYDocCleanupHooked.add(sender)");
-    const kindCheckAt = handler.indexOf('session.contentKind !== "richdoc"');
+    const kindCheckAt = handler.indexOf("session.contentKind !== requestedKind");
     expect(hookAt).toBeGreaterThan(-1);
     expect(kindCheckAt).toBeGreaterThan(-1);
     expect(hookAt).toBeLessThan(kindCheckAt);

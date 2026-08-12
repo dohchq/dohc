@@ -5,6 +5,7 @@ import {
   validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   CHATS_METHOD,
   VersionedLiveAdapter,
@@ -650,17 +651,6 @@ function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
   if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
   return workspace;
-}
-
-// WS-G2-C-2: only RICH (markdown) files bind to an engine Y.Doc — that is the
-// editor surface the Collaboration extension drives. Plain source/CSV/JSON/text
-// files keep the local autosave editor, and secret paths never open as a Y.Doc
-// (the driver refuses one anyway). The renderer already gates on the same
-// classifier; this is the main-side authority.
-function isRichEnginePath(path: string): boolean {
-  const dot = path.lastIndexOf(".");
-  const ext = dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
-  return ext === "md" || ext === "markdown";
 }
 
 // PR 18 read-only shared views: a shared view is a read-only local workspace.
@@ -8266,7 +8256,7 @@ function registerIpcHandlers(
   // (constructed through the workspace's engine capture, which reuses its store)
   // and forwards remote CRDT deltas back to the sender that opened it. No
   // websocket or token is needed. Gated on an engine-flagged workspace + a
-  // rich (markdown) path; a
+  // classified live-document path; a
   // secret/already-live throw surfaces as available:false so the renderer falls
   // back to the plain local autosave editor. The ONE refusal that must not fall
   // back that way is path-not-in-version (#534): the plain editor is writable
@@ -8288,9 +8278,10 @@ function registerIpcHandlers(
     const sender = event.sender;
     const generation = rendererGeneration(sender.id);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
-    // Only engine-flagged workspaces have a capture; only rich (markdown) files
-    // bind to a Y.Doc. Everything else stays on the plain editor.
-    if (!capture || !isRichEnginePath(input.path)) {
+    const requestedKind = liveDocumentKindForPath(input.path);
+    // Only engine-flagged workspaces have a capture. The shared classifier is
+    // the main-side authority for which paths bind to a Y.Doc.
+    if (!capture || requestedKind === null) {
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
     // PENDING FROM THE FIRST AWAIT, not from the open. A renderer reload waits
@@ -8358,11 +8349,9 @@ function registerIpcHandlers(
           path: input.path,
           // Explicit, because the daemon defaults an unspecified session to
           // PLAINTEXT (actor.rs requested_content_kind.unwrap_or(Plaintext)).
-          // The gate above admits only rich markdown paths, and a plaintext
-          // session seeds/projects the plainText root while the editor binds
-          // the body fragment — the doc opens empty and every typed edit
-          // settles back to the pre-edit file while the UI shows "Saved".
-          contentKind: "richdoc",
+          // The requested kind must match the editor selected for this path.
+          // A mismatched session binds the editor to the wrong Y.Doc root.
+          contentKind: requestedKind,
           // The document's REAL save state. A settle failure used to reach
           // nothing at all while the editor's own timer kept saying "Saved" —
           // three dogfood journeys watched a doc report Saved over a
@@ -8482,14 +8471,13 @@ function registerIpcHandlers(
         });
       }
       // The daemon honors the requested kind only for state-free markers; a
-      // lineage with durable state keeps its own. Binding the rich editor's
-      // body fragment onto a plaintext session is silent data loss (empty doc
-      // over a non-empty file, typed edits pruned at close) — refuse loudly,
-      // and fall back to the plain editor only once the session is released.
-      if (session.contentKind !== "richdoc") {
+      // lineage with durable state keeps its own. Binding an editor to a
+      // different content kind is silent data loss. Refuse the session and
+      // fall back to the plain editor only once the session is released.
+      if (session.contentKind !== requestedKind) {
         console.error(
           `[desktop] engine Y.Doc open for ${input.path} came back ${session.contentKind}; ` +
-            "refusing the rich editor (kind-mismatched lineage).",
+            `the editor requested ${requestedKind} (kind-mismatched lineage).`,
         );
         const released = await release("kind-mismatched lineage");
         return OpenEngineYDocSessionResult.parse({

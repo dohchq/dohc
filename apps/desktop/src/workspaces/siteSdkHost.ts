@@ -4,6 +4,7 @@ import {
   validateUserMaterializePath,
   validateUserReadPath,
 } from "@dohc/workspace-core";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { rgPath } from "@vscode/ripgrep";
 import { basename, join } from "node:path";
 import { realpath, stat } from "node:fs/promises";
@@ -97,10 +98,6 @@ function visiblePath(scopeRoot: string | null, workspacePath: string): string | 
 
 function isAtOrBelow(path: string, root: string): boolean {
   return root === "." || path === root || path.startsWith(`${root}/`);
-}
-
-function isCanonicalMarkdownPath(path: string): boolean {
-  return /\.(?:md|markdown)$/i.test(path);
 }
 
 function capabilities(context: SiteSdkHostContext) {
@@ -289,15 +286,13 @@ export async function invokeSiteSdkHost(
           "files.write cannot overwrite database files. Use databases.edit so structured transactions, history, and collaboration are preserved.",
         );
       }
-      // Markdown is projected from the canonical Y.Doc/document model. This
-      // host does not own a document session or the review/lock context needed
-      // to perform a correct canonical transaction, so a raw text overwrite
-      // here would bypass collaboration, history, and live-editor state.
-      // Keep ordinary source/text writes useful while failing closed for rich
-      // documents until the SDK has a first-class document edit capability.
-      if (isCanonicalMarkdownPath(path)) {
+      // A live document is projected from its canonical Y.Doc. This host does
+      // not own the session or review context for a canonical transaction.
+      // Keep ordinary source writes useful while the SDK lacks a live-document
+      // editing capability.
+      if (liveDocumentKindForPath(path) !== null) {
         throw new Error(
-          "files.write cannot overwrite canonical Markdown documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
+          "files.write cannot overwrite live documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
         );
       }
       const body = typeof input.text === "string" ? input.text : null;

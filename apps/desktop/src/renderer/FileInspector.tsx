@@ -1,3 +1,4 @@
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   FileText,
   Image as ImageIcon,
@@ -425,7 +426,7 @@ export type FileViewKind =
 // the E2E and unit tests pin the dispatch table directly.
 export function classifyForView(path: string): FileViewKind {
   const ext = extensionOf(path);
-  if (ext === "md" || ext === "markdown") return "markdown";
+  if (liveDocumentKindForPath(path) === "richdoc") return "markdown";
   if (TABLE_EXT.has(ext)) return "csv";
   if (ext === "json") return "json";
   if (IMAGE_EXT.has(ext)) return "image";

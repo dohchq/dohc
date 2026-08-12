@@ -100,7 +100,7 @@ describe("site SDK host authority", () => {
     );
   });
 
-  it("rejects raw canonical Markdown writes without changing the document", async () => {
+  it("rejects raw live-document writes without changing the document", async () => {
     const root = await workspace();
     const context = { workspaceRoot: root, scopeRoot: null, writable: true };
 
@@ -109,7 +109,7 @@ describe("site SDK host authority", () => {
         path: "notes/today.md",
         text: "replacement that bypasses Y.Doc\n",
       }),
-    ).rejects.toThrow(/cannot overwrite canonical Markdown.*locks, history, and collaboration/i);
+    ).rejects.toThrow(/cannot overwrite live documents.*locks, history, and collaboration/i);
     await expect(readFile(join(root, "notes", "today.md"), "utf8")).resolves.toBe(
       "hello from dohc\n",
     );
@@ -119,7 +119,17 @@ describe("site SDK host authority", () => {
         path: "notes/also-canonical.MARKDOWN",
         text: "not written\n",
       }),
-    ).rejects.toThrow(/canonical Markdown/i);
+    ).rejects.toThrow(/live documents/i);
+
+    await expect(
+      invokeSiteSdkHost(context, "files.write", {
+        path: "notes/not-live.mdx",
+        text: "ordinary source\n",
+      }),
+    ).resolves.toEqual({ path: "notes/not-live.mdx" });
+    await expect(readFile(join(root, "notes", "not-live.mdx"), "utf8")).resolves.toBe(
+      "ordinary source\n",
+    );
   });
 
   it("rejects raw database writes and requires structured databases.edit", async () => {
