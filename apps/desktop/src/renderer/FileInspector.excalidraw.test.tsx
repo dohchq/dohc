@@ -5,45 +5,53 @@ import {
   declareSceneRoots,
   foldScene,
   insertElementRevision,
+  putSceneAsset,
 } from "@dohc/excalidraw-scene";
 import * as Y from "yjs";
 import type { ExcalidrawCanvasProps } from "./ExcalidrawCanvas";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import type { EngineYDocSaveStateEvent } from "../ipc/channels";
 
+const canvas = vi.hoisted(() => ({
+  props: null as null | Record<string, unknown>,
+}));
+
 vi.mock("./ExcalidrawCanvas", () => ({
-  default: (props: ExcalidrawCanvasProps) => (
-    <div
-      data-testid="mock-excalidraw-canvas"
-      data-read-only={String(props.readOnly)}
-      data-source={props.document.source ?? ""}
-      data-files={Object.keys(props.document.files).join(",")}
-      data-scene-doc={String(props.sceneDoc !== undefined)}
-      data-presence-topic={props.presence?.topic ?? ""}
-      data-scene-elements={
-        props.sceneDoc ? String(foldScene(props.sceneDoc).elements.length) : ""
-      }
-    >
-      <button
-        type="button"
-        data-testid="mock-drawing-change"
-        onClick={() =>
-          props.onChange?.(
-            JSON.stringify({
-              type: "excalidraw",
-              version: 2,
-              source: "dohc-test",
-              elements: [{ id: "changed", type: "rectangle" }],
-              appState: {},
-              files: {},
-            }),
-          )
+  default: (props: ExcalidrawCanvasProps) => {
+    canvas.props = props as unknown as Record<string, unknown>;
+    return (
+      <div
+        data-testid="mock-excalidraw-canvas"
+        data-read-only={String(props.readOnly)}
+        data-source={props.document.source ?? ""}
+        data-files={Object.keys(props.document.files).join(",")}
+        data-scene-doc={String(props.sceneDoc !== undefined)}
+        data-presence-topic={props.presence?.topic ?? ""}
+        data-scene-elements={
+          props.sceneDoc ? String(foldScene(props.sceneDoc).elements.length) : ""
         }
       >
-        Change drawing
-      </button>
-    </div>
-  ),
+        <button
+          type="button"
+          data-testid="mock-drawing-change"
+          onClick={() =>
+            props.onChange?.(
+              JSON.stringify({
+                type: "excalidraw",
+                version: 2,
+                source: "dohc-test",
+                elements: [{ id: "changed", type: "rectangle" }],
+                appState: {},
+                files: {},
+              }),
+            )
+          }
+        >
+          Change drawing
+        </button>
+      </div>
+    );
+  },
 }));
 
 import { classifyForView, FileInspector } from "./FileInspector";
@@ -51,6 +59,53 @@ import { EMPTY_EXCALIDRAW_DOCUMENT } from "./excalidrawDocument";
 
 const CONTENT_HASH = "a".repeat(64);
 const WRITTEN_HASH = "b".repeat(64);
+
+const PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function largeValidPng(): Uint8Array {
+  const base = Uint8Array.from(atob(PNG_BASE64), (char) => char.charCodeAt(0));
+  const type = new TextEncoder().encode("tEXt");
+  const data = new Uint8Array(50 * 1024);
+  data.set(new TextEncoder().encode("Note\0"));
+  data.fill(65, 5);
+  const checksumInput = new Uint8Array(type.length + data.length);
+  checksumInput.set(type);
+  checksumInput.set(data, type.length);
+  const chunk = new Uint8Array(12 + data.length);
+  const view = new DataView(chunk.buffer);
+  view.setUint32(0, data.length);
+  chunk.set(type, 4);
+  chunk.set(data, 8);
+  view.setUint32(8 + data.length, crc32(checksumInput));
+  const iendOffset = base.length - 12;
+  const png = new Uint8Array(base.length + chunk.length);
+  png.set(base.subarray(0, iendOffset));
+  png.set(chunk, iendOffset);
+  png.set(base.subarray(iendOffset), iendOffset + chunk.length);
+  return png;
+}
+
+const ARTIFACT_DESCRIPTOR = {
+  id: "file-1",
+  mimeType: "image/png",
+  created: 1,
+  ref: "assets/excalidraw/image.png",
+  sha256: "a".repeat(64),
+  lastRetrieved: 2,
+  version: 3,
+};
 
 function drawing(source: string, withFile = false): string {
   return JSON.stringify({
@@ -92,7 +147,7 @@ function bridgeFor(
     writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
       async () => ({ status: "written", contentHash: WRITTEN_HASH }),
     ),
-    openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
+    openEngineYDocSession: vi.fn<DohcDesktopBridge["openEngineYDocSession"]>(async (payload) => {
       sessionId = payload.sessionId;
       return engineScene
         ? { available: true, initialUpdate: Y.encodeStateAsUpdate(engineScene) }
@@ -100,6 +155,11 @@ function bridgeFor(
     }),
     closeEngineYDocSession: vi.fn(async () => undefined),
     applyEngineYDocUpdate: vi.fn(async () => undefined),
+    readEngineYDocArtifactAsset: vi.fn<
+      DohcDesktopBridge["readEngineYDocArtifactAsset"]
+    >(async () => {
+      throw new Error("The scene has no artifact assets.");
+    }),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
     onEngineYDocSaveState: vi.fn(
       (listener: (event: EngineYDocSaveStateEvent) => void) => {
@@ -120,6 +180,7 @@ function bridgeFor(
 describe("FileInspector Excalidraw view", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    canvas.props = null;
   });
 
   afterEach(() => {
@@ -250,6 +311,141 @@ describe("FileInspector Excalidraw view", () => {
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  it("hydrates a verified large PNG outside the engine Y.Doc", async () => {
+    const bytes = largeValidPng();
+    expect(bytes.byteLength).toBeGreaterThan(48 * 1024);
+    expect([...bytes.subarray(0, 8)]).toEqual([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]);
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    insertElementRevision(scene, {
+      id: "image-1",
+      type: "image",
+      fileId: ARTIFACT_DESCRIPTOR.id,
+      version: 1,
+      versionNonce: 1,
+      isDeleted: false,
+      index: "a0",
+    });
+    putSceneAsset(scene, ARTIFACT_DESCRIPTOR);
+    const bridge = bridgeFor(drawing("engine"), scene);
+    bridge.openEngineYDocSession = vi.fn(async () => ({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(scene),
+      artifactAssets: [ARTIFACT_DESCRIPTOR],
+    }));
+    bridge.readEngineYDocArtifactAsset = vi.fn(async () => ({
+      descriptor: ARTIFACT_DESCRIPTOR,
+      bytes,
+    }));
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="large.excalidraw" />,
+    );
+
+    await screen.findByTestId("mock-excalidraw-canvas");
+    const props = canvas.props as unknown as ExcalidrawCanvasProps;
+    const hydrateAssets = props.hydrateAssets;
+    expect(hydrateAssets).toBeTypeOf("function");
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="large.excalidraw" />,
+    );
+    expect(
+      (canvas.props as unknown as ExcalidrawCanvasProps).hydrateAssets,
+    ).toBe(hydrateAssets);
+    const doc = props.sceneDoc!;
+    const beforeHydration = Y.encodeStateVector(doc);
+    const [file] = await hydrateAssets!();
+
+    expect(file).toMatchObject({
+      id: ARTIFACT_DESCRIPTOR.id,
+      mimeType: "image/png",
+      created: ARTIFACT_DESCRIPTOR.created,
+      lastRetrieved: ARTIFACT_DESCRIPTOR.lastRetrieved,
+      version: ARTIFACT_DESCRIPTOR.version,
+    });
+    expect(file?.dataURL).toMatch(/^data:image\/png;base64,iVBOR/);
+    expect(file?.dataURL.length).toBeGreaterThan(64 * 1024);
+    expect(bridge.readEngineYDocArtifactAsset).toHaveBeenCalledWith({
+      sessionId: expect.any(String),
+      assetId: ARTIFACT_DESCRIPTOR.id,
+    });
+    expect(Y.encodeStateAsUpdate(doc, beforeHydration)).toHaveLength(2);
+    expect(Y.encodeStateAsUpdate(doc).byteLength).toBeLessThan(4 * 1024);
+  });
+
+  it("keeps the drawing editable when an artifact asset cannot load", async () => {
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    putSceneAsset(scene, ARTIFACT_DESCRIPTOR);
+    const bridge = bridgeFor(drawing("engine"), scene);
+    bridge.openEngineYDocSession = vi.fn(async () => ({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(scene),
+      artifactAssets: [ARTIFACT_DESCRIPTOR],
+    }));
+    bridge.readEngineYDocArtifactAsset = vi.fn(async () => {
+      throw new Error("missing asset");
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+
+    const view = await screen.findByTestId("mock-excalidraw-canvas");
+    const props = canvas.props as unknown as ExcalidrawCanvasProps;
+    await expect(props.hydrateAssets!()).resolves.toEqual([]);
+    expect(view.dataset.readOnly).toBe("false");
+  });
+
+  it("drops an asset read that resolves after the drawing session changes", async () => {
+    const firstScene = new Y.Doc();
+    const secondScene = new Y.Doc();
+    declareSceneRoots(firstScene);
+    declareSceneRoots(secondScene);
+    putSceneAsset(firstScene, ARTIFACT_DESCRIPTOR);
+    let resolveAsset!: (value: {
+      descriptor: typeof ARTIFACT_DESCRIPTOR;
+      bytes: Uint8Array;
+    }) => void;
+    const pendingAsset = new Promise<{
+      descriptor: typeof ARTIFACT_DESCRIPTOR;
+      bytes: Uint8Array;
+    }>((resolve) => {
+      resolveAsset = resolve;
+    });
+    const bridge = bridgeFor();
+    bridge.openEngineYDocSession = vi.fn(async (payload) => ({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(
+        payload.path === "first.excalidraw" ? firstScene : secondScene,
+      ),
+      artifactAssets:
+        payload.path === "first.excalidraw" ? [ARTIFACT_DESCRIPTOR] : [],
+    }));
+    bridge.readEngineYDocArtifactAsset = vi.fn(() => pendingAsset);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="first.excalidraw" />,
+    );
+    await screen.findByTestId("mock-excalidraw-canvas");
+    const firstProps = canvas.props as unknown as ExcalidrawCanvasProps;
+    const pendingHydration = firstProps.hydrateAssets!();
+
+    view.rerender(
+      <FileInspector workspaceId="ws-2" path="second.excalidraw" />,
+    );
+    await waitFor(() => {
+      const current = canvas.props as unknown as ExcalidrawCanvasProps;
+      expect(current.sceneDoc).not.toBe(firstProps.sceneDoc);
+    });
+    resolveAsset({ descriptor: ARTIFACT_DESCRIPTOR, bytes: largeValidPng() });
+
+    await expect(pendingHydration).resolves.toEqual([]);
+    expect(
+      (canvas.props as unknown as ExcalidrawCanvasProps).hydrateAssets,
+    ).toBeUndefined();
+  });
+
   it("binds owner-workspace presence to the exact engine document", async () => {
     const bridge = bridgeFor();
     const scene = new Y.Doc();
@@ -372,6 +568,47 @@ describe("FileInspector Excalidraw view", () => {
     expect(screen.queryByTestId("view-drawing-truncated")).toBeNull();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
     view.unmount();
+  });
+
+  it("explains an engine-held drawing and retries without a writable fallback", async () => {
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    const bridge = bridgeFor(drawing("disk"));
+    bridge.openEngineYDocSession = vi
+      .fn()
+      .mockResolvedValueOnce({
+        available: false,
+        engineMayHoldDocument: true,
+      })
+      .mockResolvedValueOnce({
+        available: true,
+        initialUpdate: Y.encodeStateAsUpdate(scene),
+      });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+
+    const notice = await screen.findByTestId(
+      "engine-may-hold-document-notice",
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not open this document for editing.",
+    );
+    expect(notice.textContent).toContain("It is read-only for now.");
+    expect(screen.getByTestId("mock-excalidraw-canvas").dataset.readOnly).toBe(
+      "true",
+    );
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    await waitFor(() => {
+      expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(2);
+      expect(screen.queryByTestId("engine-may-hold-document-notice")).toBeNull();
+      expect(screen.getByTestId("mock-excalidraw-canvas").dataset.sceneDoc).toBe(
+        "true",
+      );
+    });
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
   it("shows an actionable error for invalid drawing JSON", async () => {

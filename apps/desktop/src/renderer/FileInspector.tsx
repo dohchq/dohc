@@ -1,4 +1,5 @@
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import {
   FileText,
   Image as ImageIcon,
@@ -14,6 +15,7 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -3429,6 +3431,53 @@ function ImageView({ url, path }: { url: string; path: string }) {
   );
 }
 
+const EXCALIDRAW_ASSET_MIME_TYPES = new Set<BinaryFileData["mimeType"]>([
+  "image/svg+xml",
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "application/octet-stream",
+]);
+
+function excalidrawAssetMimeType(
+  value: string,
+): BinaryFileData["mimeType"] | null {
+  return EXCALIDRAW_ASSET_MIME_TYPES.has(value as BinaryFileData["mimeType"])
+    ? (value as BinaryFileData["mimeType"])
+    : null;
+}
+
+function artifactDataUrl(
+  mimeType: BinaryFileData["mimeType"],
+  bytes: Uint8Array,
+): BinaryFileData["dataURL"] {
+  const chunks: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    chunks.push(
+      String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)),
+    );
+  }
+  return `data:${mimeType};base64,${btoa(chunks.join(""))}` as BinaryFileData["dataURL"];
+}
+
+type ArtifactAssetDescriptor = UseEngineDoc["artifactAssets"][number];
+
+function sameArtifactAssetDescriptor(
+  left: ArtifactAssetDescriptor,
+  right: ArtifactAssetDescriptor,
+): boolean {
+  return (
+    left.id === right.id &&
+    left.mimeType === right.mimeType &&
+    left.created === right.created &&
+    left.ref === right.ref &&
+    left.sha256 === right.sha256 &&
+    left.lastRetrieved === right.lastRetrieved &&
+    left.version === right.version
+  );
+}
+
 function DrawingView({
   body,
   contentHash,
@@ -3448,6 +3497,7 @@ function DrawingView({
   notice,
   recoveryNotices,
   engine,
+  onRetryEngineOpen,
   presenceFactory,
 }: {
   body: string;
@@ -3467,6 +3517,7 @@ function DrawingView({
   notice?: React.ReactNode;
   recoveryNotices: React.ReactNode;
   engine: UseEngineDoc;
+  onRetryEngineOpen: () => void;
   presenceFactory?: ExcalidrawPresenceFactory | null;
   onSaveStateChange?: (state: FileSaveState) => void;
 }) {
@@ -3575,6 +3626,69 @@ function DrawingView({
     presenceFactory,
     workspaceId,
   ]);
+  const hydrationSession = useMemo(() => {
+    if (!engineMode || !engine.doc || engine.artifactAssets.length === 0) {
+      return null;
+    }
+    return {
+      workspaceId,
+      path,
+      doc: engine.doc,
+      descriptors: engine.artifactAssets,
+      read: engine.readArtifactAsset,
+    };
+  }, [
+    engine.artifactAssets,
+    engine.doc,
+    engine.readArtifactAsset,
+    engineMode,
+    path,
+    workspaceId,
+  ]);
+  const activeHydrationSession = useRef(hydrationSession);
+  useLayoutEffect(() => {
+    activeHydrationSession.current = hydrationSession;
+    return () => {
+      if (activeHydrationSession.current === hydrationSession) {
+        activeHydrationSession.current = null;
+      }
+    };
+  }, [hydrationSession]);
+  const hydrateAssets = useMemo<ExcalidrawCanvasProps["hydrateAssets"]>(() => {
+    if (!hydrationSession) return undefined;
+    return async () => {
+      const files: BinaryFileData[] = [];
+      for (const descriptor of hydrationSession.descriptors) {
+        if (activeHydrationSession.current !== hydrationSession) return [];
+        const mimeType = excalidrawAssetMimeType(descriptor.mimeType);
+        if (!mimeType) continue;
+        try {
+          const loaded = await hydrationSession.read(descriptor.id);
+          if (
+            activeHydrationSession.current !== hydrationSession ||
+            !sameArtifactAssetDescriptor(loaded.descriptor, descriptor)
+          ) {
+            continue;
+          }
+          files.push({
+            id: descriptor.id as BinaryFileData["id"],
+            mimeType,
+            dataURL: artifactDataUrl(mimeType, loaded.bytes),
+            created: descriptor.created,
+            ...(descriptor.lastRetrieved === undefined
+              ? {}
+              : { lastRetrieved: descriptor.lastRetrieved }),
+            ...(descriptor.version === undefined
+              ? {}
+              : { version: descriptor.version }),
+          });
+        } catch {
+          // One missing asset cannot stop the drawing or its other assets.
+        }
+      }
+      return activeHydrationSession.current === hydrationSession ? files : [];
+    };
+  }, [hydrationSession]);
   const drawingChipState =
     engineMode && engine.saveState === "deleted"
       ? "deleted"
@@ -3611,6 +3725,12 @@ function DrawingView({
       />
       {engineMode || engine.opening ? null : notice}
       {recoveryNotices}
+      {engine.engineMayHoldDocument ? (
+        <EngineMayHoldDocumentNotice
+          onRetry={onRetryEngineOpen}
+          contentShown={document.value !== null}
+        />
+      ) : null}
       {assetRefused ? (
         <div
           className="border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
@@ -3651,6 +3771,7 @@ function DrawingView({
                 document.value ?? parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)
               }
               sceneDoc={engine.doc ?? undefined}
+              hydrateAssets={hydrateAssets}
               presence={presence}
               readOnly={canvasReadOnly}
               onAssetRefusedChange={setAssetRefused}
@@ -4220,6 +4341,7 @@ export function FileInspector(props: {
           notice={truncatedNotice}
           recoveryNotices={recoveryNotices}
           engine={engine}
+          onRetryEngineOpen={retryEngineOpen}
           presenceFactory={props.drawingCollaboration}
         />
       );
