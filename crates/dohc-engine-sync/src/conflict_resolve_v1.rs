@@ -7,7 +7,8 @@ use dohc_engine_collab::{
 use dohc_engine_domain::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictResolution, ConflictStatus,
     ResolveConflictKind, ResolveTextConflict, ResolveTextConflictResult, TextConflict,
-    TextSnapshot, insert_text_conflict_if_absent, select_snapshot_by_path_in_tx,
+    TextSnapshot, derive_capture_object_id, insert_text_conflict_if_absent,
+    select_snapshot_by_path_in_tx,
 };
 use dohc_engine_files::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification,
@@ -194,6 +195,14 @@ pub struct PreparedLocalConflictResolveV1 {
     built: BuiltConflictResolveV1,
     pre_effect_moment_order: i64,
     lineage: LocalLineagePlan,
+}
+
+impl PreparedLocalConflictResolveV1 {
+    /// Refuse before domain effects if either object named by this resolution
+    /// is owned by a live editor session.
+    pub fn ensure_no_live_ydoc_session(&self, leases: &dyn LeaseProbe) -> Result<(), SyncError> {
+        ensure_no_live_ydoc_session(&self.built.validated.payload, leases)
+    }
 }
 
 enum LocalLineagePlan {
@@ -1266,7 +1275,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
     )?;
     require_imported_roots(tx, &validated)?;
     let payload = &validated.payload;
-    let (disposition, live) = classify_imported_head(tx, payload)?;
+    let (mut disposition, live) = classify_imported_head(tx, payload)?;
 
     let key = payload
         .current
@@ -1282,12 +1291,12 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             })
         })
         .transpose()?;
-    if let Some(key) = key.as_ref()
-        && leases.is_live(key)
+    ensure_no_live_ydoc_session(payload, leases)?;
+    if disposition != ImportedHeadDisposition::Diverged
+        && payload.lineage_transition.is_none()
+        && !unbound_receiver_lineages_match_reviewed_sides(tx, payload)?
     {
-        return Err(SyncError::RetryableState {
-            reason: "ydoc-session-live",
-        });
+        disposition = ImportedHeadDisposition::Diverged;
     }
     if disposition != ImportedHeadDisposition::Diverged {
         preflight_imported_lineage(tx, payload, key.as_ref(), disposition)?;
@@ -1315,6 +1324,9 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                     &payload.workspace_id,
                     shadow,
                 )?;
+            }
+            if payload.lineage_transition.is_none() {
+                reconcile_unbound_receiver_lineages(tx, payload, envelope.recorded_at_ms)?;
             }
             close_imported_conflict(tx, payload)?;
         }
@@ -1352,6 +1364,81 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
         inserted: None,
         matched: true,
     })
+}
+
+fn conflict_resolve_ydoc_keys(payload: &ConflictResolveV1) -> Result<Vec<DocKey>, SyncError> {
+    let mut keys = Vec::with_capacity(2);
+    if payload.current.present().is_none() {
+        keys.push(
+            DocKey::new(
+                &payload.workspace_id,
+                &payload.target_version_id,
+                derive_capture_object_id(
+                    &payload.workspace_id,
+                    &payload.target_version_id,
+                    &payload.paths[payload.current.path_ref()],
+                ),
+            )
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "conflict.resolve Y.Doc coordinates are invalid",
+            })?,
+        );
+    }
+    for head in [&payload.current, &payload.result] {
+        let Some(head) = head.present() else {
+            continue;
+        };
+        let key = DocKey::new(
+            &payload.workspace_id,
+            &payload.target_version_id,
+            &head.object_id,
+        )
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "conflict.resolve Y.Doc coordinates are invalid",
+        })?;
+        if !keys.iter().any(|candidate| candidate == &key) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+fn ensure_no_live_ydoc_session(
+    payload: &ConflictResolveV1,
+    leases: &dyn LeaseProbe,
+) -> Result<(), SyncError> {
+    if conflict_resolve_ydoc_keys(payload)?
+        .iter()
+        .any(|key| leases.is_live(key))
+    {
+        return Err(SyncError::RetryableState {
+            reason: "ydoc-session-live",
+        });
+    }
+    Ok(())
+}
+
+fn unbound_receiver_lineages_match_reviewed_sides(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+) -> Result<bool, SyncError> {
+    for key in conflict_resolve_ydoc_keys(payload)? {
+        let Some(projection) = crate::ydoc_apply::complete_ydoc_projection_in_tx(tx, &key)? else {
+            continue;
+        };
+        let projection_sha256 = dohc_engine_storage::hex_sha256(projection.as_bytes());
+        let matches_reviewed_side = [&payload.current, &payload.result].iter().any(|head| {
+            head.present().is_some_and(|head| {
+                head.object_id == key.object_id
+                    && head.content_kind == HeadContentKindV1::Text
+                    && head.blob_sha256 == projection_sha256
+            })
+        });
+        if !matches_reviewed_side {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) fn verify_imported_conflict_effect_in_tx(
@@ -1671,7 +1758,7 @@ fn commit_imported_lineage(
     now_ms: i64,
 ) -> Result<(), SyncError> {
     let Some(transition) = payload.lineage_transition.as_ref() else {
-        return Ok(());
+        return reconcile_unbound_receiver_lineages(tx, payload, now_ms);
     };
     let key = key.ok_or(SyncError::InvalidInput {
         reason: "conflict.resolve lineage transition has no current object",
@@ -1709,6 +1796,102 @@ fn commit_imported_lineage(
         .map_err(map_local_collab_error)?;
     }
     Ok(())
+}
+
+fn reconcile_unbound_receiver_lineages(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let current_key = payload
+        .current
+        .present()
+        .map(|head| {
+            DocKey::new(
+                &payload.workspace_id,
+                &payload.target_version_id,
+                &head.object_id,
+            )
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "conflict.resolve Y.Doc coordinates are invalid",
+            })
+        })
+        .transpose()?;
+    let result_key = payload
+        .result
+        .present()
+        .map(|head| {
+            DocKey::new(
+                &payload.workspace_id,
+                &payload.target_version_id,
+                &head.object_id,
+            )
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "conflict.resolve Y.Doc coordinates are invalid",
+            })
+        })
+        .transpose()?;
+
+    if let Some(result_key) = result_key.as_ref() {
+        if let Some(current_key) = current_key.as_ref()
+            && result_key != current_key
+        {
+            crate::ydoc_apply::reconcile_conflict_parent_resulting_head_in_tx(
+                tx,
+                current_key,
+                crate::ResultingHead::BinaryOrAbsent,
+                now_ms,
+            )?;
+        }
+        reconcile_unbound_result_head(tx, payload, result_key, now_ms)?;
+    } else if let Some(current_key) = current_key.as_ref() {
+        crate::ydoc_apply::reconcile_conflict_parent_resulting_head_in_tx(
+            tx,
+            current_key,
+            crate::ResultingHead::BinaryOrAbsent,
+            now_ms,
+        )?;
+    }
+    Ok(())
+}
+
+fn reconcile_unbound_result_head(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let result = payload.result.present().ok_or(SyncError::InvalidInput {
+        reason: "conflict.resolve result object is absent",
+    })?;
+    match result.content_kind {
+        HeadContentKindV1::Binary => {
+            crate::ydoc_apply::reconcile_conflict_parent_resulting_head_in_tx(
+                tx,
+                key,
+                crate::ResultingHead::BinaryOrAbsent,
+                now_ms,
+            )
+        }
+        HeadContentKindV1::Text => {
+            let text: String = tx
+                .query_row(
+                    "SELECT text FROM blobs WHERE sha256=?1",
+                    [&result.blob_sha256],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            crate::ydoc_apply::reconcile_conflict_parent_resulting_head_in_tx(
+                tx,
+                key,
+                crate::ResultingHead::Text {
+                    path: &payload.paths[result.path_ref],
+                    text: &text,
+                },
+                now_ms,
+            )
+        }
+    }
 }
 
 fn close_imported_conflict(
@@ -3000,6 +3183,32 @@ mod tests {
         (scratch, store, key, built)
     }
 
+    fn moved_object_receiver_fixture() -> (
+        ScratchDir,
+        EngineStore,
+        DocKey,
+        DocKey,
+        BuiltConflictResolveV1,
+    ) {
+        let (scratch, store, current_key, built) = path_change_receiver_fixture();
+        let mut payload = built.validated.payload;
+        for head in [&mut payload.incoming, &mut payload.result] {
+            let HeadV1::Present(head) = head else {
+                panic!("moved result is present");
+            };
+            head.object_id = "object-b".to_owned();
+        }
+        payload.effect_context.result_object_created_at_ms = Some(11);
+        payload
+            .lineage_transition
+            .as_mut()
+            .expect("moved current archives its lineage")
+            .successor = None;
+        let built = build_conflict_resolve_v1(payload).expect("moved-object carrier");
+        let result_key = DocKey::new("ws", "main", "object-b").expect("result key");
+        (scratch, store, current_key, result_key, built)
+    }
+
     fn absent_result_receiver_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1)
     {
         let (scratch, store, key, built) = receiver_fixture();
@@ -3706,6 +3915,65 @@ mod tests {
         assert_eq!(
             crate::read_replication_acked_seq(&store, "ws", "peer").expect("retry ack"),
             0
+        );
+    }
+
+    #[test]
+    fn lineage_unbound_parent_rewrites_the_receivers_closed_ydoc() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let mut payload = built.validated.payload;
+        payload.lineage_transition = None;
+        let built = build_conflict_resolve_v1(payload).expect("lineage-unbound carrier");
+        let parent = imported_envelope(0, "conflict.resolve", built.value);
+
+        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
+            .expect("apply lineage-unbound parent");
+
+        let marker = dohc_engine_collab::read_marker(&store, &key)
+            .expect("read receiver marker")
+            .expect("receiver lineage remains present");
+        let projected = store
+            .write_with(&NoFaults, |tx| {
+                let doc =
+                    dohc_engine_collab::load_doc_in_tx(tx, &key).map_err(map_local_collab_error)?;
+                doc.project(marker.content_kind)
+                    .map(|projection| projection.markdown)
+                    .map_err(map_local_collab_error)
+            })
+            .expect("project receiver Y.Doc");
+        let dohc_engine_storage::TxnOutcome::Committed(projected) = projected else {
+            panic!("projection transaction cannot crash without an injected fault");
+        };
+        assert_eq!(
+            projected, "resolved text",
+            "the compound parent must not leave the canonical receiver Y.Doc behind its file head",
+        );
+    }
+
+    #[test]
+    fn moved_result_retries_while_its_destination_ydoc_is_live() {
+        let (_scratch, mut store, _current_key, result_key, built) =
+            moved_object_receiver_fixture();
+        let parent = imported_envelope(0, "conflict.resolve", built.value);
+        let leases = dohc_engine_collab::LeaseRegistry::new();
+        let _held = leases.acquire(&result_key).expect("hold destination live");
+
+        assert!(matches!(
+            crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &leases),
+            Err(SyncError::RetryableState {
+                reason: "ydoc-session-live"
+            })
+        ));
+        assert_eq!(
+            crate::read_replication_acked_seq(&store, "ws", "peer").expect("ack"),
+            -1,
+        );
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", "doc.md")
+                .expect("current path")
+                .is_some(),
+            "the destination lease must refuse before deleting the current head",
         );
     }
 

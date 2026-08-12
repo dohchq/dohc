@@ -619,6 +619,48 @@ pub(crate) fn ensure_ydoc_lineage_complete_in_tx(
     }
 }
 
+/// Project one closed lineage after proving that none of its durable updates
+/// are deferred or dependency-incomplete. A missing or content-free marker
+/// has no canonical projection to bind.
+pub(crate) fn complete_ydoc_projection_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<String>, SyncError> {
+    let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
+    let Some((marker, doc)) = complete.state.as_ref() else {
+        return Ok(None);
+    };
+    let has_content = marker.lineage_claim_status.has_claimed_base()
+        || marker.head_update_seq > 0
+        || marker.head_snapshot_seq > 0;
+    if !has_content {
+        return Ok(None);
+    }
+    doc.project(marker.content_kind)
+        .map(|projection| Some(projection.markdown))
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "ydoc projection exceeds materialization cap",
+        })
+}
+
+/// Reconcile a strict conflict parent with a receiver-local closed lineage.
+/// The parent is the replicated operation, so the local CRDT rewrite must not
+/// emit a second `ydoc.update`.
+pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    resulting: ResultingHead<'_>,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
+    match resulting {
+        ResultingHead::Text { path, text } => {
+            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, now_ms, false)
+        }
+        ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
+    }
+}
+
 /// Reconcile a locally-originated file mutation with its closed Y.Doc
 /// lineage. The generated CRDT update is journaled before the mutation's
 /// artifact operation, so every peer applies one canonical rewrite.

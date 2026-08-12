@@ -1063,29 +1063,56 @@ async fn moved_text_and_binary_results_archive_the_full_predecessor_without_a_su
 
         let supervisor = WorkspaceSupervisor::new();
         let handle = supervisor.open(&db, 10).expect("open actor").actor;
+        let input = ResolveTextConflict {
+            workspace_id: WS.to_owned(),
+            conflict_id: conflict_id.clone(),
+            resolution: ResolveConflictKind::ApplyIncoming,
+            object_id: format!("resolved-{case}-object"),
+            write_moment_id: format!("m-resolve-{case}-write"),
+            delete_moment_id: format!("m-resolve-{case}-delete"),
+            metadata_origin: "api".to_owned(),
+            metadata_summary: Some(format!("reviewed {case}")),
+            metadata_correlation_id: Some(format!("correlation-{case}")),
+            author_json: Some(
+                serde_json::json!({
+                    "kind": "agent",
+                    "agentId": "agent-1",
+                    "onBehalfOf": "user-1"
+                })
+                .to_string(),
+            ),
+            now_ms: 11,
+            request_id: Some(format!("request-{case}")),
+            conflict_answer_budget_bytes: usize::MAX,
+        };
+        let leases = dohc_engine_collab::LeaseRegistry::new();
+        let held_destination = if moved_path.is_some() {
+            let destination =
+                DocKey::new(WS, "main", &input.object_id).expect("destination Y.Doc key");
+            Some(leases.acquire(&destination).expect("hold destination live"))
+        } else {
+            None
+        };
+        if held_destination.is_some() {
+            let refused = handle
+                .conflict_resolve(
+                    input.clone(),
+                    leases.clone(),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect_err("the destination Y.Doc lease must block a moved result");
+            assert!(matches!(
+                refused,
+                RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-session-live"
+                })
+            ));
+        }
+        drop(held_destination);
         handle
-            .conflict_resolve(
-                ResolveTextConflict {
-                    workspace_id: WS.to_owned(),
-                    conflict_id,
-                    resolution: ResolveConflictKind::ApplyIncoming,
-                    object_id: format!("resolved-{case}-object"),
-                    write_moment_id: format!("m-resolve-{case}-write"),
-                    delete_moment_id: format!("m-resolve-{case}-delete"),
-                    metadata_origin: "api".to_owned(),
-                    metadata_summary: Some(format!("reviewed {case}")),
-                    metadata_correlation_id: Some(format!("correlation-{case}")),
-                    author_json: Some(
-                        r#"{"kind":"agent","agentId":"agent-1","onBehalfOf":"user-1"}"#.to_owned(),
-                    ),
-                    now_ms: 11,
-                    request_id: Some(format!("request-{case}")),
-                    conflict_answer_budget_bytes: usize::MAX,
-                },
-                dohc_engine_collab::LeaseRegistry::new(),
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-            )
+            .conflict_resolve(input, leases, Arc::new(NoFaults), CancellationToken::new())
             .await
             .unwrap_or_else(|error| panic!("resolve {case}: {error:?}"));
         supervisor.close(&db).expect("close actor");

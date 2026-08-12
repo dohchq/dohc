@@ -11039,58 +11039,18 @@ fn conflict_resolve_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    // A LIVE editor holds the document this resolution would rewrite. The
-    // fold commits a full-document update to the durable Y.Doc, and the
-    // client keeps editing the copy it already has: its next update merges
-    // from pre-resolution state, so the reviewed choice is reversed or the
-    // live edits are lost — the same property the open/settle freeze
-    // protects, breached from the other side (the session is already
-    // holding the document rather than trying to acquire it).
-    //
-    // Refuse rather than mutate underneath it. The caller closes or resyncs
-    // the session and resolves again; `ydoc_resync_on_store` is the door
-    // that makes that recoverable.
-    // `status='open'` is what stops this guard outranking the idempotency
-    // contract. A resolution that COMMITTED and lost its response is retried
-    // with the same `request_id`; the domain's request ledger replays the
-    // recorded result and rewrites nothing, so refusing that retry for a live
-    // lease would turn a lost response into a different answer. Only a
-    // resolution that has not committed can still rewrite a held document,
-    // and only that one is refused.
-    let held_target: Option<(String, String, Option<String>)> = store.read_with(|conn| {
-        conn.query_row(
-            "SELECT c.target_version_id, c.path, \
-                    (SELECT a.object_id FROM path_aliases a \
-                      WHERE a.workspace_id=c.workspace_id \
-                        AND a.version_id=c.target_version_id AND a.path=c.path) \
-             FROM conflicts c \
-             WHERE c.workspace_id=?1 AND c.conflict_id=?2 AND c.status='open'",
-            params![input.workspace_id, input.conflict_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()
-        .map_err(StorageError::corrupt_public)
-    })?;
-    if let Some((version_id, path, object_id)) = held_target {
-        let canonical_path = validate_addressable_plaintext_path(&path)?;
-        let object_id = object_id.unwrap_or_else(|| {
-            derive_capture_object_id(&input.workspace_id, &version_id, &canonical_path)
-        });
-        let key = DocKey::new(&input.workspace_id, &version_id, &object_id)?;
-        if leases.is_held(&key) {
-            return Err(dohc_engine_domain::DomainError::InvalidInput {
-                reason: "ydoc-session-live",
-            }
-            .into());
-        }
-    }
     VersionedTextStore::new(store)
         .resolve_text_conflict_with(
             input,
             faults,
             |tx, conflict, _live| {
-                dohc_engine_sync::prepare_local_conflict_resolve_v1_in_tx(tx, input, conflict)
-                    .map_err(map_fold_error)
+                let prepared =
+                    dohc_engine_sync::prepare_local_conflict_resolve_v1_in_tx(tx, input, conflict)
+                        .map_err(map_fold_error)?;
+                prepared
+                    .ensure_no_live_ydoc_session(leases)
+                    .map_err(map_fold_error)?;
+                Ok(prepared)
             },
             |tx, result, plan| {
                 if let Some(delete) = result.delete.as_ref() {
