@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, normalize, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
@@ -14,6 +14,17 @@ export function desktopDevEnvironment(source) {
   const environment = { ...source };
   for (const name of Object.keys(environment)) {
     if (name.toUpperCase() === "ELECTRON_RUN_AS_NODE") {
+      delete environment[name];
+    }
+  }
+  return environment;
+}
+
+export function workspaceEngineBuildEnvironment(source) {
+  const environment = { ...source };
+  for (const name of Object.keys(environment)) {
+    const upperName = name.toUpperCase();
+    if (upperName === "CARGO_BUILD_TARGET" || upperName === "CARGO_TARGET_DIR") {
       delete environment[name];
     }
   }
@@ -35,11 +46,68 @@ export function workspaceEngineBuildArguments(root) {
     "build",
     "--target-dir",
     join(root, "target"),
+    "--message-format=json-render-diagnostics",
     "-p",
     "dohc-workspace-engine",
     "--bin",
     "dohc-workspace-engine",
   ];
+}
+
+function engineBinaryName(platform) {
+  return `dohc-workspace-engine${platform === "win32" ? ".exe" : ""}`;
+}
+
+export function validateWorkspaceEngineBuild(
+  output,
+  root,
+  platform = process.platform,
+) {
+  const build = parseWorkspaceEngineBuildOutput(output);
+  const executable = build.executable;
+  const expected = resolve(root, "target", "debug", engineBinaryName(platform));
+  if (!executable) {
+    throw new Error(
+      `cargo succeeded but did not report the Rust workspace engine executable. Expected ${expected}.`,
+    );
+  }
+
+  const observed = normalize(resolve(executable));
+  const comparableObserved = platform === "win32" ? observed.toLowerCase() : observed;
+  const comparableExpected = platform === "win32" ? expected.toLowerCase() : expected;
+  if (comparableObserved !== comparableExpected) {
+    throw new Error(
+      `Cargo target configuration built the Rust workspace engine at ${observed}, but Electron loads ${expected}. Remove [build].target from Cargo configuration; the desktop launcher already selects the native engine target.`,
+    );
+  }
+
+  return { diagnostics: build.diagnostics, executable: observed };
+}
+
+function parseWorkspaceEngineBuildOutput(output) {
+  let executable;
+  const diagnostics = [];
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (message.reason === "compiler-message" && message.message?.rendered) {
+      diagnostics.push(message.message.rendered);
+    }
+    if (
+      message.reason === "compiler-artifact" &&
+      message.target?.name === "dohc-workspace-engine" &&
+      message.target.kind?.includes("bin") &&
+      typeof message.executable === "string"
+    ) {
+      executable = message.executable;
+    }
+  }
+  return { diagnostics, executable };
 }
 
 export function electronViteSpawnOptions(source) {
@@ -72,6 +140,35 @@ function runRequired(command, args, options, action) {
   }
 }
 
+function buildWorkspaceEngine() {
+  const result = spawnSync("cargo", workspaceEngineBuildArguments(repoRoot), {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: workspaceEngineBuildEnvironment(process.env),
+    stdio: ["inherit", "pipe", "inherit"],
+  });
+  if (result.error) fail("build the Rust workspace engine", result.error);
+
+  const output = result.stdout ?? "";
+  const parsedBuild = parseWorkspaceEngineBuildOutput(output);
+  for (const diagnostic of parsedBuild.diagnostics) process.stderr.write(diagnostic);
+
+  const exitCode = foregroundExitCode(result);
+  if (exitCode !== 0) {
+    console.error(
+      `Desktop development could not build the Rust workspace engine. cargo exited with code ${exitCode}.`,
+    );
+    process.exit(exitCode);
+  }
+  if (result.status !== 0) process.exit(0);
+
+  try {
+    validateWorkspaceEngineBuild(output, repoRoot);
+  } catch (error) {
+    fail("build the Rust workspace engine in the path Electron loads", error);
+  }
+}
+
 function run() {
   runRequired(
     process.execPath,
@@ -80,12 +177,7 @@ function run() {
     "verify the Electron installation",
   );
 
-  runRequired(
-    "cargo",
-    workspaceEngineBuildArguments(repoRoot),
-    { cwd: repoRoot, stdio: "inherit" },
-    "build the Rust workspace engine",
-  );
+  buildWorkspaceEngine();
 
   const devServer = spawnSync(
     process.execPath,

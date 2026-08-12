@@ -5,7 +5,9 @@ import {
   desktopDevEnvironment,
   electronViteSpawnOptions,
   foregroundExitCode,
+  validateWorkspaceEngineBuild,
   workspaceEngineBuildArguments,
+  workspaceEngineBuildEnvironment,
 } from "./dev.mjs";
 
 test("desktop dev launches Electron outside Node mode", () => {
@@ -47,9 +49,54 @@ test("desktop dev builds the engine where Electron loads it", () => {
     "build",
     "--target-dir",
     join(root, "target"),
+    "--message-format=json-render-diagnostics",
     "-p",
     "dohc-workspace-engine",
     "--bin",
     "dohc-workspace-engine",
   ]);
+});
+
+test("desktop dev ignores inherited Cargo target settings", () => {
+  const source = {
+    CARGO_BUILD_TARGET: "x86_64-unknown-linux-gnu",
+    cargo_target_dir: "elsewhere",
+    KEEP_ME: "yes",
+  };
+
+  assert.deepEqual(workspaceEngineBuildEnvironment(source), { KEEP_ME: "yes" });
+  assert.equal(source.CARGO_BUILD_TARGET, "x86_64-unknown-linux-gnu");
+});
+
+test("desktop dev verifies Cargo built the executable Electron loads", () => {
+  const root = resolve("workspace", "dohc");
+  const expected = join(root, "target", "debug", "dohc-workspace-engine.exe");
+  const output = JSON.stringify({
+    reason: "compiler-artifact",
+    target: { kind: ["bin"], name: "dohc-workspace-engine" },
+    executable: expected,
+  });
+
+  assert.equal(validateWorkspaceEngineBuild(output, root, "win32").executable, expected);
+
+  const redirected = join(
+    root,
+    "target",
+    "x86_64-pc-windows-msvc",
+    "debug",
+    "dohc-workspace-engine.exe",
+  );
+  assert.throws(
+    () =>
+      validateWorkspaceEngineBuild(
+        JSON.stringify({
+          reason: "compiler-artifact",
+          target: { kind: ["bin"], name: "dohc-workspace-engine" },
+          executable: redirected,
+        }),
+        root,
+        "win32",
+      ),
+    /Cargo target configuration.*Remove \[build\]\.target/,
+  );
 });
