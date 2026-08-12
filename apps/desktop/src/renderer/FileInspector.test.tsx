@@ -1469,6 +1469,74 @@ describe("markdown editor unmount flush", () => {
     );
   });
 
+  it("uses an older duplicate read when the later request fails", async () => {
+    type ReadResult = {
+      text: string;
+      truncated: false;
+      contentHash: string;
+    };
+    let resolveOlder!: (value: ReadResult) => void;
+    let rejectNewer!: (reason: Error) => void;
+    const older = new Promise<ReadResult>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const newer = new Promise<ReadResult>((_resolve, reject) => {
+      rejectNewer = reject;
+    });
+    bridgeMock.readWorkspaceText
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+    const user = userEvent.setup();
+    render(
+      <>
+        <FileInspector workspaceId="ws-1" path="notes/fallback.txt" />
+        <FileInspector workspaceId="ws-1" path="notes/fallback.txt" />
+      </>,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+
+    await act(async () => {
+      rejectNewer(new Error("read failed"));
+      await newer.catch(() => undefined);
+    });
+    await act(async () => {
+      resolveOlder({
+        text: "available",
+        truncated: false,
+        contentHash: TEST_CONTENT_HASH,
+      });
+      await older;
+    });
+
+    const buffer = getSharedLocalDocument(
+      localDocumentKey("ws-1", "notes/fallback.txt", undefined),
+    );
+    await waitFor(() =>
+      expect(buffer.getSnapshot()).toMatchObject({
+        initialized: true,
+        body: "available",
+        contentHash: TEST_CONTENT_HASH,
+      }),
+    );
+    const editor = (
+      await screen.findByTestId("view-text-editor")
+    ).querySelector(".cm-content") as HTMLElement;
+    await user.click(editor);
+    await user.keyboard("{End} edit");
+    await waitFor(
+      () =>
+        expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+          workspaceId: "ws-1",
+          relativePath: "notes/fallback.txt",
+          text: "available edit",
+          expectedContentHash: TEST_CONTENT_HASH,
+        }),
+      { timeout: 5_000 },
+    );
+  });
+
   it("does not replay a duplicate Markdown draft after its peer saves the same body", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValue({
       text: "# Hello\n\n",

@@ -166,6 +166,24 @@ describe("SharedLocalDocument", () => {
     release();
   });
 
+  it("initializes from an older successful read when the newer read fails", () => {
+    const buffer = getSharedLocalDocument(
+      localDocumentKey("ws", "fallback.txt", 1),
+    );
+    const release = buffer.retain();
+    const older = buffer.beginRead();
+    buffer.beginRead(); // The later request settles without an accepted read.
+
+    expect(buffer.initializeRead("available", "hash-1", older)).toBe(true);
+    expect(buffer.getSnapshot()).toMatchObject({
+      initialized: true,
+      body: "available",
+      contentHash: "hash-1",
+      dirty: false,
+    });
+    release();
+  });
+
   it("isolates the same path across workspaces and version reopen keys", () => {
     const first = getSharedLocalDocument(localDocumentKey("ws-a", "a.txt", 1));
     const otherWorkspace = getSharedLocalDocument(

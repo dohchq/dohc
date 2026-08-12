@@ -49,6 +49,7 @@ export class SharedLocalDocument {
   private tail: Promise<void> = Promise.resolve();
   private writers = 0;
   private latestReadTicket = 0;
+  private latestAcceptedReadTicket = 0;
   private snapshot: LocalDocumentSnapshot = {
     initialized: false,
     body: "",
@@ -90,7 +91,10 @@ export class SharedLocalDocument {
     contentHash: string | null,
     readTicket: number,
   ): boolean {
-    if (readTicket !== this.latestReadTicket || this.initialized) return false;
+    if (readTicket < this.latestAcceptedReadTicket || this.initialized) {
+      return false;
+    }
+    this.latestAcceptedReadTicket = readTicket;
     this.initialized = true;
     this.replace({ body, contentHash }, null, false, "saved");
     return true;
@@ -124,7 +128,10 @@ export class SharedLocalDocument {
     force = false,
     readTicket?: number,
   ): boolean {
-    if (readTicket !== undefined && readTicket !== this.latestReadTicket) {
+    if (
+      readTicket !== undefined &&
+      readTicket < this.latestAcceptedReadTicket
+    ) {
       return false;
     }
     if (this.snapshot.dirty || this.writers > 0) {
@@ -147,6 +154,9 @@ export class SharedLocalDocument {
       } else {
         return false;
       }
+    }
+    if (readTicket !== undefined) {
+      this.latestAcceptedReadTicket = readTicket;
     }
     this.initialized = true;
     this.replace(
