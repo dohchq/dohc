@@ -7202,12 +7202,12 @@ impl EngineService {
             } else {
                 "absent"
             },
-            seed_markdown: {
+            seed_content: {
                 // A seed past the in-band cap cannot cross the wire as one
                 // string, and a client that can't seed can't edit: refuse the
                 // open outright (blob streaming for large bodies is RPC-D).
                 if state
-                    .seed_markdown
+                    .seed_content
                     .as_ref()
                     .is_some_and(|seed| seed.len() > MAX_INBAND_CONTENT_BYTES)
                 {
@@ -7216,7 +7216,7 @@ impl EngineService {
                         "ydoc-seed-exceeds-inband-cap",
                     ));
                 }
-                state.seed_markdown
+                state.seed_content
             },
         };
         lock(&self.sessions).insert(
@@ -7405,7 +7405,7 @@ impl EngineService {
         serde_json::to_value(YdocSettleResult {
             moment_id: settled.moment_id,
             path: settled.path,
-            markdown: settled.markdown,
+            content: settled.content,
             sha256: settled.sha256,
             materialized: settled.materialized,
             projection: YdocProjectionProvenance {
@@ -7475,7 +7475,7 @@ impl EngineService {
         // Missing `settle` means SETTLE — the TS driver treats close() as
         // settle-unless-explicitly-false, and defaulting to false here would
         // fail dirty local-only closes (UnsettledClose) and let a replicated
-        // close compact while the markdown projection is stale.
+        // close compact while the artifact projection is stale.
         let default_settle = {
             let (_open, session) = self.ydoc_session(handle, &params.session_id)?;
             // An untouched absent-lineage session (opened, never seeded) has
@@ -9137,7 +9137,7 @@ struct YdocOpenResult {
     /// (apps/desktop/src/workspaces/workspaceEngineCapture.ts).
     head: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    seed_markdown: Option<String>,
+    seed_content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -9178,10 +9178,10 @@ struct YdocProjectionProvenance {
 struct YdocSettleResult {
     moment_id: String,
     path: String,
-    /// `null` once the settled markdown is past the in-band cap. The settle
+    /// `null` once the settled content is past the in-band cap. The settle
     /// still committed and the daemon wrote the file — the client reads it
     /// from disk rather than echoing it back over the wire.
-    markdown: Option<String>,
+    content: Option<String>,
     sha256: String,
     /// `false` when the settle committed but materialization was blocked by
     /// containment: the file on disk is still the OLD artifact and the write
@@ -11545,6 +11545,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::ProjectionTooComplex { .. }
         | CollabError::InvalidIdentifier { .. }
         | CollabError::ContentKindMismatch
+        | CollabError::UnsupportedContentKind { .. }
         | CollabError::BaseAlreadyClaimed
         | CollabError::BaseStateDiverged
         | CollabError::LeaseHeld

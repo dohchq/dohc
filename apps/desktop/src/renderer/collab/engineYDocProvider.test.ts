@@ -12,7 +12,7 @@ import {
 // and can push a remote delta back. This exercises the renderer half of the
 // bridge (seed / ship-local / receive-remote / no-echo) with no Electron.
 function mockTransport(
-  seedMarkdownLines: string[] = ["Start."],
+  seedContentLines: string[] = ["Start."],
   applyGate: Promise<void> = Promise.resolve(),
 ): {
   transport: EngineYDocTransport;
@@ -27,7 +27,7 @@ function mockTransport(
   const mainDoc = new Y.Doc();
   mainDoc.transact(() => {
     const frag = mainDoc.getXmlFragment("body");
-    for (const line of seedMarkdownLines) {
+    for (const line of seedContentLines) {
       const p = new Y.XmlElement("paragraph");
       const t = new Y.XmlText();
       t.insert(0, line);

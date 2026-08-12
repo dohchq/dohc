@@ -1676,7 +1676,7 @@ export function createWorkspaceEngineCapture(
     onSettled: (
       result: {
         sha256: string;
-        markdown: string | null;
+        content: string | null;
         materialized: boolean;
       },
       token: number,
@@ -3483,7 +3483,7 @@ export function createWorkspaceEngineCapture(
         const onSettled = async (
           result: {
             sha256: string;
-            markdown: string | null;
+            content: string | null;
             // The daemon reports whether the settled document reached the workspace
             // file. Only an explicit success may continue to the save notification.
             materialized: boolean;

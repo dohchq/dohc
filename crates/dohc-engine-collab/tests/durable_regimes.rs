@@ -395,7 +395,7 @@ fn local_only_close_prunes_the_cache() {
         matches!(out, CloseOutcome::Pruned { .. }),
         "local-only prunes"
     );
-    // The CRDT cache is gone; the marker survives (markdown-is-the-artifact).
+    // The CRDT cache is gone; the marker survives (the workspace file is the artifact).
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 0, "updates pruned");
     assert_eq!(
         count(&ts.store, "ydoc_snapshots", &key),
@@ -1494,7 +1494,7 @@ fn settle_projects_and_enqueues_an_idempotent_job() {
     let first =
         committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 5_000).expect("settle"));
     assert!(!first.deduped);
-    assert_eq!(first.projection.markdown, "the settled markdown body");
+    assert_eq!(first.projection.content, "the settled markdown body");
     assert_eq!(
         first.projection.source_state_vector_sha256.len(),
         64,

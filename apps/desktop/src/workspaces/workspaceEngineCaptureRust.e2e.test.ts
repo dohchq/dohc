@@ -158,7 +158,7 @@ it.skipIf(engine.missing)(
       await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
       const settled = await session.settleNow();
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(
-        settled.markdown,
+        settled.content,
       );
 
       // The outside writer replaces the file. Nothing is typed afterwards, so

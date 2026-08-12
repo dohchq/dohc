@@ -223,7 +223,7 @@ pub struct YdocOpenState {
     /// the session's settle preimage expectation until its first settle.
     pub head_blob_sha256: Option<String>,
     pub lineage_existing: bool,
-    pub seed_markdown: Option<String>,
+    pub seed_content: Option<String>,
 }
 
 /// Result of the single moment+snapshot+materialization settlement path.
@@ -231,10 +231,10 @@ pub struct YdocOpenState {
 pub struct YdocSettlement {
     pub moment_id: String,
     pub path: String,
-    /// The settled markdown, or `None` when it is larger than the in-band
+    /// The settled artifact content, or `None` when it exceeds the in-band
     /// response cap. The cap bounds the RESPONSE, never durability: the file
     /// is written to disk and the moment committed either way.
-    pub markdown: Option<String>,
+    pub content: Option<String>,
     pub sha256: String,
     /// Whether the file on disk actually received these bytes. `false` means
     /// the settle committed durably (marker, moment, snapshot) but
@@ -245,10 +245,10 @@ pub struct YdocSettlement {
     pub projection: Projection,
 }
 
-/// The settled markdown as the response may carry it: `None` once past the
+/// The settled content as the response may carry it: `None` once past the
 /// in-band cap, where the caller reads the artifact from disk instead.
-fn inband_settled_markdown(markdown: String) -> Option<String> {
-    (markdown.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES).then_some(markdown)
+fn inband_settled_content(content: String) -> Option<String> {
+    (content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES).then_some(content)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -8779,7 +8779,7 @@ fn ydoc_version_unsettled_content_kind_on_store(
         }
         let content_kind = persisted.marker.content_kind;
         let projected = persisted.doc.project(content_kind)?;
-        let projected_sha = hex_sha256(projected.markdown.as_bytes());
+        let projected_sha = hex_sha256(projected.content.as_bytes());
         let materialized_sha: Option<String> = store.read_with(|conn| {
             conn.query_row(
                 "SELECT blob_sha256 FROM snapshots \
@@ -8967,15 +8967,15 @@ fn ydoc_open_state_on_store(
     let persisted = dohc_engine_collab::load_persisted(store, &key)?;
     // "Existing" means durable DOC STATE, not a bare marker: a local-only
     // close prunes every CRDT row and leaves head_update_seq == 0
-    // (markdown-is-the-artifact). Reporting such a lineage as existing would
-    // hand the client an EMPTY doc with no seedMarkdown — its next settle
+    // (the workspace file is the artifact). Reporting it as existing would
+    // hand the client an EMPTY doc with no seedContent — its next settle
     // would clobber the settled file. A pruned marker is seed-eligible
     // (the recordUpdate guard checks head_update_seq > 0), so the artifact
     // re-seeds the cache exactly like a first open. "Durable doc state"
     // means updates OR snapshots: a replicated lineage holding only its
     // base snapshot (head_update_seq == 0, head_snapshot_seq > 0) is
     // EXISTING — reporting it absent would hand the client the base state
-    // AND a markdown seed, duplicating content on the first seed apply.
+    // AND a content seed, duplicating the artifact on the first seed apply.
     let lineage_existing = persisted
         .as_ref()
         .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
@@ -9030,7 +9030,7 @@ fn ydoc_open_state_on_store(
         regime,
         initial_update,
         lineage_existing,
-        seed_markdown: (!lineage_existing)
+        seed_content: (!lineage_existing)
             .then(|| head.map(|snapshot| snapshot.text))
             .flatten(),
     })
@@ -9065,7 +9065,7 @@ fn ydoc_record_update_on_store(
     // A replicated, base-claimed lineage journals the ydoc.update DELTA in
     // the SAME transaction as the append (blob-before-log holds; TS parity:
     // ydocEngineDriver journals inside the recordUpdate write). Local-only
-    // lineages journal nothing — their markdown is the artifact.
+    // lineages journal nothing because the workspace file is the artifact.
     let update_sha = dohc_engine_storage::hex_sha256(update);
     let journal_key = key.clone();
     let journal_path = path.to_owned();
@@ -9183,7 +9183,7 @@ impl std::fmt::Display for SharingDeclined {
         write!(
             f,
             "document too large to share: {} allows {} bytes, observed {} bytes of encoded base \
-             state. The edit is saved and markdown stays this document's artifact.",
+             state. The edit is saved, and the workspace file remains this document's artifact.",
             self.constraint, self.limit_bytes, self.observed_bytes
         )
     }
@@ -9224,7 +9224,8 @@ fn ydoc_originate_base_in_tx(
         return Ok(BaseOrigination::NothingToDo);
     }
     // This workspace does not replicate with a relay, so nothing here has a
-    // peer: the lineage stays local-only, keeps markdown as its artifact, and
+    // peer: the lineage stays local-only, keeps the workspace file as its
+    // artifact, and
     // prunes on close. A private document must never be promoted to a shared
     // lineage — promotion is irreversible in the log it starts writing.
     //
@@ -9249,7 +9250,8 @@ fn ydoc_originate_base_in_tx(
     // refusal would roll that valid edit back, and every later one with it.
     //
     // Decline to originate instead. The edit commits, the lineage stays
-    // local-only, and markdown remains its artifact. #549 owns the measured
+    // local-only, and the workspace file remains its artifact. #549 owns the
+    // measured
     // base-specific bound that replaces this check.
     //
     // The decline is REPORTED, not silent (#632): it is the one branch here a
@@ -9366,10 +9368,10 @@ fn ydoc_settle_on_store(
     let projection = doc.project(content_kind)?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
-    // the file from `projection.markdown` down here, so an over-cap doc
+    // the file from `projection.content` down here, so an over-cap doc
     // settles and lands on disk exactly like any other; the response reports
-    // `markdown: None` and the caller reads the file. (Refusing here instead
-    // left the user's content in the CRDT and the .md at zero bytes.)
+    // `content: None` and the caller reads the file. (Refusing here instead
+    // left the user's content in the CRDT and the workspace file at zero bytes.)
     //
     // The stale-head guard runs BEFORE the idempotent no-op: an external
     // capture ingest (or any same-object writer) must surface as
@@ -9512,7 +9514,7 @@ fn ydoc_settle_on_store(
     // materialization job — the TS driver only settles when the projection
     // differs. Answer with the current head instead (its pending job, if
     // any, was replayed above).
-    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
     if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
         == Some(projected_sha.as_str())
     {
@@ -9520,7 +9522,7 @@ fn ydoc_settle_on_store(
         return Ok(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
-            markdown: inband_settled_markdown(current.text),
+            content: inband_settled_content(current.text),
             sha256: current.blob_sha256,
             // Any pending job for this head was replayed above, and a Blocked
             // replay returns Err rather than reaching here.
@@ -9586,7 +9588,7 @@ fn ydoc_settle_on_store(
                 version_id: key.version_id.clone(),
                 object_id: key.object_id.clone(),
                 path: path.to_owned(),
-                text: projection_for_write.markdown.clone(),
+                text: projection_for_write.content.clone(),
                 moment_id,
                 metadata_origin: "ydoc".to_owned(),
                 metadata_summary: None,
@@ -9757,7 +9759,7 @@ fn ydoc_settle_on_store(
     Ok(YdocSettlement {
         moment_id: write.moment.moment_id,
         path: write.snapshot.path,
-        markdown: inband_settled_markdown(write.snapshot.text),
+        content: inband_settled_content(write.snapshot.text),
         sha256: write.snapshot.blob_sha256,
         materialized,
         projection,
@@ -9800,10 +9802,10 @@ fn ydoc_close_session_on_store(
         return Ok(None);
     };
     // Richdoc settles like plaintext now, so the local-only close follows the
-    // same markdown-is-the-artifact prune (close_session refuses a DIRTY local
+    // same workspace-file artifact rule (close_session refuses a DIRTY local
     // prune either way, and persists every replicated lineage internally).
-    // Keeping the closed CRDT authoritative here would shadow external .md
-    // edits on reopen: existing lineage, no seedMarkdown, stale document.
+    // Keeping the closed CRDT authoritative here would shadow external file
+    // edits on reopen: existing lineage, no seedContent, stale document.
     let persist_closed_state = false;
     let outcome = match dohc_engine_collab::close_session(
         store,

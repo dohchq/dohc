@@ -243,7 +243,7 @@ export interface OpenYdocAdapterSessionInput {
   path: string;
   contentKind?: YdocContentKind;
   // An object with no durable CRDT lineage is normally seeded from its
-  // markdown. Set false when the caller ALREADY holds the document's canonical
+  // artifact content. Set false when the caller already holds the canonical
   // state and will replay it: a seed carries a fresh client id, so merging it
   // into a populated doc appends a second copy of the file instead of
   // resuming it. Callers that pass false own re-establishing the content.
@@ -293,10 +293,10 @@ function declareDohcRootSchema(doc: Y.Doc): void {
   doc.getText("plainText");
 }
 
-function createPlaintextSeedDoc(markdown: string): Y.Doc {
+function createPlaintextSeedDoc(content: string): Y.Doc {
   const doc = new Y.Doc();
   declareDohcRootSchema(doc);
-  if (markdown.length > 0) doc.getText("plainText").insert(0, markdown);
+  if (content.length > 0) doc.getText("plainText").insert(0, content);
   return doc;
 }
 
@@ -1243,19 +1243,16 @@ export class YdocLiveAdapter {
     if (
       lineageAbsent &&
       input.seedAbsentLineage !== false &&
-      rawResult !== null &&
-      !Array.isArray(rawResult) &&
-      typeof rawResult === "object" &&
-      typeof rawResult.seedMarkdown === "string"
+      typeof result.seedContent === "string"
     ) {
       try {
-        if (!isWellFormedUtf16(rawResult.seedMarkdown)) {
+        if (!isWellFormedUtf16(result.seedContent)) {
           throw new IllFormedUtf16EditError();
         }
         const seedDoc =
           result.contentKind === "plaintext"
-            ? createPlaintextSeedDoc(rawResult.seedMarkdown)
-            : markdownToYDoc(rawResult.seedMarkdown);
+            ? createPlaintextSeedDoc(result.seedContent)
+            : markdownToYDoc(result.seedContent);
         await session.applySeedUpdate(Y.encodeStateAsUpdate(seedDoc));
         // The exposed initial state must INCLUDE the seed: consumers (the
         // desktop bridge) forward session.initialUpdate to the renderer,

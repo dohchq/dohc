@@ -518,7 +518,7 @@ describe("workspaceEngineCapture batch capture", () => {
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
-            ({ sha256: "a".repeat(64), markdown: "" }) as never,
+            ({ sha256: "a".repeat(64), content: "" }) as never,
           applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async () => undefined,
         };
@@ -539,7 +539,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   // #338. The engine owns the .md: it materializes a changed projection and
-  // leaves a drifted file alone. The desktop mirrored the settled markdown
+  // leaves a drifted file alone. The desktop mirrored the settled content
   // over the file anyway, so an edit made outside dohc while the document was
   // open vanished from disk. The desktop no longer writes here at all, and
   // every case below drives the REAL onSettled against a REAL file; only the
@@ -547,7 +547,7 @@ describe("workspaceEngineCapture batch capture", () => {
   // ydocProviderSession's runSettle does.
   function driftFixture(settled: {
     sha256: string;
-    markdown: string | null;
+    content: string | null;
     path?: string;
   }) {
     return async (options: EngineYdocProviderSessionOptions) => {
@@ -580,7 +580,7 @@ describe("workspaceEngineCapture batch capture", () => {
   // states that settle produced.
   async function settleOnClose(
     root: string,
-    settled: { sha256: string; markdown: string | null },
+    settled: { sha256: string; content: string | null },
     onError?: (context: string, error: unknown) => void,
   ): Promise<string[]> {
     const states: string[] = [];
@@ -609,7 +609,7 @@ describe("workspaceEngineCapture batch capture", () => {
     // the outside edit is gone from disk.
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
-      markdown: EDITOR_TEXT,
+      content: EDITOR_TEXT,
     });
 
     expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
@@ -627,7 +627,7 @@ describe("workspaceEngineCapture batch capture", () => {
 
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
-      markdown: EDITOR_TEXT,
+      content: EDITOR_TEXT,
     });
 
     expect((await readFile(join(root, "note.md"), "utf8")).length).toBe(
@@ -643,25 +643,25 @@ describe("workspaceEngineCapture batch capture", () => {
 
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
-      markdown: EDITOR_TEXT,
+      content: EDITOR_TEXT,
     });
 
     expect(existsSync(join(root, "note.md"))).toBe(false);
     expect(states).toEqual(["changed-on-disk"]);
   });
 
-  // markdown === null: the body is past the engine's in-band response cap, so
+  // content === null: the body is past the engine's in-band response cap, so
   // it never rode back over the wire. The settle still reports its sha, so
   // drift is just as answerable there — the old code returned "Saved" without
   // looking.
-  it("reports the drift for an over-cap settle whose markdown never crossed the wire", async () => {
+  it("reports the drift for an over-cap settle whose content never crossed the wire", async () => {
     const root = await tempRoot();
     const outside = "written outside dohc\n";
     await write(root, "note.md", outside);
 
     const states = await settleOnClose(root, {
       sha256: sha256Utf8("a body far past the in-band cap"),
-      markdown: null,
+      content: null,
     });
 
     expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
@@ -682,7 +682,7 @@ describe("workspaceEngineCapture batch capture", () => {
     try {
       const states = await settleOnClose(root, {
         sha256: sha256Utf8(EDITOR_TEXT),
-        markdown: EDITOR_TEXT,
+        content: EDITOR_TEXT,
       });
 
       expect(states).toEqual(["changed-on-disk"]);
@@ -705,7 +705,7 @@ describe("workspaceEngineCapture batch capture", () => {
     try {
       const states = await settleOnClose(
         root,
-        { sha256: sha256Utf8(EDITOR_TEXT), markdown: EDITOR_TEXT },
+        { sha256: sha256Utf8(EDITOR_TEXT), content: EDITOR_TEXT },
         (context, error) => errors.push({ context, error }),
       );
 
@@ -743,7 +743,7 @@ describe("workspaceEngineCapture batch capture", () => {
       onError: (context, error) => errors.push({ context, error }),
       openRustYDocProviderSession: driftFixture({
         sha256: sha256Utf8(EDITOR_TEXT),
-        markdown: EDITOR_TEXT,
+        content: EDITOR_TEXT,
         path: "notes/note.md",
       }),
     });
@@ -768,7 +768,7 @@ describe("workspaceEngineCapture batch capture", () => {
 
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
-      markdown: EDITOR_TEXT,
+      content: EDITOR_TEXT,
     });
 
     expect(await readFile(join(root, "note.md"), "utf8")).toBe(EDITOR_TEXT);
@@ -795,7 +795,7 @@ describe("workspaceEngineCapture batch capture", () => {
       requests,
       openRustYDocProviderSession: driftFixture({
         sha256: sha256Utf8(EDITOR_TEXT),
-        markdown: EDITOR_TEXT,
+        content: EDITOR_TEXT,
       }),
     });
 
@@ -2769,7 +2769,7 @@ describe("Rust engine session selection", () => {
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
-            ({ sha256: "b".repeat(64), markdown: "daemon" }) as never,
+            ({ sha256: "b".repeat(64), content: "daemon" }) as never,
           close: async () => undefined,
         } as never;
       },
@@ -2835,7 +2835,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
         evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () =>
-          ({ sha256: "c".repeat(64), markdown: "" }) as never,
+          ({ sha256: "c".repeat(64), content: "" }) as never,
         close: async () => undefined,
       } as never;
     };
@@ -3072,7 +3072,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
-            return { sha256: "d".repeat(64), markdown: "written by a peer" } as never;
+            return { sha256: "d".repeat(64), content: "written by a peer" } as never;
           },
           close: async (closeOptions?: { settle?: boolean }) => {
             closedWithSettle = closeOptions?.settle;
@@ -3149,7 +3149,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
-            return { sha256: "e".repeat(64), markdown: "arrived from a peer" } as never;
+            return { sha256: "e".repeat(64), content: "arrived from a peer" } as never;
           },
           close: async (closeOptions?: {
             settle?: boolean;
@@ -3254,7 +3254,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           },
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
-            ({ sha256: "f".repeat(64), markdown: "" }) as never,
+            ({ sha256: "f".repeat(64), content: "" }) as never,
           applyExternalMarkdownEdit: async (markdown: string) =>
             ({ kind: "merged", markdown }) as const,
           close: async () => {
@@ -3319,7 +3319,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
             settles.push("settle");
             return {
               sha256: "f".repeat(64),
-              markdown: "arrived from a peer",
+              content: "arrived from a peer",
             } as never;
           },
           close: async (closeOptions?: {
@@ -3394,7 +3394,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         applyLocalUpdate: async () => undefined,
         settleNow: async () => {
           settles.push("settle");
-          return { sha256: "a".repeat(64), markdown: "" } as never;
+          return { sha256: "a".repeat(64), content: "" } as never;
         },
         close: async () => {
           // The agent's write lands while the release is in flight.
@@ -3459,7 +3459,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
-            return { sha256: "f".repeat(64), markdown: "arrived from a peer" } as never;
+            return { sha256: "f".repeat(64), content: "arrived from a peer" } as never;
           },
           close: async (closeOptions?: {
             settle?: boolean;
@@ -3525,7 +3525,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           settleNow: async () => {
             settled.push(resurrected);
             await writeFile(join(root, path), resurrected, "utf8");
-            return { sha256: "7".repeat(64), markdown: resurrected } as never;
+            return { sha256: "7".repeat(64), content: resurrected } as never;
           },
           close: async () => {
             throw new DaemonRefusalError(

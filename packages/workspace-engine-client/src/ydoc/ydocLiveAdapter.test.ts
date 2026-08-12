@@ -36,13 +36,13 @@ const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
 const PATH = "notes/live.txt";
 
-function seedPlaintextEngine(markdown = ""): YdocLoopbackEngine {
+function seedPlaintextEngine(content = ""): YdocLoopbackEngine {
   const engine = new YdocLoopbackEngine();
   engine.seedFile({
     workspace: WORKSPACE,
     versionId: VERSION,
     path: PATH,
-    markdown,
+    content,
     contentKind: "plaintext",
   });
   return engine;
@@ -592,8 +592,8 @@ describe("YdocLiveAdapter", () => {
 
     expect(session.doc.getText("plainText").toString()).toBe(content);
     expect(engine.sessionText(session.sessionId)).toBe(content);
-    expect(settled.markdown).toBe(content);
-    expect([...(settled.markdown ?? "")]).toEqual([...content]);
+    expect(settled.content).toBe(content);
+    expect([...(settled.content ?? "")]).toEqual([...content]);
 
     await session.close({ settle: false });
     adapter.dispose();
@@ -644,7 +644,7 @@ describe("YdocLiveAdapter", () => {
     await Promise.all([first, second]);
     const settled = await session.settle();
 
-    expect(settled.markdown).toBe("first second");
+    expect(settled.content).toBe("first second");
     expect(engine.recordedUpdates).toHaveLength(2);
     expect(recordActors).toEqual([
       "actor-first",
@@ -1133,7 +1133,7 @@ describe("YdocLiveAdapter", () => {
 
     expect(settled).toHaveLength(1);
     // THE assertion a call count cannot make.
-    expect(settled[0]?.markdown).toContain("typed while the store was busy");
+    expect(settled[0]?.content).toContain("typed while the store was busy");
 
     await provider.close({ settle: false });
   });
@@ -1159,7 +1159,7 @@ describe("YdocLiveAdapter", () => {
     scheduler.fire();
     await drain();
     expect(settled).toHaveLength(1);
-    expect(settled[0]?.markdown).toContain("typed against a stubborn store");
+    expect(settled[0]?.content).toContain("typed against a stubborn store");
 
     await provider.close({ settle: false });
   });
@@ -1520,8 +1520,8 @@ describe("YdocLiveAdapter", () => {
     expect(settled).toHaveLength(1);
     // Both edits reached the engine — the refused one via the resend, the
     // later one on its own.
-    expect(settled[0]?.markdown).toContain("typed before the session died");
-    expect(settled[0]?.markdown).toContain("typed after the refusal");
+    expect(settled[0]?.content).toContain("typed before the session died");
+    expect(settled[0]?.content).toContain("typed after the refusal");
 
     await provider.close({ settle: false });
   });
@@ -2143,7 +2143,7 @@ describe("YdocLiveAdapter", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH,
-      markdown: "",
+      content: "",
       contentKind: "richdoc",
     });
     const transientClose = new Error("injected transient close failure");
@@ -2574,7 +2574,7 @@ describe("YdocLiveAdapter", () => {
     // settle first, which is what covers it.
     await provider.close({ settle: true });
 
-    expect(settled.markdown).toBe("seed local");
+    expect(settled.content).toBe("seed local");
     expect(settled.projection).toEqual({
       contentKind: "plaintext",
       sourceStateVectorSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
@@ -2588,7 +2588,7 @@ describe("YdocLiveAdapter", () => {
     expect(engine.requests.map((request) => request.method)).toEqual([
       YDOC_METHOD.open,
       // The captured seed ("seed") now journals through a real recordUpdate
-      // (#721/#728: `ydoc_open_state_on_store` returns `seedMarkdown` for a
+      // (#721/#728: `ydoc_open_state_on_store` returns `seedContent` for a
       // head-present open with no lineage yet, and the adapter records it),
       // ahead of the manual local edit's own recordUpdate.
       YDOC_METHOD.recordUpdate,
@@ -2676,7 +2676,7 @@ describe("YdocLiveAdapter", () => {
         workspace: WORKSPACE,
         versionId: VERSION,
         path,
-        markdown: "",
+        content: "",
         contentKind: "plaintext",
       });
     }
@@ -2722,7 +2722,7 @@ describe("YdocLiveAdapter", () => {
             result: {
               ...(response.result as Record<string, unknown>),
               lineage: "absent",
-              seedMarkdown: "seeded body",
+              seedContent: "seeded body",
             },
           };
         }
@@ -3116,7 +3116,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: OLD_PATH,
-      markdown: "original content",
+      content: "original content",
       contentKind: "plaintext",
       objectId: "object-original",
     });
@@ -3142,7 +3142,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: OLD_PATH,
-      markdown: "a completely different file",
+      content: "a completely different file",
       contentKind: "plaintext",
       objectId: "object-new",
     });
@@ -3167,7 +3167,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: NEW_PATH,
-      markdown: "original content",
+      content: "original content",
       contentKind: "plaintext",
       objectId: "object-original",
     });
@@ -3219,7 +3219,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH,
-      markdown: "captured now",
+      content: "captured now",
       contentKind: "plaintext",
     });
 
@@ -3238,7 +3238,7 @@ describe("the ydoc.open deadline (#616)", () => {
   });
 
   // Codex round on #728 head 1a05775e. The `?? resurrectedDoc(session.doc)`
-  // fallback this test used to pin was unreachable: after the seedMarkdown
+  // fallback this test used to pin was unreachable: after the seedContent
   // fix, every server-side content source (a captured seed, a
   // resurrection, a local edit, a remote update) journals a lineage before
   // markSessionReplicated can run, so a session with no lineage entry
@@ -3385,7 +3385,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH,
-      markdown: "shared text",
+      content: "shared text",
       contentKind: "plaintext",
       objectId: "object-old",
     });
@@ -3414,13 +3414,13 @@ describe("the ydoc.open deadline (#616)", () => {
     // a delete + unrelated recreate that happens to land on the same
     // bytes.
     // MUTATION: drop the object-id comparison from `coveredByCapture` ->
-    // this close SUCCEEDS, because the NEW object's captured markdown
+    // this close SUCCEEDS, because the NEW object's captured content
     // happens to match the OLD object's session content.
     engine.seedFile({
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH,
-      markdown: "shared text",
+      content: "shared text",
       contentKind: "plaintext",
       objectId: "object-new",
     });
@@ -3464,7 +3464,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH2,
-      markdown: "A, now at its new path",
+      content: "A, now at its new path",
       contentKind: "plaintext",
       objectId: aObjectId,
     });
@@ -3480,7 +3480,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH1,
-      markdown: "a completely unrelated new file",
+      content: "a completely unrelated new file",
       contentKind: "plaintext",
     });
 
@@ -3554,7 +3554,7 @@ describe("the ydoc.open deadline (#616)", () => {
       "typed, never settled: plain text content",
     );
     const settled = await reopened.settle();
-    expect(settled.markdown).toBe(
+    expect(settled.content).toBe(
       "typed, never settled: plain text content",
     );
     await reopened.close({ settle: true });
@@ -3591,7 +3591,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH2,
-      markdown: "typed, never settled: ",
+      content: "typed, never settled: ",
       contentKind: "plaintext",
       objectId: session.objectId,
     });
@@ -3631,7 +3631,7 @@ describe("the ydoc.open deadline (#616)", () => {
     });
 
     // A DIFFERENT version's fixture reuses the SAME (derived) object id
-    // string, with markdown matching this session's content — a plausible
+    // string, with content matching this session's content — a plausible
     // fixture collision the daemon's DocKey always keeps apart. This is
     // the ONLY `files` entry with this object id, in either scope.
     // MUTATION: scan `files` by object id alone, ignoring workspace/version
@@ -3640,7 +3640,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: OTHER_VERSION,
       path: PATH,
-      markdown: "same object id, wrong scope: ",
+      content: "same object id, wrong scope: ",
       contentKind: "plaintext",
       objectId: session.objectId,
     });
@@ -3665,7 +3665,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH_A,
-      markdown: "stale bytes at the old path",
+      content: "stale bytes at the old path",
       contentKind: "plaintext",
       objectId: OBJECT_ID,
     });
@@ -3693,7 +3693,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH_B,
-      markdown: "fresh bytes at the new path",
+      content: "fresh bytes at the new path",
       contentKind: "plaintext",
       objectId: OBJECT_ID,
     });
@@ -3739,7 +3739,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH_B,
-      markdown: "A, now at its new path",
+      content: "A, now at its new path",
       contentKind: "plaintext",
       objectId: aObjectId,
     });
@@ -3779,7 +3779,7 @@ describe("the ydoc.open deadline (#616)", () => {
   // refuses (NoMarker) rather than letting an empty projection clobber
   // whatever the artifact holds.
   it("an explicit settle:true close on an untouched absent-lineage session refuses instead of materializing an empty projection", async () => {
-    const materialized: Array<{ path: string; markdown: string }> = [];
+    const materialized: Array<{ path: string; content: string }> = [];
     const engine = new YdocLoopbackEngine({
       materialize: (input) => materialized.push(input),
     });
@@ -3810,12 +3810,12 @@ describe("the ydoc.open deadline (#616)", () => {
   // `firstUpdatePending` true forever — so a direct settle over a freshly
   // opened captured file, with no local edits at all, wrongly hit the
   // guard above. `ydoc_open_state_on_store` (actor.rs) never embeds a seed
-  // in `initial_update`: `seed_markdown` carries it separately, and the
+  // in `initial_update`: `seed_content` carries it separately, and the
   // CLIENT applies-and-records it through a REAL `ydoc.recordUpdate`
   // (`YdocLiveAdapter.openSession`), which is what clears
   // `firstUpdatePending` honestly — the guard itself needed no change.
   it("a head-present open with no lineage yet journals its seed through recordUpdate, so an untouched settle succeeds", async () => {
-    const materialized: Array<{ path: string; markdown: string }> = [];
+    const materialized: Array<{ path: string; content: string }> = [];
     const engine = new YdocLoopbackEngine({
       materialize: (input) => materialized.push(input),
     });
@@ -3823,7 +3823,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH,
-      markdown: "captured content",
+      content: "captured content",
       contentKind: "plaintext",
     });
     const adapter = new YdocLiveAdapter(engine);
@@ -3839,13 +3839,13 @@ describe("the ydoc.open deadline (#616)", () => {
     );
 
     // MUTATION: embed the seed directly in `initialUpdateBase64` instead of
-    // returning `seedMarkdown` for the adapter to record -> this close
+    // returning `seedContent` for the adapter to record -> this close
     // wrongly refuses (NoMarker), even though the artifact already holds
     // this exact content and nothing was ever "untouched" from the
     // daemon's point of view.
     await expect(session.close({ settle: true })).resolves.toBeUndefined();
     expect(materialized).toEqual([
-      { path: PATH, markdown: "captured content" },
+      { path: PATH, content: "captured content" },
     ]);
     adapter.dispose();
   });
@@ -3863,7 +3863,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH,
-      markdown: "original content",
+      content: "original content",
       contentKind: "plaintext",
       objectId: "object-explicit-id",
     });
@@ -3892,7 +3892,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: WORKSPACE,
       versionId: VERSION,
       path: PATH,
-      markdown: "updated content",
+      content: "updated content",
       contentKind: "plaintext",
     });
 
@@ -3943,7 +3943,7 @@ describe("the ydoc.open deadline (#616)", () => {
       workspace: OTHER_WORKSPACE,
       versionId: VERSION,
       path: PATH,
-      markdown: "unrelated workspace's file",
+      content: "unrelated workspace's file",
       contentKind: "plaintext",
       objectId: derivedId,
     });

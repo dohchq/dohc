@@ -116,12 +116,12 @@ function daemonSessions(): EngineWorkspaceSessions {
   return new EngineWorkspaceSessions({ currentClient: () => client });
 }
 
-function seedYdoc(versionId: string, markdown = INITIAL_MARKDOWN): void {
+function seedYdoc(versionId: string, content = INITIAL_MARKDOWN): void {
   ydoc.seedFile({
     workspace: WORKSPACE_ID,
     versionId,
     path: PATH,
-    markdown,
+    content,
     contentKind: "richdoc",
   });
 }
@@ -187,8 +187,8 @@ beforeEach(async () => {
   // else (#338). A loopback that reports `materialized: true` while writing
   // nothing would leave every file below unchanged, so it materializes too.
   ydoc = new YdocLoopbackEngine({
-    materialize: ({ path, markdown }) =>
-      writeFileSync(join(root, path), markdown, "utf8"),
+    materialize: ({ path, content }) =>
+      writeFileSync(join(root, path), content, "utf8"),
   });
   seedYdoc("main");
   sessions = daemonSessions();
@@ -218,7 +218,7 @@ it("journals a live editor update through the Rust Y.Doc provider and suppresses
 
   // 2, not 1: the head-present open's own seed (`INITIAL_MARKDOWN`) now
   // journals through a real recordUpdate ahead of this typed edit's
-  // (#721/#728, `ydoc_open_state_on_store`'s `seedMarkdown`).
+  // (#721/#728, `ydoc_open_state_on_store`'s `seedContent`).
   expect(ydoc.recordedUpdates).toHaveLength(2);
   expect(await readFile(join(root, PATH), "utf8")).toContain(
     "Typed with no collaboration server.",
@@ -856,7 +856,7 @@ it("opens a crash-orphaned draft the daemon resurrects, head absent and all", as
     workspace: WORKSPACE_ID,
     versionId: "main",
     path: ORPHANED,
-    markdown: "",
+    content: "",
     contentKind: "richdoc",
     head: "absent",
   });

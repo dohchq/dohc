@@ -7832,7 +7832,7 @@ fn a_fold_the_parser_can_reproduce_still_commits() {
             .doc
             .project(dohc_engine_collab::ContentKind::Richdoc)
             .expect("projection")
-            .markdown,
+            .content,
         chosen,
         "the lineage projects exactly the chosen bytes"
     );
@@ -8253,9 +8253,9 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                     .expect("established content kind"),
             )
             .expect("project established kind");
-        assert!(projected.markdown.contains("base"));
+        assert!(projected.content.contains("base"));
         assert!(
-            !projected.markdown.contains("queued"),
+            !projected.content.contains("queued"),
             "the refused alternate-root edit must not project through the established kind"
         );
         assert!(
@@ -8639,7 +8639,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             .doc
             .project(dohc_engine_collab::ContentKind::Plaintext)
             .expect("project converged base")
-            .markdown,
+            .content,
         "device Y document"
     );
 }

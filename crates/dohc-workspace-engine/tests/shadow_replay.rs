@@ -215,7 +215,7 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
             .doc
             .project(ContentKind::Plaintext)
             .expect("bounded plaintext projection")
-            .markdown,
+            .content,
         "benign"
     );
 }

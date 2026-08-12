@@ -3,7 +3,7 @@
 //! The Rust-owned durable Y.Doc update cache, snapshots, convergence-neutral
 //! compaction, per-document leases, the base-once replicated lineage, idempotent
 //! and echo-suppressed `ydoc.update` replication apply, and the settle pipeline
-//! (Y.Doc → markdown projection with provenance, materialized through R04's job
+//! (Y.Doc → artifact content with provenance, materialized through R04's job
 //! pipeline). It is the follow-through on the yrs abort criterion the week-one
 //! spike cleared (`SPIKE_REPORT.md`, `DECISIONS.md`), and it enforces all five
 //! binding yrs constraints — see [`ydoc`] for the per-constraint enforcement.
@@ -11,7 +11,7 @@
 //! # Two regimes (do not conflate)
 //!
 //! - **Local-only** ([`Regime::LocalOnly`]): the update/snapshot rows are a
-//!   PRUNABLE fast-resume cache. Markdown is the durable canonical artifact; a
+//!   PRUNABLE fast-resume cache. The workspace file is the durable artifact; a
 //!   closed session prunes the CRDT rows to nothing (keeping only the marker).
 //! - **Replicated** ([`Regime::Replicated`]): the CRDT lineage is durable
 //!   canonical. `ydoc.update` ops are journaled, the base is emitted exactly

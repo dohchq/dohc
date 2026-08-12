@@ -12,7 +12,7 @@
 //! 2. **Nested `Any::Map` key order is nondeterministic through a yrs re-encode.**
 //!    [`Ydoc::canonical_content`] sorts every map (including nested frontmatter
 //!    objects) via `BTreeMap`, and [`project_frontmatter`] sorts nested keys, so
-//!    neither the semantic convergence surface nor the markdown projection
+//!    neither the semantic convergence surface nor the content projection
 //!    depends on HashMap iteration order.
 //! 3. **Well-formed UTF-16 at the boundary.** Rust `String` cannot hold a lone
 //!    surrogate, so every string this module produces is well-formed by
@@ -96,18 +96,17 @@ impl ContentKind {
     }
 }
 
-/// A markdown projection of a durable Y.Doc with its provenance. Constraint 4:
-/// the TS `yDocToMarkdown` is destructive (y-prosemirror drops PM-invalid
-/// elements), so provenance must record what state produced the markdown and
-/// whether the projection mutated the source.
+/// A content projection of a durable Y.Doc with its provenance. Constraint 4:
+/// a projector can mutate its source, so provenance records the state that
+/// produced the content and whether projection changed that state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
-    /// The projected markdown (UTF-8; well-formed by Rust's `String` invariant).
-    pub markdown: String,
+    /// The projected artifact content (well-formed UTF-8 by `String`).
+    pub content: String,
     /// The content kind that drove the projection.
     pub content_kind: ContentKind,
     /// Lowercase-hex sha-256 of the doc's state vector at projection time — the
-    /// durable provenance link from a settled markdown blob back to the exact
+    /// durable provenance link from a settled content blob back to the exact
     /// CRDT state it came from.
     pub source_state_vector_sha256: String,
     /// Whether producing this projection mutated the live doc. The Rust
@@ -261,15 +260,15 @@ impl Ydoc {
         crate::hex_sha256(&canonical)
     }
 
-    /// Project to markdown with provenance (constraint 4). Plaintext projects the
-    /// exact `Y.Text`; richdoc projects sorted frontmatter + paragraph text.
+    /// Project artifact content with provenance (constraint 4). Plaintext
+    /// projects the exact `Y.Text`; richdoc projects Markdown.
     pub fn project(&self, content_kind: ContentKind) -> Result<Projection, CollabError> {
-        let markdown = match content_kind {
+        let content = match content_kind {
             ContentKind::Plaintext => self.project_plaintext(),
             ContentKind::Richdoc => self.project_richdoc(),
         }?;
         Ok(Projection {
-            markdown,
+            content,
             content_kind,
             source_state_vector_sha256: crate::hex_sha256(&self.encode_state_vector()),
             destructive: false,
@@ -3705,7 +3704,7 @@ mod projection_tests {
         assert_eq!(
             doc.project(ContentKind::Richdoc)
                 .expect("small projection")
-                .markdown,
+                .content,
             "\n| Value         | Other  |\n| ------------- | ------ |\n| left \\| right | stable |"
         );
     }
@@ -3738,7 +3737,7 @@ mod projection_tests {
         assert_eq!(
             doc.project(ContentKind::Richdoc)
                 .expect("small projection")
-                .markdown,
+                .content,
             "\n| first  | row |\n| ------ | --- |\n| second | row |"
         );
     }
@@ -3760,7 +3759,7 @@ mod projection_tests {
             projection
                 .expect("checked above")
                 .expect("clamped projection")
-                .markdown,
+                .content,
             "###### bounded",
             "out-of-schema heading levels clamp to level six"
         );
@@ -3846,7 +3845,7 @@ mod projection_tests {
         let markdown = doc
             .project(ContentKind::Richdoc)
             .expect("small projection")
-            .markdown;
+            .content;
         assert_eq!(
             markdown,
             "\n| H               |\n| --------------- |\n| first<br>second |"
@@ -3883,7 +3882,7 @@ mod projection_tests {
         let markdown = doc
             .project(ContentKind::Richdoc)
             .expect("small projection")
-            .markdown;
+            .content;
         assert!(
             markdown.contains("````const fence = ```;````<br>`left \\| right <&>`"),
             "unexpected projection: {markdown}"
@@ -4021,7 +4020,7 @@ fn main() {}
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen);
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert_eq!(
-            projected.markdown, chosen,
+            projected.content, chosen,
             "the folded document projects the chosen bytes back"
         );
         let body = serde_json::to_string(&doc.canonical_content()["body"]).expect("body json");
@@ -4059,7 +4058,7 @@ fn main() {}
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen);
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert_eq!(
-            projected.markdown, chosen,
+            projected.content, chosen,
             "the nested frontmatter roundtrips byte-identically"
         );
         let frontmatter =
@@ -4104,11 +4103,11 @@ fn main() {}
             .project(ContentKind::Richdoc)
             .expect("projection");
         assert_ne!(
-            projected.markdown, hostile,
+            projected.content, hostile,
             "past the budget the fold cannot reproduce the chosen bytes"
         );
         assert!(
-            projected.markdown.contains("&gt;"),
+            projected.content.contains("&gt;"),
             "and the loss is the projector's escaping"
         );
     }
@@ -4128,9 +4127,9 @@ fn main() {}
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen);
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert!(
-            projected.markdown.contains("item") && projected.markdown.contains("after"),
+            projected.content.contains("item") && projected.content.contains("after"),
             "the list ends where no successor exists and the rest still parses: {}",
-            projected.markdown
+            projected.content
         );
     }
 
@@ -4147,7 +4146,7 @@ fn main() {}
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen);
             let projected = doc.project(ContentKind::Richdoc).expect("projection");
             assert_eq!(
-                projected.markdown, chosen,
+                projected.content, chosen,
                 "a {levels}-level quote must roundtrip byte-identically"
             );
         }

@@ -7,9 +7,10 @@
 //!
 //! ## Two regimes (never conflated — plan correction)
 //!
-//! [`Regime::LocalOnly`] keeps the log as a PRUNABLE fast-resume cache: markdown
-//! is the durable canonical, and a closed session prunes every CRDT row to the
-//! bare marker. [`Regime::Replicated`] makes the CRDT lineage durable canonical:
+//! [`Regime::LocalOnly`] keeps the log as a PRUNABLE fast-resume cache. The
+//! workspace file is the durable artifact, and a closed session prunes every
+//! CRDT row to the bare marker. [`Regime::Replicated`] makes the CRDT lineage
+//! durable canonical:
 //! the base is emitted exactly once, local edits journal `ydoc.update` ops
 //! (surfaced via [`AppendOutcome::emit_outbound`]), and close NEVER prunes — a
 //! peer bootstraps from the persisted lineage.
@@ -28,7 +29,7 @@ use crate::DocKey;
 /// Which durability regime a lineage lives under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Regime {
-    /// Prunable fast-resume cache; markdown is durable canonical.
+    /// Prunable fast-resume cache; the workspace file is the durable artifact.
     LocalOnly,
     /// Durable canonical CRDT lineage; base-once, never pruned on close.
     Replicated,
@@ -122,12 +123,12 @@ pub enum ClaimOutcome {
 /// The outcome of a settle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettleOutcome {
-    /// The markdown projection with provenance.
+    /// The artifact content projection with provenance.
     pub projection: Projection,
     /// The durable materialization job id (deterministic; a crash-retry with the
     /// same content is an idempotent no-op).
     pub job_id: String,
-    /// Lowercase-hex sha-256 of the projected markdown (its `binary_blobs` key).
+    /// Lowercase-hex sha-256 of the projected content (its `binary_blobs` key).
     pub content_sha256: String,
     /// True when the job was already enqueued for this content+generation.
     pub deduped: bool,
@@ -720,8 +721,8 @@ pub fn maybe_compact(
 }
 
 /// Claim the single BASE snapshot for a replicated lineage (base-once). The base
-/// bytes are a full-state re-encode of the doc seeded from markdown at first
-/// creation. Re-checks `base_claimed` inside the transaction so a cross-process
+/// bytes are a full-state re-encode of the document after its initial artifact
+/// seed. Re-checks `base_claimed` inside the transaction so a cross-process
 /// first-open race resolves to exactly one base: the loser observes the winner's
 /// base and returns [`ClaimOutcome::Resumed`] (emitting no second base).
 pub fn claim_base(
@@ -881,7 +882,7 @@ pub fn record_update_in_tx(
 /// transaction.
 ///
 /// The encode is a full state of the lineage as it stands right now, never a
-/// fresh markdown seed. A promoted lineage therefore publishes the update rows
+/// fresh artifact seed. A promoted lineage therefore publishes the update rows
 /// it already holds: a fresh seed would mint new Yjs item ids, leave those rows
 /// on the origin alone, and every clean peer would be permanently missing them.
 ///
@@ -903,8 +904,8 @@ pub fn encode_origination_base_in_tx(
     }))
 }
 
-/// Settle: project the reconstructed Y.Doc to markdown (with provenance),
-/// content-address the markdown into `binary_blobs`, and enqueue a durable
+/// Settle: project the reconstructed Y.Doc to artifact content (with provenance),
+/// content-address the projection in `binary_blobs`, and enqueue a durable
 /// materialization job (R04's pipeline) in the SAME transaction.
 ///
 /// **Clock-independent exactly-once.** The generation is a DURABLE, monotone
@@ -927,13 +928,13 @@ pub fn settle(
         None => return Err(CollabError::NoMarker),
     };
     let projection = persisted.doc.project(persisted.marker.content_kind)?;
-    let markdown_bytes = projection.markdown.clone().into_bytes();
-    let content_sha = crate::hex_sha256(&markdown_bytes);
+    let content_bytes = projection.content.clone().into_bytes();
+    let content_sha = crate::hex_sha256(&content_bytes);
     let sv_bytes = persisted.doc.encode_state_vector();
 
     store.write_with(faults, |tx| {
-        // Persist the markdown + the provenance state vector as content blobs.
-        put_binary_blob(tx, &markdown_bytes)?;
+        // Persist the content and its provenance state vector as blobs.
+        put_binary_blob(tx, &content_bytes)?;
         put_binary_blob(tx, &sv_bytes)?;
 
         // Durable per-doc settle counter + last-materialized content.
@@ -1027,7 +1028,7 @@ pub fn settle(
 
 /// Close a session: regime-dependent. Replicated (or persist-closed-state)
 /// compacts and KEEPS the lineage durable; local-only prunes every CRDT row to
-/// the bare marker (markdown-is-the-artifact).
+/// the bare marker (the workspace file is the artifact).
 pub fn close_session(
     store: &mut EngineStore,
     key: &DocKey,
@@ -1047,7 +1048,7 @@ pub fn close_session(
         });
     }
     // Local-only prune would DISCARD the CRDT cache. Refuse unless the artifact
-    // already holds the head's bytes (markdown-is-the-artifact: the artifact
+    // already holds the head's bytes (the workspace file is the artifact: it
     // must exist before the cache is thrown away). A doc with no edits
     // (`head_update_seq == 0`) has nothing to lose and prunes freely.
     if marker.head_update_seq > 0 {
@@ -1056,7 +1057,7 @@ pub fn close_session(
             persisted
                 .doc
                 .project(marker.content_kind)?
-                .markdown
+                .content
                 .as_bytes(),
         );
         // TWO ways the artifact can already hold these bytes, and both count.

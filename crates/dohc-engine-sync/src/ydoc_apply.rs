@@ -602,7 +602,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         .map_err(|_| SyncError::InvalidInput {
             reason: "ydoc projection exceeds materialization cap",
         })?;
-    if projection.markdown != chosen_text {
+    if projection.content != chosen_text {
         let update = doc.rewrite_content_to_markdown(marker.content_kind, chosen_text);
         // VERIFY THE FOLD'S OWN OUTPUT. The markdown parser behind the
         // rewrite is asserted to be the projector's inverse, and nothing
@@ -631,7 +631,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
             .map_err(|_| SyncError::InvalidInput {
                 reason: "ydoc projection exceeds materialization cap",
             })?;
-        if refolded.markdown != chosen_text {
+        if refolded.content != chosen_text {
             return Err(SyncError::InvalidInput {
                 reason: "ydoc-resolution-not-representable",
             });
@@ -682,16 +682,16 @@ pub fn fold_resolution_into_ydoc_in_tx(
     Ok(())
 }
 
-/// Store the projected markdown as a text blob so a conflict side can
+/// Store the projected content as a text blob so a conflict side can
 /// reference it (the conflict UI hydrates sides from `blobs`).
 fn put_projection_text_blob(
     tx: &rusqlite::Transaction<'_>,
-    markdown: &str,
+    content: &str,
     sha256: &str,
 ) -> Result<(), SyncError> {
     tx.execute(
         "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-        params![sha256, markdown.len() as i64, markdown],
+        params![sha256, content.len() as i64, content],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -727,8 +727,8 @@ pub fn project_and_write_in_tx(
     // remote projection instead (moment-lane parity) and leave the head and
     // the settle marker alone until a resolution closes the conflict.
     if let Some(conflict_id) = open_sync_conflict_id(tx, key)? {
-        let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
-        put_projection_text_blob(tx, &projection.markdown, &projected_sha)?;
+        let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+        put_projection_text_blob(tx, &projection.content, &projected_sha)?;
         crate::moment_apply::coalesce_conflict_sides(
             tx,
             &key.workspace_id,
@@ -757,7 +757,7 @@ pub fn project_and_write_in_tx(
     // capture/local write while last_settled_sha points at an older settle,
     // and leaving it stale would wedge the next settle in
     // ConflictStaleTarget over a converged doc.
-    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
     if let Some(snapshot) = current
         .snapshot
         .as_ref()
@@ -793,7 +793,7 @@ pub fn project_and_write_in_tx(
             version_id: key.version_id.clone(),
             object_id: key.object_id.clone(),
             path: path.to_owned(),
-            text: projection.markdown.clone(),
+            text: projection.content.clone(),
             moment_id,
             metadata_origin: "ydoc".to_owned(),
             metadata_summary: None,
@@ -1130,9 +1130,9 @@ pub fn apply_ydoc_envelope(
                     .map_err(|_| SyncError::InvalidInput {
                         reason: "ydoc projection exceeds materialization cap",
                     })?;
-                let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+                let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
                 if snapshot.blob_sha256 != projected_sha {
-                    put_projection_text_blob(tx, &projection.markdown, &projected_sha)?;
+                    put_projection_text_blob(tx, &projection.content, &projected_sha)?;
                     let incoming_moment_id =
                         ydoc_apply_moment_id(&claim_key, &base_path, &op.origin_id, op.origin_seq);
                     let conflict_id = crate::moment_apply::sync_conflict_id(

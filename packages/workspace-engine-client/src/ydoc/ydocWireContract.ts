@@ -45,6 +45,9 @@ export type YdocOpenResult = JsonObject & {
   // daemon resurrects is lineage-existing and head-absent. Only both absent
   // means the session is bound to an EMPTY doc over nothing.
   lineage: "existing" | "absent";
+  // Present only when the engine opened a captured artifact without durable
+  // CRDT lineage. The client records this content as the lineage's first update.
+  seedContent?: string;
 };
 
 export type YdocRecordUpdateParams = JsonObject & {
@@ -74,7 +77,7 @@ export type YdocSettleResult = JsonObject & {
   // null once the settled body is past the engine's in-band response cap. The
   // settle still committed and the engine wrote the file — read it from disk
   // rather than echoing it back over the wire.
-  markdown: string | null;
+  content: string | null;
   sha256: string;
   // false => the settle committed but the FILE did not move (materialization
   // blocked by containment; the write is pending a retry). Nothing may report
@@ -199,6 +202,15 @@ export function decodeYdocOpenResult(value: JsonValue): YdocOpenResult {
     ),
     head: headValue(object, "head", "ydoc.open result"),
     lineage: lineageValue(object, "lineage", "ydoc.open result"),
+    ...(object.seedContent === undefined
+      ? {}
+      : {
+          seedContent: stringValue(
+            object,
+            "seedContent",
+            "ydoc.open result",
+          ),
+        }),
   };
 }
 
@@ -255,7 +267,7 @@ export function decodeYdocSettleResult(value: JsonValue): YdocSettleResult {
   return {
     momentId: stringValue(object, "momentId", "ydoc.settle result"),
     path: stringValue(object, "path", "ydoc.settle result"),
-    markdown: nullableStringValue(object, "markdown", "ydoc.settle result"),
+    content: nullableStringValue(object, "content", "ydoc.settle result"),
     sha256: stringValue(object, "sha256", "ydoc.settle result"),
     materialized: booleanValue(object, "materialized", "ydoc.settle result"),
     projection: {

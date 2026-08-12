@@ -93,7 +93,7 @@ function captureWith(root: string, sessions: EngineWorkspaceSessions) {
       head: "present" as const,
       lineage: "existing" as const,
       applyLocalUpdate: async () => undefined,
-      settleNow: async () => ({ sha256: "a".repeat(64), markdown: "" }) as never,
+      settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
       applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
       close: async () => undefined,
       evict: async () => undefined,
@@ -456,7 +456,7 @@ describe("the document open's capture-chain hold (#564)", () => {
           lineage: "absent" as const,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
-            ({ sha256: "a".repeat(64), markdown: "" }) as never,
+            ({ sha256: "a".repeat(64), content: "" }) as never,
           applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async () => {
             throw closeError;
@@ -550,7 +550,7 @@ describe("the document open's capture-chain hold (#564)", () => {
             lineage: absent ? ("absent" as const) : ("existing" as const),
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
-              ({ sha256: "a".repeat(64), markdown: "" }) as never,
+              ({ sha256: "a".repeat(64), content: "" }) as never,
             applyExternalMarkdownEdit: async () =>
               ({ kind: "merged" }) as never,
             close: async () => {
@@ -669,7 +669,7 @@ describe("the document open's capture-chain hold (#564)", () => {
           lineage: "absent" as const,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
-            ({ sha256: "a".repeat(64), markdown: "" }) as never,
+            ({ sha256: "a".repeat(64), content: "" }) as never,
           applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async (closeOptions?: {
             settle?: boolean;
@@ -762,7 +762,7 @@ describe("the document open's capture-chain hold (#564)", () => {
             lineage: evicted ? ("existing" as const) : ("absent" as const),
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
-              ({ sha256: "a".repeat(64), markdown: "" }) as never,
+              ({ sha256: "a".repeat(64), content: "" }) as never,
             applyExternalMarkdownEdit: async () =>
               ({ kind: "merged" }) as never,
             close: async () => {
@@ -841,7 +841,7 @@ describe("the document open's capture-chain hold (#564)", () => {
             lineage: evicted ? ("existing" as const) : ("absent" as const),
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
-              ({ sha256: "a".repeat(64), markdown: "" }) as never,
+              ({ sha256: "a".repeat(64), content: "" }) as never,
             applyExternalMarkdownEdit: async () =>
               ({ kind: "merged" }) as never,
             close: async () => {
@@ -913,7 +913,7 @@ describe("the document open's capture-chain hold (#564)", () => {
           lineage: "absent" as const,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
-            ({ sha256: "a".repeat(64), markdown: "" }) as never,
+            ({ sha256: "a".repeat(64), content: "" }) as never,
           applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async (closeOptions?: {
             settle?: boolean;
@@ -986,7 +986,7 @@ describe("the document open's capture-chain hold (#564)", () => {
             lineage: absent ? ("absent" as const) : ("existing" as const),
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
-              ({ sha256: "a".repeat(64), markdown: "" }) as never,
+              ({ sha256: "a".repeat(64), content: "" }) as never,
             applyExternalMarkdownEdit: async () =>
               ({ kind: "merged" }) as never,
             close: async () => {

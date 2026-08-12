@@ -95,7 +95,7 @@ fn assert_matches_expectation(fx: &Fixture, doc: &Ydoc) {
             assert_eq!(
                 doc.project(ContentKind::Plaintext)
                     .expect("bounded plaintext projection")
-                    .markdown,
+                    .content,
                 expected,
                 "plaintext projection seed {}",
                 fx.seed
@@ -135,7 +135,7 @@ fn assert_matches_expectation(fx: &Fixture, doc: &Ydoc) {
                 assert_eq!(
                     doc.project(ContentKind::Richdoc)
                         .expect("bounded richdoc projection")
-                        .markdown,
+                        .content,
                     expected_markdown,
                     "richdoc markdown projection seed {}",
                     fx.seed
@@ -196,7 +196,7 @@ fn richdoc_projection_matches_typescript_byte_for_byte() {
         assert_eq!(
             doc.project(ContentKind::Richdoc)
                 .expect("bounded richdoc projection")
-                .markdown,
+                .content,
             expected,
             "projection fixture {kind}"
         );
@@ -973,7 +973,7 @@ fn nested_frontmatter_keys_are_sorted_deterministically() {
     let markdown = doc
         .project(ContentKind::Richdoc)
         .expect("bounded richdoc projection")
-        .markdown;
+        .content;
     let a = markdown.find("alpha").expect("alpha");
     let b = markdown.find("beta").expect("beta");
     let d = markdown.find("delta").expect("delta");

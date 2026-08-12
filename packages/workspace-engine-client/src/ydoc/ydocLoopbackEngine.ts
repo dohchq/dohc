@@ -20,13 +20,13 @@ interface LoopbackFile {
   versionId: string;
   objectId: string;
   contentKind: YdocContentKind;
-  markdown: string;
+  content: string;
   // Whether this version has a file snapshot.
   head: "present" | "absent";
 }
 
 // Mirrors `dohc_engine_collab::durable::Regime`: LocalOnly is a prunable
-// fast-resume cache (markdown is durable canonical), Replicated is the
+// fast-resume cache (the artifact is durable canonical), Replicated is the
 // durable canonical CRDT lineage itself, and its close NEVER prunes it.
 type LineageRegime = "local-only" | "replicated";
 
@@ -72,7 +72,7 @@ export interface SeedLoopbackFileInput {
   workspace: string;
   versionId: string;
   path: string;
-  markdown: string;
+  content: string;
   contentKind?: YdocContentKind;
   objectId?: string;
   // The default models an ordinary captured file with a version snapshot.
@@ -221,7 +221,7 @@ function project(session: LoopbackSession): string {
 }
 
 export interface YdocLoopbackEngineOptions {
-  // The daemon WRITES the projected markdown to the workspace file as part of
+  // The daemon writes the projected content to the workspace file as part of
   // settle, which is what its `materialized: true` reports. A loopback with no
   // materializer reports that same flag while nothing reaches disk — a caller
   // that reads the file back then sees content only because something else
@@ -231,7 +231,7 @@ export interface YdocLoopbackEngineOptions {
   // lineage without touching a drifted file. That is more than the daemon
   // does, so no test may use this hook to prove what happens to a file the
   // daemon leaves alone — those cases belong to a real-daemon test.
-  materialize?: (input: { path: string; markdown: string }) => void;
+  materialize?: (input: { path: string; content: string }) => void;
 }
 
 export class YdocLoopbackEngine implements EngineTransport {
@@ -290,7 +290,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       versionId: input.versionId,
       objectId,
       contentKind: input.contentKind ?? "richdoc",
-      markdown: input.markdown,
+      content: input.content,
       head: input.head ?? "present",
     });
   }
@@ -497,20 +497,20 @@ export class YdocLoopbackEngine implements EngineTransport {
       : (requestedKind ?? file?.contentKind ?? "richdoc");
     const doc = lineage ? resurrectedDoc(lineage.doc) : declaredDoc();
     const lineageAbsentAtOpen = lineage === undefined;
-    // A captured file with no durable lineage yet ships its markdown as
-    // `seedMarkdown`, not embedded in `initialUpdateBase64` — the CLIENT
+    // A captured file with no durable lineage yet ships its content as
+    // `seedContent`, not embedded in `initialUpdateBase64` — the CLIENT
     // applies it as a real local update and records it through
     // `ydoc.recordUpdate` (`YdocLiveAdapter.openSession`), exactly as
     // `ydoc_open_state_on_store` does (actor.rs): `initial_update` stays
-    // the EMPTY doc's state, and `seed_markdown` carries the head's text
+    // the EMPTY doc's state, and `seed_content` carries the head's text
     // separately, `(!lineage_existing).then(|| head...).flatten()`. That
     // recordUpdate is what clears `firstUpdatePending` — embedding the
     // seed directly into the initial doc here (as an earlier version of
     // this loopback did) leaves an ordinary settle over a freshly-opened
     // captured file looking untouched forever, and the NoMarker guard
     // refuses it.
-    const seedMarkdown =
-      !lineage && file?.head === "present" ? file.markdown : undefined;
+    const seedContent =
+      !lineage && file?.head === "present" ? file.content : undefined;
     this.sessions.set(sessionId, {
       sessionId,
       workspace: request.workspace,
@@ -532,7 +532,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(doc)),
       lineage: lineage ? "existing" : "absent",
       head: file ? file.head : "absent",
-      ...(seedMarkdown !== undefined ? { seedMarkdown } : {}),
+      ...(seedContent !== undefined ? { seedContent } : {}),
     };
   }
 
@@ -562,7 +562,7 @@ export class YdocLoopbackEngine implements EngineTransport {
   }
 
   private settleSession(session: LoopbackSession): {
-    markdown: string;
+    content: string;
     sha256: string;
   } {
     // `ydoc_settle_on_store`'s `load_persisted` finds no marker row at all
@@ -576,12 +576,12 @@ export class YdocLoopbackEngine implements EngineTransport {
     if (session.lineageAbsentAtOpen && session.firstUpdatePending) {
       throw noMarkerRefusal();
     }
-    const markdown = project(session);
-    const digest = sha256(markdown);
-    this.options.materialize?.({ path: session.path, markdown });
+    const content = project(session);
+    const digest = sha256(content);
+    this.options.materialize?.({ path: session.path, content });
     const entry = this.lineages.get(this.lineageKeyFor(session));
     if (entry) entry.lastSettledSha = digest;
-    return { markdown, sha256: digest };
+    return { content, sha256: digest };
   }
 
   private settle(value: JsonValue): JsonValue {
@@ -590,11 +590,11 @@ export class YdocLoopbackEngine implements EngineTransport {
       requiredString(params, "sessionId", "ydoc.settle params"),
     );
     optionalString(params, "summary");
-    const { markdown, sha256: digest } = this.settleSession(session);
+    const { content, sha256: digest } = this.settleSession(session);
     return {
       momentId: `moment-${this.nextMomentId++}`,
       path: session.path,
-      markdown,
+      content,
       sha256: digest,
       // The loopback always "materializes": it has no containment to block.
       materialized: true,
@@ -672,14 +672,14 @@ export class YdocLoopbackEngine implements EngineTransport {
       // (durable.rs close_session): the projected content must match either
       // the last settle this lineage recorded, OR a CAPTURED head — the
       // `files` row IS this loopback's disk read, so a present head whose
-      // markdown already matches the projection is the same proof
+      // content already matches the projection is the same proof
       // `captured_head_sha` reads there (durable.rs:1278-1310). That query
       // is scoped by (workspace, version, object_id) with NO path
       // restriction — a rename does not mint a new object — so the lookup
       // here resolves by object identity too, never by this session's own
       // path: a renamed object captured at its NEW path still covers the
       // OLD session's close, and a path rebound to a DIFFERENT object with
-      // coincidentally identical markdown never covers this one. Absent
+      // coincidentally identical content never covers this one. Absent
       // head covers nothing either, same as the daemon's read. A
       // REPLICATED lineage never takes this branch — its close compacts
       // and keeps the rows regardless of settle state (see
@@ -693,7 +693,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       const coveredByCapture =
         capturedFile !== undefined &&
         capturedFile.head === "present" &&
-        sha256(capturedFile.markdown) === currentSha;
+        sha256(capturedFile.content) === currentSha;
       if (entry.lastSettledSha !== currentSha && !coveredByCapture) {
         throw unsettledCloseRefusal();
       }

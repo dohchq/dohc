@@ -87,7 +87,7 @@ fn plaintext_update(text: &str) -> String {
 /// The order is VERIFIED, not assumed. Writing the file and opening straight
 /// after relies on the open beating the watcher's settle window, and this
 /// machine has shown 3.5x slowdowns under suite load — a paused task lets
-/// capture ingest first, `seedMarkdown` comes back "" instead of null, and the
+/// capture ingest first, `seedContent` comes back "" instead of null, and the
 /// test false-fails without ever staging the race it exists to cover.
 ///
 /// The capture probe cannot enforce it either: its seam holds the driver AFTER
@@ -117,7 +117,7 @@ async fn stage_headless_session_over_an_empty_artifact(
             }),
         )
         .await;
-        if opened["seedMarkdown"] == Value::Null {
+        if opened["seedContent"] == Value::Null {
             // The seed comes from the HEAD, not from disk, so a null seed IS
             // the proof that no head exists yet.
             assert_eq!(opened["lineage"], json!("absent"));
@@ -225,7 +225,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     // the path. The open consumer keys its refusal on `head`, not on `lineage`
     // — reading `lineage` here would refuse every ordinary first open.
     assert_eq!(opened["head"], json!("present"));
-    assert_eq!(opened["seedMarkdown"], json!("before"));
+    assert_eq!(opened["seedContent"], json!("before"));
     let session_id = opened["sessionId"].as_str().expect("session id");
     let object_id = opened["objectId"].as_str().expect("object id");
     assert!(session_id.starts_with("ydoc-"));
@@ -290,7 +290,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         json!({ "sessionId": session_id, "summary": "RPC-C settle" }),
     )
     .await;
-    assert_eq!(settled["markdown"], json!("settled text"));
+    assert_eq!(settled["content"], json!("settled text"));
     assert_eq!(settled["projection"]["contentKind"], json!("plaintext"));
     assert_eq!(settled["projection"]["destructive"], json!(false));
     assert_eq!(
@@ -359,13 +359,13 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     // The local-only close PRUNED the CRDT cache to the bare marker
-    // (markdown-is-the-artifact), so the reopen must NOT claim an existing
+    // (the workspace file is the artifact), so the reopen must NOT claim an existing
     // lineage — that would hand the client an empty doc with nothing to seed
     // from, and its next settle would clobber the settled file. Instead the
-    // artifact re-seeds the cache: lineage absent + seedMarkdown carrying the
+    // artifact re-seeds the cache: lineage absent + seedContent carrying the
     // settled content.
     assert_eq!(reopened["lineage"], json!("absent"));
-    assert_eq!(reopened["seedMarkdown"], json!("settled text"));
+    assert_eq!(reopened["seedContent"], json!("settled text"));
     let reopened_session = reopened["sessionId"].as_str().expect("reopened session");
     let reseeded = call(
         &transport,
@@ -449,7 +449,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         json!({ "sessionId": rich_session }),
     )
     .await;
-    let rich_markdown = rich_settled["markdown"].as_str().expect("rich markdown");
+    let rich_markdown = rich_settled["content"].as_str().expect("rich markdown");
     assert!(
         rich_markdown.contains("Rich settled body."),
         "richdoc settle must project the body fragment, got {rich_markdown:?}"
@@ -469,7 +469,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     // The default close SETTLED the richdoc, so the local-only lineage prunes
-    // exactly like plaintext (markdown-is-the-artifact): a reopen must reseed
+    // exactly like plaintext (the workspace file is the artifact): a reopen must reseed
     // from the settled markdown, not resume a persisted CRDT — a persisted
     // closed CRDT would shadow any external .md edit made while closed.
     let rich_reopened = call(
@@ -485,7 +485,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     assert_eq!(rich_reopened["lineage"], json!("absent"));
-    let reseed = rich_reopened["seedMarkdown"].as_str().expect("rich reseed");
+    let reseed = rich_reopened["seedContent"].as_str().expect("rich reseed");
     assert!(
         reseed.contains("Rich settled body."),
         "reopen must reseed from the settled artifact, got {reseed:?}"
@@ -560,7 +560,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         "an explicit kind must override a bare marker's remembered default"
     );
     assert_eq!(recovered["lineage"], json!("absent"));
-    assert_eq!(recovered["seedMarkdown"], json!("poisoned default body"));
+    assert_eq!(recovered["seedContent"], json!("poisoned default body"));
     call(
         &transport,
         &handle,
@@ -862,19 +862,19 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
         json!({ "sessionId": session_id, "summary": "still owned" }),
     )
     .await;
-    assert_eq!(settled["markdown"], json!("session text"));
+    assert_eq!(settled["content"], json!("session text"));
 
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_markdown() {
+async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content() {
     // AUDIT-SILENTSAVE. Three dogfood journeys watched a doc read "Saved" in
     // the editor while its .md sat at ZERO BYTES: the settle refused
     // pre-commit on every debounce because the RESPONSE could not carry the
     // markdown as one wire string. The cap belongs to the wire, not to
     // durability — the daemon materializes from the projection it already
-    // holds, so the file must land and the response must say `markdown: null`.
+    // holds, so the file must land and the response must say `content: null`.
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
 
@@ -927,7 +927,7 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_markdow
 
     // The response omits the body (it cannot cross as one string) but the
     // settle COMMITTED: a moment id, a sha, and the real bytes on disk.
-    assert_eq!(settled["markdown"], Value::Null);
+    assert_eq!(settled["content"], Value::Null);
     assert!(
         settled["momentId"]
             .as_str()
@@ -959,7 +959,7 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_markdow
         json!({ "sessionId": session_id, "summary": "paste again" }),
     )
     .await;
-    assert_eq!(resettled["markdown"], Value::Null);
+    assert_eq!(resettled["content"], Value::Null);
     let on_disk = std::fs::read_to_string(scratch.path().join("load/big.md"))
         .expect("the second over-cap settle must write the .md");
     assert!(
@@ -1106,7 +1106,7 @@ async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
     .await;
     // The empty file IS the seed: the lineage is absent and seeds from "".
     assert_eq!(opened["lineage"], json!("absent"));
-    assert_eq!(opened["seedMarkdown"], json!(""));
+    assert_eq!(opened["seedContent"], json!(""));
     let session_id = opened["sessionId"].as_str().expect("session id");
 
     let typed = "Baseline alpha persisted normally.";
@@ -1129,7 +1129,7 @@ async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
         json!({ "sessionId": session_id, "summary": "type" }),
     )
     .await;
-    assert_eq!(settled["markdown"], json!(typed));
+    assert_eq!(settled["content"], json!(typed));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("baseline/alpha.md")).expect("settled"),
         typed,
@@ -1245,7 +1245,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
         json!({ "sessionId": session_id, "summary": "type" }),
     )
     .await;
-    assert_eq!(settled["markdown"], json!(typed));
+    assert_eq!(settled["content"], json!(typed));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(&path)).expect("settled"),
         typed,
@@ -1272,7 +1272,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
         json!({ "sessionId": session_id, "summary": "type more" }),
     )
     .await;
-    let resettled = resettled["markdown"].as_str().expect("markdown");
+    let resettled = resettled["content"].as_str().expect("content");
     // BOTH edits, not just the newest: a second settlement that dropped the
     // first would otherwise satisfy every assertion here. Order is not
     // asserted — two independent client ids inserting at offset 0 order by
@@ -1418,7 +1418,7 @@ async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
     )
     .await;
     assert_eq!(opened["lineage"], json!("absent"));
-    assert_eq!(opened["seedMarkdown"], Value::Null);
+    assert_eq!(opened["seedContent"], Value::Null);
     let session_id = opened["sessionId"].as_str().expect("session id");
 
     call(
@@ -1440,7 +1440,7 @@ async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
         json!({ "sessionId": session_id, "summary": "create" }),
     )
     .await;
-    assert_eq!(settled["markdown"], json!("fresh content"));
+    assert_eq!(settled["content"], json!("fresh content"));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("notes/created.md")).expect("created"),
         "fresh content"
@@ -1660,7 +1660,7 @@ async fn settle_recovers_after_a_transient_replace_failure() {
         json!({ "sessionId": session_id, "summary": "v2 retry" }),
     )
     .await;
-    assert_eq!(retried["markdown"], json!("v2 locked v1"));
+    assert_eq!(retried["content"], json!("v2 locked v1"));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("notes/locked.md")).expect("v2 on disk"),
         "v2 locked v1",
@@ -1775,7 +1775,7 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
         json!({ "sessionId": session_id, "summary": "v3 after replay" }),
     )
     .await;
-    assert_eq!(settled["markdown"], json!("v3 v2 v1"));
+    assert_eq!(settled["content"], json!("v3 v2 v1"));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("notes/changed.md")).expect("on disk"),
         "v3 v2 v1"
@@ -2296,7 +2296,7 @@ async fn a_captured_head_discharges_a_dirty_local_only_session() {
     )
     .await;
     assert_eq!(opened["head"], json!("present"));
-    assert_eq!(opened["seedMarkdown"], json!("base"));
+    assert_eq!(opened["seedContent"], json!("base"));
     let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
 
     // Dirty the lineage and never settle it: `head_update_seq > 0` with
@@ -2343,7 +2343,7 @@ async fn a_captured_head_discharges_a_dirty_local_only_session() {
     )
     .await;
     assert_eq!(reopened["head"], json!("present"));
-    assert_eq!(reopened["seedMarkdown"], json!(TYPED));
+    assert_eq!(reopened["seedContent"], json!(TYPED));
     assert_eq!(
         reopened["lineage"],
         json!("absent"),
@@ -2491,7 +2491,7 @@ async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
         }),
     )
     .await;
-    assert_eq!(settled["markdown"], json!("what the user typed"));
+    assert_eq!(settled["content"], json!("what the user typed"));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(PATH)).expect("on disk"),
         "what the user typed"

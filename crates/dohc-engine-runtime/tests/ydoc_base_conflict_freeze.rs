@@ -242,7 +242,7 @@ async fn resolving_keep_current_folds_the_choice_into_the_lineage() {
         .project(ContentKind::Plaintext)
         .expect("projection");
     assert_eq!(
-        folded.markdown, "local truth",
+        folded.content, "local truth",
         "resolution must rewrite the lineage to the chosen text"
     );
     let fold_deltas: Vec<String> = store

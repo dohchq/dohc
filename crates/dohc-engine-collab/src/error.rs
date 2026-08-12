@@ -29,7 +29,7 @@ pub enum CollabError {
     #[error("Y.Doc update is {actual} bytes, over the {max}-byte cap")]
     UpdateTooLarge { actual: usize, max: usize },
 
-    /// Markdown projection exceeded its materialization cap. This is checked
+    /// The artifact projection exceeded its materialization cap. This is checked
     /// while rendering so hostile content cannot amplify a small Y.Doc into a
     /// much larger temporary allocation before the boundary rejects it.
     #[error("Y.Doc projection is at least {actual} bytes, over the {max}-byte cap")]
@@ -97,9 +97,9 @@ pub enum CollabError {
     SeedOntoExistingLineage,
 
     /// A local-only close would prune CRDT state whose edits no durable settle
-    /// covers (the current head is not reflected in the materialized markdown).
-    /// Settle first — markdown-is-the-artifact requires the artifact to exist
-    /// before the cache is discarded.
+    /// covers (the current head is not reflected in the materialized artifact).
+    /// Settle first. The workspace file must contain the artifact before the
+    /// cache is discarded.
     #[error("local-only close would discard unsettled edits; settle before closing")]
     UnsettledClose,
 
