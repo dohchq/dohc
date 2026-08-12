@@ -2242,12 +2242,24 @@ mod tests {
         assert_eq!(declines[0].constraint, "MAX_YDOC_UPDATE_BYTES");
         assert!(declines[0].observed_bytes > declines[0].limit_bytes);
 
+        let pushed_declines =
+            match crate::cursor::write_pushed_seq(&mut store, "ws", "local", 0, &NoFaults, 1_001)
+                .expect("advance a pushed origin after enrolment")
+            {
+                dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
+                dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+            };
+        assert!(
+            pushed_declines.is_empty(),
+            "pushed-origin updates must not repeat the per-pass full-state scan"
+        );
+
         let next_cursor = crate::RelayCursor {
             cursor: 1,
             ..cursor
         };
         let next_declines =
-            match crate::commit_relay_cursor(&mut store, "ws", &next_cursor, &NoFaults, 1_001)
+            match crate::commit_relay_cursor(&mut store, "ws", &next_cursor, &NoFaults, 1_002)
                 .expect("commit next relay cursor")
             {
                 dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
@@ -2265,12 +2277,22 @@ mod tests {
         let (_scratch, mut store) = store();
         seed_main(&mut store);
         enroll(&mut store).expect("enroll before seeding legacy lineages");
-        store
+        let (ambiguous, missing) = match store
             .write_with(&NoFaults, |tx| {
-                for (object_id, status, path) in [
-                    ("legacy-ambiguous", "ambiguous", Some("legacy-ambiguous.md")),
-                    ("legacy-missing", "missing", Some("legacy-missing.md")),
-                    ("legacy-pathless", "unclaimed", None),
+                for (object_id, status, regime, path) in [
+                    (
+                        "legacy-ambiguous",
+                        "ambiguous",
+                        "replicated",
+                        Some("legacy-ambiguous.md"),
+                    ),
+                    (
+                        "legacy-missing",
+                        "missing",
+                        "replicated",
+                        Some("legacy-missing.md"),
+                    ),
+                    ("legacy-pathless", "unclaimed", "local-only", None),
                 ] {
                     tx.execute(
                         "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
@@ -2281,17 +2303,8 @@ mod tests {
                     tx.execute(
                         "INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime, \
                          head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms,path) \
-                         VALUES ('ws','main',?1,'plaintext',?2,0,0,?3,1,?4)",
-                        rusqlite::params![
-                            object_id,
-                            if status == "unclaimed" {
-                                "local-only"
-                            } else {
-                                "replicated"
-                            },
-                            status,
-                            path,
-                        ],
+                        VALUES ('ws','main',?1,'plaintext',?2,0,0,?3,1,?4)",
+                        rusqlite::params![object_id, regime, status, path],
                     )
                     .map_err(SyncError::persist)?;
                 }
@@ -2318,15 +2331,13 @@ mod tests {
                 )?;
                 Ok::<_, SyncError>((ambiguous, missing))
             })
-            .map(|outcome| match outcome {
-                dohc_engine_storage::TxnOutcome::Committed(outcomes) => outcomes,
-                dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
-            })
-            .map(|(ambiguous, missing)| {
-                assert_eq!(ambiguous, BaseOrigination::NothingToDo);
-                assert_eq!(missing, BaseOrigination::NothingToDo);
-            })
-            .expect("legacy claimed lineages are not re-originated");
+            .expect("legacy claimed lineages are not re-originated")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(outcomes) => outcomes,
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        };
+        assert_eq!(ambiguous, BaseOrigination::NothingToDo);
+        assert_eq!(missing, BaseOrigination::NothingToDo);
 
         let cursor = crate::RelayCursor {
             cursor: 0,

@@ -1,5 +1,5 @@
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::SyncError;
 use crate::model::bounded;
@@ -107,6 +107,8 @@ pub fn commit_relay_cursor(
                 ],
             )
             .map_err(SyncError::persist)?;
+            // Cursor commit is the per-pass level trigger. Re-scan here so an
+            // oversized unclaimed base stays visible until it can originate.
             let sharing_declined = if was_enrolled {
                 crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
                     tx,
@@ -194,20 +196,14 @@ pub(crate) fn write_pushed_seq(
                 params![workspace_id, origin_id, pushed_seq],
             )
             .map_err(SyncError::persist)?;
-            backfill_after_first_position(tx, workspace_id, was_enrolled, now_ms)
+            if was_enrolled {
+                // Cursor commit owns the recurring scan. A pushed-origin
+                // update must not repeat that full-state work.
+                Ok(Vec::new())
+            } else {
+                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)
+            }
         })
-}
-
-fn backfill_after_first_position(
-    tx: &Transaction<'_>,
-    workspace_id: &str,
-    was_enrolled: bool,
-    now_ms: i64,
-) -> Result<Vec<crate::SharingDeclined>, SyncError> {
-    if was_enrolled {
-        return Ok(Vec::new());
-    }
-    crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)
 }
 
 pub(crate) fn rewind_pushed_seq(
