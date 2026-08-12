@@ -2,12 +2,25 @@
 name: file-pr
 description: >-
   Use when the user asks to file, open, create, or publish a pull request for
-  the current branch, or when completed work must be proposed for review.
+  the current branch, or when completed work must be proposed for review. In a
+  repository that provides this skill, use it instead of a generic GitHub
+  publishing skill.
 ---
 
 # File a pull request
 
 File an accurate PR that represents the whole branch.
+
+## Load the target repository's policy
+
+1. Resolve the checkout or worktree that contains the branch you will publish.
+2. Read `AGENTS.md` and `skills/file-pr/SKILL.md` from that worktree.
+3. Use those copies when your session started from a different checkout.
+4. Fetch the base branch before you write the PR.
+5. Re-read both files from the fetched base when either file differs.
+
+This skill takes precedence over generic GitHub publishing skills. A stale
+session catalog does not override the target repository's current workflow.
 
 ## Establish the change
 
@@ -129,7 +142,9 @@ when they help someone decide whether to merge the PR.
 5. Create or update the PR with the chosen base, title, body, and draft state.
 6. Read the PR back from GitHub.
 7. Verify its head, base, title, body, and draft state.
-8. Return the PR link to the user.
+8. Verify that the live body starts with the required attribution and one blank line.
+9. Correct the live body immediately when either attribution check fails.
+10. Return the PR link to the user.
 
 Do not request reviews or start a review watcher for a draft PR.
 
