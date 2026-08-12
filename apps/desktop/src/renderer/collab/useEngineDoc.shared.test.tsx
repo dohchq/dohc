@@ -26,6 +26,7 @@ function sharedBridge() {
   >();
   const openedSessionIds: string[] = [];
   let closeGate: Promise<void> | null = null;
+  let openGate: Promise<void> | null = null;
   let openError: Error | null = null;
   let remoteUnsubscribeError: Error | null = null;
   const source = new Y.Doc();
@@ -36,6 +37,7 @@ function sharedBridge() {
     openEngineYDocSession: vi.fn(
       async (payload: { sessionId: string }) => {
         openedSessionIds.push(payload.sessionId);
+        await openGate;
         if (openError) {
           const error = openError;
           openError = null;
@@ -90,6 +92,16 @@ function sharedBridge() {
     failNextOpen(error = new Error("engine unavailable")) {
       openError = error;
     },
+    holdNextOpen() {
+      let release!: () => void;
+      openGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        openGate = null;
+        release();
+      };
+    },
     failNextRemoteUnsubscribe(error = new Error("unsubscribe failed")) {
       remoteUnsubscribeError = error;
     },
@@ -126,6 +138,7 @@ function Consumer(props: {
       <span data-testid={"available-" + props.id}>
         {String(engine.available)}
       </span>
+      <span data-testid={"opening-" + props.id}>{String(engine.opening)}</span>
       <span data-testid={"state-" + props.id}>{engine.saveState}</span>
       <span data-testid={"deleted-" + props.id}>
         {String(engine.deletedWhileEditing)}
@@ -310,9 +323,21 @@ it("shares one document lease until the final consumer unmounts", async () => {
 
 it("settles a failed shared open for both consumers", async () => {
   harness.failNextOpen();
+  const rejectOpen = harness.holdNextOpen();
   const view = render(<Pair />);
 
+  await waitFor(() =>
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(1),
+  );
+  expect(screen.getByTestId("available-first").textContent).toBe("false");
+  expect(screen.getByTestId("available-second").textContent).toBe("false");
+  expect(screen.getByTestId("opening-first").textContent).toBe("true");
+  expect(screen.getByTestId("opening-second").textContent).toBe("true");
+
+  rejectOpen();
   await waitFor(() => {
+    expect(screen.getByTestId("opening-first").textContent).toBe("false");
+    expect(screen.getByTestId("opening-second").textContent).toBe("false");
     expect(screen.getByTestId("available-first").textContent).toBe("false");
     expect(screen.getByTestId("available-second").textContent).toBe("false");
   });

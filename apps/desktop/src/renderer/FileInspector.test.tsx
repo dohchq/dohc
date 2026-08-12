@@ -1735,7 +1735,7 @@ describe("markdown editor unmount flush", () => {
       );
       buffer.publishDraft("unsaved", {});
       let flush: DraftFlush | null = null;
-      const view = render(
+      render(
         <FileInspector
           workspaceId="ws-1"
           path={path}
@@ -1747,27 +1747,9 @@ describe("markdown editor unmount flush", () => {
       await screen.findByTestId(viewTestId);
       await waitFor(() => expect(flush).not.toBeNull());
 
-      const flushing = flush!({ captureOnFailure: true });
-      const rejected = expect(flushing).rejects.toThrow(
+      await expect(flush!({ captureOnFailure: true })).rejects.toThrow(
         "dohc cannot save this draft without a content hash.",
       );
-      // Let the old implementation leave its first no-progress iteration,
-      // then stop its loop without hanging the test runner.
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      view.rerender(
-        <FileInspector
-          workspaceId="ws-1"
-          path={path}
-          readOnly
-          registerDraftFlush={(next) => {
-            flush = next;
-          }}
-        />,
-      );
-
-      await rejected;
       expect(buffer.getSnapshot()).toMatchObject({
         body: "unsaved",
         contentHash: null,
