@@ -40,6 +40,7 @@ import {
   SendChatMessagePayload,
   SendChatMessageResult,
   SetChatReactionPayload,
+  ShowWorkbenchMenuPayload,
   AcceptDmPayload,
   DeclineDmPayload,
   RequestDmAgainPayload,
@@ -71,7 +72,32 @@ import {
   parseInvokeSiteSdkPayloadForIpc,
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
+import { MAX_EDITOR_GROUP_ID_CHARS } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+
+describe("workbench menu IPC contract", () => {
+  it("carries an optional bounded editor group ID", () => {
+    const payload = {
+      workspaceId: "workspace-1",
+      context: "tab" as const,
+      path: "notes/a.md",
+    };
+
+    expect(
+      ShowWorkbenchMenuPayload.parse({ ...payload, groupId: "primary" }),
+    ).toEqual({ ...payload, groupId: "primary" });
+    expect(ShowWorkbenchMenuPayload.parse(payload)).toEqual(payload);
+    expect(
+      ShowWorkbenchMenuPayload.safeParse({ ...payload, groupId: "" }).success,
+    ).toBe(false);
+    expect(
+      ShowWorkbenchMenuPayload.safeParse({
+        ...payload,
+        groupId: "g".repeat(MAX_EDITOR_GROUP_ID_CHARS + 1),
+      }).success,
+    ).toBe(false);
+  });
+});
 
 describe("workspace text IPC contract", () => {
   const hash = "a".repeat(64);
@@ -558,12 +584,19 @@ describe("settings IPC contract", () => {
 
 describe("workspace UI state IPC contract", () => {
   const validState = {
-    version: 1,
+    version: 2,
     activeView: "explorer",
     sidebarVisible: true,
     sidebarWidth: 320,
-    tabs: ["notes/a.md"],
-    activeTab: "notes/a.md",
+    editorGroups: [
+      {
+        id: "primary",
+        tabs: ["notes/a.md"],
+        activeTab: "notes/a.md",
+        size: 1,
+      },
+    ],
+    activeEditorGroup: "primary",
     chatsVisible: true,
   };
 
@@ -573,6 +606,69 @@ describe("workspace UI state IPC contract", () => {
       const height: number | undefined = parsed.openEditorsHeight;
       expect(height).toBeUndefined();
     }
+  });
+
+  it("rejects the replaced version-1 flat-tab contract", () => {
+    expect(
+      WorkspaceUiState.safeParse({
+        ...validState,
+        version: 1,
+        tabs: ["notes/a.md"],
+        activeTab: "notes/a.md",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires globally unique tabs, valid focus, and normalized sizes", () => {
+    expect(
+      WorkspaceUiState.safeParse({
+        ...validState,
+        editorGroups: [
+          validState.editorGroups[0],
+          {
+            id: "right",
+            tabs: ["notes/a.md"],
+            activeTab: "notes/a.md",
+            size: 0.5,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      WorkspaceUiState.safeParse({
+        ...validState,
+        activeEditorGroup: "missing",
+      }).success,
+    ).toBe(false);
+    expect(
+      WorkspaceUiState.safeParse({
+        ...validState,
+        editorGroups: [{ ...validState.editorGroups[0], size: 0.5 }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("enforces the total open-tab cap across editor groups", () => {
+    expect(
+      WorkspaceUiState.safeParse({
+        ...validState,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: Array.from({ length: 60 }, (_, index) => `left-${index}.md`),
+            activeTab: "left-0.md",
+            size: 0.5,
+          },
+          {
+            id: "right",
+            tabs: Array.from({ length: 41 }, (_, index) => `right-${index}.md`),
+            activeTab: "right-0.md",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "right",
+      }).success,
+    ).toBe(false);
   });
 });
 

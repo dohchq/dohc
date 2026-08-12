@@ -679,6 +679,58 @@ describe("markdown editor unmount flush", () => {
     );
   });
 
+  it("does not focus an inactive inspector's source editor", async () => {
+    let registered: (() => void) | null = null;
+    render(
+      <>
+        <button type="button" data-testid="active-group-control">
+          Active group
+        </button>
+        <FileInspector
+          workspaceId="ws-1"
+          path="a.md"
+          autoFocus={false}
+          registerSourceToggle={(toggle) => {
+            registered = toggle;
+          }}
+        />
+      </>,
+    );
+    await screen.findByTestId("view-markdown");
+    const activeGroupControl = screen.getByTestId("active-group-control");
+    activeGroupControl.focus();
+
+    await toggleSourceOnce(() => registered);
+    await findSourceEditor();
+
+    expect(document.activeElement).toBe(activeGroupControl);
+  });
+
+  it("focuses the source editor when autoFocus is omitted", async () => {
+    let registered: (() => void) | null = null;
+    render(
+      <>
+        <button type="button" data-testid="previous-focus">
+          Previous focus
+        </button>
+        <FileInspector
+          workspaceId="ws-1"
+          path="a.md"
+          registerSourceToggle={(toggle) => {
+            registered = toggle;
+          }}
+        />
+      </>,
+    );
+    await screen.findByTestId("view-markdown");
+    screen.getByTestId("previous-focus").focus();
+
+    await toggleSourceOnce(() => registered);
+    const sourceEditor = await findSourceEditor();
+
+    expect(document.activeElement).toBe(sourceEditor);
+  });
+
   it("settles a successful legacy save while mounted in StrictMode", async () => {
     let releaseWrite!: () => void;
     const heldWrite = new Promise<{ status: "written"; contentHash: string }>(

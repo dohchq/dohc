@@ -39,6 +39,7 @@ import {
 } from "./file-tree-optimistic";
 import { buildTree, type TreeNode } from "./path-tree";
 import {
+  type EditorGroup,
   clampOpenEditorsHeight,
   isGraphTabPath,
   isHistoryDiffTabPath,
@@ -61,9 +62,9 @@ export interface ExplorerProps {
   workspaceId: string;
   files: WorkspaceFileEntry[];
   folders: string[];
-  activeTab: string | null;
-  openTabs: Array<{ path: string }>;
-  dirtyTab: string | null;
+  editorGroups: EditorGroup[];
+  activeEditorGroup: string;
+  dirtyPaths: ReadonlySet<string>;
   // Paths with a set-aside draft (#567): marks Open Editors rows for every
   // tab, not only the active one (#579 review, r4).
   recoveryPaths: ReadonlySet<string>;
@@ -78,8 +79,8 @@ export interface ExplorerProps {
   // application-menu "New Folder" route).
   createRequest: { kind: "file" | "folder"; id: number } | null;
   onOpenFile: (path: string) => void;
-  onActivateTab: (path: string) => void;
-  onCloseTab: (path: string) => void;
+  onActivateTab: (groupId: string, path: string) => void;
+  onCloseTab: (groupId: string, path: string) => void;
   onCloseAllTabs: () => void;
   onNewUntitledTextFile: () => void;
   onCollapseFolders: () => void;
@@ -367,6 +368,13 @@ export function Explorer(props: ExplorerProps) {
     onOpenFile,
     onTogglePin,
   } = props;
+  const activeTab =
+    props.editorGroups.find((group) => group.id === props.activeEditorGroup)?.activeTab ??
+    null;
+  const openEditorCount = props.editorGroups.reduce(
+    (count, group) => count + group.tabs.length,
+    0,
+  );
   const [pending, setPending] = useState<PendingTreeChange[]>([]);
   const [openEditorsExpanded, setOpenEditorsExpanded] = useState(true);
   const [viewportCap, setViewportCap] = useState(viewportOpenEditorsCap);
@@ -415,7 +423,7 @@ export function Explorer(props: ExplorerProps) {
 
   // The open-editors list caps its height and scrolls internally, so the
   // active row must be brought back into view whenever it changes — or moves:
-  // openTabs (reducer state, referentially stable between changes) is a
+  // editorGroups (reducer state, referentially stable between changes) is a
   // dependency because reordering or closing tabs shifts the active row
   // without changing activeTab (and shrinking the section can push it out).
   // Scroll the list directly (not scrollIntoView): the list and the file tree
@@ -423,7 +431,7 @@ export function Explorer(props: ExplorerProps) {
   // scroll that ancestor — yanking the user's tree scroll position on tab
   // switches.
   useEffect(() => {
-    if (!props.activeTab || !openEditorsExpanded) return;
+    if (!activeTab || !openEditorsExpanded) return;
     const list = openEditorsListRef.current;
     const row = list?.querySelector<HTMLElement>('[data-active="true"]');
     if (!list || !row) return;
@@ -435,8 +443,8 @@ export function Explorer(props: ExplorerProps) {
       list.scrollTop += rowRect.bottom - listRect.bottom;
     }
   }, [
-    props.activeTab,
-    props.openTabs,
+    activeTab,
+    props.editorGroups,
     openEditorsExpanded,
     props.openEditorsHeight,
     viewportCap,
@@ -543,10 +551,10 @@ export function Explorer(props: ExplorerProps) {
     const target =
       focusedPath ??
       selectedPath ??
-    (props.activeTab && !isVirtualTabPath(props.activeTab) ? props.activeTab : null);
+      (activeTab && !isVirtualTabPath(activeTab) ? activeTab : null);
     if (!target) return "";
     return isFolderPath(target) ? target : parentDir(target);
-  }, [focusedPath, isFolderPath, props.activeTab, selection]);
+  }, [activeTab, focusedPath, isFolderPath, selection]);
 
   const beginCreateAtFocus = useCallback(
     (kind: "file" | "folder") => {
@@ -1201,7 +1209,7 @@ export function Explorer(props: ExplorerProps) {
         key={row.fullPath}
         row={row}
         selected={selection.has(row.fullPath)}
-        active={props.activeTab === row.fullPath}
+        active={activeTab === row.fullPath}
         focused={focusedPath === row.fullPath}
         dropPreview={dropPreviewForRow(row)}
         registerRef={registerRef}
@@ -1265,12 +1273,12 @@ export function Explorer(props: ExplorerProps) {
                 className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
               />
               <span className="min-w-0 flex-1 truncate">Open Editors</span>
-              {props.openTabs.length > 0 ? (
+              {openEditorCount > 0 ? (
                 <span
-                  aria-label={`${props.openTabs.length} open editor${props.openTabs.length === 1 ? "" : "s"}`}
+                  aria-label={`${openEditorCount} open editor${openEditorCount === 1 ? "" : "s"}`}
                   className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none text-subtle"
                 >
-                  {props.openTabs.length}
+                  {openEditorCount}
                 </span>
               ) : null}
             </button>
@@ -1283,7 +1291,7 @@ export function Explorer(props: ExplorerProps) {
               </SectionActionButton>
               <SectionActionButton
                 label="Close all editors"
-                disabled={props.openTabs.length === 0}
+                disabled={openEditorCount === 0}
                 onClick={props.onCloseAllTabs}
               >
                 <X size={13} aria-hidden />
@@ -1292,7 +1300,7 @@ export function Explorer(props: ExplorerProps) {
           </header>
 
           {openEditorsExpanded ? (
-            props.openTabs.length > 0 ? (
+            openEditorCount > 0 ? (
               <ul
                 ref={openEditorsListRef}
                 data-testid="open-editors-list"
@@ -1303,59 +1311,90 @@ export function Explorer(props: ExplorerProps) {
                 style={{ maxHeight: Math.min(props.openEditorsHeight, viewportCap) }}
                 className="m-0 list-none overflow-y-auto overscroll-contain p-0"
               >
-                {props.openTabs.map((tab) => {
-                  const active = props.activeTab === tab.path;
-                  const dirty =
-                    props.dirtyTab === tab.path ||
-                    props.recoveryPaths.has(tab.path);
-                  const title = editorTitle(tab.path);
-                  return (
-                    <li
-                      key={tab.path}
-                      data-testid="open-editor-row"
-                      data-path={tab.path}
-                      data-active={active}
-                      className={`group mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
-                        active ? "bg-line text-ink" : "text-muted hover:bg-line/50 hover:text-ink"
-                      }`}
+                {props.editorGroups.map((group, groupIndex) => (
+                  <li
+                    key={group.id}
+                    data-testid="open-editor-group"
+                    data-group-id={group.id}
+                  >
+                    {props.editorGroups.length > 1 ? (
+                      <div
+                        role="heading"
+                        aria-level={3}
+                        className="h-6 px-3 pt-1 text-[10px] font-semibold uppercase tracking-wide text-subtle"
+                      >
+                        Group {groupIndex + 1}
+                      </div>
+                    ) : null}
+                    <ul
+                      aria-label={
+                        props.editorGroups.length > 1
+                          ? `Group ${groupIndex + 1} open editors`
+                          : undefined
+                      }
+                      className="m-0 list-none p-0"
                     >
-                      <button
-                        type="button"
-                        title={tab.path}
-                        onClick={() => props.onActivateTab(tab.path)}
-                        className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-0 pl-8 pr-2 text-left text-[13px] outline-none"
-                      >
-                        <OpenEditorIcon
-                          path={tab.path}
-                          kind={fileByPath.get(tab.path)?.kind ?? null}
-                        />
-                        <span className="min-w-0 flex-1 truncate">{title}</span>
-                        {dirty ? (
-                          <span
-                            data-testid="open-editor-dirty"
-                            aria-label="Unsaved changes"
-                            className="size-1.5 shrink-0 rounded-full bg-muted"
-                          />
-                        ) : null}
-                      </button>
-                      <button
-                        type="button"
-                        data-testid="open-editor-close"
-                        aria-label={`Close ${title}`}
-                        title={`Close ${title}`}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          props.onCloseTab(tab.path);
-                        }}
-                        className={`mr-1 grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-line hover:text-ink focus:opacity-100 ${
-                          active ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-                        }`}
-                      >
-                        <X size={13} aria-hidden />
-                      </button>
-                    </li>
-                  );
-                })}
+                      {group.tabs.map((tab) => {
+                        const active =
+                          group.id === props.activeEditorGroup &&
+                          group.activeTab === tab.path;
+                        const dirty =
+                          props.dirtyPaths.has(tab.path) ||
+                          props.recoveryPaths.has(tab.path);
+                        const title = editorTitle(tab.path);
+                        return (
+                          <li
+                            key={`${group.id}:${tab.path}`}
+                            data-testid="open-editor-row"
+                            data-group-id={group.id}
+                            data-path={tab.path}
+                            data-active={active}
+                            className={`group mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
+                              active
+                                ? "bg-line text-ink"
+                                : "text-muted hover:bg-line/50 hover:text-ink"
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              title={tab.path}
+                              onClick={() => props.onActivateTab(group.id, tab.path)}
+                              className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-0 pl-8 pr-2 text-left text-[13px] outline-none"
+                            >
+                              <OpenEditorIcon
+                                path={tab.path}
+                                kind={fileByPath.get(tab.path)?.kind ?? null}
+                              />
+                              <span className="min-w-0 flex-1 truncate">{title}</span>
+                              {dirty ? (
+                                <span
+                                  data-testid="open-editor-dirty"
+                                  aria-label="Unsaved changes"
+                                  className="size-1.5 shrink-0 rounded-full bg-muted"
+                                />
+                              ) : null}
+                            </button>
+                            <button
+                              type="button"
+                              data-testid="open-editor-close"
+                              aria-label={`Close ${title}`}
+                              title={`Close ${title}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                props.onCloseTab(group.id, tab.path);
+                              }}
+                              className={`mr-1 grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-line hover:text-ink focus:opacity-100 ${
+                                active ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                              }`}
+                            >
+                              <X size={13} aria-hidden />
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </li>
+                ))}
               </ul>
             ) : (
               <div className="px-3 py-1.5 text-[11px] text-subtle">
@@ -1363,7 +1402,7 @@ export function Explorer(props: ExplorerProps) {
               </div>
             )
           ) : null}
-          {openEditorsExpanded && props.openTabs.length > 0 ? (
+          {openEditorsExpanded && openEditorCount > 0 ? (
             <div
               data-testid="open-editors-resize"
               role="separator"

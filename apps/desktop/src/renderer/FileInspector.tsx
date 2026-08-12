@@ -1274,6 +1274,9 @@ function MarkdownView(props: {
   // docs toggle the read-only source projection; the legacy autosave editor
   // switches its existing (editable) source mode.
   registerSourceToggle?: (toggle: (() => void) | null) => void;
+  // Only the active editor group may claim focus when its source textarea
+  // mounts. Omitted preserves the single-editor behavior for existing callers.
+  autoFocus?: boolean;
   // The engine refused the open because the path is not in this workspace's
   // version (#534). `discardedEdit` is true when the user had typed and that
   // draft was thrown away rather than written — the inspector owes them that
@@ -2824,7 +2827,7 @@ function MarkdownView(props: {
         <textarea
           data-testid="markdown-editor"
           ref={editorRef}
-          autoFocus
+          autoFocus={props.autoFocus ?? true}
           value={draft}
           readOnly={readOnly}
           onChange={(e) => onDraft(e.target.value)}
@@ -3680,6 +3683,9 @@ export function FileInspector(props: {
   // Registers the mounted markdown view's "view source" toggle with the shell
   // (command palette seam) — registerDraftFlush precedent.
   registerSourceToggle?: (toggle: (() => void) | null) => void;
+  // Editor groups keep inactive inspectors mounted. They pass false so a
+  // source textarea mounting there cannot steal focus from the active group.
+  autoFocus?: boolean;
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
@@ -3921,6 +3927,7 @@ export function FileInspector(props: {
             switchUnresyncedRef={switchUnresyncedRef}
             refreshKey={props.refreshKey}
             registerSourceToggle={props.registerSourceToggle}
+            autoFocus={props.autoFocus}
             onPendingDraftChange={setPendingDraft}
             engine={engine}
             onRetryEngineOpen={retryEngineOpen}

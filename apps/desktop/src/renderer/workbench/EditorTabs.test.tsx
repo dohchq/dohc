@@ -17,6 +17,7 @@ const tabs = [{ path: "a.md" }, { path: "b.md" }, { path: "c.md" }];
 function renderTabs(activeTab: string) {
   return render(
     <EditorTabs
+      groupNumber={1}
       tabs={tabs}
       activeTab={activeTab}
       activeTabDirty={false}
@@ -25,6 +26,7 @@ function renderTabs(activeTab: string) {
       onClose={noop}
       onContextMenu={noop}
       onMove={noop}
+      onCreateGroupRight={noop}
     />,
   );
 }
@@ -47,6 +49,7 @@ describe("EditorTabs strip scrolling", () => {
 
     rerender(
       <EditorTabs
+        groupNumber={1}
         tabs={tabs}
         activeTab="c.md"
         activeTabDirty={false}
@@ -55,6 +58,7 @@ describe("EditorTabs strip scrolling", () => {
         onClose={noop}
         onContextMenu={noop}
         onMove={noop}
+        onCreateGroupRight={noop}
       />,
     );
     expect(scroll).toHaveBeenCalledTimes(2);
@@ -156,6 +160,7 @@ describe("EditorTabs overlay scrollbar", () => {
 
     rerender(
       <EditorTabs
+        groupNumber={1}
         tabs={tabs}
         activeTab="a.md"
         activeTabDirty
@@ -164,6 +169,7 @@ describe("EditorTabs overlay scrollbar", () => {
         onClose={noop}
         onContextMenu={noop}
         onMove={noop}
+        onCreateGroupRight={noop}
       />,
     );
     expect(thumb.style.display).toBe("");
@@ -182,5 +188,32 @@ describe("EditorTabs overlay scrollbar", () => {
     // Released: plain pointer travel no longer scrolls.
     fireEvent.pointerMove(thumb, { pointerId: 1, buttons: 1, clientX: 90 });
     expect(strip.scrollLeft).toBeCloseTo(120, 1);
+  });
+
+  it("labels group-scoped controls and moves the active tab into a new group", () => {
+    const onCreateGroupRight = vi.fn();
+    render(
+      <EditorTabs
+        groupNumber={2}
+        tabs={tabs}
+        activeTab="a.md"
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onCreateGroupRight={onCreateGroupRight}
+      />,
+    );
+
+    expect(screen.getByRole("tablist", { name: "Editor group 2 tabs" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "All tabs in editor group 2" }),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "New editor group right" }),
+    );
+    expect(onCreateGroupRight).toHaveBeenCalledOnce();
   });
 });

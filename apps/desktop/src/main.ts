@@ -3888,6 +3888,9 @@ function registerIpcHandlers(
       const template: Electron.MenuItemConstructorOptions[] =
         input.context === "tab"
           ? [
+              item("Move into New Group", "move-tab-to-new-group"),
+              item("Close Editor Group", "close-editor-group"),
+              separator,
               item("Close Tab", "close-tab"),
               item("Close Other Tabs", "close-other-tabs"),
               separator,

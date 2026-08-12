@@ -5,6 +5,7 @@ import {
 import { z } from "zod";
 import {
   MAX_EXPANDED_FOLDERS,
+  MAX_EDITOR_GROUP_ID_CHARS,
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
@@ -14,7 +15,6 @@ import {
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
-  RETIRED_VIEW_IDS,
   VIEW_IDS,
 } from "../renderer/workbench/workbenchState";
 import {
@@ -365,6 +365,7 @@ export const ShowWorkbenchMenuPayload = z.object({
   workspaceId: WORKSPACE_ID,
   context: z.enum(["tab", "editor", "status"]),
   path: PATH_STRING.optional(),
+  groupId: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS).optional(),
 });
 export type ShowWorkbenchMenuPayload = z.infer<typeof ShowWorkbenchMenuPayload>;
 
@@ -3056,26 +3057,47 @@ export type UpdateCheckResult = z.infer<typeof UpdateCheckResult>;
 // renderer cannot write .dohc through writeWorkspaceText by design —
 // validateUserWritePath refuses reserved paths). The clamp/cap constants are
 // the pure workbench model's, so contract and model can never disagree.
+const WorkspaceEditorGroup = z
+  .object({
+    id: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS),
+    tabs: z.array(PATH_STRING).max(MAX_OPEN_TABS),
+    activeTab: PATH_STRING.nullable(),
+    size: z.number().finite().positive().max(1),
+  })
+  .superRefine((group, context) => {
+    const uniqueTabs = new Set(group.tabs);
+    if (uniqueTabs.size !== group.tabs.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tabs"],
+        message: "Editor group tabs must be unique.",
+      });
+    }
+    if (
+      (group.tabs.length === 0 && group.activeTab !== null) ||
+      (group.tabs.length > 0 &&
+        (group.activeTab === null || !uniqueTabs.has(group.activeTab)))
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["activeTab"],
+        message: "The active tab must belong to its editor group.",
+      });
+    }
+  });
+
 export const WorkspaceUiState = z.object({
-  version: z.literal(1),
-  // Retired views stay accepted: getWorkspaceUiState safeParses the WHOLE
-  // file, so one stale activeView (e.g. the removed Agent panel's "agent")
-  // must degrade to the default view — never null every tab/pin/fold the
-  // user had. parseUiState maps unknown views to the default.
-  activeView: z.enum([...VIEW_IDS, ...RETIRED_VIEW_IDS]),
+  version: z.literal(2),
+  activeView: z.enum(VIEW_IDS),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
-  tabs: z.array(PATH_STRING).max(MAX_OPEN_TABS),
-  activeTab: PATH_STRING.nullable(),
-  // The right-hand Chats panel (replaced the history rail's historyVisible/
-  // historyWidth). Optional, still version 1: files written before the panel
-  // existed keep parsing (their history fields are dropped as unknown keys)
-  // instead of nulling every tab/pin/fold the user had.
+  editorGroups: z.array(WorkspaceEditorGroup).min(1),
+  activeEditorGroup: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS),
+  // The right-hand Chats panel. Optional fields degrade independently when a
+  // version-2 file is hand-edited or lacks a newer cosmetic setting.
   chatsVisible: z.boolean().optional(),
   chatsWidth: z.number().int().min(CHATS_MIN_WIDTH).max(CHATS_MAX_WIDTH).optional(),
-  // Additive (resizable Open Editors section), still version 1. It must NEVER
-  // null the whole saved state: serializeUiState clamps every write, so this
-  // catch only handles foreign/hand-edited files.
+  // The catch keeps a foreign height from nulling an otherwise valid file.
   openEditorsHeight: z
     .number()
     .int()
@@ -3083,13 +3105,61 @@ export const WorkspaceUiState = z.object({
     .max(OPEN_EDITORS_MAX_HEIGHT)
     .optional()
     .catch(undefined),
-  // Additive (Phase E3 explorer), still version 1: optional fields parse old
-  // files, and zod's non-strict parse drops unknown keys for old readers.
+  // Explorer and quick-open fields remain optional cosmetic state.
   expandedFolders: z.array(PATH_STRING).max(MAX_EXPANDED_FOLDERS).optional(),
   pinned: z.array(PATH_STRING).max(MAX_PINNED_PATHS).optional(),
-  // Additive (Phase E5.0 quick-open ranking), still version 1: the last ~20
-  // opened files, most recent first — recency boosts quick-open results.
+  // The last ~20 opened files, most recent first.
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
+}).superRefine((state, context) => {
+  const groupIds = new Set<string>();
+  const tabPaths = new Set<string>();
+  let tabCount = 0;
+  let totalSize = 0;
+  for (let groupIndex = 0; groupIndex < state.editorGroups.length; groupIndex++) {
+    const group = state.editorGroups[groupIndex];
+    if (groupIds.has(group.id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["editorGroups", groupIndex, "id"],
+        message: "Editor group IDs must be unique.",
+      });
+    }
+    groupIds.add(group.id);
+    totalSize += group.size;
+    for (let tabIndex = 0; tabIndex < group.tabs.length; tabIndex++) {
+      const path = group.tabs[tabIndex];
+      tabCount += 1;
+      if (tabPaths.has(path)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["editorGroups", groupIndex, "tabs", tabIndex],
+          message: "Open tab paths must be unique across editor groups.",
+        });
+      }
+      tabPaths.add(path);
+    }
+  }
+  if (tabCount > MAX_OPEN_TABS) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["editorGroups"],
+      message: `Open tabs exceed the configured limit of ${MAX_OPEN_TABS} tabs.`,
+    });
+  }
+  if (!groupIds.has(state.activeEditorGroup)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["activeEditorGroup"],
+      message: "The active editor group must exist.",
+    });
+  }
+  if (Math.abs(totalSize - 1) > 1e-6) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["editorGroups"],
+      message: "Editor group sizes must sum to 1.",
+    });
+  }
 });
 export type WorkspaceUiState = z.infer<typeof WorkspaceUiState>;
 
