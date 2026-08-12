@@ -2347,6 +2347,18 @@ DROP TABLE replication_pending_resolves;
 pub(crate) const DROP_REPLICATION_PENDING_RESOLVES_MIGRATION_ID: &str =
     "v1-drop-replication-pending-resolves";
 
+/// Ordinal 31. A compound parent and its adjacent shadows can cross a relay
+/// page boundary. Keep the parent's apply disposition on its append-only log
+/// row so a later shadow can distinguish a refused parent from an accepted
+/// parent whose owned moment history is corrupt.
+const V1_REPLICATION_LOG_DISPOSITION_DDL: &str = "\
+ALTER TABLE replication_log
+ADD COLUMN apply_disposition TEXT NOT NULL DEFAULT 'applied'
+  CHECK (apply_disposition IN ('applied', 'refused'));
+";
+
+pub(crate) const REPLICATION_LOG_DISPOSITION_MIGRATION_ID: &str = "v1-replication-log-disposition";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -2569,6 +2581,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: DROP_REPLICATION_PENDING_RESOLVES_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_DROP_REPLICATION_PENDING_RESOLVES_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 31,
+        id: REPLICATION_LOG_DISPOSITION_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_REPLICATION_LOG_DISPOSITION_DDL,
         sets_user_version: None,
     },
 ];
@@ -3996,6 +4015,64 @@ mod tests {
             "the migration deletes only the dead sidecar"
         );
 
+        let disposition = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply the later replication-log disposition migration");
+        assert_eq!(disposition, MigrationOutcome::Applied { newly_applied: 1 });
+        let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("rerun current migrations");
+        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
+    }
+
+    #[test]
+    fn replication_log_disposition_migration_preserves_existing_rows_and_constrains_new_rows() {
+        let dir = tempdir();
+        let path = dir.join("replication-log-disposition.db");
+        let ctx = MigrationContext::current(2_900);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let migration_index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == REPLICATION_LOG_DISPOSITION_MIGRATION_ID)
+            .expect("replication-log disposition migration is registered");
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("migrate through ordinal 30");
+        conn.execute(
+            "INSERT INTO replication_log (
+                 workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported
+             ) VALUES ('ws','peer',0,'workspace.init','{}',1,1)",
+            [],
+        )
+        .expect("seed pre-migration replication row");
+
+        let outcome = run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("add durable apply disposition");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        let disposition: String = conn
+            .query_row(
+                "SELECT apply_disposition FROM replication_log \
+                 WHERE workspace_id='ws' AND origin_id='peer' AND origin_seq=0",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read backfilled disposition");
+        assert_eq!(disposition, "applied");
+        conn.execute(
+            "UPDATE replication_log SET apply_disposition='unknown' \
+             WHERE workspace_id='ws' AND origin_id='peer' AND origin_seq=0",
+            [],
+        )
+        .expect_err("unknown apply dispositions must fail closed");
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
         assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });

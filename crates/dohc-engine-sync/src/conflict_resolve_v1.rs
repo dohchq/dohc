@@ -1482,19 +1482,17 @@ pub(crate) fn verify_imported_conflict_effect_in_tx(
         .origin_seq
         .checked_sub(offset)
         .ok_or(SyncError::CoordinateDiverged)?;
-    let parent: Option<(String, i64)> = tx
+    let parent: Option<(String, i64, String)> = tx
         .query_row(
-            "SELECT payload_json,recorded_at_ms FROM replication_log \
+            "SELECT payload_json,recorded_at_ms,apply_disposition FROM replication_log \
              WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 \
-               AND op_kind='conflict.resolve' AND imported=1 \
-               AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals r \
-                 WHERE r.workspace_id=?1 AND r.origin_id=?2 AND r.origin_seq=?3)",
+               AND op_kind='conflict.resolve' AND imported=1",
             params![envelope.workspace_id, envelope.origin_id, parent_seq],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(SyncError::corrupt)?;
-    let Some((parent_json, parent_recorded_at_ms)) = parent else {
+    let Some((parent_json, parent_recorded_at_ms, parent_disposition)) = parent else {
         return Err(SyncError::CoordinateDiverged);
     };
     let parent_value: Value =
@@ -1516,6 +1514,17 @@ pub(crate) fn verify_imported_conflict_effect_in_tx(
         || dohc_engine_storage::hex_sha256(&observed) != parent.shadow_sha256s[owner.effect_index]
     {
         return Err(SyncError::CoordinateDiverged);
+    }
+    if parent_disposition == "refused" {
+        return Ok(MomentApplyResult {
+            conflicts_opened: 0,
+            materialization_changes: Vec::new(),
+        });
+    }
+    if parent_disposition != "applied" {
+        return Err(corrupt_local(
+            "conflict parent has an invalid apply disposition",
+        ));
     }
     let moment_id = parent.payload.effects[owner.effect_index]
         .moment_id
@@ -3582,6 +3591,106 @@ mod tests {
         assert_eq!(
             crate::read_replication_acked_seq(&store, "ws", "peer").expect("child ack"),
             1
+        );
+    }
+
+    #[test]
+    fn refused_parent_still_authenticates_and_advances_its_owned_shadow() {
+        let (_scratch, mut store, _key, built) = receiver_fixture();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-a".to_owned(),
+                    path: "doc.md".to_owned(),
+                    text: "receiver divergence".to_owned(),
+                    moment_id: "moment-diverged".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("diverge receiver head");
+        let poisoned_vector_sha = store
+            .put_binary_blob(b"not the successor state vector")
+            .expect("store mismatched successor vector");
+        let mut payload = built.validated.payload;
+        let successor = payload
+            .lineage_transition
+            .as_mut()
+            .and_then(|transition| transition.successor.as_mut())
+            .expect("mutable successor descriptor");
+        successor.state_vector_blob_sha256 = poisoned_vector_sha;
+        let built = build_conflict_resolve_v1(payload).expect("poisoned carrier remains valid");
+
+        let parent = imported_envelope(0, "conflict.resolve", built.value.clone());
+        let parent_outcome =
+            crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases);
+        assert!(
+            matches!(parent_outcome, Ok(crate::ApplyOutcome::Refused(_))),
+            "poisoned successor must refuse its parent: {parent_outcome:?}",
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "DELETE FROM replication_pending_refusals WHERE workspace_id='ws'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("simulate the refusal report committed before the next pull page");
+
+        let child = imported_envelope(1, "moment.append", built.validated.shadows[0].clone());
+        let outcome =
+            crate::apply_replication_envelope(&mut store, &child, &NoFaults, &crate::NoLiveLeases);
+        assert!(
+            matches!(outcome, Ok(crate::ApplyOutcome::Applied(_))),
+            "the refused parent's authenticated shadow must retire without applying: {outcome:?}",
+        );
+        assert_eq!(
+            crate::read_replication_acked_seq(&store, "ws", "peer").expect("child ack"),
+            1
+        );
+        let (head, owned_moments, dispositions): (String, i64, Vec<(i64, String)>) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                         WHERE s.workspace_id='ws' AND s.version_id='main' \
+                           AND s.object_id='object-a'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' \
+                           AND moment_id='moment-result'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.prepare(
+                        "SELECT origin_seq,apply_disposition FROM replication_log \
+                         WHERE workspace_id='ws' AND origin_id='peer' ORDER BY origin_seq",
+                    )?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+                ))
+            })
+            .expect("state after refused bundle");
+        assert_eq!(
+            head, "receiver divergence",
+            "the refused bundle must not mutate content"
+        );
+        assert_eq!(owned_moments, 0, "the refused shadow is verification-only");
+        assert_eq!(
+            dispositions,
+            [(0, "refused".to_owned()), (1, "applied".to_owned())],
+            "the append-only parent outcome authenticates a shadow after its transient report is gone",
         );
     }
 

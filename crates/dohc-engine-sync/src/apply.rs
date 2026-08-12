@@ -336,17 +336,24 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         if let Admission::Refused(refusal) = &admission {
             persist_refusal(tx, refusal)?;
         }
+        let apply_disposition = if matches!(&admission, Admission::Refused(_)) {
+            "refused"
+        } else {
+            "applied"
+        };
         tx.execute(
             "INSERT INTO replication_log \
-             (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+             (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported, \
+              apply_disposition) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
             params![
                 envelope.workspace_id,
                 envelope.origin_id,
                 envelope.origin_seq,
                 envelope.op_kind,
                 payload_json,
-                envelope.recorded_at_ms
+                envelope.recorded_at_ms,
+                apply_disposition,
             ],
         )
         .map_err(SyncError::persist)?;
