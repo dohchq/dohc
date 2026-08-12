@@ -128,4 +128,12 @@ describe("decodeYdocOpenResult", () => {
       decodeYdocOpenResult(openResult({ lineage: "present" })),
     ).toThrow(YdocProtocolShapeError);
   });
+
+  it("strips extra daemon fields without rejecting the result", () => {
+    const decoded = decodeYdocOpenResult(
+      openResult({ seedMarkdown: "# Seed", daemonOnly: true }),
+    );
+    expect(decoded).not.toHaveProperty("seedMarkdown");
+    expect(decoded).not.toHaveProperty("daemonOnly");
+  });
 });

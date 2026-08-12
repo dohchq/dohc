@@ -1,3 +1,7 @@
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
+import * as Struct from "effect/Struct";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
 export const VERSIONED_METHOD = {
@@ -709,554 +713,462 @@ export class VersionedProtocolShapeError extends Error {
   }
 }
 
-function objectValue(value: JsonValue, label: string): JsonObject {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new VersionedProtocolShapeError(`${label} must be a JSON object.`);
-  }
-  return value;
+function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
+  return Schema.Struct(fields).mapFields(Struct.map(Schema.mutableKey));
 }
 
-function strictObjectValue(
+function decodeVersionedSchema<S extends Schema.ConstraintDecoder<unknown>>(
+  schema: S,
   value: JsonValue,
   label: string,
-  keys: readonly string[],
-): JsonObject {
-  const object = objectValue(value, label);
-  for (const key of Object.keys(object)) {
-    if (!keys.includes(key)) {
-      throw new VersionedProtocolShapeError(`${label}.${key} is not allowed.`);
-    }
-  }
-  return object;
-}
-
-function stringValue(object: JsonObject, key: string, label: string): string {
-  const value = object[key];
-  if (typeof value !== "string") {
-    throw new VersionedProtocolShapeError(`${label}.${key} must be a string.`);
-  }
-  return value;
-}
-
-function numberValue(object: JsonObject, key: string, label: string): number {
-  const value = object[key];
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+): S["Type"] {
+  const decoded = Schema.decodeUnknownResult(schema, {
+    onExcessProperty: "error",
+  })(value);
+  if (Result.isFailure(decoded)) {
+    const issue = SchemaIssue.makeFormatterStandardSchemaV1()(
+      decoded.failure.issue,
+    ).issues[0];
+    const path = issue?.path?.map((part) =>
+      typeof part === "number" ? `[${part}]` : `.${String(part)}`,
+    ).join("") ?? "";
     throw new VersionedProtocolShapeError(
-      `${label}.${key} must be a safe integer.`,
+      `${label}${path}: ${issue?.message ?? decoded.failure.message}`,
     );
   }
-  return value;
+  return decoded.success;
 }
 
-function booleanValue(object: JsonObject, key: string, label: string): boolean {
-  const value = object[key];
-  if (typeof value !== "boolean") {
-    throw new VersionedProtocolShapeError(`${label}.${key} must be a boolean.`);
-  }
-  return value;
-}
+const NullableString = Schema.NullOr(Schema.String);
+const NullableInt = Schema.NullOr(Schema.Int);
+const ContentKindSchema = Schema.Literals(["text", "binary"]);
+const VersionKindSchema = Schema.Literals(["main", "named"]);
+const ChangeStatusSchema = Schema.Literals(["added", "modified", "deleted"]);
+const MaterializeOutcomeSchema = Schema.Literals([
+  "applied",
+  "skipped",
+  "conflict",
+  "superseded",
+  "error",
+]);
+const EmptyObjectSchema = Schema.Record(Schema.String, Schema.Never);
 
-function nullableStringValue(
-  object: JsonObject,
-  key: string,
-  label: string,
-): string | null {
-  const value = object[key];
-  if (value !== null && typeof value !== "string") {
-    throw new VersionedProtocolShapeError(
-      `${label}.${key} must be a string or null.`,
-    );
-  }
-  return value;
-}
+const FileObjectSchema = mutableStruct({
+  id: Schema.String,
+  workspaceId: Schema.String,
+  createdAtMs: Schema.Int,
+});
 
-function nullableNumberValue(
-  object: JsonObject,
-  key: string,
-  label: string,
-): number | null {
-  const value = object[key];
-  if (value !== null && (typeof value !== "number" || !Number.isSafeInteger(value))) {
-    throw new VersionedProtocolShapeError(
-      `${label}.${key} must be a safe integer or null.`,
-    );
-  }
-  return value;
-}
+const SnapshotMetadataFields = {
+  workspaceId: Schema.String,
+  versionId: Schema.String,
+  objectId: Schema.String,
+  path: Schema.String,
+  contentKind: ContentKindSchema,
+  sha256: Schema.String,
+  byteLength: Schema.Int,
+  updatedAtMs: Schema.Int,
+  latestMomentId: Schema.String,
+  metadataOrigin: Schema.String,
+  metadataSummary: Schema.optionalKey(NullableString),
+  metadataCorrelationId: Schema.optionalKey(NullableString),
+} as const;
 
-function arrayValue(object: JsonObject, key: string, label: string): JsonValue[] {
-  const value = object[key];
-  if (!Array.isArray(value)) {
-    throw new VersionedProtocolShapeError(`${label}.${key} must be an array.`);
-  }
-  return value;
-}
+const SnapshotMetadataSchema = mutableStruct(SnapshotMetadataFields);
+const TextWriteSnapshotSchema = mutableStruct({
+  ...SnapshotMetadataFields,
+  contentKind: Schema.Literal("text"),
+  text: Schema.String,
+  blobSha256: Schema.String,
+});
+const BinaryWriteSnapshotWireSchema = mutableStruct({
+  objectId: Schema.String,
+  path: Schema.String,
+  contentKind: Schema.Literal("binary"),
+  text: Schema.Literal(""),
+  sha256: Schema.String,
+  byteLength: Schema.Int,
+  workspaceId: Schema.optionalKey(Schema.Unknown),
+  versionId: Schema.optionalKey(Schema.Unknown),
+  updatedAtMs: Schema.Int,
+  latestMomentId: Schema.String,
+  metadataOrigin: Schema.optionalKey(Schema.Unknown),
+});
 
-function contentKindValue(
-  object: JsonObject,
-  key: string,
-  label: string,
-): VersionedContentKind {
-  const value = object[key];
-  if (value !== "text" && value !== "binary") {
-    throw new VersionedProtocolShapeError(
-      `${label}.${key} must be text or binary.`,
-    );
-  }
-  return value;
-}
+const AgentAuthorSchema = mutableStruct({
+  kind: Schema.Literal("agent"),
+  agentId: Schema.String,
+  onBehalfOf: Schema.String,
+  agentRunId: Schema.optionalKey(Schema.String),
+});
+const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
+const MomentAuthorSchema = Schema.NullOr(
+  Schema.Union([AgentAuthorSchema, CorruptAuthorSchema]),
+);
 
-function fileObjectValue(value: JsonValue, label: string): FileObject {
-  const object = strictObjectValue(value, label, [
-    "id",
-    "workspaceId",
-    "createdAtMs",
-  ]);
-  return {
-    id: stringValue(object, "id", label),
-    workspaceId: stringValue(object, "workspaceId", label),
-    createdAtMs: numberValue(object, "createdAtMs", label),
-  };
-}
+const MomentRecordSchema = mutableStruct({
+  momentOrder: Schema.Int,
+  momentId: Schema.String,
+  versionId: Schema.String,
+  objectId: Schema.String,
+  path: Schema.String,
+  recordedAtMs: Schema.Int,
+  operation: Schema.Literals(["write", "delete", "rename"]),
+  afterContentKind: ContentKindSchema,
+  afterBlobSha256: NullableString,
+  afterBinarySha256: NullableString,
+  beforePresent: Schema.Boolean,
+  beforeContentKind: ContentKindSchema,
+  beforeBlobSha256: NullableString,
+  beforeBinarySha256: NullableString,
+  beforeLatestMomentId: NullableString,
+  metadataOrigin: Schema.String,
+  metadataSummary: Schema.optionalKey(NullableString),
+  metadataCorrelationId: Schema.optionalKey(NullableString),
+  author: MomentAuthorSchema,
+  syncRecordOnly: Schema.Boolean,
+  afterText: NullableString,
+  afterByteLength: NullableInt,
+  afterInbandLimitBytes: NullableInt,
+  beforeText: NullableString,
+  beforeByteLength: NullableInt,
+  beforeInbandLimitBytes: NullableInt,
+  beforePath: Schema.optionalKey(NullableString),
+});
 
-function snapshotMetadataValue(
-  value: JsonValue,
-  label: string,
-  extraKeys: readonly string[] = [],
-): SnapshotMetadata {
-  const object = strictObjectValue(value, label, [
-    "workspaceId",
-    "versionId",
-    "objectId",
-    "path",
-    "contentKind",
-    "sha256",
-    "byteLength",
-    "updatedAtMs",
-    "latestMomentId",
-    "metadataOrigin",
-    "metadataSummary",
-    "metadataCorrelationId",
-    ...extraKeys,
-  ]);
-  const result: SnapshotMetadata = {
-    workspaceId: stringValue(object, "workspaceId", label),
-    versionId: stringValue(object, "versionId", label),
-    objectId: stringValue(object, "objectId", label),
-    path: stringValue(object, "path", label),
-    contentKind: contentKindValue(object, "contentKind", label),
-    sha256: stringValue(object, "sha256", label),
-    byteLength: numberValue(object, "byteLength", label),
-    updatedAtMs: numberValue(object, "updatedAtMs", label),
-    latestMomentId: stringValue(object, "latestMomentId", label),
-    metadataOrigin: stringValue(object, "metadataOrigin", label),
-  };
-  if (object.metadataSummary !== undefined) {
-    result.metadataSummary = nullableStringValue(object, "metadataSummary", label);
-  }
-  if (object.metadataCorrelationId !== undefined) {
-    result.metadataCorrelationId = nullableStringValue(
-      object,
-      "metadataCorrelationId",
-      label,
-    );
-  }
-  return result;
-}
+const TextReadMetadataFields = {
+  ...SnapshotMetadataFields,
+  blobSha256: Schema.String,
+} as const;
+const VersionedTextReadValueSchema = Schema.Union([
+  mutableStruct({
+    ...TextReadMetadataFields,
+    contentKind: Schema.Literal("text"),
+    text: Schema.String,
+  }),
+  mutableStruct({
+    ...TextReadMetadataFields,
+    contentKind: Schema.Literal("text"),
+    text: Schema.Null,
+    inbandLimitBytes: Schema.Int,
+  }),
+  mutableStruct({
+    ...TextReadMetadataFields,
+    contentKind: Schema.Literal("binary"),
+    text: Schema.Literal(""),
+  }),
+]);
 
-function momentAuthorValue(value: JsonValue, label: string): MomentAuthor {
-  if (value === null) return null;
-  const object = objectValue(value, label);
-  if (object.corrupt === true) {
-    strictObjectValue(value, label, ["corrupt"]);
-    return { corrupt: true };
-  }
-  strictObjectValue(value, label, [
-    "kind",
-    "agentId",
-    "onBehalfOf",
-    "agentRunId",
-  ]);
-  if (object.kind !== "agent") {
-    throw new VersionedProtocolShapeError(`${label}.kind is invalid.`);
-  }
-  const author: AgentAuthor = {
-    kind: "agent",
-    agentId: stringValue(object, "agentId", label),
-    onBehalfOf: stringValue(object, "onBehalfOf", label),
-  };
-  if (object.agentRunId !== undefined) {
-    author.agentRunId = stringValue(object, "agentRunId", label);
-  }
-  return author;
-}
+const TextWriteResultSchema = mutableStruct({
+  object: FileObjectSchema,
+  snapshot: TextWriteSnapshotSchema,
+  moment: MomentRecordSchema,
+  deduped: Schema.Boolean,
+});
+const BinaryWriteResultWireSchema = mutableStruct({
+  object: FileObjectSchema,
+  snapshot: BinaryWriteSnapshotWireSchema,
+  moment: MomentRecordSchema,
+  deduped: Schema.Boolean,
+  materializeEnqueued: Schema.Boolean,
+  materialized: Schema.Boolean,
+  materializeOutcome: MaterializeOutcomeSchema,
+});
+const TextRenameResultSchema = mutableStruct({
+  object: FileObjectSchema,
+  before: SnapshotMetadataSchema,
+  after: SnapshotMetadataSchema,
+  moment: MomentRecordSchema,
+  deduped: Schema.Boolean,
+});
+const TextDeleteResultSchema = mutableStruct({
+  object: FileObjectSchema,
+  before: SnapshotMetadataSchema,
+  moment: MomentRecordSchema,
+  deduped: Schema.Boolean,
+});
+const TextRollbackResultSchema = mutableStruct({
+  rolledBack: Schema.Literal(true),
+  deduped: Schema.Boolean,
+  materializeEnqueued: Schema.Boolean,
+  materialized: Schema.Boolean,
+  materializeOutcome: MaterializeOutcomeSchema,
+});
 
-function momentValue(value: JsonValue, label: string): MomentRecord {
-  const object = strictObjectValue(value, label, [
-    "momentOrder",
-    "momentId",
-    "versionId",
-    "objectId",
-    "path",
-    "recordedAtMs",
-    "operation",
-    "afterContentKind",
-    "afterBlobSha256",
-    "afterBinarySha256",
-    "beforePresent",
-    "beforeContentKind",
-    "beforeBlobSha256",
-    "beforeBinarySha256",
-    "beforeLatestMomentId",
-    "metadataOrigin",
-    "metadataSummary",
-    "metadataCorrelationId",
-    "author",
-    "syncRecordOnly",
-    "afterText",
-    "afterByteLength",
-    "afterInbandLimitBytes",
-    "beforeText",
-    "beforeByteLength",
-    "beforeInbandLimitBytes",
-    "beforePath",
-  ]);
-  const operation = object.operation;
-  if (operation !== "write" && operation !== "delete" && operation !== "rename") {
-    throw new VersionedProtocolShapeError(`${label}.operation is invalid.`);
-  }
-  const result: MomentRecord = {
-    momentOrder: numberValue(object, "momentOrder", label),
-    momentId: stringValue(object, "momentId", label),
-    versionId: stringValue(object, "versionId", label),
-    objectId: stringValue(object, "objectId", label),
-    path: stringValue(object, "path", label),
-    recordedAtMs: numberValue(object, "recordedAtMs", label),
-    operation,
-    afterContentKind: contentKindValue(object, "afterContentKind", label),
-    afterBlobSha256: nullableStringValue(object, "afterBlobSha256", label),
-    afterBinarySha256: nullableStringValue(object, "afterBinarySha256", label),
-    beforePresent: booleanValue(object, "beforePresent", label),
-    beforeContentKind: contentKindValue(object, "beforeContentKind", label),
-    beforeBlobSha256: nullableStringValue(object, "beforeBlobSha256", label),
-    beforeBinarySha256: nullableStringValue(object, "beforeBinarySha256", label),
-    beforeLatestMomentId: nullableStringValue(object, "beforeLatestMomentId", label),
-    metadataOrigin: stringValue(object, "metadataOrigin", label),
-    author: momentAuthorValue(object.author ?? null, `${label}.author`),
-    syncRecordOnly: booleanValue(object, "syncRecordOnly", label),
-    afterText: nullableStringValue(object, "afterText", label),
-    afterByteLength: nullableNumberValue(object, "afterByteLength", label),
-    afterInbandLimitBytes: nullableNumberValue(object, "afterInbandLimitBytes", label),
-    beforeText: nullableStringValue(object, "beforeText", label),
-    beforeByteLength: nullableNumberValue(object, "beforeByteLength", label),
-    beforeInbandLimitBytes: nullableNumberValue(object, "beforeInbandLimitBytes", label),
-  };
-  if (object.beforePath !== undefined) {
-    result.beforePath = nullableStringValue(object, "beforePath", label);
-  }
-  if (object.metadataSummary !== undefined) {
-    result.metadataSummary = nullableStringValue(object, "metadataSummary", label);
-  }
-  if (object.metadataCorrelationId !== undefined) {
-    result.metadataCorrelationId = nullableStringValue(
-      object,
-      "metadataCorrelationId",
-      label,
-    );
-  }
-  return result;
-}
+const VersionRecordSchema = mutableStruct({
+  id: Schema.String,
+  workspaceId: Schema.String,
+  kind: VersionKindSchema,
+  name: Schema.String,
+  forkPoint: Schema.optionalKey(
+    mutableStruct({
+      versionId: Schema.String,
+      momentId: Schema.optionalKey(Schema.String),
+    }),
+  ),
+  createdAtMs: Schema.Int,
+});
+const VersionsListEntrySchema = mutableStruct({
+  versionId: Schema.String,
+  kind: VersionKindSchema,
+  name: Schema.String,
+  createdAtMs: Schema.Int,
+  forkVersionId: NullableString,
+  forkMomentId: NullableString,
+});
+const VersionsListResultSchema = mutableStruct({
+  versions: Schema.mutable(Schema.Array(VersionsListEntrySchema)),
+  nextAfterVersionId: NullableString,
+});
 
-function secretMomentValue(value: JsonValue, label: string): SecretMomentRecord {
-  const object = strictObjectValue(value, label, [
-    "id",
-    "workspaceId",
-    "versionId",
-    "path",
-    "recordedAtMs",
-    "operation",
-    "metadata",
-    "momentOrder",
-    "protected",
-  ]);
-  const operation = object.operation;
-  if (operation !== "write" && operation !== "delete") {
-    throw new VersionedProtocolShapeError(`${label}.operation is invalid.`);
-  }
-  const metadata = strictObjectValue(
-    object.metadata ?? null,
-    `${label}.metadata`,
-    ["origin", "summary", "correlationId"],
-  );
-  const summary = nullableStringValue(metadata, "summary", `${label}.metadata`);
-  const correlationId = nullableStringValue(
-    metadata,
-    "correlationId",
-    `${label}.metadata`,
-  );
-  if (object.protected !== true) {
-    throw new VersionedProtocolShapeError(`${label}.protected must be true.`);
-  }
-  return {
-    id: stringValue(object, "id", label),
-    workspaceId: stringValue(object, "workspaceId", label),
-    versionId: stringValue(object, "versionId", label),
-    path: stringValue(object, "path", label),
-    recordedAtMs: numberValue(object, "recordedAtMs", label),
-    operation,
-    metadata: {
-      origin: stringValue(metadata, "origin", `${label}.metadata`),
-      summary,
-      correlationId,
-    },
-    momentOrder: numberValue(object, "momentOrder", label),
-    protected: true,
-  };
-}
+const VersionedComparisonRecordSchema = mutableStruct({
+  workspaceId: Schema.String,
+  path: Schema.String,
+  targetVersionId: Schema.String,
+  sourceVersionId: Schema.String,
+  base: Schema.NullOr(VersionedTextReadValueSchema),
+  current: Schema.NullOr(VersionedTextReadValueSchema),
+  incoming: Schema.NullOr(VersionedTextReadValueSchema),
+  status: Schema.Literals([
+    "same",
+    "incoming-changed",
+    "current-changed",
+    "diverged",
+  ]),
+});
+const MergeMaterializationFields = {
+  materializeEnqueued: Schema.Boolean,
+  materialized: Schema.Boolean,
+  materializeOutcome: MaterializeOutcomeSchema,
+} as const;
+const VersionsMergeResultSchema = Schema.Union([
+  mutableStruct({
+    status: Schema.Literal("unchanged"),
+    deduped: Schema.Boolean,
+    comparison: VersionedComparisonRecordSchema,
+    reason: Schema.Literals(["already-same", "source-unchanged"]),
+    ...MergeMaterializationFields,
+  }),
+  mutableStruct({
+    status: Schema.Literal("conflict"),
+    conflictId: Schema.String,
+    deduped: Schema.Boolean,
+    comparison: VersionedComparisonRecordSchema,
+    ...MergeMaterializationFields,
+  }),
+  mutableStruct({
+    status: Schema.Literal("merged"),
+    writeKind: Schema.Literals(["write", "binary-write"]),
+    object: FileObjectSchema,
+    snapshot: SnapshotMetadataSchema,
+    moment: MomentRecordSchema,
+    deduped: Schema.Boolean,
+    comparison: VersionedComparisonRecordSchema,
+    ...MergeMaterializationFields,
+  }),
+  mutableStruct({
+    status: Schema.Literal("merged"),
+    writeKind: Schema.Literal("delete"),
+    object: FileObjectSchema,
+    before: SnapshotMetadataSchema,
+    moment: MomentRecordSchema,
+    deduped: Schema.Boolean,
+    comparison: VersionedComparisonRecordSchema,
+    ...MergeMaterializationFields,
+  }),
+]);
+
+const CompareFilesEntrySchema = mutableStruct({
+  path: Schema.String,
+  status: ChangeStatusSchema,
+  binary: Schema.optionalKey(Schema.Literal(true)),
+});
+const VersionsCompareFilesResultSchema = mutableStruct({
+  entries: Schema.mutable(Schema.Array(CompareFilesEntrySchema)),
+  nextCursor: NullableString,
+});
+
+const BinaryReadResultSchema = Schema.NullOr(
+  Schema.Union([
+    mutableStruct({
+      objectId: Schema.String,
+      sha256: Schema.String,
+      byteLength: Schema.Int,
+      bytesBase64: Schema.String,
+    }),
+    mutableStruct({
+      objectId: Schema.String,
+      sha256: Schema.String,
+      byteLength: Schema.Int,
+      bytesBase64: Schema.Null,
+      inbandLimitBytes: Schema.Int,
+    }),
+  ]),
+);
+const BlobReadResultSchema = Schema.Union([
+  mutableStruct({ bytesBase64: Schema.String }),
+  mutableStruct({
+    bytesBase64: Schema.Null,
+    byteLength: Schema.Int,
+    inbandLimitBytes: Schema.Int,
+  }),
+]);
+
+const SecretMomentRecordSchema = mutableStruct({
+  id: Schema.String,
+  workspaceId: Schema.String,
+  versionId: Schema.String,
+  path: Schema.String,
+  recordedAtMs: Schema.Int,
+  operation: Schema.Literals(["write", "delete"]),
+  metadata: mutableStruct({
+    origin: Schema.String,
+    summary: NullableString,
+    correlationId: NullableString,
+  }),
+  momentOrder: Schema.Int,
+  protected: Schema.Literal(true),
+});
+const SecretWriteResultSchema = mutableStruct({
+  changed: Schema.Boolean,
+  moment: Schema.NullOr(SecretMomentRecordSchema),
+});
+const SecretsListResultSchema = mutableStruct({
+  secrets: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        path: Schema.String,
+        byteLength: Schema.Int,
+        updatedAtMs: Schema.Int,
+        latestMomentId: Schema.String,
+      }),
+    ),
+  ),
+  nextAfterPath: NullableString,
+});
+const SecretsMaterializeResultSchema = Schema.NullOr(
+  Schema.Union([
+    mutableStruct({ text: Schema.String }),
+    mutableStruct({
+      text: Schema.Null,
+      byteLength: Schema.Int,
+      inbandLimitBytes: Schema.Int,
+    }),
+  ]),
+);
+const SecretDeleteResultSchema = mutableStruct({
+  moment: Schema.NullOr(SecretMomentRecordSchema),
+});
+const SecretCompareResultSchema = mutableStruct({
+  entries: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        path: Schema.String,
+        status: ChangeStatusSchema,
+      }),
+    ),
+  ),
+  nextAfterPath: NullableString,
+});
+const SecretRestoreResultSchema = mutableStruct({
+  restored: Schema.Literals(["text", "deleted"]),
+  restoredMomentId: Schema.String,
+  path: Schema.String,
+});
+const SecretsMomentsListResultSchema = mutableStruct({
+  moments: Schema.mutable(Schema.Array(SecretMomentRecordSchema)),
+  nextBeforeMomentOrder: NullableInt,
+});
+const MomentsListResultSchema = mutableStruct({
+  moments: Schema.mutable(Schema.Array(MomentRecordSchema)),
+  nextBeforeMomentOrder: NullableInt,
+  latestMomentOrder: Schema.Int,
+});
+const TextListResultSchema = mutableStruct({
+  files: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        path: Schema.String,
+        objectId: Schema.String,
+        contentKind: ContentKindSchema,
+        sha256: Schema.String,
+        byteLength: NullableInt,
+        binarySha256: NullableString,
+        updatedAtMs: Schema.Int,
+        latestMomentId: Schema.String,
+        metadataOrigin: Schema.String,
+        hasYdocMarker: Schema.Boolean,
+        metadataSummary: Schema.optionalKey(NullableString),
+        metadataCorrelationId: Schema.optionalKey(NullableString),
+      }),
+    ),
+  ),
+  nextAfterPath: NullableString,
+});
 
 export function decodeVersionedTextWriteResult(value: JsonValue): VersionedTextWriteResult {
-  const label = "versionedText.write result";
-  const object = strictObjectValue(value, label, [
-    "object",
-    "snapshot",
-    "moment",
-    "deduped",
-  ]);
-  const snapshot = snapshotMetadataValue(
-    object.snapshot ?? null,
-    `${label}.snapshot`,
-    ["text", "blobSha256"],
-  );
-  const snapshotObject = objectValue(object.snapshot ?? null, `${label}.snapshot`);
-  if (snapshot.contentKind !== "text") {
-    throw new VersionedProtocolShapeError(`${label}.snapshot.contentKind must be text.`);
-  }
-  return {
-    object: fileObjectValue(object.object ?? null, `${label}.object`),
-    snapshot: {
-      ...snapshot,
-      contentKind: "text",
-      text: stringValue(snapshotObject, "text", `${label}.snapshot`),
-      blobSha256: stringValue(snapshotObject, "blobSha256", `${label}.snapshot`),
-    },
-    moment: momentValue(object.moment ?? null, `${label}.moment`),
-    deduped: booleanValue(object, "deduped", label),
-  };
+  return decodeVersionedSchema(
+    TextWriteResultSchema,
+    value,
+    "versionedText.write result",
+  ) as VersionedTextWriteResult;
 }
 
 export function decodeVersionedTextReadResult(value: JsonValue): VersionedTextReadResult {
-  if (value === null) return null;
-  const label = "versionedText.read result";
-  const object = strictObjectValue(value, label, [
-    "workspaceId",
-    "versionId",
-    "objectId",
-    "path",
-    "contentKind",
-    "text",
-    "byteLength",
-    "blobSha256",
-    "sha256",
-    "updatedAtMs",
-    "latestMomentId",
-    "metadataOrigin",
-    "metadataSummary",
-    "metadataCorrelationId",
-    "inbandLimitBytes",
-  ]);
-  const metadata = snapshotMetadataValue(value, label, [
-    "text",
-    "blobSha256",
-    "inbandLimitBytes",
-  ]);
-  const blobSha256 = stringValue(object, "blobSha256", label);
-  const text = nullableStringValue(object, "text", label);
-
-  if (metadata.contentKind === "binary") {
-    if (text !== "") {
-      throw new VersionedProtocolShapeError(`${label}.text must be empty for binary content.`);
-    }
-    if (object.inbandLimitBytes !== undefined) {
-      throw new VersionedProtocolShapeError(
-        `${label}.inbandLimitBytes is invalid for binary content.`,
-      );
-    }
-    return { ...metadata, contentKind: "binary", text: "", blobSha256 };
-  }
-
-  if (text === null) {
-    return {
-      ...metadata,
-      contentKind: "text",
-      text: null,
-      blobSha256,
-      inbandLimitBytes: numberValue(object, "inbandLimitBytes", label),
-    };
-  }
-  if (object.inbandLimitBytes !== undefined) {
-    throw new VersionedProtocolShapeError(
-      `${label}.inbandLimitBytes is invalid for in-band text.`,
-    );
-  }
-  return { ...metadata, contentKind: "text", text, blobSha256 };
+  return decodeVersionedSchema(
+    Schema.NullOr(VersionedTextReadValueSchema),
+    value,
+    "versionedText.read result",
+  ) as VersionedTextReadResult;
 }
 
 export function decodeVersionedBinaryWriteResult(value: JsonValue): VersionedBinaryWriteResult {
-  const label = "versionedBinary.write result";
-  const object = strictObjectValue(value, label, [
-    "object",
-    "snapshot",
-    "moment",
-    "deduped",
-    "materializeEnqueued",
-    "materialized",
-    "materializeOutcome",
-  ]);
-  const snapshot = strictObjectValue(
-    object.snapshot ?? null,
-    `${label}.snapshot`,
-    [
-      "objectId",
-      "path",
-      "contentKind",
-      "text",
-      "sha256",
-      "byteLength",
-      "workspaceId",
-      "versionId",
-      "updatedAtMs",
-      "latestMomentId",
-      "metadataOrigin",
-    ],
+  const decoded = decodeVersionedSchema(
+    BinaryWriteResultWireSchema,
+    value,
+    "versionedBinary.write result",
   );
-  if (snapshot.contentKind !== "binary") {
-    throw new VersionedProtocolShapeError(`${label}.snapshot.contentKind must be binary.`);
-  }
-  if (snapshot.text !== "") {
-    throw new VersionedProtocolShapeError(`${label}.snapshot.text must be empty.`);
-  }
   return {
-    object: fileObjectValue(object.object ?? null, `${label}.object`),
+    ...decoded,
     snapshot: {
-      objectId: stringValue(snapshot, "objectId", `${label}.snapshot`),
-      path: stringValue(snapshot, "path", `${label}.snapshot`),
+      objectId: decoded.snapshot.objectId,
+      path: decoded.snapshot.path,
       contentKind: "binary",
       text: "",
-      sha256: stringValue(snapshot, "sha256", `${label}.snapshot`),
-      byteLength: numberValue(snapshot, "byteLength", `${label}.snapshot`),
-      updatedAtMs: numberValue(snapshot, "updatedAtMs", `${label}.snapshot`),
-      latestMomentId: stringValue(snapshot, "latestMomentId", `${label}.snapshot`),
+      sha256: decoded.snapshot.sha256,
+      byteLength: decoded.snapshot.byteLength,
+      updatedAtMs: decoded.snapshot.updatedAtMs,
+      latestMomentId: decoded.snapshot.latestMomentId,
     },
-    moment: momentValue(object.moment ?? null, `${label}.moment`),
-    deduped: booleanValue(object, "deduped", label),
-    materializeEnqueued: booleanValue(object, "materializeEnqueued", label),
-    materialized: booleanValue(object, "materialized", label),
-    materializeOutcome: materializeOutcomeValue(object, label),
-  };
+  } as VersionedBinaryWriteResult;
 }
 
 export function decodeVersionedTextRenameResult(value: JsonValue): VersionedTextRenameResult {
-  const label = "versionedText.rename result";
-  const object = strictObjectValue(value, label, [
-    "object",
-    "before",
-    "after",
-    "moment",
-    "deduped",
-  ]);
-  return {
-    object: fileObjectValue(object.object ?? null, `${label}.object`),
-    before: snapshotMetadataValue(object.before ?? null, `${label}.before`),
-    after: snapshotMetadataValue(object.after ?? null, `${label}.after`),
-    moment: momentValue(object.moment ?? null, `${label}.moment`),
-    deduped: booleanValue(object, "deduped", label),
-  };
+  return decodeVersionedSchema(
+    TextRenameResultSchema,
+    value,
+    "versionedText.rename result",
+  ) as VersionedTextRenameResult;
 }
 
 export function decodeVersionedTextDeleteResult(value: JsonValue): VersionedTextDeleteResult {
-  const label = "versionedText.delete result";
-  const object = strictObjectValue(value, label, [
-    "object",
-    "before",
-    "moment",
-    "deduped",
-  ]);
-  return {
-    object: fileObjectValue(object.object ?? null, `${label}.object`),
-    before: snapshotMetadataValue(object.before ?? null, `${label}.before`),
-    moment: momentValue(object.moment ?? null, `${label}.moment`),
-    deduped: booleanValue(object, "deduped", label),
-  };
+  return decodeVersionedSchema(
+    TextDeleteResultSchema,
+    value,
+    "versionedText.delete result",
+  ) as VersionedTextDeleteResult;
 }
 
 export function decodeVersionedTextRollbackResult(value: JsonValue): VersionedTextRollbackResult {
-  const label = "versionedText.rollback result";
-  const object = strictObjectValue(value, label, [
-    "rolledBack",
-    "deduped",
-    "materializeEnqueued",
-    "materialized",
-    "materializeOutcome",
-  ]);
-  if (object.rolledBack !== true) {
-    throw new VersionedProtocolShapeError(`${label}.rolledBack must be true.`);
-  }
-  return {
-    rolledBack: true,
-    deduped: booleanValue(object, "deduped", label),
-    materializeEnqueued: booleanValue(object, "materializeEnqueued", label),
-    materialized: booleanValue(object, "materialized", label),
-    materializeOutcome: materializeOutcomeValue(object, label),
-  };
-}
-
-function materializeOutcomeValue(object: JsonObject, label: string): MaterializeOutcome {
-  const outcome = object.materializeOutcome;
-  if (
-    outcome !== "applied" &&
-    outcome !== "skipped" &&
-    outcome !== "conflict" &&
-    outcome !== "superseded" &&
-    outcome !== "error"
-  ) {
-    throw new VersionedProtocolShapeError(`${label}.materializeOutcome is invalid.`);
-  }
-  return outcome;
+  return decodeVersionedSchema(
+    TextRollbackResultSchema,
+    value,
+    "versionedText.rollback result",
+  ) as VersionedTextRollbackResult;
 }
 
 export function decodeVersionRecord(value: JsonValue): VersionRecord {
-  const label = "version record";
-  const object = strictObjectValue(value, label, [
-    "id",
-    "workspaceId",
-    "kind",
-    "name",
-    "forkPoint",
-    "createdAtMs",
-  ]);
-  const kind = object.kind;
-  if (kind !== "main" && kind !== "named") {
-    throw new VersionedProtocolShapeError(`${label}.kind must be main or named.`);
-  }
-  const record: VersionRecord = {
-    id: stringValue(object, "id", label),
-    workspaceId: stringValue(object, "workspaceId", label),
-    kind,
-    name: stringValue(object, "name", label),
-    createdAtMs: numberValue(object, "createdAtMs", label),
-  };
-  if (object.forkPoint !== undefined) {
-    const fork = strictObjectValue(
-      object.forkPoint,
-      `${label}.forkPoint`,
-      ["versionId", "momentId"],
-    );
-    record.forkPoint = { versionId: stringValue(fork, "versionId", `${label}.forkPoint`) };
-    if (fork.momentId !== undefined) {
-      record.forkPoint.momentId = stringValue(fork, "momentId", `${label}.forkPoint`);
-    }
-  }
-  return record;
+  return decodeVersionedSchema(VersionRecordSchema, value, "version record") as VersionRecord;
 }
 
 export function decodeVersionsActiveResult(value: JsonValue): VersionsActiveResult {
@@ -1264,487 +1176,167 @@ export function decodeVersionsActiveResult(value: JsonValue): VersionsActiveResu
 }
 
 export function decodeVersionsListResult(value: JsonValue): VersionsListResult {
-  const label = "versions.list result";
-  const object = strictObjectValue(value, label, [
-    "versions",
-    "nextAfterVersionId",
-  ]);
-  const versions = arrayValue(object, "versions", label).map(
-    (entry, index): VersionsListEntry => {
-      const entryLabel = `${label}.versions[${index}]`;
-      const row = strictObjectValue(entry, entryLabel, [
-        "versionId",
-        "kind",
-        "name",
-        "createdAtMs",
-        "forkVersionId",
-        "forkMomentId",
-      ]);
-      const kind = row.kind;
-      if (kind !== "main" && kind !== "named") {
-        throw new VersionedProtocolShapeError(
-          `${entryLabel}.kind must be main or named.`,
-        );
-      }
-      return {
-        versionId: stringValue(row, "versionId", entryLabel),
-        kind,
-        name: stringValue(row, "name", entryLabel),
-        createdAtMs: numberValue(row, "createdAtMs", entryLabel),
-        forkVersionId: nullableStringValue(row, "forkVersionId", entryLabel),
-        forkMomentId: nullableStringValue(row, "forkMomentId", entryLabel),
-      };
-    },
-  );
-  return {
-    versions,
-    nextAfterVersionId: nullableStringValue(object, "nextAfterVersionId", label),
-  };
+  return decodeVersionedSchema(
+    VersionsListResultSchema,
+    value,
+    "versions.list result",
+  ) as VersionsListResult;
 }
 
 export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult {
-  const label = "versionedText.merge result";
-  const object = strictObjectValue(value, label, [
-    "status",
-    "writeKind",
-    "object",
-    "snapshot",
-    "moment",
-    "deduped",
-    "materializeEnqueued",
-    "materialized",
-    "materializeOutcome",
-    "comparison",
-    "reason",
-    "before",
-    "conflictId",
-  ]);
-  const status = object.status;
-  const materialization: MergeMaterializationResult = {
-    materializeEnqueued: booleanValue(object, "materializeEnqueued", label),
-    materialized: booleanValue(object, "materialized", label),
-    materializeOutcome: materializeOutcomeValue(object, label),
-  };
-  const comparison = comparisonValue(
-    object.comparison ?? null,
-    `${label}.comparison`,
-  );
-  if (status === "unchanged") {
-    const reason = object.reason;
-    if (reason !== "already-same" && reason !== "source-unchanged") {
-      throw new VersionedProtocolShapeError(`${label}.reason is invalid.`);
-    }
-    return {
-      status,
-      deduped: booleanValue(object, "deduped", label),
-      comparison,
-      reason,
-      ...materialization,
-    };
-  }
-  if (status === "conflict") {
-    if (object.reason !== undefined) {
-      throw new VersionedProtocolShapeError(`${label}.reason is invalid for conflict.`);
-    }
-    return {
-      status,
-      conflictId: stringValue(object, "conflictId", label),
-      deduped: booleanValue(object, "deduped", label),
-      comparison,
-      ...materialization,
-    };
-  }
-  if (status !== "merged") {
-    throw new VersionedProtocolShapeError(`${label}.status is invalid.`);
-  }
-  const writeKind = object.writeKind;
-  // A fast-forwarded binary head reports the same keys as a text one; only its
-  // snapshot's content kind differs.
-  if (writeKind === "write" || writeKind === "binary-write") {
-    return {
-      status,
-      writeKind,
-      object: fileObjectValue(object.object ?? null, `${label}.object`),
-      snapshot: snapshotMetadataValue(object.snapshot ?? null, `${label}.snapshot`),
-      moment: momentValue(object.moment ?? null, `${label}.moment`),
-      deduped: booleanValue(object, "deduped", label),
-      comparison,
-      ...materialization,
-    };
-  }
-  if (writeKind === "delete") {
-    return {
-      status,
-      writeKind,
-      object: fileObjectValue(object.object ?? null, `${label}.object`),
-      before: snapshotMetadataValue(
-        object.before ?? null,
-        `${label}.before`,
-      ),
-      moment: momentValue(object.moment ?? null, `${label}.moment`),
-      deduped: booleanValue(object, "deduped", label),
-      comparison,
-      ...materialization,
-    };
-  }
-  throw new VersionedProtocolShapeError(`${label}.writeKind is invalid.`);
+  return decodeVersionedSchema(
+    VersionsMergeResultSchema,
+    value,
+    "versionedText.merge result",
+  ) as VersionsMergeResult;
 }
 
 export function decodeVersionsCompareFilesResult(value: JsonValue): VersionsCompareFilesResult {
-  const label = "versions.compareFiles result";
-  const object = strictObjectValue(value, label, ["entries", "nextCursor"]);
-  const entries = arrayValue(object, "entries", label).map((entry, index) => {
-    const entryLabel = `${label}.entries[${index}]`;
-    const row = strictObjectValue(entry, entryLabel, [
-      "path",
-      "status",
-      "binary",
-    ]);
-    const status = row.status;
-    if (status !== "added" && status !== "modified" && status !== "deleted") {
-      throw new VersionedProtocolShapeError(`${entryLabel}.status is invalid.`);
-    }
-    const decoded: VersionsCompareFilesEntry = {
-      path: stringValue(row, "path", entryLabel),
-      status,
-    };
-    if (row.binary !== undefined) {
-      if (row.binary !== true) {
-        throw new VersionedProtocolShapeError(`${entryLabel}.binary must be true.`);
-      }
-      decoded.binary = true;
-    }
-    return decoded;
-  });
-  return { entries, nextCursor: nullableStringValue(object, "nextCursor", label) };
+  return decodeVersionedSchema(
+    VersionsCompareFilesResultSchema,
+    value,
+    "versions.compareFiles result",
+  ) as VersionsCompareFilesResult;
 }
 
 export function decodeVersionedBinaryReadResult(value: JsonValue): VersionedBinaryReadResult {
-  if (value === null) return null;
-  const label = "versionedBinary.read result";
-  const object = strictObjectValue(value, label, [
-    "objectId",
-    "sha256",
-    "byteLength",
-    "bytesBase64",
-    "inbandLimitBytes",
-  ]);
-  const bytesBase64 = nullableStringValue(object, "bytesBase64", label);
-  const result: VersionedBinaryReadValue = {
-    objectId: stringValue(object, "objectId", label),
-    sha256: stringValue(object, "sha256", label),
-    byteLength: numberValue(object, "byteLength", label),
-    bytesBase64,
-  };
-  if (bytesBase64 === null) {
-    result.inbandLimitBytes = numberValue(object, "inbandLimitBytes", label);
-  } else if (object.inbandLimitBytes !== undefined) {
-    throw new VersionedProtocolShapeError(
-      `${label}.inbandLimitBytes is invalid for in-band bytes.`,
-    );
-  }
-  return result;
+  return decodeVersionedSchema(
+    BinaryReadResultSchema,
+    value,
+    "versionedBinary.read result",
+  ) as VersionedBinaryReadResult;
 }
 
 export function decodeVersionedBinaryReadBlobResult(value: JsonValue): VersionedBinaryReadBlobResult {
-  const label = "versionedBinary.readBlob result";
-  const object = strictObjectValue(value, label, [
-    "bytesBase64",
-    "byteLength",
-    "inbandLimitBytes",
-  ]);
-  if (object.bytesBase64 === null) {
-    return {
-      bytesBase64: null,
-      byteLength: numberValue(object, "byteLength", label),
-      inbandLimitBytes: numberValue(object, "inbandLimitBytes", label),
-    };
-  }
-  return { bytesBase64: stringValue(object, "bytesBase64", label) };
+  return decodeVersionedSchema(
+    BlobReadResultSchema,
+    value,
+    "versionedBinary.readBlob result",
+  ) as VersionedBinaryReadBlobResult;
 }
 
 export function decodeVersionedTextReadBlobResult(value: JsonValue): VersionedTextReadBlobResult {
-  const label = "versionedText.readBlob result";
-  const object = strictObjectValue(value, label, [
-    "bytesBase64",
-    "byteLength",
-    "inbandLimitBytes",
-  ]);
-  if (object.bytesBase64 === null) {
-    return {
-      bytesBase64: null,
-      byteLength: numberValue(object, "byteLength", label),
-      inbandLimitBytes: numberValue(object, "inbandLimitBytes", label),
-    };
-  }
-  return { bytesBase64: stringValue(object, "bytesBase64", label) };
+  return decodeVersionedSchema(
+    BlobReadResultSchema,
+    value,
+    "versionedText.readBlob result",
+  ) as VersionedTextReadBlobResult;
 }
 
 export function decodeSecretWriteResult(value: JsonValue): SecretWriteResult {
-  const label = "secrets.write result";
-  const object = strictObjectValue(value, label, ["changed", "moment"]);
-  return {
-    changed: booleanValue(object, "changed", label),
-    moment: object.moment === null
-      ? null
-      : secretMomentValue(object.moment ?? null, `${label}.moment`),
-  };
+  return decodeVersionedSchema(
+    SecretWriteResultSchema,
+    value,
+    "secrets.write result",
+  ) as SecretWriteResult;
 }
 
 export function decodeSecretsListResult(value: JsonValue): SecretsListResult {
-  const label = "secrets.list result";
-  const object = strictObjectValue(value, label, [
-    "secrets",
-    "nextAfterPath",
-  ]);
-  return {
-    secrets: arrayValue(object, "secrets", label).map((entry, index) => {
-      const entryLabel = `${label}.secrets[${index}]`;
-      const row = strictObjectValue(entry, entryLabel, [
-        "path",
-        "byteLength",
-        "updatedAtMs",
-        "latestMomentId",
-      ]);
-      return {
-        path: stringValue(row, "path", entryLabel),
-        byteLength: numberValue(row, "byteLength", entryLabel),
-        updatedAtMs: numberValue(row, "updatedAtMs", entryLabel),
-        latestMomentId: stringValue(row, "latestMomentId", entryLabel),
-      };
-    }),
-    nextAfterPath: nullableStringValue(object, "nextAfterPath", label),
-  };
+  return decodeVersionedSchema(
+    SecretsListResultSchema,
+    value,
+    "secrets.list result",
+  ) as SecretsListResult;
 }
 
 export function decodeSecretsStateExistsResult(value: JsonValue): boolean {
-  if (typeof value !== "boolean") {
-    throw new VersionedProtocolShapeError(
-      "secrets.stateExists result must be a boolean.",
-    );
-  }
-  return value;
+  return decodeVersionedSchema(
+    Schema.Boolean,
+    value,
+    "secrets.stateExists result",
+  );
 }
 
 export function decodeSecretsMaterializeResult(
   value: JsonValue,
 ): SecretsMaterializeResult {
-  if (value === null) return null;
-  const label = "secrets.materialize result";
-  const object = strictObjectValue(value, label, [
-    "text",
-    "byteLength",
-    "inbandLimitBytes",
-  ]);
-  const text = nullableStringValue(object, "text", label);
-  if (text === null) {
-    return {
-      text: null,
-      byteLength: numberValue(object, "byteLength", label),
-      inbandLimitBytes: numberValue(object, "inbandLimitBytes", label),
-    };
-  }
-  if (object.byteLength !== undefined || object.inbandLimitBytes !== undefined) {
-    throw new VersionedProtocolShapeError(
-      `${label} in-band text must not carry over-cap metadata.`,
-    );
-  }
-  return { text };
+  return decodeVersionedSchema(
+    SecretsMaterializeResultSchema,
+    value,
+    "secrets.materialize result",
+  ) as SecretsMaterializeResult;
 }
 
 export function decodeSecretDeleteResult(value: JsonValue): SecretDeleteResult {
-  const label = "secrets.delete result";
-  const object = strictObjectValue(value, label, ["moment"]);
-  return {
-    moment: object.moment === null
-      ? null
-      : secretMomentValue(object.moment ?? null, `${label}.moment`),
-  };
+  return decodeVersionedSchema(
+    SecretDeleteResultSchema,
+    value,
+    "secrets.delete result",
+  ) as SecretDeleteResult;
 }
 
 export function decodeSecretCompareResult(value: JsonValue): SecretCompareResult {
-  const label = "secrets.compare result";
-  const object = strictObjectValue(value, label, [
-    "entries",
-    "nextAfterPath",
-  ]);
-  const entries = arrayValue(object, "entries", label).map((entry, index) => {
-    const entryLabel = `${label}.entries[${index}]`;
-    const row = strictObjectValue(entry, entryLabel, ["path", "status"]);
-    const status = row.status;
-    if (status !== "added" && status !== "modified" && status !== "deleted") {
-      throw new VersionedProtocolShapeError(`${entryLabel}.status is invalid.`);
-    }
-    const decoded: SecretCompareEntry = {
-      path: stringValue(row, "path", entryLabel),
-      status,
-    };
-    return decoded;
-  });
-  return { entries, nextAfterPath: nullableStringValue(object, "nextAfterPath", label) };
+  return decodeVersionedSchema(
+    SecretCompareResultSchema,
+    value,
+    "secrets.compare result",
+  ) as SecretCompareResult;
 }
 
 export const decodeSecretApplyResult = decodeSecretWriteResult;
 
 export function decodeSecretRestoreResult(value: JsonValue): SecretRestoreResult {
-  const label = "secrets.restore result";
-  const object = strictObjectValue(value, label, [
-    "restored",
-    "restoredMomentId",
-    "path",
-  ]);
-  const restored = object.restored;
-  if (restored !== "text" && restored !== "deleted") {
-    throw new VersionedProtocolShapeError(`${label}.restored is invalid.`);
-  }
-  return {
-    restored,
-    restoredMomentId: stringValue(object, "restoredMomentId", label),
-    path: stringValue(object, "path", label),
-  };
+  return decodeVersionedSchema(
+    SecretRestoreResultSchema,
+    value,
+    "secrets.restore result",
+  ) as SecretRestoreResult;
 }
 
 export function decodeSecretsMomentsListResult(value: JsonValue): SecretsMomentsListResult {
-  const label = "secrets.moments.list result";
-  const object = strictObjectValue(value, label, [
-    "moments",
-    "nextBeforeMomentOrder",
-  ]);
-  return {
-    moments: arrayValue(object, "moments", label).map((moment, index) =>
-      secretMomentValue(moment, `${label}.moments[${index}]`),
-    ),
-    nextBeforeMomentOrder: nullableNumberValue(object, "nextBeforeMomentOrder", label),
-  };
+  return decodeVersionedSchema(
+    SecretsMomentsListResultSchema,
+    value,
+    "secrets.moments.list result",
+  ) as SecretsMomentsListResult;
 }
 
 export function decodeSecretsMomentsGetResult(value: JsonValue): SecretsMomentsGetResult {
-  return value === null ? null : secretMomentValue(value, "secrets.moments.get result");
+  return decodeVersionedSchema(
+    Schema.NullOr(SecretMomentRecordSchema),
+    value,
+    "secrets.moments.get result",
+  ) as SecretsMomentsGetResult;
 }
 
 export function decodeMomentsListResult(value: JsonValue): MomentsListResult {
-  const label = "moments.list result";
-  const object = strictObjectValue(value, label, [
-    "moments",
-    "nextBeforeMomentOrder",
-    "latestMomentOrder",
-  ]);
-  return {
-    moments: arrayValue(object, "moments", label).map((moment, index) =>
-      momentValue(moment, `${label}.moments[${index}]`),
-    ),
-    nextBeforeMomentOrder: nullableNumberValue(object, "nextBeforeMomentOrder", label),
-    latestMomentOrder: numberValue(object, "latestMomentOrder", label),
-  };
+  return decodeVersionedSchema(
+    MomentsListResultSchema,
+    value,
+    "moments.list result",
+  ) as MomentsListResult;
 }
 
 export function decodeMomentsGetResult(value: JsonValue): MomentsGetResult {
-  return value === null ? null : momentValue(value, "moments.get result");
+  return decodeVersionedSchema(
+    Schema.NullOr(MomentRecordSchema),
+    value,
+    "moments.get result",
+  ) as MomentsGetResult;
 }
 
 export function decodeVersionedTextListResult(
   value: JsonValue,
 ): VersionedTextListResult {
-  const label = "versionedText.list result";
-  const object = strictObjectValue(value, label, ["files", "nextAfterPath"]);
-  const files = arrayValue(object, "files", label).map((entry, index) => {
-    const entryLabel = `${label}.files[${index}]`;
-    const row = strictObjectValue(entry, entryLabel, [
-      "path",
-      "objectId",
-      "contentKind",
-      "sha256",
-      "byteLength",
-      "binarySha256",
-      "updatedAtMs",
-      "latestMomentId",
-      "metadataOrigin",
-      "hasYdocMarker",
-      "metadataSummary",
-      "metadataCorrelationId",
-    ]);
-    const decoded: VersionedTextListEntry = {
-      path: stringValue(row, "path", entryLabel),
-      objectId: stringValue(row, "objectId", entryLabel),
-      contentKind: contentKindValue(row, "contentKind", entryLabel),
-      sha256: stringValue(row, "sha256", entryLabel),
-      byteLength: nullableNumberValue(row, "byteLength", entryLabel),
-      binarySha256: nullableStringValue(row, "binarySha256", entryLabel),
-      updatedAtMs: numberValue(row, "updatedAtMs", entryLabel),
-      latestMomentId: stringValue(row, "latestMomentId", entryLabel),
-      metadataOrigin: stringValue(row, "metadataOrigin", entryLabel),
-      hasYdocMarker: booleanValue(row, "hasYdocMarker", entryLabel),
-    };
-    if (row.metadataSummary !== undefined) {
-      decoded.metadataSummary = nullableStringValue(
-        row,
-        "metadataSummary",
-        entryLabel,
-      );
-    }
-    if (row.metadataCorrelationId !== undefined) {
-      decoded.metadataCorrelationId = nullableStringValue(
-        row,
-        "metadataCorrelationId",
-        entryLabel,
-      );
-    }
-    return decoded;
-  });
-  return {
-    files,
-    nextAfterPath: nullableStringValue(object, "nextAfterPath", label),
-  };
+  return decodeVersionedSchema(
+    TextListResultSchema,
+    value,
+    "versionedText.list result",
+  ) as VersionedTextListResult;
 }
 
 export function decodeVersionsCompareResult(
   value: JsonValue,
 ): VersionsCompareResult {
-  return comparisonValue(value, "versionedText.compare result");
-}
-
-function comparisonValue(
-  value: JsonValue,
-  label: string,
-): VersionedComparisonRecord {
-  const object = strictObjectValue(value, label, [
-    "workspaceId",
-    "path",
-    "targetVersionId",
-    "sourceVersionId",
-    "base",
-    "current",
-    "incoming",
-    "status",
-  ]);
-  const status = object.status;
-  if (
-    status !== "same" &&
-    status !== "incoming-changed" &&
-    status !== "current-changed" &&
-    status !== "diverged"
-  ) {
-    throw new VersionedProtocolShapeError(`${label}.status is invalid.`);
-  }
-  const state = (key: "base" | "current" | "incoming") => {
-    const candidate = object[key] ?? null;
-    return candidate === null ? null : decodeVersionedTextReadResult(candidate);
-  };
-  return {
-    workspaceId: stringValue(object, "workspaceId", label),
-    path: stringValue(object, "path", label),
-    targetVersionId: stringValue(object, "targetVersionId", label),
-    sourceVersionId: stringValue(object, "sourceVersionId", label),
-    base: state("base"),
-    current: state("current"),
-    incoming: state("incoming"),
-    status,
-  };
+  return decodeVersionedSchema(
+    VersionedComparisonRecordSchema,
+    value,
+    "versionedText.compare result",
+  ) as VersionsCompareResult;
 }
 
 function decodeEmptyObject(value: JsonValue, label: string): JsonObject {
-  strictObjectValue(value, label, []);
-  return {};
+  return decodeVersionedSchema(EmptyObjectSchema, value, label);
 }
 
 export function decodeVersionedResult<M extends VersionedMethod>(

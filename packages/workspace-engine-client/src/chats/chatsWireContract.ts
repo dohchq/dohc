@@ -1,3 +1,6 @@
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
 export const CHATS_METHOD = {
@@ -727,6 +730,373 @@ export class ChatsProtocolShapeError extends Error {
   }
 }
 
+function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
+  return Schema.Struct(fields).mapFields(Struct.map(Schema.mutableKey));
+}
+
+function decodeChatsSchema<S extends Schema.ConstraintDecoder<unknown>>(
+  schema: S,
+  value: JsonValue,
+  label: string,
+): S["Type"] {
+  const decoded = Schema.decodeUnknownResult(schema, {
+    onExcessProperty: "error",
+  })(value);
+  if (Result.isFailure(decoded)) {
+    const message = decoded.failure.message;
+    const pathAt = message.lastIndexOf("\n  at ");
+    if (pathAt !== -1) {
+      const path = message
+        .slice(pathAt + 6)
+        .replace(/\["([^"]+)"\]/gu, ".$1");
+      throw new ChatsProtocolShapeError(
+        `${label}${path}: ${message.slice(0, pathAt)}`,
+      );
+    }
+    throw new ChatsProtocolShapeError(`${label}: ${message}`);
+  }
+  return decoded.success;
+}
+
+const NonnegativeInt = Schema.Natural;
+const AnyInt = Schema.Int;
+const NullableString = Schema.NullOr(Schema.String);
+const NullableNonnegativeInt = Schema.NullOr(NonnegativeInt);
+const ActorKindSchema = Schema.Literals(["human", "agent"]);
+const ChannelKindSchema = Schema.Literals(["channel", "dm", "agent"]);
+const FollowTargetKindSchema = Schema.Literals([
+  "person",
+  "agent",
+  "channel",
+  "thread",
+]);
+const NextCursorFields = { nextCursor: NullableString } as const;
+
+const ChatActorSchema = mutableStruct({
+  kind: ActorKindSchema,
+  displayName: Schema.String,
+});
+const ChatLinkedFileSchema = mutableStruct({
+  objectId: Schema.String,
+  pathHint: Schema.optionalKey(Schema.String),
+  linkedAtMs: AnyInt,
+});
+const ChatThreadSchema = mutableStruct({
+  id: Schema.String,
+  workspaceId: Schema.String,
+  title: Schema.String,
+  createdAtMs: AnyInt,
+  updatedAtMs: AnyInt,
+  linkedFile: Schema.optionalKey(ChatLinkedFileSchema),
+  channelId: Schema.optionalKey(Schema.String),
+});
+const ChatAttachmentSchema = mutableStruct({
+  attachmentId: Schema.String,
+  threadId: Schema.String,
+  messageId: Schema.String,
+  targetKind: Schema.Literal("file"),
+  objectId: Schema.optionalKey(Schema.String),
+  pathHint: Schema.optionalKey(Schema.String),
+  headingText: Schema.optionalKey(Schema.String),
+  headingAnchor: Schema.optionalKey(Schema.String),
+  headingOccurrence: Schema.optionalKey(NonnegativeInt),
+  createdAtMs: AnyInt,
+});
+const ChatMessageSchema = mutableStruct({
+  id: Schema.String,
+  workspaceId: Schema.String,
+  threadId: Schema.String,
+  author: ChatActorSchema,
+  authorUserId: Schema.optionalKey(Schema.String),
+  parentMessageId: Schema.optionalKey(Schema.String),
+  origin: Schema.optionalKey(Schema.Literal("cli")),
+  body: Schema.String,
+  createdAtMs: AnyInt,
+  attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
+});
+const ChatDecisionSchema = mutableStruct({
+  threadId: Schema.String,
+  messageId: Schema.String,
+  state: Schema.Literals(["open", "resolved"]),
+  resolvedByMessageId: Schema.optionalKey(Schema.String),
+  atMs: AnyInt,
+});
+const ChatReactionAuthorSchema = mutableStruct({
+  authorId: Schema.String,
+  kind: ActorKindSchema,
+  displayName: Schema.String,
+});
+const ChatReactionSchema = mutableStruct({
+  reactionId: Schema.String,
+  threadId: Schema.String,
+  messageId: Schema.String,
+  emoji: Schema.String,
+  author: ChatReactionAuthorSchema,
+  state: Schema.Literals(["added", "removed"]),
+  atMs: AnyInt,
+});
+const ChatBookmarkSchema = mutableStruct({
+  bookmarkId: Schema.String,
+  workspaceId: Schema.String,
+  ownerUserId: Schema.String,
+  targetKind: Schema.Literals(["message", "thread"]),
+  targetId: Schema.String,
+  threadId: Schema.String,
+  messageId: Schema.optionalKey(Schema.String),
+  mode: Schema.Literals(["live", "snapshot"]),
+  destinationPath: Schema.String,
+  state: Schema.Literals(["active", "archived"]),
+  generation: NonnegativeInt,
+  projectedGeneration: NonnegativeInt,
+  projectionState: Schema.Literals(["pending", "ready", "failed", "stale"]),
+  projectionObjectId: Schema.optionalKey(Schema.String),
+  createdAtMs: NonnegativeInt,
+  updatedAtMs: NonnegativeInt,
+  lastProjectedAtMs: Schema.optionalKey(NonnegativeInt),
+  failureReason: Schema.optionalKey(Schema.String),
+});
+const ChatDispatchSchema = mutableStruct({
+  workspaceId: Schema.String,
+  triggerMessageId: Schema.String,
+  threadId: Schema.String,
+  state: Schema.Literals(["pending", "running", "done", "failed"]),
+  runId: Schema.optionalKey(Schema.String),
+  failureReason: Schema.optionalKey(Schema.String),
+  attemptCount: NonnegativeInt,
+  createdAtMs: NonnegativeInt,
+  updatedAtMs: NonnegativeInt,
+});
+const ChatRunSchema = mutableStruct({
+  workspaceId: Schema.String,
+  runId: Schema.String,
+  threadId: Schema.String,
+  triggerMessageId: Schema.String,
+  command: Schema.String,
+  startedAtMs: NonnegativeInt,
+  endedAtMs: Schema.optionalKey(NonnegativeInt),
+  exitCode: Schema.optionalKey(AnyInt),
+  failureReason: Schema.optionalKey(Schema.String),
+  logPath: Schema.optionalKey(Schema.String),
+  failureNotePosted: Schema.Boolean,
+});
+const ChatDispatchClaimSchema = mutableStruct({
+  dispatch: ChatDispatchSchema,
+  run: ChatRunSchema,
+});
+const ChatThreadPauseSchema = mutableStruct({
+  workspaceId: Schema.String,
+  threadId: Schema.String,
+  paused: Schema.Boolean,
+  reason: Schema.optionalKey(Schema.String),
+  updatedAtMs: NonnegativeInt,
+});
+const ChatAgentReadStateSchema = mutableStruct({
+  workspaceId: Schema.String,
+  threadId: Schema.String,
+  lastReadCreatedAtMs: AnyInt,
+  lastReadMessageId: Schema.String,
+  revision: NonnegativeInt,
+  updatedAtMs: NonnegativeInt,
+});
+const ChatChannelSchema = mutableStruct({
+  workspaceId: Schema.String,
+  channelId: Schema.String,
+  name: Schema.String,
+  slug: Schema.String,
+  kind: ChannelKindSchema,
+  createdAtMs: AnyInt,
+  updatedAtMs: AnyInt,
+});
+const ChatChannelSummarySchema = mutableStruct({
+  workspaceId: Schema.String,
+  channelId: Schema.String,
+  name: Schema.String,
+  slug: Schema.String,
+  kind: ChannelKindSchema,
+  createdAtMs: AnyInt,
+  updatedAtMs: AnyInt,
+  threadCount: NonnegativeInt,
+  unreadCount: NonnegativeInt,
+});
+const ChatThreadWireRecordSchema = mutableStruct({
+  workspaceId: Schema.String,
+  threadId: Schema.String,
+  title: Schema.String,
+  createdAtMs: AnyInt,
+  updatedAtMs: AnyInt,
+  channelId: NullableString,
+  linkedObjectId: NullableString,
+});
+const ChatThreadReadStateSchema = mutableStruct({
+  workspaceId: Schema.String,
+  threadId: Schema.String,
+  lastReadSequence: NonnegativeInt,
+  revision: NonnegativeInt,
+  updatedAtMs: AnyInt,
+});
+const ChatUnreadFileThreadSchema = mutableStruct({
+  threadId: Schema.NonEmptyString,
+  messageCount: NonnegativeInt,
+  lastReadSequence: NonnegativeInt,
+});
+const ChatFollowSchema = mutableStruct({
+  workspaceId: Schema.String,
+  ownerUserId: Schema.String,
+  targetKind: FollowTargetKindSchema,
+  targetId: Schema.String,
+  state: Schema.Literals(["following", "unfollowed"]),
+  updatedAtMs: AnyInt,
+});
+const ChatFeedReadStateSchema = mutableStruct({
+  workspaceId: Schema.String,
+  ownerUserId: Schema.String,
+  lastSeenCreatedAtMs: AnyInt,
+  lastSeenMessageId: Schema.String,
+  updatedAtMs: AnyInt,
+});
+const ChatFileMentionSchema = mutableStruct({
+  attachment: ChatAttachmentSchema,
+  message: ChatMessageSchema,
+  thread: ChatThreadSchema,
+  channel: Schema.optionalKey(ChatChannelSchema),
+});
+const ChatMentionSchema = mutableStruct({
+  threadId: Schema.String,
+  messageId: Schema.String,
+  handle: Schema.String,
+  authorKind: ActorKindSchema,
+  createdAtMs: AnyInt,
+});
+const ChatChannelOpeningMessageSchema = mutableStruct({
+  id: Schema.String,
+  author: ChatActorSchema,
+  createdAtMs: AnyInt,
+  bodySnippet: Schema.String,
+  reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
+});
+const ChatChannelThreadSummarySchema = mutableStruct({
+  thread: ChatThreadSchema,
+  messageCount: NonnegativeInt,
+  lastReadSequence: NonnegativeInt,
+  unreadCount: NonnegativeInt,
+  openDecisionCount: NonnegativeInt,
+  openingMessage: Schema.optionalKey(ChatChannelOpeningMessageSchema),
+});
+const ChatFeedChannelSchema = mutableStruct({
+  id: Schema.String,
+  workspaceId: Schema.String,
+  name: Schema.String,
+  slug: Schema.String,
+  kind: ChannelKindSchema,
+  createdAtMs: AnyInt,
+  updatedAtMs: AnyInt,
+});
+const ChatFeedItemSchema = mutableStruct({
+  message: ChatMessageSchema,
+  thread: ChatThreadSchema,
+  reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
+  matchedBy: Schema.mutable(Schema.Array(FollowTargetKindSchema)),
+  channel: Schema.optionalKey(ChatFeedChannelSchema),
+  parentMessage: Schema.optionalKey(ChatMessageSchema),
+  openingMessage: Schema.optionalKey(ChatMessageSchema),
+});
+const ChatProjectionSchema = mutableStruct({
+  path: Schema.String,
+  readOnly: Schema.Literal(true),
+  threadId: Schema.String,
+  text: Schema.String,
+});
+const BookmarkTransitionSchema = mutableStruct({
+  bookmark: ChatBookmarkSchema,
+  applied: Schema.Boolean,
+});
+
+function pageSchema(key: string, item: Schema.Constraint) {
+  return mutableStruct({
+    [key]: Schema.mutable(Schema.Array(item)),
+    ...NextCursorFields,
+  });
+}
+
+const ChatsResultSchemas = {
+  channel: ChatChannelSchema,
+  channelMaybe: Schema.NullOr(ChatChannelSchema),
+  channelsList: mutableStruct({
+    channels: Schema.mutable(Schema.Array(ChatChannelSummarySchema)),
+    ...NextCursorFields,
+  }),
+  wireId: mutableStruct({ wireId: NullableString }),
+  threadStart: mutableStruct({
+    thread: ChatThreadSchema,
+    message: ChatMessageSchema,
+  }),
+  thread: ChatThreadSchema,
+  threadsList: mutableStruct({
+    threads: Schema.mutable(Schema.Array(ChatThreadWireRecordSchema)),
+    ...NextCursorFields,
+  }),
+  threadsPage: pageSchema("threads", ChatThreadSchema),
+  channelThreadsPage: pageSchema("threads", ChatChannelThreadSummarySchema),
+  maybeString: Schema.NullOr(Schema.String),
+  projection: ChatProjectionSchema,
+  message: ChatMessageSchema,
+  messagesList: mutableStruct({
+    messages: Schema.mutable(Schema.Array(ChatMessageSchema)),
+    nextAfterMessageOrder: NullableNonnegativeInt,
+  }),
+  readState: ChatThreadReadStateSchema,
+  unreadThreads: Schema.mutable(Schema.Array(ChatUnreadFileThreadSchema)),
+  decision: ChatDecisionSchema,
+  decisionsPage: pageSchema("decisions", ChatDecisionSchema),
+  reaction: ChatReactionSchema,
+  reactionsPage: pageSchema("reactions", ChatReactionSchema),
+  attachmentsPage: pageSchema("attachments", ChatAttachmentSchema),
+  fileMentionsPage: pageSchema("mentions", ChatFileMentionSchema),
+  mentionsPage: pageSchema("mentions", ChatMentionSchema),
+  agentRead: ChatAgentReadStateSchema,
+  follow: ChatFollowSchema,
+  followsList: mutableStruct({
+    follows: Schema.mutable(Schema.Array(ChatFollowSchema)),
+    ...NextCursorFields,
+  }),
+  nullResult: Schema.Null,
+  feedReadState: ChatFeedReadStateSchema,
+  feedPage: mutableStruct({
+    items: Schema.mutable(Schema.Array(ChatFeedItemSchema)),
+    ...NextCursorFields,
+    headCursor: NullableString,
+    readState: Schema.NullOr(ChatFeedReadStateSchema),
+  }),
+  bookmark: ChatBookmarkSchema,
+  bookmarkMaybe: Schema.NullOr(ChatBookmarkSchema),
+  bookmarksList: mutableStruct({
+    bookmarks: Schema.mutable(Schema.Array(ChatBookmarkSchema)),
+    ...NextCursorFields,
+  }),
+  bookmarksPage: pageSchema("bookmarks", ChatBookmarkSchema),
+  bookmarkTransition: BookmarkTransitionSchema,
+  enqueue: mutableStruct({ enqueued: Schema.Boolean }),
+  count: NonnegativeInt,
+  claimMaybe: Schema.NullOr(ChatDispatchClaimSchema),
+  dispatchesPage: pageSchema("dispatches", ChatDispatchSchema),
+  claimsPage: pageSchema("claims", ChatDispatchClaimSchema),
+  runMessagesPage: mutableStruct({
+    messageIds: Schema.mutable(Schema.Array(Schema.String)),
+    ...NextCursorFields,
+  }),
+  runMaybe: Schema.NullOr(ChatRunSchema),
+  boolean: Schema.Boolean,
+  pauseMaybe: Schema.NullOr(ChatThreadPauseSchema),
+  pause: ChatThreadPauseSchema,
+  run: ChatRunSchema,
+  recoveriesPage: pageSchema(
+    "recoveries",
+    mutableStruct({ run: ChatRunSchema, attemptCount: NonnegativeInt }),
+  ),
+  complete: mutableStruct({ completed: Schema.Literal(true) }),
+  fail: mutableStruct({ failed: Schema.Literal(true) }),
+} as const;
+
 function objectValue(value: JsonValue, label: string, keys?: readonly string[]): ChatsJsonObject {
   if (value === null || Array.isArray(value) || typeof value !== "object") {
     throw new ChatsProtocolShapeError(`${label} must be a JSON object.`);
@@ -738,632 +1108,77 @@ function objectValue(value: JsonValue, label: string, keys?: readonly string[]):
       }
     }
   }
-  return value;
-}
-
-function stringValue(object: ChatsJsonObject, key: string, label: string): string {
-  const value = object[key];
-  if (typeof value !== "string") {
-    throw new ChatsProtocolShapeError(`${label}.${key} must be a string.`);
-  }
-  return value;
-}
-
-function nonEmptyString(
-  object: ChatsJsonObject,
-  key: string,
-  label: string,
-): string {
-  const value = stringValue(object, key, label);
-  if (value.length === 0) {
-    throw new ChatsProtocolShapeError(`${label}.${key} must not be empty.`);
-  }
-  return value;
-}
-
-function optionalString(object: ChatsJsonObject, key: string, label: string): string | undefined {
-  if (object[key] === undefined) return undefined;
-  return stringValue(object, key, label);
-}
-
-function nullableString(object: ChatsJsonObject, key: string, label: string): string | null {
-  const value = object[key];
-  if (value !== null && typeof value !== "string") {
-    throw new ChatsProtocolShapeError(`${label}.${key} must be a string or null.`);
-  }
-  return value;
-}
-
-function safeInteger(
-  object: ChatsJsonObject,
-  key: string,
-  label: string,
-  nonnegative = true,
-): number {
-  const value = object[key];
-  if (
-    typeof value !== "number" ||
-    !Number.isSafeInteger(value) ||
-    (nonnegative && value < 0)
-  ) {
-    throw new ChatsProtocolShapeError(
-      `${label}.${key} must be a ${nonnegative ? "nonnegative " : ""}safe integer.`,
-    );
-  }
-  return value;
-}
-
-function optionalInteger(
-  object: ChatsJsonObject,
-  key: string,
-  label: string,
-  nonnegative = true,
-): number | undefined {
-  if (object[key] === undefined) return undefined;
-  return safeInteger(object, key, label, nonnegative);
-}
-
-function nullableSafeInteger(
-  object: ChatsJsonObject,
-  key: string,
-  label: string,
-): number | null {
-  if (object[key] === null) return null;
-  return safeInteger(object, key, label);
-}
-
-function booleanValue(object: ChatsJsonObject, key: string, label: string): boolean {
-  const value = object[key];
-  if (typeof value !== "boolean") {
-    throw new ChatsProtocolShapeError(`${label}.${key} must be a boolean.`);
-  }
-  return value;
-}
-
-function arrayValue(object: ChatsJsonObject, key: string, label: string): JsonValue[] {
-  const value = object[key];
-  if (!Array.isArray(value)) {
-    throw new ChatsProtocolShapeError(`${label}.${key} must be an array.`);
-  }
-  return value;
-}
-
-function enumValue<T extends string>(
-  object: ChatsJsonObject,
-  key: string,
-  label: string,
-  values: readonly T[],
-): T {
-  const value = object[key];
-  if (typeof value !== "string" || !values.includes(value as T)) {
-    throw new ChatsProtocolShapeError(`${label}.${key} is invalid.`);
-  }
-  return value as T;
-}
-
-function cursorValue(object: ChatsJsonObject, label: string): string | null {
-  return nullableString(object, "nextCursor", label);
+  return value as ChatsJsonObject;
 }
 
 export function decodeChatActor(value: JsonValue, label = "chat actor"): ChatActor {
-  const object = objectValue(value, label, ["kind", "displayName"]);
-  return {
-    kind: enumValue(object, "kind", label, ["human", "agent"]),
-    displayName: stringValue(object, "displayName", label),
-  };
+  return decodeChatsSchema(ChatActorSchema, value, label) as ChatActor;
 }
 
 export function decodeChatThread(value: JsonValue, label = "chat thread"): ChatThread {
-  const object = objectValue(value, label, [
-    "id", "workspaceId", "title", "createdAtMs", "updatedAtMs", "linkedFile", "channelId",
-  ]);
-  const result: ChatThread = {
-    id: stringValue(object, "id", label),
-    workspaceId: stringValue(object, "workspaceId", label),
-    title: stringValue(object, "title", label),
-    createdAtMs: safeInteger(object, "createdAtMs", label, false),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
-  };
-  if (object.channelId !== undefined) result.channelId = stringValue(object, "channelId", label);
-  if (object.linkedFile !== undefined) {
-    const linkedLabel = `${label}.linkedFile`;
-    const linked = objectValue(object.linkedFile, linkedLabel, [
-      "objectId", "pathHint", "linkedAtMs",
-    ]);
-    result.linkedFile = {
-      objectId: stringValue(linked, "objectId", linkedLabel),
-      linkedAtMs: safeInteger(linked, "linkedAtMs", linkedLabel, false),
-    };
-    const pathHint = optionalString(linked, "pathHint", linkedLabel);
-    if (pathHint !== undefined) result.linkedFile.pathHint = pathHint;
-  }
-  return result;
+  return decodeChatsSchema(ChatThreadSchema, value, label) as ChatThread;
 }
 
 export function decodeChatAttachment(
   value: JsonValue,
   label = "chat attachment",
 ): ChatAttachment {
-  const object = objectValue(value, label, [
-    "attachmentId", "threadId", "messageId", "targetKind", "objectId", "pathHint",
-    "headingText", "headingAnchor", "headingOccurrence", "createdAtMs",
-  ]);
-  const result: ChatAttachment = {
-    attachmentId: stringValue(object, "attachmentId", label),
-    threadId: stringValue(object, "threadId", label),
-    messageId: stringValue(object, "messageId", label),
-    targetKind: enumValue(object, "targetKind", label, ["file"]),
-    createdAtMs: safeInteger(object, "createdAtMs", label, false),
-  };
-  for (const key of ["objectId", "pathHint", "headingText", "headingAnchor"] as const) {
-    const field = optionalString(object, key, label);
-    if (field !== undefined) result[key] = field;
-  }
-  const occurrence = optionalInteger(object, "headingOccurrence", label);
-  if (occurrence !== undefined) result.headingOccurrence = occurrence;
-  return result;
+  return decodeChatsSchema(ChatAttachmentSchema, value, label) as ChatAttachment;
 }
 
 export function decodeChatMessage(value: JsonValue, label = "chat message"): ChatMessage {
-  const object = objectValue(value, label, [
-    "id", "workspaceId", "threadId", "author", "authorUserId", "parentMessageId",
-    "origin", "body", "createdAtMs", "attachments",
-  ]);
-  const result: ChatMessage = {
-    id: stringValue(object, "id", label),
-    workspaceId: stringValue(object, "workspaceId", label),
-    threadId: stringValue(object, "threadId", label),
-    author: decodeChatActor(object.author ?? null, `${label}.author`),
-    body: stringValue(object, "body", label),
-    createdAtMs: safeInteger(object, "createdAtMs", label, false),
-    attachments: arrayValue(object, "attachments", label).map((entry, index) =>
-      decodeChatAttachment(entry, `${label}.attachments[${index}]`)),
-  };
-  for (const key of ["authorUserId", "parentMessageId"] as const) {
-    const field = optionalString(object, key, label);
-    if (field !== undefined) result[key] = field;
-  }
-  if (object.origin !== undefined) {
-    result.origin = enumValue(object, "origin", label, ["cli"] as const);
-  }
-  return result;
+  return decodeChatsSchema(ChatMessageSchema, value, label) as ChatMessage;
 }
 
 export function decodeChatDecision(value: JsonValue, label = "chat decision"): ChatDecision {
-  const object = objectValue(value, label, [
-    "threadId", "messageId", "state", "resolvedByMessageId", "atMs",
-  ]);
-  const result: ChatDecision = {
-    threadId: stringValue(object, "threadId", label),
-    messageId: stringValue(object, "messageId", label),
-    state: enumValue(object, "state", label, ["open", "resolved"]),
-    atMs: safeInteger(object, "atMs", label, false),
-  };
-  const resolved = optionalString(object, "resolvedByMessageId", label);
-  if (resolved !== undefined) result.resolvedByMessageId = resolved;
-  return result;
+  return decodeChatsSchema(ChatDecisionSchema, value, label) as ChatDecision;
 }
 
 export function decodeChatReaction(value: JsonValue, label = "chat reaction"): ChatReaction {
-  const object = objectValue(value, label, [
-    "reactionId", "threadId", "messageId", "emoji", "author", "state", "atMs",
-  ]);
-  const authorLabel = `${label}.author`;
-  const author = objectValue(object.author ?? null, authorLabel, [
-    "authorId", "kind", "displayName",
-  ]);
-  return {
-    reactionId: stringValue(object, "reactionId", label),
-    threadId: stringValue(object, "threadId", label),
-    messageId: stringValue(object, "messageId", label),
-    emoji: stringValue(object, "emoji", label),
-    author: {
-      authorId: stringValue(author, "authorId", authorLabel),
-      kind: enumValue(author, "kind", authorLabel, ["human", "agent"]),
-      displayName: stringValue(author, "displayName", authorLabel),
-    },
-    state: enumValue(object, "state", label, ["added", "removed"]),
-    atMs: safeInteger(object, "atMs", label, false),
-  };
+  return decodeChatsSchema(ChatReactionSchema, value, label) as ChatReaction;
 }
 
 export function decodeChatBookmark(value: JsonValue, label = "chat bookmark"): ChatBookmark {
-  const object = objectValue(value, label, [
-    "bookmarkId", "workspaceId", "ownerUserId", "targetKind", "targetId", "threadId",
-    "messageId", "mode", "destinationPath", "state", "generation", "projectedGeneration",
-    "projectionState", "projectionObjectId", "createdAtMs", "updatedAtMs",
-    "lastProjectedAtMs", "failureReason",
-  ]);
-  const result: ChatBookmark = {
-    bookmarkId: stringValue(object, "bookmarkId", label),
-    workspaceId: stringValue(object, "workspaceId", label),
-    ownerUserId: stringValue(object, "ownerUserId", label),
-    targetKind: enumValue(object, "targetKind", label, ["message", "thread"]),
-    targetId: stringValue(object, "targetId", label),
-    threadId: stringValue(object, "threadId", label),
-    mode: enumValue(object, "mode", label, ["live", "snapshot"]),
-    destinationPath: stringValue(object, "destinationPath", label),
-    state: enumValue(object, "state", label, ["active", "archived"]),
-    generation: safeInteger(object, "generation", label),
-    projectedGeneration: safeInteger(object, "projectedGeneration", label),
-    projectionState: enumValue(object, "projectionState", label, [
-      "pending", "ready", "failed", "stale",
-    ]),
-    createdAtMs: safeInteger(object, "createdAtMs", label),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label),
-  };
-  for (const key of ["messageId", "projectionObjectId", "failureReason"] as const) {
-    const field = optionalString(object, key, label);
-    if (field !== undefined) result[key] = field;
-  }
-  const projectedAt = optionalInteger(object, "lastProjectedAtMs", label);
-  if (projectedAt !== undefined) result.lastProjectedAtMs = projectedAt;
-  return result;
+  return decodeChatsSchema(ChatBookmarkSchema, value, label) as ChatBookmark;
 }
 
 export function decodeChatDispatch(value: JsonValue, label = "chat dispatch"): ChatDispatch {
-  const object = objectValue(value, label, [
-    "workspaceId", "triggerMessageId", "threadId", "state", "runId", "failureReason",
-    "attemptCount", "createdAtMs", "updatedAtMs",
-  ]);
-  const result: ChatDispatch = {
-    workspaceId: stringValue(object, "workspaceId", label),
-    triggerMessageId: stringValue(object, "triggerMessageId", label),
-    threadId: stringValue(object, "threadId", label),
-    state: enumValue(object, "state", label, ["pending", "running", "done", "failed"]),
-    attemptCount: safeInteger(object, "attemptCount", label),
-    createdAtMs: safeInteger(object, "createdAtMs", label),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label),
-  };
-  for (const key of ["runId", "failureReason"] as const) {
-    const field = optionalString(object, key, label);
-    if (field !== undefined) result[key] = field;
-  }
-  return result;
+  return decodeChatsSchema(ChatDispatchSchema, value, label) as ChatDispatch;
 }
 
 export function decodeChatRun(value: JsonValue, label = "chat run"): ChatRun {
-  const object = objectValue(value, label, [
-    "workspaceId", "runId", "threadId", "triggerMessageId", "command", "startedAtMs",
-    "endedAtMs", "exitCode", "failureReason", "logPath", "failureNotePosted",
-  ]);
-  const result: ChatRun = {
-    workspaceId: stringValue(object, "workspaceId", label),
-    runId: stringValue(object, "runId", label),
-    threadId: stringValue(object, "threadId", label),
-    triggerMessageId: stringValue(object, "triggerMessageId", label),
-    command: stringValue(object, "command", label),
-    startedAtMs: safeInteger(object, "startedAtMs", label),
-    failureNotePosted: booleanValue(object, "failureNotePosted", label),
-  };
-  const ended = optionalInteger(object, "endedAtMs", label);
-  if (ended !== undefined) result.endedAtMs = ended;
-  const exitCode = optionalInteger(object, "exitCode", label, false);
-  if (exitCode !== undefined) result.exitCode = exitCode;
-  for (const key of ["failureReason", "logPath"] as const) {
-    const field = optionalString(object, key, label);
-    if (field !== undefined) result[key] = field;
-  }
-  return result;
-}
-
-function decodeClaim(value: JsonValue, label: string): ChatDispatchClaim {
-  const object = objectValue(value, label, ["dispatch", "run"]);
-  return {
-    dispatch: decodeChatDispatch(object.dispatch ?? null, `${label}.dispatch`),
-    run: decodeChatRun(object.run ?? null, `${label}.run`),
-  };
-}
-
-function decodePause(value: JsonValue, label: string): ChatThreadPause {
-  const object = objectValue(value, label, [
-    "workspaceId", "threadId", "paused", "reason", "updatedAtMs",
-  ]);
-  const result: ChatThreadPause = {
-    workspaceId: stringValue(object, "workspaceId", label),
-    threadId: stringValue(object, "threadId", label),
-    paused: booleanValue(object, "paused", label),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label),
-  };
-  const reason = optionalString(object, "reason", label);
-  if (reason !== undefined) result.reason = reason;
-  return result;
-}
-
-function decodeAgentRead(value: JsonValue, label: string): ChatAgentReadState {
-  const object = objectValue(value, label, [
-    "workspaceId", "threadId", "lastReadCreatedAtMs", "lastReadMessageId", "revision",
-    "updatedAtMs",
-  ]);
-  return {
-    workspaceId: stringValue(object, "workspaceId", label),
-    threadId: stringValue(object, "threadId", label),
-    lastReadCreatedAtMs: safeInteger(object, "lastReadCreatedAtMs", label, false),
-    lastReadMessageId: stringValue(object, "lastReadMessageId", label),
-    revision: safeInteger(object, "revision", label),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label),
-  };
-}
-
-function decodeChannel(value: JsonValue, label: string): ChatChannel {
-  const object = objectValue(value, label, [
-    "workspaceId", "channelId", "name", "slug", "kind", "createdAtMs", "updatedAtMs",
-  ]);
-  return {
-    workspaceId: stringValue(object, "workspaceId", label),
-    channelId: stringValue(object, "channelId", label),
-    name: stringValue(object, "name", label),
-    slug: stringValue(object, "slug", label),
-    kind: enumValue(object, "kind", label, ["channel", "dm", "agent"]),
-    createdAtMs: safeInteger(object, "createdAtMs", label, false),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
-  };
-}
-
-function decodeChannelSummary(
-  value: JsonValue,
-  label: string,
-): ChatChannelSummary {
-  const object = objectValue(value, label, [
-    "workspaceId",
-    "channelId",
-    "name",
-    "slug",
-    "kind",
-    "createdAtMs",
-    "updatedAtMs",
-    "threadCount",
-    "unreadCount",
-  ]);
-  return {
-    workspaceId: stringValue(object, "workspaceId", label),
-    channelId: stringValue(object, "channelId", label),
-    name: stringValue(object, "name", label),
-    slug: stringValue(object, "slug", label),
-    kind: enumValue(object, "kind", label, ["channel", "dm", "agent"]),
-    createdAtMs: safeInteger(object, "createdAtMs", label, false),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
-    threadCount: safeInteger(object, "threadCount", label),
-    unreadCount: safeInteger(object, "unreadCount", label),
-  };
-}
-
-function decodeThreadWireRecord(
-  value: JsonValue,
-  label: string,
-): ChatThreadWireRecord {
-  const object = objectValue(value, label, [
-    "workspaceId",
-    "threadId",
-    "title",
-    "createdAtMs",
-    "updatedAtMs",
-    "channelId",
-    "linkedObjectId",
-  ]);
-  return {
-    workspaceId: stringValue(object, "workspaceId", label),
-    threadId: stringValue(object, "threadId", label),
-    title: stringValue(object, "title", label),
-    createdAtMs: safeInteger(object, "createdAtMs", label, false),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
-    channelId: nullableString(object, "channelId", label),
-    linkedObjectId: nullableString(object, "linkedObjectId", label),
-  };
-}
-
-function decodeReadState(value: JsonValue, label: string): ChatThreadReadState {
-  const object = objectValue(value, label, [
-    "workspaceId",
-    "threadId",
-    "lastReadSequence",
-    "revision",
-    "updatedAtMs",
-  ]);
-  return {
-    workspaceId: stringValue(object, "workspaceId", label),
-    threadId: stringValue(object, "threadId", label),
-    lastReadSequence: safeInteger(object, "lastReadSequence", label),
-    revision: safeInteger(object, "revision", label),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
-  };
+  return decodeChatsSchema(ChatRunSchema, value, label) as ChatRun;
 }
 
 export function decodeUnreadFileThreads(
   value: JsonValue,
   label = `${CHATS_METHOD.readStateListUnreadFileThreads} result`,
 ): ChatUnreadFileThread[] {
-  if (!Array.isArray(value)) {
-    throw new ChatsProtocolShapeError(`${label} must be an array.`);
+  return decodeChatsSchema(
+    Schema.mutable(Schema.Array(ChatUnreadFileThreadSchema)),
+    value,
+    label,
+  ) as ChatUnreadFileThread[];
+}
+
+function decodeRunRecordsForThread(value: JsonValue, label: string): ChatThreadRunsPage {
+  const object = objectValue(value, label, ["runs", "nextCursor"]);
+  const runsObject = objectValue(object.runs ?? null, `${label}.runs`);
+  const runs: Record<string, ChatRun> = Object.create(null);
+  for (const [messageId, run] of Object.entries(runsObject)) {
+    runs[messageId] = decodeChatsSchema(
+      ChatRunSchema,
+      run ?? null,
+      `${label}.runs.${messageId}`,
+    ) as ChatRun;
   }
-  return value.map((entry, index) => {
-    const entryLabel = `${label}[${index}]`;
-    const object = objectValue(entry, entryLabel, [
-      "threadId",
-      "messageCount",
-      "lastReadSequence",
-    ]);
-    return {
-      threadId: nonEmptyString(object, "threadId", entryLabel),
-      messageCount: safeInteger(object, "messageCount", entryLabel),
-      lastReadSequence: safeInteger(object, "lastReadSequence", entryLabel),
-    };
-  });
-}
-
-function decodeFollow(value: JsonValue, label: string): ChatFollow {
-  const object = objectValue(value, label, [
-    "workspaceId",
-    "ownerUserId",
-    "targetKind",
-    "targetId",
-    "state",
-    "updatedAtMs",
-  ]);
   return {
-    workspaceId: stringValue(object, "workspaceId", label),
-    ownerUserId: stringValue(object, "ownerUserId", label),
-    targetKind: enumValue(object, "targetKind", label, [
-      "person",
-      "agent",
-      "channel",
-      "thread",
-    ]),
-    targetId: stringValue(object, "targetId", label),
-    state: enumValue(object, "state", label, ["following", "unfollowed"]),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
-  };
-}
-
-function decodeFeedReadState(
-  value: JsonValue,
-  label: string,
-): ChatFeedReadState {
-  const object = objectValue(value, label, [
-    "workspaceId",
-    "ownerUserId",
-    "lastSeenCreatedAtMs",
-    "lastSeenMessageId",
-    "updatedAtMs",
-  ]);
-  return {
-    workspaceId: stringValue(object, "workspaceId", label),
-    ownerUserId: stringValue(object, "ownerUserId", label),
-    lastSeenCreatedAtMs: safeInteger(
-      object,
-      "lastSeenCreatedAtMs",
-      label,
-      false,
+    runs,
+    nextCursor: decodeChatsSchema(
+      NullableString,
+      object.nextCursor as JsonValue,
+      `${label}.nextCursor`,
     ),
-    lastSeenMessageId: stringValue(object, "lastSeenMessageId", label),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
-  };
-}
-
-function decodeFileMention(value: JsonValue, label: string): ChatFileMention {
-  const object = objectValue(value, label, ["attachment", "message", "thread", "channel"]);
-  const result: ChatFileMention = {
-    attachment: decodeChatAttachment(object.attachment ?? null, `${label}.attachment`),
-    message: decodeChatMessage(object.message ?? null, `${label}.message`),
-    thread: decodeChatThread(object.thread ?? null, `${label}.thread`),
-  };
-  if (object.channel !== undefined) {
-    result.channel = decodeChannel(object.channel, `${label}.channel`);
-  }
-  return result;
-}
-
-function decodeMention(value: JsonValue, label: string): ChatMention {
-  const object = objectValue(value, label, [
-    "threadId", "messageId", "handle", "authorKind", "createdAtMs",
-  ]);
-  return {
-    threadId: stringValue(object, "threadId", label),
-    messageId: stringValue(object, "messageId", label),
-    handle: stringValue(object, "handle", label),
-    authorKind: enumValue(object, "authorKind", label, ["human", "agent"]),
-    createdAtMs: safeInteger(object, "createdAtMs", label, false),
-  };
-}
-
-function decodeChannelThread(value: JsonValue, label: string): ChatChannelThreadSummary {
-  const object = objectValue(value, label, [
-    "thread", "messageCount", "lastReadSequence", "unreadCount", "openDecisionCount",
-    "openingMessage",
-  ]);
-  const result: ChatChannelThreadSummary = {
-    thread: decodeChatThread(object.thread ?? null, `${label}.thread`),
-    messageCount: safeInteger(object, "messageCount", label),
-    lastReadSequence: safeInteger(object, "lastReadSequence", label),
-    unreadCount: safeInteger(object, "unreadCount", label),
-    openDecisionCount: safeInteger(object, "openDecisionCount", label),
-  };
-  if (object.openingMessage !== undefined) {
-    const openingLabel = `${label}.openingMessage`;
-    const opening = objectValue(object.openingMessage, openingLabel, [
-      "id", "author", "createdAtMs", "bodySnippet", "reactions",
-    ]);
-    result.openingMessage = {
-      id: stringValue(opening, "id", openingLabel),
-      author: decodeChatActor(opening.author ?? null, `${openingLabel}.author`),
-      createdAtMs: safeInteger(opening, "createdAtMs", openingLabel, false),
-      bodySnippet: stringValue(opening, "bodySnippet", openingLabel),
-      reactions: arrayValue(opening, "reactions", openingLabel).map((entry, index) =>
-        decodeChatReaction(entry, `${openingLabel}.reactions[${index}]`)),
-    };
-  }
-  return result;
-}
-
-function decodePage<T>(
-  value: JsonValue,
-  label: string,
-  field: string,
-  decode: (entry: JsonValue, label: string) => T,
-): { rows: T[]; cursor: string | null } {
-  const object = objectValue(value, label, [field, "nextCursor"]);
-  return {
-    rows: arrayValue(object, field, label).map((entry, index) =>
-      decode(entry, `${label}.${field}[${index}]`)),
-    cursor: cursorValue(object, label),
-  };
-}
-
-function decodeFeed(value: JsonValue, label: string): ChatFeedPage {
-  const object = objectValue(value, label, [
-    "items", "nextCursor", "headCursor", "readState",
-  ]);
-  const items = arrayValue(object, "items", label).map((entry, index): ChatFeedItem => {
-    const itemLabel = `${label}.items[${index}]`;
-    const item = objectValue(entry, itemLabel, [
-      "message", "thread", "reactions", "matchedBy", "channel", "parentMessage", "openingMessage",
-    ]);
-    const result: ChatFeedItem = {
-      message: decodeChatMessage(item.message ?? null, `${itemLabel}.message`),
-      thread: decodeChatThread(item.thread ?? null, `${itemLabel}.thread`),
-      reactions: arrayValue(item, "reactions", itemLabel).map((reaction, reactionIndex) =>
-        decodeChatReaction(reaction, `${itemLabel}.reactions[${reactionIndex}]`)),
-      matchedBy: arrayValue(item, "matchedBy", itemLabel).map((kind, kindIndex) => {
-        if (!["person", "agent", "channel", "thread"].includes(String(kind))) {
-          throw new ChatsProtocolShapeError(`${itemLabel}.matchedBy[${kindIndex}] is invalid.`);
-        }
-        return kind as "person" | "agent" | "channel" | "thread";
-      }),
-    };
-    for (const key of ["parentMessage", "openingMessage"] as const) {
-      if (item[key] !== undefined) {
-        result[key] = decodeChatMessage(item[key], `${itemLabel}.${key}`);
-      }
-    }
-    if (item.channel !== undefined) {
-      const channelLabel = `${itemLabel}.channel`;
-      const channel = objectValue(item.channel, channelLabel, [
-        "id", "workspaceId", "name", "slug", "kind", "createdAtMs", "updatedAtMs",
-      ]);
-      result.channel = {
-        id: stringValue(channel, "id", channelLabel),
-        workspaceId: stringValue(channel, "workspaceId", channelLabel),
-        name: stringValue(channel, "name", channelLabel),
-        slug: stringValue(channel, "slug", channelLabel),
-        kind: enumValue(channel, "kind", channelLabel, ["channel", "dm", "agent"]),
-        createdAtMs: safeInteger(channel, "createdAtMs", channelLabel, false),
-        updatedAtMs: safeInteger(channel, "updatedAtMs", channelLabel, false),
-      };
-    }
-    return result;
-  });
-  let readState: ChatFeedReadState | null = null;
-  if (object.readState !== null) {
-    readState = decodeFeedReadState(
-      object.readState ?? null,
-      `${label}.readState`,
-    );
-  }
-  return {
-    items,
-    nextCursor: nullableString(object, "nextCursor", label),
-    headCursor: nullableString(object, "headCursor", label),
-    readState,
   };
 }
 
@@ -1377,292 +1192,113 @@ export function decodeChatsResult<M extends ChatsMethod>(
     case CHATS_METHOD.channelCreate:
     case CHATS_METHOD.channelEnsureAgent:
     case CHATS_METHOD.channelEnsureGeneral:
-      result = decodeChannel(value, label);
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.channel, value, label); break;
     case CHATS_METHOD.channelFindBySlug:
-      result = value === null ? null : decodeChannel(value, label);
-      break;
-    case CHATS_METHOD.channelsList: {
-      const object = objectValue(value, label, ["channels", "nextCursor"]);
-      result = {
-        channels: arrayValue(object, "channels", label).map((entry, index) =>
-          decodeChannelSummary(entry, `${label}.channels[${index}]`),
-        ),
-        nextCursor: nullableString(object, "nextCursor", label),
-      };
-      break;
-    }
-    case CHATS_METHOD.channelGetWireId: {
-      const object = objectValue(value, label, ["wireId"]);
-      result = { wireId: nullableString(object, "wireId", label) };
-      break;
-    }
-    case CHATS_METHOD.threadStart: {
-      const object = objectValue(value, label, ["thread", "message"]);
-      result = {
-        thread: decodeChatThread(object.thread ?? null, `${label}.thread`),
-        message: decodeChatMessage(object.message ?? null, `${label}.message`),
-      };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.channelMaybe, value, label); break;
+    case CHATS_METHOD.channelsList:
+      result = decodeChatsSchema(ChatsResultSchemas.channelsList, value, label); break;
+    case CHATS_METHOD.channelGetWireId:
+      result = decodeChatsSchema(ChatsResultSchemas.wireId, value, label); break;
+    case CHATS_METHOD.threadStart:
+      result = decodeChatsSchema(ChatsResultSchemas.threadStart, value, label); break;
     case CHATS_METHOD.threadCreate:
-      result = decodeChatThread(value, label);
-      break;
-    case CHATS_METHOD.threadsList: {
-      const object = objectValue(value, label, ["threads", "nextCursor"]);
-      result = {
-        threads: arrayValue(object, "threads", label).map((entry, index) =>
-          decodeThreadWireRecord(entry, `${label}.threads[${index}]`),
-        ),
-        nextCursor: nullableString(object, "nextCursor", label),
-      };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.thread, value, label); break;
+    case CHATS_METHOD.threadsList:
+      result = decodeChatsSchema(ChatsResultSchemas.threadsList, value, label); break;
     case CHATS_METHOD.threadsListForFile:
-    case CHATS_METHOD.agentReadListUnreadThreads: {
-      const page = decodePage(value, label, "threads", decodeChatThread);
-      result = { threads: page.rows, nextCursor: page.cursor };
-      break;
-    }
-    case CHATS_METHOD.threadsListForChannel: {
-      const page = decodePage(value, label, "threads", decodeChannelThread);
-      result = { threads: page.rows, nextCursor: page.cursor };
-      break;
-    }
+    case CHATS_METHOD.agentReadListUnreadThreads:
+      result = decodeChatsSchema(ChatsResultSchemas.threadsPage, value, label); break;
+    case CHATS_METHOD.threadsListForChannel:
+      result = decodeChatsSchema(ChatsResultSchemas.channelThreadsPage, value, label); break;
     case CHATS_METHOD.threadFindChannelId:
     case CHATS_METHOD.dispatchRunIdForMessage:
-      if (value !== null && typeof value !== "string") {
-        throw new ChatsProtocolShapeError(`${label} must be a string or null.`);
-      }
-      result = value;
-      break;
-    case CHATS_METHOD.threadGetProjection: {
-      const object = objectValue(value, label, ["path", "readOnly", "threadId", "text"]);
-      if (object.readOnly !== true) {
-        throw new ChatsProtocolShapeError(`${label}.readOnly must be true.`);
-      }
-      result = {
-        path: stringValue(object, "path", label),
-        readOnly: true,
-        threadId: stringValue(object, "threadId", label),
-        text: stringValue(object, "text", label),
-      };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.maybeString, value, label); break;
+    case CHATS_METHOD.threadGetProjection:
+      result = decodeChatsSchema(ChatsResultSchemas.projection, value, label); break;
     case CHATS_METHOD.messageSend:
-      result = decodeChatMessage(value, label);
-      break;
-    case CHATS_METHOD.messagesList: {
-      const object = objectValue(value, label, [
-        "messages",
-        "nextAfterMessageOrder",
-      ]);
-      result = {
-        messages: arrayValue(object, "messages", label).map((entry, index) =>
-          decodeChatMessage(entry, `${label}.messages[${index}]`),
-        ),
-        nextAfterMessageOrder: nullableSafeInteger(
-          object,
-          "nextAfterMessageOrder",
-          label,
-        ),
-      };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.message, value, label); break;
+    case CHATS_METHOD.messagesList:
+      result = decodeChatsSchema(ChatsResultSchemas.messagesList, value, label); break;
     case CHATS_METHOD.readStateGet:
     case CHATS_METHOD.readStateMarkThreadRead:
-      result = decodeReadState(value, label);
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.readState, value, label); break;
     case CHATS_METHOD.readStateListUnreadFileThreads:
-      result = decodeUnreadFileThreads(value, label);
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.unreadThreads, value, label); break;
     case CHATS_METHOD.decisionResolve:
-      result = decodeChatDecision(value, label);
-      break;
-    case CHATS_METHOD.decisionsListForThread: {
-      const page = decodePage(value, label, "decisions", decodeChatDecision);
-      result = { decisions: page.rows, nextCursor: page.cursor };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.decision, value, label); break;
+    case CHATS_METHOD.decisionsListForThread:
+      result = decodeChatsSchema(ChatsResultSchemas.decisionsPage, value, label); break;
     case CHATS_METHOD.reactionSet:
-      result = decodeChatReaction(value, label);
-      break;
-    case CHATS_METHOD.reactionsList: {
-      const page = decodePage(value, label, "reactions", decodeChatReaction);
-      result = { reactions: page.rows, nextCursor: page.cursor };
-      break;
-    }
-    case CHATS_METHOD.attachmentsListForThread: {
-      const page = decodePage(value, label, "attachments", decodeChatAttachment);
-      result = { attachments: page.rows, nextCursor: page.cursor };
-      break;
-    }
-    case CHATS_METHOD.attachmentsListFileMentions: {
-      const page = decodePage(value, label, "mentions", decodeFileMention);
-      result = { mentions: page.rows, nextCursor: page.cursor };
-      break;
-    }
-    case CHATS_METHOD.mentionsListForHandle: {
-      const page = decodePage(value, label, "mentions", decodeMention);
-      result = { mentions: page.rows, nextCursor: page.cursor };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.reaction, value, label); break;
+    case CHATS_METHOD.reactionsList:
+      result = decodeChatsSchema(ChatsResultSchemas.reactionsPage, value, label); break;
+    case CHATS_METHOD.attachmentsListForThread:
+      result = decodeChatsSchema(ChatsResultSchemas.attachmentsPage, value, label); break;
+    case CHATS_METHOD.attachmentsListFileMentions:
+      result = decodeChatsSchema(ChatsResultSchemas.fileMentionsPage, value, label); break;
+    case CHATS_METHOD.mentionsListForHandle:
+      result = decodeChatsSchema(ChatsResultSchemas.mentionsPage, value, label); break;
     case CHATS_METHOD.agentReadMarkThreadRead:
-      result = decodeAgentRead(value, label);
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.agentRead, value, label); break;
     case CHATS_METHOD.followsSet:
-      result = decodeFollow(value, label);
-      break;
-    case CHATS_METHOD.followsList: {
-      const object = objectValue(value, label, ["follows", "nextCursor"]);
-      result = {
-        follows: arrayValue(object, "follows", label).map((entry, index) =>
-          decodeFollow(entry, `${label}.follows[${index}]`),
-        ),
-        nextCursor: nullableString(object, "nextCursor", label),
-      };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.follow, value, label); break;
+    case CHATS_METHOD.followsList:
+      result = decodeChatsSchema(ChatsResultSchemas.followsList, value, label); break;
     case CHATS_METHOD.followsEnsureDefaults:
-      if (value !== null) throw new ChatsProtocolShapeError(`${label} must be null.`);
-      result = null;
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.nullResult, value, label); break;
     case CHATS_METHOD.feedMarkSeen:
-      result = decodeFeedReadState(value, label);
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.feedReadState, value, label); break;
     case CHATS_METHOD.feedListPersonal:
-      result = decodeFeed(value, label);
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.feedPage, value, label); break;
     case CHATS_METHOD.bookmarkSave:
-      result = decodeChatBookmark(value, label);
-      break;
-    case CHATS_METHOD.bookmarksList: {
-      const object = objectValue(value, label, ["bookmarks", "nextCursor"]);
-      result = {
-        bookmarks: arrayValue(object, "bookmarks", label).map((entry, index) =>
-          decodeChatBookmark(entry, `${label}.bookmarks[${index}]`),
-        ),
-        nextCursor: nullableString(object, "nextCursor", label),
-      };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.bookmark, value, label); break;
+    case CHATS_METHOD.bookmarksList:
+      result = decodeChatsSchema(ChatsResultSchemas.bookmarksList, value, label); break;
     case CHATS_METHOD.bookmarkFind:
-      result = value === null ? null : decodeChatBookmark(value, label);
-      break;
-    case CHATS_METHOD.bookmarkListPending: {
-      const page = decodePage(value, label, "bookmarks", decodeChatBookmark);
-      result = { bookmarks: page.rows, nextCursor: page.cursor };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.bookmarkMaybe, value, label); break;
+    case CHATS_METHOD.bookmarkListPending:
+      result = decodeChatsSchema(ChatsResultSchemas.bookmarksPage, value, label); break;
     case CHATS_METHOD.bookmarkArchive:
     case CHATS_METHOD.bookmarkMarkPending:
-      result = decodeChatBookmark(value, label);
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.bookmark, value, label); break;
     case CHATS_METHOD.bookmarkMarkFailed:
     case CHATS_METHOD.bookmarkMarkStale:
-    case CHATS_METHOD.bookmarkMarkReady: {
-      const object = objectValue(value, label, ["bookmark", "applied"]);
-      result = {
-        bookmark: decodeChatBookmark(object.bookmark ?? null, `${label}.bookmark`),
-        applied: booleanValue(object, "applied", label),
-      };
-      break;
-    }
-    case CHATS_METHOD.dispatchEnqueue: {
-      const object = objectValue(value, label, ["enqueued"]);
-      result = { enqueued: booleanValue(object, "enqueued", label) };
-      break;
-    }
+    case CHATS_METHOD.bookmarkMarkReady:
+      result = decodeChatsSchema(ChatsResultSchemas.bookmarkTransition, value, label); break;
+    case CHATS_METHOD.dispatchEnqueue:
+      result = decodeChatsSchema(ChatsResultSchemas.enqueue, value, label); break;
     case CHATS_METHOD.dispatchRecordEligibleTriggers:
     case CHATS_METHOD.dispatchRecentCount:
-    case CHATS_METHOD.dispatchFailPendingForThread: {
-      const object = { count: value } as ChatsJsonObject;
-      result = safeInteger(object, "count", label);
-      break;
-    }
+    case CHATS_METHOD.dispatchFailPendingForThread:
+      result = decodeChatsSchema(ChatsResultSchemas.count, value, label); break;
     case CHATS_METHOD.dispatchClaimNextPending:
-      result = value === null ? null : decodeClaim(value, label);
-      break;
-    case CHATS_METHOD.dispatchListPending: {
-      const page = decodePage(value, label, "dispatches", decodeChatDispatch);
-      result = { dispatches: page.rows, nextCursor: page.cursor };
-      break;
-    }
-    case CHATS_METHOD.dispatchOpenRuns: {
-      const page = decodePage(value, label, "claims", decodeClaim);
-      result = { claims: page.rows, nextCursor: page.cursor };
-      break;
-    }
-    case CHATS_METHOD.dispatchListRunMessages: {
-      const object = objectValue(value, label, ["messageIds", "nextCursor"]);
-      result = {
-        messageIds: arrayValue(object, "messageIds", label).map((entry, index) => {
-          if (typeof entry !== "string") {
-            throw new ChatsProtocolShapeError(`${label}.messageIds[${index}] must be a string.`);
-          }
-          return entry;
-        }),
-        nextCursor: cursorValue(object, label),
-      };
-      break;
-    }
-    case CHATS_METHOD.dispatchRunRecordsForThread: {
-      const object = objectValue(value, label, ["runs", "nextCursor"]);
-      const runsObject = objectValue(object.runs ?? null, `${label}.runs`);
-      const runs: Record<string, ChatRun> = Object.create(null);
-      for (const [messageId, run] of Object.entries(runsObject)) {
-        runs[messageId] = decodeChatRun(run ?? null, `${label}.runs.${messageId}`);
-      }
-      result = { runs, nextCursor: cursorValue(object, label) };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.claimMaybe, value, label); break;
+    case CHATS_METHOD.dispatchListPending:
+      result = decodeChatsSchema(ChatsResultSchemas.dispatchesPage, value, label); break;
+    case CHATS_METHOD.dispatchOpenRuns:
+      result = decodeChatsSchema(ChatsResultSchemas.claimsPage, value, label); break;
+    case CHATS_METHOD.dispatchListRunMessages:
+      result = decodeChatsSchema(ChatsResultSchemas.runMessagesPage, value, label); break;
+    case CHATS_METHOD.dispatchRunRecordsForThread:
+      result = decodeRunRecordsForThread(value, label); break;
     case CHATS_METHOD.dispatchGetRunRecord:
-      result = value === null ? null : decodeChatRun(value, label);
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.runMaybe, value, label); break;
     case CHATS_METHOD.dispatchIsThreadPaused:
     case CHATS_METHOD.dispatchRecordRunMessage:
     case CHATS_METHOD.dispatchRequeueFailedTrigger:
-      if (typeof value !== "boolean") {
-        throw new ChatsProtocolShapeError(`${label} must be a boolean.`);
-      }
-      result = value;
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.boolean, value, label); break;
     case CHATS_METHOD.dispatchGetThreadPauseState:
-      result = value === null ? null : decodePause(value, label);
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.pauseMaybe, value, label); break;
     case CHATS_METHOD.dispatchSetThreadPaused:
-      result = decodePause(value, label);
-      break;
+      result = decodeChatsSchema(ChatsResultSchemas.pause, value, label); break;
     case CHATS_METHOD.dispatchMarkFailureNotePosted:
-      result = decodeChatRun(value, label);
-      break;
-    case CHATS_METHOD.dispatchListAppQuitRecoveries: {
-      const page = decodePage(value, label, "recoveries", (entry, entryLabel) => {
-        const object = objectValue(entry, entryLabel, ["run", "attemptCount"]);
-        return {
-          run: decodeChatRun(object.run ?? null, `${entryLabel}.run`),
-          attemptCount: safeInteger(object, "attemptCount", entryLabel),
-        };
-      });
-      result = { recoveries: page.rows, nextCursor: page.cursor };
-      break;
-    }
-    case CHATS_METHOD.dispatchComplete: {
-      const object = objectValue(value, label, ["completed"]);
-      if (object.completed !== true) {
-        throw new ChatsProtocolShapeError(`${label}.completed must be true.`);
-      }
-      result = { completed: true };
-      break;
-    }
-    case CHATS_METHOD.dispatchFail: {
-      const object = objectValue(value, label, ["failed"]);
-      if (object.failed !== true) {
-        throw new ChatsProtocolShapeError(`${label}.failed must be true.`);
-      }
-      result = { failed: true };
-      break;
-    }
+      result = decodeChatsSchema(ChatsResultSchemas.run, value, label); break;
+    case CHATS_METHOD.dispatchListAppQuitRecoveries:
+      result = decodeChatsSchema(ChatsResultSchemas.recoveriesPage, value, label); break;
+    case CHATS_METHOD.dispatchComplete:
+      result = decodeChatsSchema(ChatsResultSchemas.complete, value, label); break;
+    case CHATS_METHOD.dispatchFail:
+      result = decodeChatsSchema(ChatsResultSchemas.fail, value, label); break;
     default: {
       const exhaustive: never = method;
       throw new ChatsProtocolShapeError(`Unsupported chats method: ${exhaustive}`);

@@ -3218,6 +3218,29 @@ describe("versioned result decoder rejection", () => {
     );
   });
 
+  it("rejects unsafe integers and excess nested fields", () => {
+    expect(() =>
+      decodeVersionRecord({
+        id: "draft",
+        workspaceId: "w",
+        kind: "named",
+        name: "Draft",
+        createdAtMs: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toThrow(VersionedProtocolShapeError);
+
+    expect(() =>
+      decodeVersionRecord({
+        id: "draft",
+        workspaceId: "w",
+        kind: "named",
+        name: "Draft",
+        forkPoint: { versionId: "main", unexpected: true },
+        createdAtMs: 1,
+      }),
+    ).toThrow(VersionedProtocolShapeError);
+  });
+
   it("rejects invalid discriminants strictly", () => {
     expect(() =>
       decodeVersionsCompareFilesResult({

@@ -1,3 +1,8 @@
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as SchemaGetter from "effect/SchemaGetter";
+import * as Struct from "effect/Struct";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
 export const WORKSPACE_METHOD = {
@@ -255,548 +260,226 @@ export class WorkspaceProtocolShapeError extends Error {
   }
 }
 
-function objectValue(
+function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
+  return Schema.Struct(fields).mapFields(Struct.map(Schema.mutableKey));
+}
+
+const NullableString = Schema.NullOr(Schema.String);
+const NullableInt = Schema.NullOr(Schema.Int);
+const JsonObjectSchema = Schema.Record(Schema.String, Schema.Unknown);
+const OptionalIntFromNullable = Schema.optional(
+  Schema.NullOr(Schema.Int),
+).pipe(
+  Schema.decodeTo(Schema.optionalKey(Schema.Int), {
+    decode: SchemaGetter.transformOptional(
+      Option.filter((value): value is number => value != null),
+    ),
+    encode: SchemaGetter.passthrough(),
+  }),
+);
+
+const ConflictSnapshotSchema = mutableStruct({
+  workspaceId: Schema.String,
+  versionId: Schema.String,
+  objectId: Schema.String,
+  path: Schema.String,
+  text: Schema.NullOr(Schema.String),
+  inbandLimitBytes: OptionalIntFromNullable,
+  contentKind: Schema.Literal("text"),
+  sha256: Schema.String,
+  byteLength: Schema.Int,
+  blobSha256: Schema.String,
+  updatedAtMs: Schema.Int,
+  latestMomentId: Schema.String,
+  metadataOrigin: Schema.String,
+  metadataSummary: NullableString,
+  metadataCorrelationId: NullableString,
+});
+
+const ConflictFileStateSchema = mutableStruct({
+  path: Schema.String,
+  contentKind: Schema.Literals(["text", "binary"]),
+  snapshot: Schema.NullOr(ConflictSnapshotSchema),
+  binarySha256: NullableString,
+  binaryByteLength: NullableInt,
+  binaryObjectId: NullableString,
+  binaryLatestMomentId: NullableString,
+  metadataSummary: NullableString,
+  metadataCorrelationId: NullableString,
+});
+
+const ConflictRecordSchema = mutableStruct({
+  id: Schema.String,
+  workspaceId: Schema.String,
+  path: Schema.String,
+  targetVersionId: Schema.String,
+  sourceVersionId: Schema.String,
+  createdAtMs: Schema.Int,
+  updatedAtMs: Schema.Int,
+  status: Schema.Literals(["open", "resolved"]),
+  chosenFrom: Schema.Literals(["current", "incoming", "merged"]),
+  resolution: Schema.NullOr(
+    Schema.Literals(["kept-current", "applied-incoming", "applied-merged"]),
+  ),
+  metadata: mutableStruct({
+    origin: Schema.String,
+    summary: NullableString,
+    correlationId: NullableString,
+  }),
+  base: ConflictFileStateSchema,
+  current: ConflictFileStateSchema,
+  incoming: ConflictFileStateSchema,
+});
+
+const ReplicatedConflictResultSchema = Schema.Union([
+  mutableStruct({
+    replicated: Schema.Literal(true),
+    status: Schema.Literal("applied"),
+    conflictId: Schema.String,
+    inserted: Schema.NullOr(Schema.Boolean),
+    matched: Schema.Boolean,
+  }),
+  mutableStruct({
+    replicated: Schema.Literal(true),
+    status: Schema.Literal("skipped"),
+  }),
+  mutableStruct({
+    replicated: Schema.Literal(true),
+    status: Schema.Literal("crashed"),
+    committed: Schema.Boolean,
+  }),
+]);
+
+const SearchResultSchema = mutableStruct({
+  surface: Schema.Literals(["file", "chat"]),
+  path: Schema.String,
+  title: Schema.String,
+  line: Schema.Int,
+  preview: Schema.String,
+  matchStart: Schema.Int,
+  matchEnd: Schema.Int,
+  threadId: NullableString,
+  objectId: NullableString,
+});
+
+const SearchQueryPageResultSchema = mutableStruct({
+  results: Schema.mutable(Schema.Array(SearchResultSchema)),
+  nextCursor: Schema.NullOr(Schema.NonEmptyString),
+  versionId: Schema.NonEmptyString,
+  restartRequired: Schema.Boolean,
+});
+
+const GranularChatMessageSearchResponseSchema = mutableStruct({
+  results: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        threadId: Schema.NonEmptyString,
+        messageId: Schema.NullOr(Schema.NonEmptyString),
+        text: Schema.String,
+      }),
+    ),
+  ),
+  saturated: Schema.Boolean,
+});
+
+const WorkspaceResultSchemas = {
+  [WORKSPACE_METHOD.open]: mutableStruct({ workspace: Schema.String }),
+  [WORKSPACE_METHOD.close]: mutableStruct({ closed: Schema.Boolean }),
+  [WORKSPACE_METHOD.conflictsList]: mutableStruct({
+    conflicts: Schema.mutable(Schema.Array(ConflictRecordSchema)),
+    nextAfterConflictId: NullableString,
+  }),
+  [WORKSPACE_METHOD.conflictsOpen]: Schema.Union([
+    mutableStruct({ inserted: Schema.Boolean }),
+    ReplicatedConflictResultSchema,
+  ]),
+  [WORKSPACE_METHOD.conflictsResolve]: Schema.Union([
+    mutableStruct({
+      conflict: ConflictRecordSchema,
+      write: Schema.NullOr(JsonObjectSchema),
+      delete: Schema.NullOr(JsonObjectSchema),
+    }),
+    ReplicatedConflictResultSchema,
+  ]),
+  [WORKSPACE_METHOD.searchQuery]: Schema.mutable(Schema.Array(SearchResultSchema)),
+  [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResultSchema,
+  [WORKSPACE_METHOD.searchQueryChatMessagesGranular]:
+    GranularChatMessageSearchResponseSchema,
+  [WORKSPACE_METHOD.watcherStatus]: mutableStruct({
+    running: Schema.Boolean,
+    degraded: Schema.Boolean,
+    terminal: Schema.Boolean,
+  }),
+  [WORKSPACE_METHOD.captureFlush]: mutableStruct({
+    settled: Schema.Boolean,
+    running: Schema.Boolean,
+    degraded: Schema.Boolean,
+  }),
+  [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
+    updated: Schema.Literal(true),
+  }),
+} as const;
+
+function decodeWorkspaceSchema<S extends Schema.ConstraintDecoder<unknown>>(
+  schema: S,
   value: JsonValue,
   label: string,
-  keys: readonly string[],
-): WorkspaceJsonObject {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new WorkspaceProtocolShapeError(`${label} must be a JSON object.`);
+): S["Type"] {
+  const decoded = Schema.decodeUnknownResult(schema, {
+    onExcessProperty: "error",
+  })(value);
+  if (Result.isFailure(decoded)) {
+    throw new WorkspaceProtocolShapeError(`${label}: ${decoded.failure.message}`);
   }
-  for (const key of Object.keys(value)) {
-    if (!keys.includes(key)) {
-      throw new WorkspaceProtocolShapeError(`${label}.${key} is not allowed.`);
-    }
-  }
-  return value;
-}
-
-function nonEmptyStringValue(
-  object: WorkspaceJsonObject,
-  key: string,
-  label: string,
-): string {
-  const value = stringValue(object, key, label);
-  if (value.length === 0) {
-    throw new WorkspaceProtocolShapeError(
-      `${label}.${key} must not be empty.`,
-    );
-  }
-  return value;
-}
-
-function recordValue(value: JsonValue, label: string): WorkspaceJsonObject {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new WorkspaceProtocolShapeError(`${label} must be a JSON object.`);
-  }
-  return value;
-}
-
-function stringValue(
-  object: WorkspaceJsonObject,
-  key: string,
-  label: string,
-): string {
-  const value = object[key];
-  if (typeof value !== "string") {
-    throw new WorkspaceProtocolShapeError(`${label}.${key} must be a string.`);
-  }
-  return value;
-}
-
-function nullableString(
-  object: WorkspaceJsonObject,
-  key: string,
-  label: string,
-): string | null {
-  const value = object[key];
-  if (value !== null && typeof value !== "string") {
-    throw new WorkspaceProtocolShapeError(
-      `${label}.${key} must be a string or null.`,
-    );
-  }
-  return value;
-}
-
-function booleanValue(
-  object: WorkspaceJsonObject,
-  key: string,
-  label: string,
-): boolean {
-  const value = object[key];
-  if (typeof value !== "boolean") {
-    throw new WorkspaceProtocolShapeError(`${label}.${key} must be a boolean.`);
-  }
-  return value;
-}
-
-function integerValue(
-  object: WorkspaceJsonObject,
-  key: string,
-  label: string,
-): number {
-  const value = object[key];
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-    throw new WorkspaceProtocolShapeError(
-      `${label}.${key} must be a safe integer.`,
-    );
-  }
-  return value;
-}
-
-function nullableInteger(
-  object: WorkspaceJsonObject,
-  key: string,
-  label: string,
-): number | null {
-  const value = object[key];
-  if (
-    value !== null &&
-    (typeof value !== "number" || !Number.isSafeInteger(value))
-  ) {
-    throw new WorkspaceProtocolShapeError(
-      `${label}.${key} must be a safe integer or null.`,
-    );
-  }
-  return value;
-}
-
-function enumValue<T extends string>(
-  object: WorkspaceJsonObject,
-  key: string,
-  label: string,
-  values: readonly T[],
-): T {
-  const value = object[key];
-  if (typeof value !== "string" || !values.includes(value as T)) {
-    throw new WorkspaceProtocolShapeError(`${label}.${key} is invalid.`);
-  }
-  return value as T;
-}
-
-function decodeSnapshot(value: JsonValue, label: string): ConflictSnapshot {
-  const object = objectValue(value, label, [
-    "workspaceId",
-    "versionId",
-    "objectId",
-    "path",
-    "text",
-    "contentKind",
-    "sha256",
-    "byteLength",
-    "blobSha256",
-    "updatedAtMs",
-    "latestMomentId",
-    "metadataOrigin",
-    "metadataSummary",
-    "metadataCorrelationId",
-    "inbandLimitBytes",
-  ]);
-  if (object.contentKind !== "text") {
-    throw new WorkspaceProtocolShapeError(
-      `${label}.contentKind must be text.`,
-    );
-  }
-  const inbandLimitBytes =
-    object.inbandLimitBytes === undefined || object.inbandLimitBytes === null
-      ? undefined
-      : integerValue(object, "inbandLimitBytes", label);
-  return {
-    workspaceId: stringValue(object, "workspaceId", label),
-    versionId: stringValue(object, "versionId", label),
-    objectId: stringValue(object, "objectId", label),
-    path: stringValue(object, "path", label),
-    // A withheld body is a hydration hint, never content: `blobSha256` names
-    // it, and the adapter fetches it before any reader sees the record.
-    text: object.text === null ? null : stringValue(object, "text", label),
-    ...(inbandLimitBytes === undefined ? {} : { inbandLimitBytes }),
-    contentKind: "text",
-    sha256: stringValue(object, "sha256", label),
-    byteLength: integerValue(object, "byteLength", label),
-    blobSha256: stringValue(object, "blobSha256", label),
-    updatedAtMs: integerValue(object, "updatedAtMs", label),
-    latestMomentId: stringValue(object, "latestMomentId", label),
-    metadataOrigin: stringValue(object, "metadataOrigin", label),
-    metadataSummary: nullableString(object, "metadataSummary", label),
-    metadataCorrelationId: nullableString(
-      object,
-      "metadataCorrelationId",
-      label,
-    ),
-  };
-}
-
-function decodeConflictState(
-  value: JsonValue,
-  label: string,
-): ConflictFileState {
-  const object = objectValue(value, label, [
-    "path",
-    "contentKind",
-    "snapshot",
-    "binarySha256",
-    "binaryByteLength",
-    "binaryObjectId",
-    "binaryLatestMomentId",
-    "metadataSummary",
-    "metadataCorrelationId",
-  ]);
-  return {
-    path: stringValue(object, "path", label),
-    contentKind: enumValue(object, "contentKind", label, ["text", "binary"]),
-    snapshot:
-      object.snapshot === null
-        ? null
-        : decodeSnapshot(object.snapshot ?? null, `${label}.snapshot`),
-    binarySha256: nullableString(object, "binarySha256", label),
-    binaryByteLength: nullableInteger(object, "binaryByteLength", label),
-    binaryObjectId: nullableString(object, "binaryObjectId", label),
-    binaryLatestMomentId: nullableString(
-      object,
-      "binaryLatestMomentId",
-      label,
-    ),
-    metadataSummary: nullableString(object, "metadataSummary", label),
-    metadataCorrelationId: nullableString(
-      object,
-      "metadataCorrelationId",
-      label,
-    ),
-  };
+  return decoded.success;
 }
 
 export function decodeConflictRecord(
   value: JsonValue,
   label = "conflict",
 ): ConflictRecord {
-  const object = objectValue(value, label, [
-    "id",
-    "workspaceId",
-    "path",
-    "targetVersionId",
-    "sourceVersionId",
-    "createdAtMs",
-    "updatedAtMs",
-    "status",
-    "chosenFrom",
-    "resolution",
-    "metadata",
-    "base",
-    "current",
-    "incoming",
-  ]);
-  const metadataLabel = `${label}.metadata`;
-  const metadata = objectValue(object.metadata ?? null, metadataLabel, [
-    "origin",
-    "summary",
-    "correlationId",
-  ]);
-  const resolution = object.resolution;
-  if (
-    resolution !== null &&
-    resolution !== "kept-current" &&
-    resolution !== "applied-incoming" &&
-    resolution !== "applied-merged"
-  ) {
-    throw new WorkspaceProtocolShapeError(`${label}.resolution is invalid.`);
-  }
-  return {
-    id: stringValue(object, "id", label),
-    workspaceId: stringValue(object, "workspaceId", label),
-    path: stringValue(object, "path", label),
-    targetVersionId: stringValue(object, "targetVersionId", label),
-    sourceVersionId: stringValue(object, "sourceVersionId", label),
-    createdAtMs: integerValue(object, "createdAtMs", label),
-    updatedAtMs: integerValue(object, "updatedAtMs", label),
-    status: enumValue(object, "status", label, ["open", "resolved"]),
-    chosenFrom: enumValue(object, "chosenFrom", label, [
-      "current",
-      "incoming",
-      "merged",
-    ]),
-    resolution,
-    metadata: {
-      origin: stringValue(metadata, "origin", metadataLabel),
-      summary: nullableString(metadata, "summary", metadataLabel),
-      correlationId: nullableString(metadata, "correlationId", metadataLabel),
-    },
-    base: decodeConflictState(object.base ?? null, `${label}.base`),
-    current: decodeConflictState(object.current ?? null, `${label}.current`),
-    incoming: decodeConflictState(object.incoming ?? null, `${label}.incoming`),
-  };
-}
-
-function decodeReplicatedConflict(
-  value: JsonValue,
-  label: string,
-): ReplicatedConflictResult {
-  const base = recordValue(value, label);
-  if (base.replicated !== true) {
-    throw new WorkspaceProtocolShapeError(`${label}.replicated must be true.`);
-  }
-  if (base.status === "skipped") {
-    objectValue(value, label, ["replicated", "status"]);
-    return { replicated: true, status: "skipped" };
-  }
-  if (base.status === "crashed") {
-    const object = objectValue(value, label, [
-      "replicated",
-      "status",
-      "committed",
-    ]);
-    return {
-      replicated: true,
-      status: "crashed",
-      committed: booleanValue(object, "committed", label),
-    };
-  }
-  if (base.status !== "applied") {
-    throw new WorkspaceProtocolShapeError(`${label}.status is invalid.`);
-  }
-  const object = objectValue(value, label, [
-    "replicated",
-    "status",
-    "conflictId",
-    "inserted",
-    "matched",
-  ]);
-  const inserted = object.inserted;
-  if (inserted !== null && typeof inserted !== "boolean") {
-    throw new WorkspaceProtocolShapeError(
-      `${label}.inserted must be a boolean or null.`,
-    );
-  }
-  return {
-    replicated: true,
-    status: "applied",
-    conflictId: stringValue(object, "conflictId", label),
-    inserted,
-    matched: booleanValue(object, "matched", label),
-  };
-}
-
-function decodeSearchResult(value: JsonValue, label: string): SearchResult {
-  const object = objectValue(value, label, [
-    "surface",
-    "path",
-    "title",
-    "line",
-    "preview",
-    "matchStart",
-    "matchEnd",
-    "threadId",
-    "objectId",
-  ]);
-  return {
-    surface: enumValue(object, "surface", label, ["file", "chat"]),
-    path: stringValue(object, "path", label),
-    title: stringValue(object, "title", label),
-    line: integerValue(object, "line", label),
-    preview: stringValue(object, "preview", label),
-    matchStart: integerValue(object, "matchStart", label),
-    matchEnd: integerValue(object, "matchEnd", label),
-    threadId: nullableString(object, "threadId", label),
-    objectId: nullableString(object, "objectId", label),
-  };
+  return decodeWorkspaceSchema(
+    ConflictRecordSchema,
+    value,
+    label,
+  ) as ConflictRecord;
 }
 
 export function decodeSearchQueryPageResult(
   value: JsonValue,
   label = `${WORKSPACE_METHOD.searchQueryPage} result`,
 ): SearchQueryPageResult {
-  const object = objectValue(value, label, [
-    "results",
-    "nextCursor",
-    "versionId",
-    "restartRequired",
-  ]);
-  if (!Array.isArray(object.results)) {
-    throw new WorkspaceProtocolShapeError(`${label}.results must be an array.`);
-  }
-  const nextCursor = nullableString(object, "nextCursor", label);
-  if (nextCursor === "") {
-    throw new WorkspaceProtocolShapeError(`${label}.nextCursor must not be empty.`);
-  }
-  return {
-    results: object.results.map((entry, index) =>
-      decodeSearchResult(entry, `${label}.results[${index}]`),
-    ),
-    nextCursor,
-    versionId: nonEmptyStringValue(object, "versionId", label),
-    restartRequired: booleanValue(object, "restartRequired", label),
-  };
-}
-
-function decodeGranularChatMessageSearchResults(
-  value: JsonValue,
-  label: string,
-): GranularChatMessageSearchResult[] {
-  if (!Array.isArray(value)) {
-    throw new WorkspaceProtocolShapeError(`${label} must be an array.`);
-  }
-  return value.map((entry, index) => {
-    const entryLabel = `${label}[${index}]`;
-    const object = objectValue(entry, entryLabel, [
-      "threadId",
-      "messageId",
-      "text",
-    ]);
-    const messageId = nullableString(object, "messageId", entryLabel);
-    if (messageId === "") {
-      throw new WorkspaceProtocolShapeError(
-        `${entryLabel}.messageId must not be empty.`,
-      );
-    }
-    return {
-      threadId: nonEmptyStringValue(object, "threadId", entryLabel),
-      messageId,
-      text: stringValue(object, "text", entryLabel),
-    };
-  });
+  return decodeWorkspaceSchema(
+    SearchQueryPageResultSchema,
+    value,
+    label,
+  ) as SearchQueryPageResult;
 }
 
 export function decodeGranularChatMessageSearchResponse(
   value: JsonValue,
   label = `${WORKSPACE_METHOD.searchQueryChatMessagesGranular} result`,
 ): GranularChatMessageSearchResponse {
-  const object = objectValue(value, label, ["results", "saturated"]);
-  return {
-    results: decodeGranularChatMessageSearchResults(
-      object.results ?? null,
-      `${label}.results`,
-    ),
-    saturated: booleanValue(object, "saturated", label),
-  };
+  return decodeWorkspaceSchema(
+    GranularChatMessageSearchResponseSchema,
+    value,
+    label,
+  ) as GranularChatMessageSearchResponse;
 }
 
 export function decodeWorkspaceResult<M extends WorkspaceMethod>(
   method: M,
   value: JsonValue,
 ): WorkspaceMethodResultMap[M] {
-  const label = `${method} result`;
-  let result: unknown;
-  switch (method) {
-    case WORKSPACE_METHOD.open: {
-      const object = objectValue(value, label, ["workspace"]);
-      result = { workspace: stringValue(object, "workspace", label) };
-      break;
-    }
-    case WORKSPACE_METHOD.close: {
-      const object = objectValue(value, label, ["closed"]);
-      result = { closed: booleanValue(object, "closed", label) };
-      break;
-    }
-    case WORKSPACE_METHOD.conflictsList: {
-      const object = objectValue(value, label, [
-        "conflicts",
-        "nextAfterConflictId",
-      ]);
-      if (!Array.isArray(object.conflicts)) {
-        throw new WorkspaceProtocolShapeError(
-          `${label}.conflicts must be an array.`,
-        );
-      }
-      result = {
-        conflicts: object.conflicts.map((entry, index) =>
-          decodeConflictRecord(entry, `${label}.conflicts[${index}]`),
-        ),
-        nextAfterConflictId: nullableString(
-          object,
-          "nextAfterConflictId",
-          label,
-        ),
-      };
-      break;
-    }
-    case WORKSPACE_METHOD.conflictsOpen: {
-      const object = recordValue(value, label);
-      if (object.replicated === true) {
-        result = decodeReplicatedConflict(value, label);
-      } else {
-        const local = objectValue(value, label, ["inserted"]);
-        result = { inserted: booleanValue(local, "inserted", label) };
-      }
-      break;
-    }
-    case WORKSPACE_METHOD.conflictsResolve: {
-      const object = recordValue(value, label);
-      if (object.replicated === true) {
-        result = decodeReplicatedConflict(value, label);
-      } else {
-        const local = objectValue(value, label, ["conflict", "write", "delete"]);
-        result = {
-          conflict: decodeConflictRecord(
-            local.conflict ?? null,
-            `${label}.conflict`,
-          ),
-          write:
-            local.write === null
-              ? null
-              : recordValue(local.write ?? null, `${label}.write`),
-          delete:
-            local.delete === null
-              ? null
-              : recordValue(local.delete ?? null, `${label}.delete`),
-        };
-      }
-      break;
-    }
-    case WORKSPACE_METHOD.searchQuery:
-      if (!Array.isArray(value)) {
-        throw new WorkspaceProtocolShapeError(`${label} must be an array.`);
-      }
-      result = value.map((entry, index) =>
-        decodeSearchResult(entry, `${label}[${index}]`),
-      );
-      break;
-    case WORKSPACE_METHOD.searchQueryPage:
-      result = decodeSearchQueryPageResult(value, label);
-      break;
-    case WORKSPACE_METHOD.searchQueryChatMessagesGranular:
-      result = decodeGranularChatMessageSearchResponse(value, label);
-      break;
-    case WORKSPACE_METHOD.watcherStatus: {
-      const object = objectValue(value, label, [
-        "running",
-        "degraded",
-        "terminal",
-      ]);
-      result = {
-        running: booleanValue(object, "running", label),
-        degraded: booleanValue(object, "degraded", label),
-        terminal: booleanValue(object, "terminal", label),
-      };
-      break;
-    }
-    case WORKSPACE_METHOD.captureFlush: {
-      const object = objectValue(value, label, [
-        "settled",
-        "running",
-        "degraded",
-      ]);
-      result = {
-        settled: booleanValue(object, "settled", label),
-        running: booleanValue(object, "running", label),
-        degraded: booleanValue(object, "degraded", label),
-      };
-      break;
-    }
-    case WORKSPACE_METHOD.captureSetAuthor: {
-      const object = objectValue(value, label, ["updated"]);
-      if (object.updated !== true) {
-        throw new WorkspaceProtocolShapeError(
-          `${label}.updated must be true.`,
-        );
-      }
-      result = { updated: true };
-      break;
-    }
-    default: {
-      const exhaustive: never = method;
-      throw new WorkspaceProtocolShapeError(
-        `Unsupported workspace method: ${exhaustive}`,
-      );
-    }
+  const schema = WorkspaceResultSchemas[method];
+  if (schema === undefined) {
+    throw new WorkspaceProtocolShapeError(
+      `Unsupported workspace method: ${method}`,
+    );
   }
-  return result as WorkspaceMethodResultMap[M];
+  return decodeWorkspaceSchema(
+    schema,
+    value,
+    `${method} result`,
+  ) as WorkspaceMethodResultMap[M];
 }

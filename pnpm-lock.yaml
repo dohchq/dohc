@@ -513,6 +513,9 @@ importers:
       '@dohc/ydoc-projection':
         specifier: workspace:*
         version: link:../ydoc-projection
+      effect:
+        specifier: 4.0.0-beta.107
+        version: 4.0.0-beta.107
       yjs:
         specifier: 13.6.30
         version: 13.6.30
