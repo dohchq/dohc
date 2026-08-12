@@ -1405,6 +1405,22 @@ const SKIPPED_RECORD = {
 };
 
 describe("ui-state merge-on-load", () => {
+  it("restores saved state after a no-op focus before the load resolves", async () => {
+    const stored = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(stored.promise);
+    renderShell(bridge);
+
+    fireEvent.pointerDown(
+      await screen.findByRole("region", { name: "Editor group 1" }),
+    );
+    await act(async () => {
+      stored.resolve(STORED_STATE);
+      await stored.promise;
+    });
+
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+  });
+
   it("a user open QUEUED before the load resolves wins over stored state (the exact stale-ref race)", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);

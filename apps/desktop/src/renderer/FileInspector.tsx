@@ -3661,7 +3661,7 @@ export function FileInspector(props: {
   // A pending file/section mention or fragment-link jump. Unlike a search
   // target this stays in the rich editor and lands on the rendered heading.
   headingTarget?: HeadingTarget;
-  onScrollConsumed?: () => void;
+  onScrollConsumed?: (nonce: number) => void;
   // Editor save-state seam for the tab strip's dirty indicator. Editable
   // source/table/document views all report through the same small contract.
   onSaveStateChange?: (state: FileSaveState) => void;
@@ -3813,7 +3813,7 @@ export function FileInspector(props: {
     !isText || engineDocBound || (text !== null && loadedPath === props.path);
   useEffect(() => {
     if (scrollTarget && scrollTarget.path === props.path && textReady) {
-      onScrollConsumed?.();
+      onScrollConsumed?.(scrollTarget.nonce);
     }
   }, [scrollTarget, props.path, textReady, onScrollConsumed]);
   const url = assetUrl(props.workspaceId, props.path, props.refreshKey ?? 0);

@@ -1655,6 +1655,9 @@ export function DesktopWorkspaceShell(props: {
     target: HeadingTarget;
   } | null>(null);
   const scrollNonce = useRef(0);
+  const consumeSearchScrollTarget = useCallback((nonce: number) => {
+    setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
+  }, []);
 
   // Restore per-workspace workbench state from .dohc/ui-state.json. Defaults
   // render immediately (launch budgets key off shell visibility); the stored
@@ -1693,6 +1696,7 @@ export function DesktopWorkspaceShell(props: {
       // side-effect-free by contract, so probing one is safe).
       const current = wbRef.current;
       const next = updater(current);
+      if (next === current) return;
       if (
         next.activeEditorGroup !== current.activeEditorGroup ||
         activeTabPath(next) !== activeTabPath(current)
@@ -4484,11 +4488,7 @@ export function DesktopWorkspaceShell(props: {
                     ? headingTarget.target
                     : undefined
                 }
-                onScrollConsumed={() =>
-                  setSearchScrollTarget((current) =>
-                    current?.nonce === groupScrollTarget?.nonce ? null : current,
-                  )
-                }
+                onScrollConsumed={consumeSearchScrollTarget}
                 onSaveStateChange={editorCallbacks.onSaveStateChange}
                 registerDraftFlush={editorCallbacks.registerDraftFlush}
                 registerSourceToggle={editorCallbacks.registerSourceToggle}

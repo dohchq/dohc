@@ -3348,7 +3348,7 @@ describe("engine markdown source view", () => {
 
     // MUTATION: keep `textReady` on the disk read alone -> this never fires,
     // the shell holds the jump, and it replays on a later open of this path.
-    await waitFor(() => expect(onScrollConsumed).toHaveBeenCalled());
+    await waitFor(() => expect(onScrollConsumed).toHaveBeenCalledWith(1));
   });
 
   // #661. Engine mode renders no source textarea, and that textarea held the
