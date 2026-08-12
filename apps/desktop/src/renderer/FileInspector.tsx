@@ -67,6 +67,10 @@ import {
   parseExcalidrawDocument,
 } from "./excalidrawDocument";
 import type { ExcalidrawCanvasProps } from "./ExcalidrawCanvas";
+import {
+  excalidrawPresenceTopic,
+  type ExcalidrawPresenceFactory,
+} from "./collab/excalidrawPresence";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -3444,6 +3448,7 @@ function DrawingView({
   notice,
   recoveryNotices,
   engine,
+  presenceFactory,
 }: {
   body: string;
   contentHash: string | null;
@@ -3462,6 +3467,7 @@ function DrawingView({
   notice?: React.ReactNode;
   recoveryNotices: React.ReactNode;
   engine: UseEngineDoc;
+  presenceFactory?: ExcalidrawPresenceFactory | null;
   onSaveStateChange?: (state: FileSaveState) => void;
 }) {
   const engineMode = engine.available && engine.doc !== null;
@@ -3536,6 +3542,40 @@ function DrawingView({
   const visibleSaveState = engineMode ? engine.saveState : editor.saveState;
   const canvasReadOnly = readOnly || engineReadOnly;
   const drawingReady = engineMode || document.value !== null;
+  const presence = useMemo(() => {
+    if (
+      !engineMode ||
+      !engine.objectId ||
+      !engine.versionId ||
+      !presenceFactory
+    ) {
+      return undefined;
+    }
+    try {
+      return {
+        transport: presenceFactory.transportForScope({
+          kind: "workspace",
+          workspaceId,
+        }),
+        topic: excalidrawPresenceTopic({
+          workspaceId,
+          versionId: engine.versionId,
+          objectId: engine.objectId,
+        }),
+        clientId: presenceFactory.clientId,
+        displayName: presenceFactory.displayName,
+      };
+    } catch {
+      // Presence is optional. A transport failure cannot affect the drawing.
+      return undefined;
+    }
+  }, [
+    engine.objectId,
+    engine.versionId,
+    engineMode,
+    presenceFactory,
+    workspaceId,
+  ]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
@@ -3602,6 +3642,7 @@ function DrawingView({
                 document.value ?? parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)
               }
               sceneDoc={engine.doc ?? undefined}
+              presence={presence}
               readOnly={canvasReadOnly}
               onAssetRefusedChange={setAssetRefused}
               onChange={canvasReadOnly || engineMode ? undefined : editor.setDraft}
@@ -3883,6 +3924,9 @@ export function FileInspector(props: {
   // version's Y.Doc lineage. Distinct from refreshKey, which ALSO bumps on
   // ordinary history growth (which must NOT reopen the live engine session).
   engineVersionKey?: number;
+  // Signed-in collaboration for owner workspaces. Read-only shared views do
+  // not open an engine session and never bind drawing presence.
+  drawingCollaboration?: ExcalidrawPresenceFactory | null;
   // Registers the mounted markdown view's "view source" toggle with the shell
   // (command palette seam) — registerDraftFlush precedent.
   registerSourceToggle?: (toggle: (() => void) | null) => void;
@@ -4167,6 +4211,7 @@ export function FileInspector(props: {
           notice={truncatedNotice}
           recoveryNotices={recoveryNotices}
           engine={engine}
+          presenceFactory={props.drawingCollaboration}
         />
       );
     case "csv":

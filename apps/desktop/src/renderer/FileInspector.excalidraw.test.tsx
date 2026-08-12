@@ -18,6 +18,7 @@ vi.mock("./ExcalidrawCanvas", () => ({
       data-source={props.document.source ?? ""}
       data-files={Object.keys(props.document.files).join(",")}
       data-scene-doc={String(props.sceneDoc !== undefined)}
+      data-presence-topic={props.presence?.topic ?? ""}
       data-scene-elements={
         props.sceneDoc ? String(foldScene(props.sceneDoc).elements.length) : ""
       }
@@ -223,6 +224,92 @@ describe("FileInspector Excalidraw view", () => {
     expect(canvas.dataset.readOnly).toBe("false");
     expect(screen.queryByTestId("view-drawing-truncated")).toBeNull();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("binds owner-workspace presence to the exact engine document", async () => {
+    const bridge = bridgeFor();
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    bridge.openEngineYDocSession = vi.fn(async () => ({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(scene),
+      objectId: "object-1",
+      versionId: "main",
+    }));
+    const transport = {
+      publish: vi.fn(),
+      leave: vi.fn(),
+      poll: vi.fn(),
+    };
+    const transportForScope = vi.fn(() => transport as never);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="architecture.excalidraw"
+        drawingCollaboration={{
+          transportForScope,
+          clientId: "client-1",
+          displayName: "Alice",
+        }}
+      />,
+    );
+
+    const canvas = await screen.findByTestId("mock-excalidraw-canvas");
+    expect(canvas.dataset.presenceTopic).toBe(
+      'scene:["ws-1","main","object-1"]',
+    );
+    expect(transportForScope).toHaveBeenCalledWith({
+      kind: "workspace",
+      workspaceId: "ws-1",
+    });
+  });
+
+  it("does not construct a presence transport in solo mode", async () => {
+    const bridge = bridgeFor();
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    bridge.openEngineYDocSession = vi.fn(async () => ({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(scene),
+      objectId: "object-1",
+      versionId: "main",
+    }));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="architecture.excalidraw" />);
+
+    const canvas = await screen.findByTestId("mock-excalidraw-canvas");
+    expect(canvas.dataset.presenceTopic).toBe("");
+  });
+
+  it("keeps the drawing available when presence transport setup fails", async () => {
+    const bridge = bridgeFor();
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    bridge.openEngineYDocSession = vi.fn(async () => ({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(scene),
+      objectId: "object-1",
+      versionId: "main",
+    }));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="architecture.excalidraw"
+        drawingCollaboration={{
+          transportForScope: () => {
+            throw new Error("presence unavailable");
+          },
+          clientId: "client-1",
+          displayName: "Alice",
+        }}
+      />,
+    );
+
+    const canvas = await screen.findByTestId("mock-excalidraw-canvas");
+    expect(canvas.dataset.sceneDoc).toBe("true");
+    expect(canvas.dataset.presenceTopic).toBe("");
   });
 
   it("keeps a truncated drawing non-writable while its scene opens", async () => {

@@ -4306,6 +4306,7 @@ export function DesktopWorkspaceShell(props: {
                 // is a Chats call like any other (#615) — same gate as the
                 // panel, the tab and the graph's toggle.
                 chatMentionsAvailable={captureAvailable}
+                drawingCollaboration={chatCollaboration}
                 scrollTarget={searchScrollTarget ?? undefined}
                 headingTarget={
                   headingTarget?.path === wb.activeTab

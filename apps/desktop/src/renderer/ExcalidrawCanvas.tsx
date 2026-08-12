@@ -21,6 +21,12 @@ import {
   sceneForCanvas,
   type SceneRemoteEchoes,
 } from "./collab/excalidrawSceneAdapter";
+import {
+  bindExcalidrawPresence,
+  type ExcalidrawPointerUpdate,
+  type ExcalidrawPresenceBinding,
+  type ExcalidrawPresenceCollaboration,
+} from "./collab/excalidrawPresence";
 
 export type ExcalidrawCanvasProps = {
   document: ExcalidrawDocument;
@@ -29,6 +35,7 @@ export type ExcalidrawCanvasProps = {
   sceneDoc?: Y.Doc;
   hydrateAssets?: () => Promise<readonly BinaryFileData[]>;
   onAssetRefusedChange?: (refused: boolean) => void;
+  presence?: ExcalidrawPresenceCollaboration & { topic: string };
 };
 
 export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
@@ -69,8 +76,10 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   const lastSerialized = useRef(initial.serialized);
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const [api, setApi] = useState<ExcalidrawImperativeAPI | null>(null);
+  const [presenceBound, setPresenceBound] = useState(false);
   const remoteEchoes = useRef<SceneRemoteEchoes>(new Map());
   const hydratedFileIds = useRef<Set<string>>(new Set());
+  const presenceBinding = useRef<ExcalidrawPresenceBinding | null>(null);
   const boundSceneDoc = useRef(props.sceneDoc);
   if (boundSceneDoc.current !== props.sceneDoc) {
     boundSceneDoc.current = props.sceneDoc;
@@ -122,10 +131,45 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     };
   }, [api, props.hydrateAssets, props.sceneDoc]);
 
+  useEffect(() => {
+    setPresenceBound(false);
+    if (!props.sceneDoc || !props.presence || !api) return;
+    let binding: ExcalidrawPresenceBinding;
+    try {
+      binding = bindExcalidrawPresence({
+        doc: props.sceneDoc,
+        transport: props.presence.transport,
+        topic: props.presence.topic,
+        clientId: props.presence.clientId,
+        displayName: props.presence.displayName,
+        getApi: () => apiRef.current,
+      });
+    } catch {
+      // Presence is optional. A binding failure cannot affect the scene.
+      return;
+    }
+    presenceBinding.current = binding;
+    setPresenceBound(true);
+    return () => {
+      if (presenceBinding.current === binding) presenceBinding.current = null;
+      setPresenceBound(false);
+      binding.destroy();
+    };
+  }, [api, props.presence, props.sceneDoc]);
+
   return (
     <div className="absolute inset-0" data-testid="excalidraw-canvas">
       <Excalidraw
         initialData={initial.scene}
+        isCollaborating={presenceBound}
+        onPointerUpdate={
+          presenceBound
+            ? (update) =>
+                presenceBinding.current?.updatePointer(
+                  update as ExcalidrawPointerUpdate,
+                )
+            : undefined
+        }
         excalidrawAPI={(api) => {
           if (apiRef.current !== api) setApi(api);
           apiRef.current = api;
@@ -156,6 +200,9 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
           props.readOnly
             ? undefined
             : (elements, appState, files) => {
+                presenceBinding.current?.updateSelection(
+                  appState.selectedElementIds,
+                );
                 if (props.sceneDoc) {
                   const result = applyCanvasSceneChange({
                     doc: props.sceneDoc,

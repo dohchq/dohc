@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { declareSceneRoots, foldScene, insertElementRevision } from "@dohc/excalidraw-scene";
 import * as Y from "yjs";
@@ -80,6 +80,55 @@ it("renders remote scene updates without echoing them", () => {
     )([rectangle(1, 10, 20)], {}, {});
   });
   expect(Y.encodeStateAsUpdate(doc, beforeEcho)).toHaveLength(2);
+});
+
+it("keeps presence dormant when no collaboration is available", () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+    />,
+  );
+
+  expect(excalidraw.props?.isCollaborating).toBe(false);
+  expect(excalidraw.props?.onPointerUpdate).toBeUndefined();
+});
+
+it("reports collaboration only after presence binds", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+      presence={{
+        topic: "scene-1",
+        clientId: "client-1",
+        displayName: "Alice",
+        transport: {
+          async publish() {
+            return { version: 1, peers: [] };
+          },
+          async leave() {},
+          poll: ({ signal }) =>
+            new Promise((resolve) => {
+              signal.addEventListener(
+                "abort",
+                () => resolve({ version: 1, peers: [] }),
+                { once: true },
+              );
+            }),
+        },
+      }}
+    />,
+  );
+
+  await waitFor(() => expect(excalidraw.props?.isCollaborating).toBe(true));
+  expect(excalidraw.props?.onPointerUpdate).toBeTypeOf("function");
 });
 
 it("records native undo output as a new higher revision", () => {
