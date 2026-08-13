@@ -2592,13 +2592,6 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
-  const openVersionCompareTab = useCallback(
-    (versionId: string) => {
-      mutateWb((state) => openTab(state, versionCompareTabPath(versionId)));
-    },
-    [mutateWb],
-  );
-
   // One import seam for the dialog flow AND the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
@@ -2746,6 +2739,12 @@ export function DesktopWorkspaceShell(props: {
       mutateWb((state) => openTab(state, path, targetGroupId));
     },
     [invalidateDeferredFileOpen, mutateWb],
+  );
+  const openVersionCompareTab = useCallback(
+    (versionId: string) => {
+      openVirtualTab(versionCompareTabPath(versionId));
+    },
+    [openVirtualTab],
   );
   const openGraphTab = useCallback(() => {
     openVirtualTab(GRAPH_TAB_PATH);

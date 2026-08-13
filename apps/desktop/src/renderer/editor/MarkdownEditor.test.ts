@@ -1170,6 +1170,53 @@ describe("MarkdownEditor remote carets", () => {
 // content held a ``` line closed its fence early and truncated on
 // re-import (#704).
 describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
+  it("replaces local Markdown without remounting or reporting a user edit", async () => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const onDirty = vi.fn();
+    render(
+      createElement(MarkdownEditor, {
+        ref,
+        value: "# Before\n",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    editor.scrollTop = 37;
+    editor.scrollLeft = 11;
+    act(() => ref.current?.focus("start"));
+    await waitFor(() => expect(document.activeElement).toBe(editor));
+    const selectionOffset = () => {
+      const selection = document.getSelection();
+      if (!selection?.anchorNode) return null;
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      range.setEnd(selection.anchorNode, selection.anchorOffset);
+      return range.toString().length;
+    };
+    const offsetBefore = selectionOffset();
+    expect(offsetBefore).not.toBeNull();
+
+    act(() => ref.current?.replaceMarkdown("# After\n\nPeer edit"));
+
+    expect(screen.getByTestId("markdown-editor")).toBe(editor);
+    expect(document.activeElement).toBe(editor);
+    expect(selectionOffset()).toBe(offsetBefore);
+    expect(editor.textContent).toContain("After");
+    expect(editor.textContent).toContain("Peer edit");
+    expect(editor.scrollTop).toBe(37);
+    expect(editor.scrollLeft).toBe(11);
+    expect(onDirty).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(editor, { key: "z", ctrlKey: true });
+    await act(async () => Promise.resolve());
+    expect(editor.textContent).toContain("After");
+    expect(editor.textContent).not.toContain("Before");
+    expect(onDirty).not.toHaveBeenCalled();
+  });
+
   it("widens a code fence in the live editor's getMarkdown when the block content contains a fence", async () => {
     const content = "before\n```\nafter";
     const value = ["````js", "before", "```", "after", "````"].join("\n");

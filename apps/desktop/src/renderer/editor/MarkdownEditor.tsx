@@ -122,6 +122,7 @@ import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
 export type MarkdownEditorHandle = {
   focus: (position?: "start" | "end") => void;
   getMarkdown: () => string;
+  replaceMarkdown: (markdown: string) => void;
 };
 
 export type MarkdownEditorCollab = {
@@ -161,7 +162,8 @@ export type BlockNavigationTarget = {
 
 export type MarkdownEditorProps = {
   value: string;
-  onDirty: () => void;
+  onDirty: (materialize?: () => string) => void;
+  onFocus?: () => void;
   workspaceId: string;
   path: string;
   knownFiles: ReadonlyArray<WikilinkFile>;
@@ -365,6 +367,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     {
       value,
       onDirty,
+      onFocus,
       knownFiles,
       onOpenWikilink,
       onOpenWorkspaceLink,
@@ -420,6 +423,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const onOpenWorkspaceLinkRef = useRef<
       ((target: WorkspaceLinkTarget) => void) | null
     >(onOpenWorkspaceLink ?? null);
+    const onFocusRef = useRef(onFocus);
+    onFocusRef.current = onFocus;
 
     // ProseMirror invokes menu handlers outside React's render cycle. Keep the
     // imperative ref current in the same tick as the visual state so rapid
@@ -706,16 +711,21 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           handleDOMEvents: {
             focus: () => {
               collaborationHistory?.stopCapturing();
+              onFocusRef.current?.();
               return false;
             },
           },
         },
         immediatelyRender: true,
-        onUpdate() {
+        onUpdate({ editor }) {
           if (collabActive) return;
           if (applyingPendingUndoRef.current) return;
           if (!dirtyTrackingReadyRef.current) return;
-          onDirty();
+          if (!editor.isFocused) return;
+          const document = editor.state.doc;
+          onDirty(() =>
+            serializeRichdocBody(escapeHighlightMarkdown(document.toJSON())),
+          );
         },
       },
       [extensions, collabActive],
@@ -962,8 +972,32 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           // losslessly reversible `==a\=\=b==` (matches import-export.ts).
           return serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON()));
         },
+        replaceMarkdown(markdown) {
+          if (!editor || collabActive) return;
+          const { from, to } = editor.state.selection;
+          const scrollTop = editor.view.dom.scrollTop;
+          const scrollLeft = editor.view.dom.scrollLeft;
+          editor
+            .chain()
+            .setContent(markdown, {
+              contentType: "markdown",
+              emitUpdate: false,
+            })
+            .command(({ tr }) => {
+              tr.setMeta("addToHistory", false);
+              return true;
+            })
+            .run();
+          const max = editor.state.doc.content.size;
+          editor.commands.setTextSelection({
+            from: Math.min(from, max),
+            to: Math.min(to, max),
+          });
+          editor.view.dom.scrollTop = scrollTop;
+          editor.view.dom.scrollLeft = scrollLeft;
+        },
       }),
-      [editor, value],
+      [collabActive, editor, value],
     );
 
     const pickerView = editor

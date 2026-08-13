@@ -1198,6 +1198,14 @@ describe("editor groups", () => {
         await user.click(await screen.findByTestId("chats-open-tab"));
       },
     },
+    {
+      destination: "Compare with Main",
+      tabPath: versionCompareTabPath("v-old"),
+      navigate: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(await screen.findByTestId("version-menu-button"));
+        await user.click(await screen.findByTestId("version-compare"));
+      },
+    },
   ])(
     "keeps $destination selected when an older duplicate-file open finishes flushing",
     async ({ tabPath, navigate }) => {
@@ -1235,6 +1243,25 @@ describe("editor groups", () => {
         contentHash: "a".repeat(64),
       }));
       bridge.writeWorkspaceText = vi.fn(() => save.promise);
+      bridge.listWorkspaceVersions = vi.fn(async () => ({
+        versions: [
+          {
+            id: "main",
+            name: "Main",
+            kind: "main" as const,
+            createdAtMs: 0,
+            canMergeIntoMain: false,
+          },
+          {
+            id: "v-old",
+            name: "Earlier draft",
+            kind: "named" as const,
+            createdAtMs: 1,
+            canMergeIntoMain: true,
+          },
+        ],
+        activeVersionId: "v-old",
+      }));
       const user = userEvent.setup();
       renderShell(bridge);
       await settleEngineOnRead(bridge);
