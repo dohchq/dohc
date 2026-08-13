@@ -49,7 +49,6 @@ import { buildChatCollaboration } from "./collab/chatCollaboration";
 import type { SearchResultsEventEntry } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
-import { EMPTY_EXCALIDRAW_DOCUMENT } from "./excalidrawDocument";
 import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
 import { CloudLogin } from "./CloudLogin";
@@ -3275,7 +3274,10 @@ export function DesktopWorkspaceShell(props: {
       const result = await bridge().createWorkspaceFile({
         workspaceId,
         relativePath: uniqueUntitledPath(files, folders, "excalidraw"),
-        initialText: EMPTY_EXCALIDRAW_DOCUMENT,
+        // The engine's absent-head contract admits a new path only while its
+        // artifact is empty. The scene session initializes its own Y.Doc;
+        // DrawingView supplies portable JSON when the engine is unavailable.
+        initialText: "",
       });
       await refreshFiles();
       openFile(result.path);

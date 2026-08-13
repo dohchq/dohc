@@ -13,7 +13,6 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import { EMPTY_EXCALIDRAW_DOCUMENT } from "./excalidrawDocument";
 
 // These drive userEvent through async UI settles — 67 findBy* awaits across 47
 // tests — so the wall-clock profile is the file, not one test (#372).
@@ -9235,7 +9234,7 @@ describe("settings entry points", () => {
 });
 
 describe("drawing entry point", () => {
-  it("creates and opens an untitled Excalidraw file from the command palette", async () => {
+  it("creates and opens an empty engine-claimable drawing from the command palette", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -9251,7 +9250,7 @@ describe("drawing entry point", () => {
       expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
         relativePath: "Untitled.excalidraw",
-        initialText: EMPTY_EXCALIDRAW_DOCUMENT,
+        initialText: "",
       }),
     );
     expect(
@@ -9280,7 +9279,7 @@ describe("drawing entry point", () => {
       expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
         relativePath: "Untitled 3.excalidraw",
-        initialText: EMPTY_EXCALIDRAW_DOCUMENT,
+        initialText: "",
       }),
     );
   });
