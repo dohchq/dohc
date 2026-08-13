@@ -157,7 +157,7 @@ export class PluginHost {
       }
       if (localState.state.plugins[pluginId]?.disabled === true) {
         throw new Error(
-          `Plugin "${pluginId}" is disabled. Re-enable it in plugin settings.`,
+          `Plugin "${pluginId}" is disabled. Re-enabling it is not yet available in the app.`,
         );
       }
 
@@ -374,7 +374,11 @@ export class PluginHost {
       return;
     }
 
-    if (this.isCurrent(record, spawn)) this.spawn(record);
+    // Re-check stopping here, not just isCurrent: a synchronous
+    // onStatusChange listener can call stop() from inside handleExit's own
+    // setStatus call, in the same tick. A stop that arrived mid-accounting
+    // must win over a respawn.
+    if (this.isCurrent(record, spawn) && !spawn.stopping) this.spawn(record);
   }
 
   private isCurrent(record: PluginRecord, spawn: PluginSpawn): boolean {

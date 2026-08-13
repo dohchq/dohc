@@ -350,7 +350,7 @@ describe("PluginHost", () => {
     await expect(
       host.start("hello-plugin", helloPluginRoot, await fixtureManifest()),
     ).rejects.toThrow(
-      'Plugin "hello-plugin" is disabled. Re-enable it in plugin settings.',
+      'Plugin "hello-plugin" is disabled. Re-enabling it is not yet available in the app.',
     );
     expect(spawnTransport).not.toHaveBeenCalled();
   });
@@ -677,6 +677,59 @@ describe("PluginHost", () => {
 
     expect(statuses.filter((status) => status === "ready")).toHaveLength(3);
     expect(spawnTransport).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not respawn a plugin a status listener stopped synchronously on crash", async () => {
+    const root = await workspaceRoot();
+    const deactivateRequests: string[] = [];
+    let disposeCount = 0;
+    let triggerExit: (() => void) | undefined;
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(
+      (params) => {
+        triggerExit = () => params.onExit({ code: 1, signal: null });
+        return {
+          request<T = unknown>(method: string): Promise<T> {
+            if (method === PLUGIN_HOST_METHODS.deactivate) {
+              deactivateRequests.push(params.pluginId);
+            }
+            const result = method === PLUGIN_HOST_METHODS.activate
+              ? { commands: [] }
+              : {};
+            return Promise.resolve(result as T);
+          },
+          dispose: () => {
+            disposeCount += 1;
+            return Promise.resolve();
+          },
+        };
+      },
+    );
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport,
+      routeSdkRequest: defaultRouter,
+      // Reacts to the crash synchronously, inside setStatus's own call —
+      // the exact reentrancy handleExit's "crashed" transition must survive.
+      onStatusChange: (pluginId, status) => {
+        if (status === "crashed") void host.stop(pluginId);
+      },
+    });
+
+    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+    expect(spawnTransport).toHaveBeenCalledTimes(1);
+
+    triggerExit?.();
+    await delay(50);
+
+    expect(spawnTransport).toHaveBeenCalledTimes(1);
+    expect(deactivateRequests).toEqual(["hello-plugin"]);
+    expect(disposeCount).toBe(1);
+    expect(host.getStatus("hello-plugin")).toBeUndefined();
   });
 
   it("keeps one plugin ready while another plugin crash-loops", async () => {
