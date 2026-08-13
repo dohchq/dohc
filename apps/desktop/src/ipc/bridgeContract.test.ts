@@ -1800,6 +1800,18 @@ describe("document export IPC contract", () => {
 });
 
 describe("engine Y.Doc update IPC contract", () => {
+  it("carries every raw state admitted by the durable engine", () => {
+    expect(ENGINE_YDOC_UPDATE_MAX_BYTES).toBe(20 * 1024 * 1024);
+    const initialUpdate = new Uint8Array(ENGINE_YDOC_UPDATE_MAX_BYTES);
+
+    expect(
+      OpenEngineYDocSessionResult.parse({
+        available: true,
+        initialUpdate,
+      }).initialUpdate,
+    ).toBe(initialUpdate);
+  });
+
   it("keeps bound document identity in the open result", () => {
     expect(
       OpenEngineYDocSessionResult.parse({

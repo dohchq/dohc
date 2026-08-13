@@ -366,11 +366,11 @@ export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | nu
 // searchId): the renderer applies a forwarded delta only when it matches the
 // session currently bound, so a slow/stale session can never repaint another.
 export const ENGINE_YDOC_SESSION_ID_MAX_CHARS = 64;
-// Raw bytes crossing renderer IPC have their own bound. The daemon later
-// base64-encodes the update into its negotiated JSON control frame, while the
-// durable engine has a separate 20 MiB raw-update bound. None of those limits
-// can stand in for another.
-export const ENGINE_YDOC_UPDATE_MAX_BYTES = 16 * 1024 * 1024;
+// Raw bytes cross renderer IPC by structured clone. Admit the durable engine's
+// measured raw-update range so an engine-owned session can always hand its
+// accepted state to the renderer. The daemon's base64 JSON frame remains a
+// separate, smaller transport bound.
+export const ENGINE_YDOC_UPDATE_MAX_BYTES = 20 * 1024 * 1024;
 
 export interface EngineYDocRemoteUpdateEvent {
   sessionId: string;
