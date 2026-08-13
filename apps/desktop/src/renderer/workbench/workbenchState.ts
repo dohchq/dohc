@@ -852,6 +852,8 @@ export function parseUiState(raw: unknown): WorkbenchState {
   };
   const editorGroups: EditorGroup[] = [];
   const groupIds = new Set<string>();
+  const discardedActiveChatsGroups = new Set<string>();
+  let chatsOwnerGroupId: string | null = null;
   let tabCount = 0;
   const rawGroups = own("editorGroups");
   if (Array.isArray(rawGroups)) {
@@ -878,6 +880,8 @@ export function parseUiState(raw: unknown): WorkbenchState {
       const tabs: WorkbenchTab[] = [];
       const tabPaths = new Set<string>();
       const rawTabs = groupOwn("tabs");
+      const rawActiveTab = groupOwn("activeTab");
+      let discardedChats = false;
       if (Array.isArray(rawTabs)) {
         for (const tab of rawTabs) {
           if (tabCount >= MAX_OPEN_TABS) break;
@@ -889,12 +893,23 @@ export function parseUiState(raw: unknown): WorkbenchState {
           ) {
             continue;
           }
+          if (tab === CHATS_TAB_PATH && chatsOwnerGroupId !== null) {
+            discardedChats = true;
+            continue;
+          }
           tabPaths.add(tab);
+          if (tab === CHATS_TAB_PATH) chatsOwnerGroupId = id;
           tabCount += 1;
           tabs.push({ path: tab });
         }
       }
-      const rawActiveTab = groupOwn("activeTab");
+      if (
+        discardedChats &&
+        rawActiveTab === CHATS_TAB_PATH &&
+        chatsOwnerGroupId !== null
+      ) {
+        discardedActiveChatsGroups.add(id);
+      }
       const activeTab =
         typeof rawActiveTab === "string" &&
         tabs.some((tab) => tab.path === rawActiveTab)
@@ -912,12 +927,23 @@ export function parseUiState(raw: unknown): WorkbenchState {
     editorGroups.push(defaults.editorGroups[0]);
     groupIds.add(defaults.editorGroups[0].id);
   }
-  const normalizedGroups = normalizeEditorGroupSizes(editorGroups);
+  let normalizedGroups = normalizeEditorGroupSizes(editorGroups);
   const rawActiveEditorGroup = own("activeEditorGroup");
-  const activeEditorGroup =
+  let activeEditorGroup =
     typeof rawActiveEditorGroup === "string" && groupIds.has(rawActiveEditorGroup)
       ? rawActiveEditorGroup
       : normalizedGroups[0].id;
+  if (
+    discardedActiveChatsGroups.has(activeEditorGroup) &&
+    chatsOwnerGroupId !== null
+  ) {
+    activeEditorGroup = chatsOwnerGroupId;
+    normalizedGroups = normalizedGroups.map((group) =>
+      group.id === chatsOwnerGroupId && group.activeTab !== CHATS_TAB_PATH
+        ? { ...group, activeTab: CHATS_TAB_PATH }
+        : group,
+    );
+  }
   const rawView = own("activeView");
   const rawSidebarVisible = own("sidebarVisible");
   const rawSidebarWidth = own("sidebarWidth");

@@ -692,6 +692,70 @@ describe("ui-state persistence round-trip", () => {
     expect(state.activeEditorGroup).toBe("left");
   });
 
+  it("keeps the first restored Chats owner and repairs duplicate Chats focus", () => {
+    const state = parseUiState({
+      version: 2,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: [CHATS_TAB_PATH, "shared.md"],
+          activeTab: "shared.md",
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: ["shared.md", CHATS_TAB_PATH, "right.md"],
+          activeTab: CHATS_TAB_PATH,
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "right",
+    });
+
+    expect(state.editorGroups[0].tabs.map((tab) => tab.path)).toEqual([
+      CHATS_TAB_PATH,
+      "shared.md",
+    ]);
+    expect(state.editorGroups[0].activeTab).toBe(CHATS_TAB_PATH);
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
+      "shared.md",
+      "right.md",
+    ]);
+    expect(state.editorGroups[1].activeTab).toBe("shared.md");
+    expect(state.activeEditorGroup).toBe("left");
+    expect(
+      allTabs(state).filter((tab) => tab.path === CHATS_TAB_PATH),
+    ).toHaveLength(1);
+  });
+
+  it("does not charge discarded duplicate Chats entries against the tab cap", () => {
+    const realFiles = Array.from(
+      { length: MAX_OPEN_TABS - 1 },
+      (_, index) => `file-${index}.md`,
+    );
+    const state = parseUiState({
+      version: 2,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: [CHATS_TAB_PATH],
+          activeTab: CHATS_TAB_PATH,
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: [CHATS_TAB_PATH, ...realFiles],
+          activeTab: realFiles[0],
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "right",
+    });
+
+    expect(allTabs(state)).toHaveLength(MAX_OPEN_TABS);
+    expect(state.editorGroups[1].tabs.at(-1)?.path).toBe(realFiles.at(-1));
+  });
+
   it("parse reads only OWN fields — inherited (prototype) fields never become state", () => {
     // A crafted object inheriting every field from its prototype must parse
     // as if the fields were absent: pure defaults, no tabs.

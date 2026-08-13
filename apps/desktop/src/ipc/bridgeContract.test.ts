@@ -74,6 +74,7 @@ import {
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
+  CHATS_TAB_PATH,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
 } from "../renderer/workbench/workbenchState";
@@ -670,6 +671,37 @@ describe("workspace UI state IPC contract", () => {
     if (!duplicateInGroup.success) {
       expect(duplicateInGroup.error.issues.map((issue) => issue.message)).toEqual([
         "Editor group tabs must be unique.",
+      ]);
+    }
+  });
+
+  it("rejects Chats in several editor groups with an exact issue", () => {
+    const result = WorkspaceUiState.safeParse({
+      ...validState,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: [CHATS_TAB_PATH, "notes/a.md"],
+          activeTab: CHATS_TAB_PATH,
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: ["notes/a.md", CHATS_TAB_PATH],
+          activeTab: CHATS_TAB_PATH,
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "left",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          path: ["editorGroups", 1, "tabs", 1],
+          message: "Chats can be open in only one editor group.",
+        }),
       ]);
     }
   });

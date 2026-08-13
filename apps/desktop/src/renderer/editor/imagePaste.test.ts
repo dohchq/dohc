@@ -343,6 +343,7 @@ describe("insertImageAtPosition", () => {
   });
 
   it("does not advance when the schema rejects the image", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const schema = new Schema({
       nodes: {
         doc: { content: "block+" },
@@ -389,7 +390,16 @@ describe("insertImageAtPosition", () => {
 
     expect(next).toBe(2);
     expect(dispatch).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[dohc] skipped image asset "assets/pic.png" at document position 2; the editor rejected the insertion.',
+    );
+    let imageCount = 0;
+    state.doc.descendants((node) => {
+      if (node.type.name === "image") imageCount += 1;
+    });
+    expect(imageCount).toBe(0);
     expect(state.doc.child(1).textContent).toBe("After");
+    warn.mockRestore();
   });
 });
 

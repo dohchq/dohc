@@ -284,7 +284,12 @@ export function insertImageAtPosition(
   const node = imageType.create(attrs);
   const clamped = Math.max(0, Math.min(pos, view.state.doc.content.size));
   const transaction = view.state.tr.insert(clamped, node);
-  if (!transaction.docChanged) return clamped;
+  if (!transaction.docChanged) {
+    console.warn(
+      `[dohc] skipped image asset "${attrs.src}" at document position ${clamped}; the editor rejected the insertion.`,
+    );
+    return clamped;
+  }
   view.dispatch(transaction);
   return transaction.mapping.map(clamped, 1);
 }
