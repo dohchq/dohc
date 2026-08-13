@@ -22,7 +22,11 @@ type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 function sharedBridge() {
   const saveStateListeners = new Set<SaveStateListener>();
   const remoteUpdateListeners = new Set<
-    (event: { sessionId: string; update: Uint8Array }) => void
+    (event: {
+      sessionId: string;
+      update: Uint8Array;
+      lineageGeneration: number;
+    }) => void
   >();
   const openedSessionIds: string[] = [];
   let closeGate: Promise<void> | null = null;
